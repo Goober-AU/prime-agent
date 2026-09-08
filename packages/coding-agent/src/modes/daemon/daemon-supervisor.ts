@@ -6458,7 +6458,7 @@ export class DaemonSupervisor {
 			}
 			return identityVerdict !== "replaced" && identityVerdict !== "gone";
 		};
-		const gracefulDeadline = Date.now() + (force ? 500 : 2000);
+		const gracefulDeadline = Date.now() + (force ? 500 : process.platform === "win32" ? 10_000 : 2000);
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
 		}

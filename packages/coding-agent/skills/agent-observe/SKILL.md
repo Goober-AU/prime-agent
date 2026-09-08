@@ -39,6 +39,18 @@ if child is not None:
   returns up to `limit` recent bounded message previews for the target session.
   `limit` must be 1-50, and `max_chars` must be 80-2000.
 
+## Field meanings
+
+- `sessionName` and preview `text` are canonical. The Python wrapper also
+  exposes `name` and preview `content` as compatibility aliases.
+- `status: "user"` means attached but idle, not that a user task is running.
+  The Python wrapper adds `activityStatus: "attached_idle"` for this state.
+- `messageCount` counts active context, not the full transcript. It can shrink
+  after compaction; a smaller count does not mean the child lost its work.
+- `RLMSubagent.session_name` is canonical; `.name` is an alias. Its optional
+  `.model` is `None` when the host has not supplied model identity. Do not infer
+  a child's model from its parent or session name.
+
 ## Safety
 
 - This skill is read-only and exposes no mutation commands.
