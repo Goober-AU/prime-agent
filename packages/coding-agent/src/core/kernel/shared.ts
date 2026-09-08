@@ -6,13 +6,13 @@ export const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 export const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS = 5000;
 export const KERNEL_SHUTDOWN_TIMEOUT_MS = 5000;
 export const DEFAULT_SNAPSHOT_DEBOUNCE_MS = 1500;
-export const SNAPSHOT_EXECUTION_TIMEOUT_MS = 5000;
+export const SNAPSHOT_EXECUTION_TIMEOUT_MS = 60_000;
 export const KERNEL_ABORT_GRACE_MS = 1000;
-export const KERNEL_BUSY_REUSE_WAIT_MS = 5000;
+export const KERNEL_BUSY_REUSE_WAIT_MS = 15_000;
 export const KERNEL_BUSY_INTERRUPT_INTERVAL_MS = 500;
 export const MAX_LATE_SENT_AGENT_MESSAGE_HANDLERS = 256;
 const KERNEL_BUSY_AFTER_INTERRUPT_MESSAGE =
-	"The Python kernel is still running the previously interrupted cell. Wait and try again, or kill the kernel to start fresh.";
+	"The Python kernel is still busy after Prime requested an interrupt. Wait to preserve state, or explicitly kill and restart the kernel.";
 
 export class KernelBusyAfterInterruptError extends Error {
 	constructor() {

@@ -34,6 +34,8 @@ describe("agent-observe skill over the kernel host bridge", () => {
 	it("lists agents and reads bounded recent messages", async () => {
 		const requests: Array<{ type: string; payload: Record<string, unknown> }> = [];
 		provisioner = new IpythonKernelProvisioner(tempDir, {
+			python: process.env.PRIME_AGENT_TEST_PYTHON,
+			env: { PYTHONPATH: join(bundledAgentObserveSkill().packagePath, "src") },
 			pythonSkills: [bundledAgentObserveSkill()],
 			hostHandlers: {
 				"agent_observe.list": async (payload) => {
@@ -76,7 +78,9 @@ print(json.dumps({"agents": agents, "agent": agent, "recent": recent}, sort_keys
 		const output = JSON.parse(result.stdout.trim());
 		expect(output.agents.agents).toHaveLength(2);
 		expect(output.agent.agent).toMatchObject({ activeSessionId: "beta", status: "model" });
-		expect(output.recent.messages).toEqual([{ index: 1, role: "assistant", text: "working", truncated: false }]);
+		expect(output.recent.messages).toEqual([
+			{ index: 1, role: "assistant", text: "working", content: "working", truncated: false },
+		]);
 		expect(requests.map((request) => request.type)).toEqual([
 			"agent_observe.list",
 			"agent_observe.get",
@@ -92,6 +96,8 @@ print(json.dumps({"agents": agents, "agent": agent, "recent": recent}, sort_keys
 
 	it("validates argument types before sending to the host", async () => {
 		provisioner = new IpythonKernelProvisioner(tempDir, {
+			python: process.env.PRIME_AGENT_TEST_PYTHON,
+			env: { PYTHONPATH: join(bundledAgentObserveSkill().packagePath, "src") },
 			pythonSkills: [bundledAgentObserveSkill()],
 			hostHandlers: {
 				"agent_observe.get": async () => {

@@ -28,10 +28,12 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
+	getModelInputLimit,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
 	resetApiProviders,
+	supportsCompaction,
 	supportsFastMode,
 } from "@earendil-works/pi-ai";
 import { theme } from "../modes/interactive/theme/theme.js";
@@ -92,6 +94,7 @@ import {
 	setAutonomousEnabled,
 } from "./autonomous.js";
 import { type BashResult, executeBashWithOperations } from "./bash-executor.js";
+import { hasProviderCheckpoint } from "./compaction/checkpoint.js";
 import {
 	COMPACT_SKILL_NAME,
 	type CompactionResult,
@@ -99,10 +102,11 @@ import {
 	collectEntriesForBranchSummary,
 	compact,
 	estimateContextTokens,
+	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
 	serializeConversation,
-	shouldCompact,
+	shouldCompactForModel,
 } from "./compaction/index.js";
 import {
 	type ContextTreeNode,
@@ -223,8 +227,21 @@ import {
 	reviewAutoRefine,
 	saveHarnessState,
 } from "./refinement/index.js";
+import { REFINEMENT_FAILURE_CUSTOM_TYPE, RefinementFailureError } from "./refinement/refinement.js";
 import { resolveConfigValue } from "./resolve-config-value.js";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.js";
+import {
+	boundedRlmVisibleText,
+	classifyRlmChildTerminal,
+	createRlmChildContinuationMessage,
+	emptyRlmContinuationState,
+	parseRlmContinuationState,
+	RLM_CHILD_MAX_CONTINUATIONS,
+	RLM_CONTINUATION_STATE_CUSTOM_TYPE,
+	type RlmPendingContinuation,
+	type RlmPendingResult,
+	type RlmTerminalStatus,
+} from "./rlm-continuation.js";
 import {
 	type CreateRlmSubagentRuntimeOptions,
 	createAsyncBashCompletionHostHandler,
@@ -1243,6 +1260,10 @@ export class AgentSession {
 	private _rlmParentAgent?: string;
 	private _repliedToParentSinceTask: boolean | undefined;
 	private _parentReplyCount = 0;
+	private _rlmContinuation = emptyRlmContinuationState();
+	private _rlmResultDeliveryInFlight?: Promise<void>;
+	private readonly _rlmExplicitRepliesInFlight = new Set<Promise<AgentSessionMessageReceipt>>();
+	private _rlmReloadBackstopTimer?: ReturnType<typeof setTimeout>;
 	private _subagentRuntimeHost?: SubagentRuntimeHost;
 	// Shared by children charged to the same assistant; excludes usage not yet attributed on disk.
 	private _rlmDurableParentUsage = new WeakMap<AssistantMessage, Usage>();
@@ -1367,6 +1388,7 @@ export class AgentSession {
 			this._rlmDepth > 0 && this.sessionManager.getBranch().some((entry) => entry.type === "message")
 				? undefined
 				: false;
+		this._restoreRlmContinuationState();
 		this._subagentRuntimeHost = config.subagentRuntimeHost;
 		this._autonomousState = createAutonomousRuntimeState(config.autonomous, {
 			cwd: this._cwd,
@@ -1397,6 +1419,8 @@ export class AgentSession {
 			activeToolNames: this._initialActiveToolNames,
 			includeAllExtensionTools: true,
 		});
+		this._restoreProviderContextForModel();
+		this._scheduleRlmReloadBackstop();
 	}
 
 	/** Refreshes MCP provider registrations without rebuilding the session runtime. */
@@ -2364,6 +2388,12 @@ export class AgentSession {
 		}
 
 		const lastMessage = this.agent.state.messages[this.agent.state.messages.length - 1];
+		if (this._pendingRequestedCompaction !== undefined) {
+			await this._agentEventQueue;
+			this._continueAfterThresholdCompaction ||= Boolean(
+				this._handleRlmChildTurnOutcome(context.message, true, "requested")?.continuation,
+			);
+		}
 		// A queued continuation disproves the assistant-last "task finished" heuristic, so preserve a true set above.
 		this._continueAfterThresholdCompaction ||= lastMessage !== undefined && lastMessage.role !== "assistant";
 		return true;
@@ -2850,22 +2880,26 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 		if (!settings.enabled) return false;
 
-		const contextWindow = this.model?.contextWindow ?? 0;
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
+		const compactionTimestamp = this._activeCompactionTimestamp();
 		if (compactionTimestamp !== undefined && context.message.timestamp <= compactionTimestamp) {
 			return false;
 		}
 
 		const contextTokens = this._getThresholdContextTokens(context.message, compactionTimestamp);
-		if (contextTokens === undefined || !shouldCompact(contextTokens, contextWindow, settings)) {
+		if (contextTokens === undefined || !this.model || !shouldCompactForModel(contextTokens, this.model, settings)) {
 			return false;
 		}
 
-		// Goal continuation takes exclusive priority over autonomous continuation, matching _getContinuationMessages.
-		if (this._queueGoalContinuationForThresholdCompaction(context.message)) {
+		await this._agentEventQueue;
+		const rlmOutcome = this._handleRlmChildTurnOutcome(context.message, true, "threshold");
+		if (rlmOutcome?.continuation) {
 			this._continueAfterThresholdCompaction = true;
-		} else if (await this._queueAutonomousContinuationForThresholdCompaction(context.message)) {
+		} else if (!rlmOutcome?.terminal && this._queueGoalContinuationForThresholdCompaction(context.message)) {
+			this._continueAfterThresholdCompaction = true;
+		} else if (
+			!rlmOutcome?.terminal &&
+			(await this._queueAutonomousContinuationForThresholdCompaction(context.message))
+		) {
 			this._continueAfterThresholdCompaction = true;
 		}
 		return true;
@@ -2997,7 +3031,11 @@ export class AgentSession {
 	private _clearQueuedAutonomousContinuations(
 		options: { restoreAutonomousState?: boolean; messages?: AgentMessage[] } = {},
 	): void {
-		const requestedMessages = options.messages ?? [...this._postCompactionContinuationMessages];
+		const requestedMessages =
+			options.messages ??
+			this._postCompactionContinuationMessages.filter((message) =>
+				this._queuedAutonomousContinuationSnapshots.has(message),
+			);
 		const requestedMessageSet = new Set(requestedMessages);
 		const queuedMessages = this._postCompactionContinuationMessages.filter((message) =>
 			requestedMessageSet.has(message),
@@ -3436,10 +3474,352 @@ export class AgentSession {
 		}
 	}
 
+	private _restoreRlmContinuationState(): void {
+		if (this._rlmDepth === 0) return;
+		for (const entry of [...this.sessionManager.getBranch()].reverse()) {
+			if (entry.type !== "custom" || entry.customType !== RLM_CONTINUATION_STATE_CUSTOM_TYPE) continue;
+			const state = parseRlmContinuationState(entry.data);
+			if (state) {
+				this._rlmContinuation = state;
+				this._repliedToParentSinceTask = state.tasks.length > 0 && state.tasks.every((task) => task.replied);
+			}
+			break;
+		}
+	}
+
+	private _persistRlmContinuationState(): void {
+		if (this._rlmDepth === 0) return;
+		this.sessionManager.appendCustomEntryWithRollback(
+			RLM_CONTINUATION_STATE_CUSTOM_TYPE,
+			structuredClone(this._rlmContinuation),
+		);
+		this.sessionManager.flushNow();
+	}
+
+	private _beginRlmParentTask(message: AgentMessage): void {
+		if (this._rlmDepth === 0 || !isAgentSessionMessage(message) || message.details.fromRelationship !== "parent")
+			return;
+		const state = this._rlmContinuation;
+		if (state.tasks.some((task) => task.id === message.details.id)) return;
+		// Follow-up admission is not a task boundary: only durable delivery can
+		// reset completion state. Keep every delivered task awaiting a result.
+		state.tasks = state.tasks.filter((task) => !task.replied);
+		state.tasks.push({ id: message.details.id, receivedAt: message.timestamp, replied: false });
+		state.continuationCount = 0;
+		state.lastSourceKey = undefined;
+		state.lastStopReason = undefined;
+		state.terminalStatus = undefined;
+		state.taskHadLength = false;
+		state.pendingContinuation = undefined;
+		state.pendingResult = undefined;
+		this._repliedToParentSinceTask = false;
+		this._persistRlmContinuationState();
+	}
+
+	private _rlmContinuationMatches(
+		message: AgentMessage,
+		pending = this._rlmContinuation.pendingContinuation,
+	): boolean {
+		return Boolean(
+			pending &&
+				message.role === "user" &&
+				message.timestamp === pending.messageTimestamp &&
+				normalizeMessageContent(message.content).text === pending.messageText,
+		);
+	}
+
+	private _hasQueuedRlmContinuation(): boolean {
+		return this._actionStore
+			.unfinishedActions()
+			.some(
+				(action) =>
+					action.payload.kind === "turn" && this._rlmContinuationMatches(primaryDeliveryRecord(action).message),
+			);
+	}
+
+	private _pendingRlmContinuationMessage(pending: RlmPendingContinuation): UserMessage {
+		return {
+			role: "user",
+			content: [{ type: "text", text: pending.messageText }],
+			timestamp: pending.messageTimestamp,
+		};
+	}
+
+	private _queuePendingRlmContinuation(): boolean {
+		const pending = this._rlmContinuation.pendingContinuation;
+		if (
+			!pending ||
+			pending.phase === "started" ||
+			this._disposed ||
+			this._disposing ||
+			this._sessionInputPumpSuspended ||
+			this._sessionInputAdmissionPauses.size > 0
+		)
+			return false;
+		if (this._hasQueuedRlmContinuation()) return true;
+		const message = this._pendingRlmContinuationMessage(pending);
+		// Recovery belongs before a later parent follow-up, not after it has reset
+		// this task's counters. The queue still owns dispatch and compaction fences.
+		this._admitSessionInput(
+			this._createPreparedTurnAction("followUp", pending.messageText, undefined, {
+				message,
+				resumeIfIdle: true,
+				queueKey: `rlm-recovery:${pending.sourceKey}`,
+			}),
+			{ front: true },
+		);
+		pending.phase = "queued";
+		this._persistRlmContinuationState();
+		return true;
+	}
+
+	private _consumeStartedRlmContinuation(message: AgentMessage): void {
+		const pending = this._rlmContinuation.pendingContinuation;
+		if (!pending || !this._rlmContinuationMatches(message, pending)) return;
+		// Retain the record until a following assistant result is authoritative.
+		// A process exiting after delivery but before that result can then resume.
+		pending.phase = "started";
+		this._persistRlmContinuationState();
+	}
+
+	private _handleRlmChildTurnOutcome(
+		message: AssistantMessage,
+		queue = false,
+		compactionReason?: string,
+	): { terminal: boolean; continuation?: UserMessage } | undefined {
+		if (this._rlmDepth === 0 || this._rlmContinuation.tasks.length === 0) return undefined;
+		const state = this._rlmContinuation;
+		const classification = classifyRlmChildTerminal(message);
+		const sourceKey = `${message.timestamp}:${message.stopReason}:${classification.text.length}:${classification.text.slice(-96)}`;
+		if (state.lastSourceKey === sourceKey) {
+			if (queue) this._queuePendingRlmContinuation();
+			return {
+				terminal: state.terminalStatus !== undefined,
+				continuation: state.pendingContinuation
+					? this._pendingRlmContinuationMessage(state.pendingContinuation)
+					: undefined,
+			};
+		}
+		state.lastSourceKey = sourceKey;
+		state.lastStopReason = message.stopReason;
+		state.taskHadLength ||= message.stopReason === "length";
+		state.pendingContinuation = undefined;
+		if (
+			classification.terminal ||
+			(classification.canContinue && state.continuationCount >= RLM_CHILD_MAX_CONTINUATIONS)
+		) {
+			const status = classification.status ?? "failed";
+			state.terminalStatus = status;
+			this._recordRlmTerminalResult({
+				status,
+				text: boundedRlmVisibleText(classification.text),
+				partial: status !== "complete" || state.taskHadLength,
+				reason: classification.terminal
+					? undefined
+					: `protocol_exhausted_after_${RLM_CHILD_MAX_CONTINUATIONS}_continuations`,
+			});
+			this._persistRlmContinuationState();
+			return { terminal: true };
+		}
+		if (!classification.canContinue) {
+			this._persistRlmContinuationState();
+			return undefined;
+		}
+		const continuation = createRlmChildContinuationMessage(++state.continuationCount, message.stopReason);
+		state.terminalStatus = undefined;
+		state.compactionReason = compactionReason;
+		state.pendingContinuation = {
+			sourceKey,
+			attempt: state.continuationCount,
+			previousStopReason: message.stopReason,
+			messageTimestamp: continuation.timestamp,
+			messageText: normalizeMessageContent(continuation.content).text,
+			phase: "reserved",
+		};
+		// Persist the reservation before exposing any queue action or model turn.
+		this._persistRlmContinuationState();
+		if (queue) this._queuePendingRlmContinuation();
+		return { terminal: false, continuation };
+	}
+
+	private _recordRlmTerminalResult(result: RlmPendingResult): void {
+		const state = this._rlmContinuation;
+		state.pendingResult = { ...result, stopReason: state.lastStopReason };
+		// A later parent task must not replace the undelivered result of an
+		// earlier task when the parent is temporarily unavailable.
+		for (const task of state.tasks) {
+			if (!task.replied && !task.result) task.result = { ...state.pendingResult };
+		}
+	}
+
+	private _markExplicitRlmParentReply(taskIds: readonly string[]): void {
+		for (const task of this._rlmContinuation.tasks) if (taskIds.includes(task.id)) task.replied = true;
+		this._repliedToParentSinceTask = this._rlmContinuation.tasks.every((task) => task.replied);
+		this._parentReplyCount++;
+		this._persistRlmContinuationState();
+	}
+
+	private async _deliverPendingRlmResults(): Promise<void> {
+		if (this._rlmResultDeliveryInFlight) return this._rlmResultDeliveryInFlight;
+		const delivery = this._deliverPendingRlmResultsOnce();
+		this._rlmResultDeliveryInFlight = delivery;
+		try {
+			await delivery;
+		} finally {
+			if (this._rlmResultDeliveryInFlight === delivery) this._rlmResultDeliveryInFlight = undefined;
+		}
+	}
+
+	private async _deliverPendingRlmResultsOnce(): Promise<void> {
+		const state = this._rlmContinuation;
+		if (!state.tasks.some((task) => task.result && !task.replied) || this._disposed || this._disposing) return;
+		const tasks = [...state.tasks];
+		// An explicit reply already on the wire owns result delivery. Do not race
+		// it with an automatic report merely because the model turn has ended.
+		await Promise.allSettled([...this._rlmExplicitRepliesInFlight]);
+		const parent = (await this._agentMessageController?.roster?.())?.entries.find(
+			(entry) => entry.relationship === "parent",
+		);
+		if (!parent || !this._agentMessageController) return;
+		for (const task of tasks) {
+			await Promise.allSettled([...this._rlmExplicitRepliesInFlight]);
+			const result = task.result;
+			if (!result || task.replied || this._disposed || this._disposing) continue;
+			const text = [
+				"RLM child automatic result",
+				`child_id: ${this._rlmParentNodeId ?? this.sessionId}`,
+				`session_name: ${this.sessionName ?? "unnamed"}`,
+				`task_id: ${task.id}`,
+				`terminal_status: ${result.status}`,
+				`partial: ${result.partial ? "yes" : "no"}`,
+				`stop_reason: ${result.stopReason ?? "unknown"}`,
+				...(result.reason ? [`reason: ${result.reason}`] : []),
+				"visible_result:",
+				result.text || "(no visible assistant text was produced)",
+			].join("\n");
+			await this._agentMessageController.sendAgentMessage({ target: parent.id, message: text });
+			task.replied = true;
+			this._parentReplyCount++;
+			this._repliedToParentSinceTask = state.tasks.every((candidate) => candidate.replied);
+			this._persistRlmContinuationState();
+		}
+	}
+
+	private _scheduleRlmReloadBackstop(): void {
+		if (
+			this._rlmDepth === 0 ||
+			(!this._rlmContinuation.pendingContinuation &&
+				!this._rlmContinuation.tasks.some((task) => task.result && !task.replied)) ||
+			this._rlmReloadBackstopTimer ||
+			this._disposed ||
+			this._disposing
+		)
+			return;
+		this._rlmReloadBackstopTimer = setTimeout(() => {
+			this._rlmReloadBackstopTimer = undefined;
+			void this._runRlmReloadBackstop().catch((error: unknown) => this._surfaceSessionInputError(error));
+		}, 0);
+		this._rlmReloadBackstopTimer.unref?.();
+	}
+
+	private async _runRlmReloadBackstop(): Promise<void> {
+		await this.agent.waitForIdle();
+		await this._agentEventQueue;
+		if (this._disposed || this._disposing || this._sessionInputPumpSuspended) return;
+		const pending = this._rlmContinuation.pendingContinuation;
+		if (pending?.phase === "started") {
+			const index = this.messages.findIndex((message) => this._rlmContinuationMatches(message, pending));
+			const later =
+				index < 0
+					? undefined
+					: this.messages
+							.slice(index + 1)
+							.reverse()
+							.find((message) => message.role === "assistant");
+			if (later?.role === "assistant" && later.stopReason === "toolUse") {
+				const toolCalls = later.content.filter((part) => part.type === "toolCall");
+				const results = this.messages
+					.slice(this.messages.indexOf(later) + 1)
+					.filter((message) => message.role === "toolResult");
+				if (
+					toolCalls.length > 0 &&
+					toolCalls.every((call) => results.some((result) => result.toolCallId === call.id)) &&
+					this.messages.at(-1)?.role === "toolResult"
+				) {
+					this._schedulePostCompactionContinue();
+				} else {
+					this._rlmContinuation.terminalStatus = "failed";
+					this._rlmContinuation.pendingContinuation = undefined;
+					this._recordRlmTerminalResult({
+						status: "failed",
+						partial: true,
+						reason: "recovery_tool_result_missing",
+						text: "An interrupted recovery tool call has no authoritative result. It was not replayed.",
+					});
+					this._persistRlmContinuationState();
+				}
+			} else if (later?.role === "assistant") this._handleRlmChildTurnOutcome(later, true, "recovery");
+			else if (index >= 0 && this.messages.at(-1)?.role !== "assistant") this._schedulePostCompactionContinue();
+			else {
+				this._rlmContinuation.terminalStatus = "failed";
+				this._rlmContinuation.pendingContinuation = undefined;
+				this._recordRlmTerminalResult({
+					status: "failed",
+					text: "The interrupted recovery turn cannot be safely replayed.",
+					partial: true,
+					reason: "recovery_checkpoint_missing",
+				});
+				this._persistRlmContinuationState();
+			}
+		} else this._queuePendingRlmContinuation();
+		await this._deliverPendingRlmResults();
+	}
+
+	get rlmDiagnostics():
+		| {
+				lastStopReason?: AssistantMessage["stopReason"];
+				terminalStatus?: RlmTerminalStatus;
+				continuationQueued: boolean;
+				compactionReason?: string;
+				currentTaskId?: string;
+				diagnosticState?: string;
+		  }
+		| undefined {
+		if (this._rlmDepth === 0) return undefined;
+		const state = this._rlmContinuation;
+		const continuationQueued = this._hasQueuedRlmContinuation();
+		return {
+			lastStopReason: state.lastStopReason,
+			terminalStatus: state.terminalStatus,
+			continuationQueued,
+			compactionReason: state.compactionReason,
+			currentTaskId: state.tasks.at(-1)?.id,
+			diagnosticState:
+				!this.isStreaming &&
+				!this.isCompacting &&
+				!state.terminalStatus &&
+				!continuationQueued &&
+				(state.lastStopReason === "length" || state.lastStopReason === "stop")
+					? "compacted_idle_incomplete"
+					: undefined,
+		};
+	}
+
 	private async _getContinuationMessages(
 		context: GetContinuationMessagesContext,
 		signal?: AbortSignal,
 	): Promise<AgentMessage[]> {
+		if (signal?.aborted) return [];
+		await this._agentEventQueue;
+		const rlmOutcome = this._handleRlmChildTurnOutcome(context.message);
+		if (rlmOutcome?.terminal) return [];
+		if (rlmOutcome?.continuation) {
+			if (this.queuedActionCount > 0) {
+				this._queuePendingRlmContinuation();
+				return [];
+			}
+			return [rlmOutcome.continuation];
+		}
 		if (this.queuedActionCount > 0) {
 			return [];
 		}
@@ -3732,6 +4112,8 @@ export class AgentSession {
 			) {
 				this.sessionManager.appendMessage(event.message);
 			}
+			this._beginRlmParentTask(event.message);
+			this._consumeStartedRlmContinuation(event.message);
 
 			if (event.message.role === "assistant") {
 				this._lastAssistantMessage = event.message;
@@ -3812,6 +4194,11 @@ export class AgentSession {
 			}
 			this._finishActiveRetryWithFailure(msg);
 			this._resolveRetry();
+			if (!compactionWillRetry) {
+				this._handleRlmChildTurnOutcome(msg);
+				this._queuePendingRlmContinuation();
+				await this._deliverPendingRlmResults();
+			}
 			if (!compactionWillRetry) {
 				this._finishGoalForTerminalAssistantMessage(msg);
 				// In serialized mode, agent-callable refine.run is serviced
@@ -4211,6 +4598,7 @@ export class AgentSession {
 			return;
 		}
 		this._disposed = true;
+		if (this._rlmReloadBackstopTimer) clearTimeout(this._rlmReloadBackstopTimer);
 		for (const run of this._unsettledRlmChildRuns) run.suppressTerminalNotice = true;
 		for (const controller of this._rlmQuiescenceWaitAborts) controller.abort();
 		this._sessionActionCommitDisposeAbortController.abort();
@@ -4352,7 +4740,7 @@ export class AgentSession {
 	}
 
 	buildSessionContext(): SessionContext {
-		const context = this.sessionManager.buildSessionContext();
+		const context = this.sessionManager.buildSessionContext(this.model);
 		for (const message of context.messages) {
 			this._applyLateIpythonSentAgentMessages(message);
 		}
@@ -4571,7 +4959,18 @@ export class AgentSession {
 
 	private async _runPreTurnCompaction(): Promise<void> {
 		const lastAssistant = this._findLastAssistantMessage();
-		if (lastAssistant) await this._checkCompaction(lastAssistant, false, false);
+		if (lastAssistant) {
+			await this._checkCompaction(lastAssistant, false, false);
+		} else if (
+			this.model &&
+			shouldCompactForModel(
+				estimateContextTokens(this.agent.state.messages).tokens,
+				this.model,
+				this.settingsManager.getCompactionSettings(),
+			)
+		) {
+			await this._runAutoCompaction("threshold", false);
+		}
 	}
 
 	private async _prepareForCommit<TPrepared, TCommitted>(
@@ -4723,7 +5122,6 @@ export class AgentSession {
 			customMessage,
 			admissionCommitted,
 		});
-		if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 	}
 
 	async queueAgentMessagePrompt(
@@ -4737,14 +5135,12 @@ export class AgentSession {
 				agentMessageId,
 				message: customMessage,
 			});
-			if (customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 			return true;
 		}
 		const queued = await this._queuePreparedPrompt("followUp", text, undefined, {
 			agentMessageId,
 			message: customMessage,
 		});
-		if (queued && customMessage?.details.fromRelationship === "parent") this._repliedToParentSinceTask = false;
 		return queued;
 	}
 
@@ -6971,6 +7367,7 @@ export class AgentSession {
 	/** Resume the scheduler after requestAbort/abortForUpdateRestart suspended it; owned pause leases are unaffected. */
 	resumeQueuedWork(): boolean {
 		this._resumeSessionInputAdmission();
+		this._queuePendingRlmContinuation();
 		this._maybeResumeGoalContinuationAfterRlmWork();
 		this._scheduleSessionInputPump();
 		return this._hasSelectableSessionInput();
@@ -7213,6 +7610,7 @@ export class AgentSession {
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = model;
 		this.sessionManager.appendModelChange(model.provider, model.id);
+		this._restoreProviderContextForModel();
 		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
 
 		this.setThinkingLevel(thinkingLevel);
@@ -7280,6 +7678,7 @@ export class AgentSession {
 
 		this.agent.state.model = next.model;
 		this.sessionManager.appendModelChange(next.model.provider, next.model.id);
+		this._restoreProviderContextForModel();
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 
 		this.setThinkingLevel(thinkingLevel);
@@ -7319,6 +7718,7 @@ export class AgentSession {
 		const serviceTier = this._getServiceTierForModelSwitch();
 		this.agent.state.model = nextModel;
 		this.sessionManager.appendModelChange(nextModel.provider, nextModel.id);
+		this._restoreProviderContextForModel();
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 
 		this.setThinkingLevel(thinkingLevel);
@@ -7600,6 +8000,9 @@ export class AgentSession {
 			this._notifySessionInputCheckpointChange();
 			this._scheduleSessionInputPump();
 			if (didCompact) {
+				if (!options.skipAbort) this._resumeSessionInputAdmission();
+				this._queuePendingRlmContinuation();
+				this._scheduleSessionInputPump();
 				this._discardPendingAutoRefine({ cancelPostCompactionContinue: true });
 				if (hadPostCompactionContinue) {
 					this._schedulePostCompactionContinue(continueAfterSessionInput);
@@ -7710,6 +8113,27 @@ export class AgentSession {
 					this.thinkingLevel,
 					summaryCall,
 					providerRetryPolicy(this.settingsManager),
+					{
+						context: {
+							systemPrompt: this.agent.state.systemPrompt,
+							messages: supportsCompaction(model)
+								? await this.agent.convertToLlm(
+										this.agent.transformContext
+											? await this.agent.transformContext([...this.agent.state.messages], signal)
+											: this.agent.state.messages,
+									)
+								: convertToLlm(this.agent.state.messages),
+							tools: this.agent.state.tools,
+						},
+						options: {
+							sessionId: this.sessionId,
+							serviceTier: this.serviceTier,
+							reasoning: this.thinkingLevel,
+							onPayload: this.agent.onPayload,
+							onResponse: this.agent.onResponse,
+							timeoutMs: 1_200_000,
+						},
+					},
 				));
 			}
 
@@ -7745,16 +8169,16 @@ export class AgentSession {
 					error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled");
 				this._semanticEdges.finishCompaction(semanticCompaction.compactionId, cancelled ? "cancelled" : "failed");
 			}
-			throw error;
+			throw signal.aborted ? new Error("Compaction cancelled") : error;
 		}
 		const newEntries = this.sessionManager.getEntries();
-		this.agent.state.messages = this.sessionManager.buildSessionContext().messages;
+		this.agent.state.messages = this.sessionManager.buildSessionContext(this.model).messages;
 		this._mergeUnpersistedOutcomes(this.agent.state.messages);
 		this._restoreLateIpythonSentAgentMessages();
 
-		const savedCompactionEntry = newEntries.find((e) => e.type === "compaction" && e.summary === summary) as
-			| CompactionEntry
-			| undefined;
+		const savedCompactionEntry = [...newEntries]
+			.reverse()
+			.find((e) => e.type === "compaction" && e.summary === summary) as CompactionEntry | undefined;
 		if (savedCompactionEntry) {
 			await this._extensionRunner.emit({
 				type: "session_compact",
@@ -8459,17 +8883,32 @@ export class AgentSession {
 				};
 			}
 		}
-		const plan = await planRefinement(
-			this.agent.state.messages,
-			planningState,
-			history,
-			model,
-			apiKey,
-			{ ...options, retry: providerRetryPolicy(this.settingsManager) },
-			headers,
-			signal,
-			this.thinkingLevel,
-		);
+		let plan: Awaited<ReturnType<typeof planRefinement>>;
+		try {
+			plan = await planRefinement(
+				this.agent.state.messages,
+				planningState,
+				history,
+				model,
+				apiKey,
+				{ ...options, retry: providerRetryPolicy(this.settingsManager) },
+				headers,
+				signal,
+				this.thinkingLevel,
+			);
+		} catch (error) {
+			if (error instanceof RefinementFailureError) {
+				this.sessionManager.appendCustomEntryWithRollback(REFINEMENT_FAILURE_CUSTOM_TYPE, {
+					...error.refinementFailure,
+					failedAt: new Date().toISOString(),
+					trigger,
+					scope: requestedScope,
+					model: { provider: model.provider, id: model.id },
+				});
+				this.sessionManager.flushNow();
+			}
+			throw error;
+		}
 		if (this._disposed || signal.aborted) {
 			throw new Error("Refinement cancelled because the session was disposed.");
 		}
@@ -8624,6 +9063,29 @@ export class AgentSession {
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
 	 */
+	private _providerContextRebuiltAt: number | undefined;
+
+	private _restoreProviderContextForModel(): void {
+		if (
+			!this.sessionManager
+				.getBranch()
+				.some((entry) => entry.type === "compaction" && hasProviderCheckpoint(entry.details))
+		)
+			return;
+		this.agent.state.messages = this.buildSessionContext().messages;
+		// Old usage may describe a window encrypted for a different model or endpoint.
+		this._providerContextRebuiltAt = Date.now();
+	}
+
+	private _activeCompactionTimestamp(): number | undefined {
+		const marker = this.agent.state.messages.find((message) => message.role === "compactionSummary");
+		if (marker) return marker.timestamp;
+		const branch = this.sessionManager.getBranch();
+		if (branch.some((entry) => entry.type === "compaction" && hasProviderCheckpoint(entry.details))) return undefined;
+		const entry = getLatestCompactionEntry(branch);
+		return entry ? new Date(entry.timestamp).getTime() : undefined;
+	}
+
 	private _getThresholdContextTokens(
 		assistantMessage: AssistantMessage,
 		compactionTimestamp: number | undefined,
@@ -8635,6 +9097,14 @@ export class AgentSession {
 			// have stale usage reflecting the old (larger) context and would falsely
 			// trigger compaction right after one just finished.
 			const usageMsg = messages[estimate.lastUsageIndex];
+			if (
+				usageMsg.role === "assistant" &&
+				((this._providerContextRebuiltAt !== undefined && usageMsg.timestamp <= this._providerContextRebuiltAt) ||
+					usageMsg.model !== this.model?.id ||
+					usageMsg.provider !== this.model?.provider)
+			) {
+				return messages.reduce((tokens, message) => tokens + estimateTokens(message), 0);
+			}
 			if (
 				compactionTimestamp !== undefined &&
 				usageMsg.role === "assistant" &&
@@ -8677,7 +9147,7 @@ export class AgentSession {
 		}
 
 		const settings = this.settingsManager.getCompactionSettings();
-		const contextWindow = this.model?.contextWindow ?? 0;
+		const contextWindow = this.model ? getModelInputLimit(this.model) : 0;
 
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
@@ -8689,8 +9159,7 @@ export class AgentSession {
 		// Skip overflow/threshold checks if this assistant message is older than the
 		// latest compaction boundary. This prevents a stale pre-compaction usage/error
 		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const compactionTimestamp = compactionEntry ? new Date(compactionEntry.timestamp).getTime() : undefined;
+		const compactionTimestamp = this._activeCompactionTimestamp();
 		const assistantIsFromBeforeCompaction =
 			compactionTimestamp !== undefined && assistantMessage.timestamp <= compactionTimestamp;
 
@@ -8735,10 +9204,20 @@ export class AgentSession {
 		// assistant usage are included, matching the /usage context display.
 		const contextTokens = this._getThresholdContextTokens(assistantMessage, compactionTimestamp);
 		if (contextTokens === undefined) return false;
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			if (queueAutonomousContinuation && this._queueGoalContinuationForThresholdCompaction(assistantMessage)) {
+		if (this.model && shouldCompactForModel(contextTokens, this.model, settings)) {
+			const rlmOutcome = queueAutonomousContinuation
+				? this._handleRlmChildTurnOutcome(assistantMessage, true, "threshold")
+				: undefined;
+			if (rlmOutcome?.continuation) {
 				this._continueAfterThresholdCompaction = true;
 			} else if (
+				!rlmOutcome?.terminal &&
+				queueAutonomousContinuation &&
+				this._queueGoalContinuationForThresholdCompaction(assistantMessage)
+			) {
+				this._continueAfterThresholdCompaction = true;
+			} else if (
+				!rlmOutcome?.terminal &&
 				queueAutonomousContinuation &&
 				(await this._queueAutonomousContinuationForThresholdCompaction(assistantMessage))
 			) {
@@ -8829,6 +9308,7 @@ export class AgentSession {
 		// Requested/threshold stop the loop on purpose, so a failed or skipped compaction must not stall it.
 		// Overflow stays excluded: a failed overflow recovery must not re-issue the overflowing request.
 		const resumeAfterFailure = () => {
+			this._queuePendingRlmContinuation();
 			if (
 				(reason === "requested" || reason === "threshold") &&
 				(shouldContinueAfterCompaction || this.agent.hasQueuedMessages() || this.hasPendingSessionWork)
@@ -8880,6 +9360,7 @@ export class AgentSession {
 				customInstructions,
 			});
 			// Queued work lives in both the agent queues and the session-owned queues.
+			this._queuePendingRlmContinuation();
 			const hasQueuedMessages = this.agent.hasQueuedMessages() || this.hasPendingSessionWork;
 			const willContinueAfterCompaction = willRetry || shouldContinueAfterCompaction || hasQueuedMessages;
 
@@ -8918,6 +9399,9 @@ export class AgentSession {
 					`${reason === "requested" ? "Requested c" : "C"}ompaction cancelled`,
 					{ aborted: true, customInstructions },
 				);
+				// Cancelling only compaction preserves recovery; a session abort owns
+				// the suspension flag and must never be bypassed here.
+				if (!this._sessionInputPumpSuspended) resumeAfterFailure();
 				return false;
 			}
 			if (error instanceof CompactionSkippedError) {
@@ -9507,30 +9991,41 @@ export class AgentSession {
 						(await this.handleAgentMessageHostRequest("agent_message.list_agents")) as AgentFamilyRosterResult,
 					awaitPendingChildPublication: (selector) => this._awaitPendingRlmChildPublication(selector),
 					sendAgentMessage: async (input) => {
-						const receipt = (await this.handleAgentMessageHostRequest("agent_message.send", {
-							target: input.target,
-							message: input.message,
-						})) as AgentSessionMessageReceipt;
-						if (this._rlmDepth > 0) {
-							let addressedParent = input.receiverRole === "parent";
-							if (input.receiverRole === undefined && this._agentMessageController?.roster) {
-								try {
-									const roster = await this._agentMessageController.roster();
-									addressedParent = roster.entries.some(
-										(entry) =>
-											entry.relationship === "parent" &&
-											(entry.id === input.target || entry.name === input.target),
-									);
-								} catch {
-									addressedParent = false;
+						const currentTaskId = this._rlmContinuation.tasks.at(-1)?.id;
+						const taskIds = this._rlmContinuation.tasks
+							.filter((task) => !task.replied && (!task.result || task.id === currentTaskId))
+							.map((task) => task.id);
+						const reply = (async () => {
+							const receipt = (await this.handleAgentMessageHostRequest("agent_message.send", {
+								target: input.target,
+								message: input.message,
+							})) as AgentSessionMessageReceipt;
+							if (this._rlmDepth > 0) {
+								let addressedParent = input.receiverRole === "parent";
+								if (input.receiverRole === undefined && this._agentMessageController?.roster) {
+									try {
+										const roster = await this._agentMessageController.roster();
+										addressedParent = roster.entries.some(
+											(entry) =>
+												entry.relationship === "parent" &&
+												(entry.id === input.target || entry.name === input.target),
+										);
+									} catch {
+										addressedParent = false;
+									}
+								}
+								if (addressedParent) {
+									this._markExplicitRlmParentReply(taskIds);
 								}
 							}
-							if (addressedParent) {
-								this._repliedToParentSinceTask = true;
-								this._parentReplyCount += 1;
-							}
+							return receipt;
+						})();
+						this._rlmExplicitRepliesInFlight.add(reply);
+						try {
+							return await reply;
+						} finally {
+							this._rlmExplicitRepliesInFlight.delete(reply);
 						}
-						return receipt;
 					},
 				}),
 			);
@@ -10983,7 +11478,9 @@ export class AgentSession {
 				});
 				await child.waitForRlmQuiescence();
 				if (run.error) throw new Error(run.error);
-				run.status = "done";
+				run.status = child._rlmContinuation.terminalStatus === "failed" ? "error" : "done";
+				if (run.status === "error")
+					run.error = child._rlmContinuation.pendingResult?.reason ?? "Child reported failure";
 				// Only successful completions return; the edge lands on the parent's next commit.
 				const childLastCommitted = child.semanticEdges.lastCommittedRequestId;
 				if (childLastCommitted !== undefined) {
@@ -10999,12 +11496,20 @@ export class AgentSession {
 				) {
 					const lastAssistantText = child.getLastAssistantText();
 					await deliverTerminalMessageToParent(
-						createRlmChildTerminalNoticeMessage({
-							kind: "completed_without_reply",
-							childId: run.id,
-							sessionName,
-							lastAssistantTextPreview: lastAssistantText ? compactRlmText(lastAssistantText) : undefined,
-						}),
+						run.status === "error"
+							? createRlmChildFailureMessage({
+									childId: run.id,
+									sessionName,
+									error: `terminal_status: failed\npartial: yes\n${run.error}\nvisible_result:\n${boundedRlmVisibleText(lastAssistantText ?? "")}`,
+								})
+							: createRlmChildTerminalNoticeMessage({
+									kind: "completed_without_reply",
+									childId: run.id,
+									sessionName,
+									lastAssistantTextPreview: lastAssistantText
+										? boundedRlmVisibleText(lastAssistantText)
+										: undefined,
+								}),
 					);
 				}
 				if (!this.registerRlmChildSession(run.id, child) && !run.detachedDeletion) {
@@ -12027,7 +12532,7 @@ export class AgentSession {
 				this.sessionManager.appendLabelChange(targetId, label);
 			}
 
-			const sessionContext = this.sessionManager.buildSessionContext();
+			const sessionContext = this.sessionManager.buildSessionContext(this.model);
 			this.agent.state.messages = sessionContext.messages;
 			this._mergeUnpersistedOutcomes(this.agent.state.messages);
 			this._restoreLateIpythonSentAgentMessages();

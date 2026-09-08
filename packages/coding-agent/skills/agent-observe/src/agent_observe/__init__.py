@@ -12,16 +12,42 @@ from typing import Any
 from rlm import host_request
 
 
+def _aliases(result: dict[str, Any]) -> dict[str, Any]:
+    """Add local compatibility fields without changing the daemon schema."""
+    result = dict(result)
+    for key in ("current", "agent"):
+        if isinstance(result.get(key), dict):
+            result[key] = _summary_aliases(result[key])
+    if isinstance(result.get("agents"), list):
+        result["agents"] = [_summary_aliases(row) for row in result["agents"]]
+    if isinstance(result.get("messages"), list):
+        result["messages"] = [
+            {**row, "content": row["text"]} if isinstance(row, dict) and "text" in row else row
+            for row in result["messages"]
+        ]
+    return result
+
+
+def _summary_aliases(summary: Any) -> Any:
+    if not isinstance(summary, dict):
+        return summary
+    return {
+        **summary,
+        **({"name": summary["sessionName"]} if "sessionName" in summary else {}),
+        **({"activityStatus": "attached_idle"} if summary.get("status") == "user" else {}),
+    }
+
+
 async def list_agents() -> dict[str, Any]:
     """List active daemon sessions visible to this agent."""
-    return await host_request("agent_observe.list")
+    return _aliases(await host_request("agent_observe.list"))
 
 
 async def get_agent(target: str) -> dict[str, Any]:
     """Read one active session summary by active id, session id/name, or suffix."""
     if not isinstance(target, str):
         raise TypeError(f"target must be str, got {type(target).__name__}")
-    return await host_request("agent_observe.get", {"target": target})
+    return _aliases(await host_request("agent_observe.get", {"target": target}))
 
 
 async def recent_messages(
@@ -42,11 +68,11 @@ async def recent_messages(
         raise TypeError(f"limit must be int, got {type(limit).__name__}")
     if not isinstance(max_chars, int):
         raise TypeError(f"max_chars must be int, got {type(max_chars).__name__}")
-    return await host_request(
+    return _aliases(await host_request(
         "agent_observe.recent",
         {
             "target": target,
             "limit": limit,
             "max_chars": max_chars,
         },
-    )
+    ))

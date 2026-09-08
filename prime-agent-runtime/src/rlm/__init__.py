@@ -44,6 +44,12 @@ class RLMSubagent:
     session_name: str
     session_dir: Path
     status: str
+    model: str | None = None
+
+    @property
+    def name(self) -> str:
+        """Compatibility alias for the canonical session_name field."""
+        return self.session_name
 
 
 def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
@@ -191,6 +197,7 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
     session_name = payload.get("session_name")
     session_dir = payload.get("session_dir")
     status = payload.get("status")
+    model = payload.get("model")
     if not isinstance(child_id, str) or not child_id:
         raise RuntimeError(f"{operation} entry is missing rlm_child_id")
     if active_session_id is not None and not isinstance(active_session_id, str):
@@ -203,6 +210,8 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
         raise RuntimeError(f"{operation} entry is missing session_dir")
     if status not in {"running", "completed", "error"}:
         raise RuntimeError(f"{operation} entry has invalid status")
+    if model is not None and not isinstance(model, str):
+        raise RuntimeError(f"{operation} entry has invalid model")
     return RLMSubagent(
         rlm_child_id=child_id,
         active_session_id=active_session_id,
@@ -210,6 +219,7 @@ def _subagent_from_payload(payload: Any, operation: str = "rlm.list_subagents") 
         session_name=session_name,
         session_dir=Path(session_dir),
         status=status,
+        model=model,
     )
 
 

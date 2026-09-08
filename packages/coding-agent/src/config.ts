@@ -16,6 +16,7 @@ import { basename, dirname, join, posix, resolve, sep, win32 } from "path";
 import { fileURLToPath } from "url";
 import { shouldUseWindowsShell, spawnSyncHidden } from "./utils/child-process.js";
 import { normalizeSocketPath } from "./utils/daemon-socket-path.js";
+import { PRIME_AGENT_UPDATE_RELEASE_URL } from "./utils/update-source.js";
 
 // =============================================================================
 // Package Detection
@@ -327,7 +328,7 @@ export function getSelfUpdateUnavailableInstruction(
 ): string {
 	const method = detectInstallMethod();
 	if (method === "bun-binary") {
-		return `Download from: https://github.com/PrimeIntellect-ai/prime-agent/releases/latest`;
+		return `Download from: ${PRIME_AGENT_UPDATE_RELEASE_URL}`;
 	}
 	if (method === "homebrew") {
 		return `Update with: brew upgrade ${APP_NAME}`;
@@ -343,10 +344,8 @@ export function getSelfUpdateUnavailableInstruction(
 }
 
 export function getUpdateInstruction(packageName: string): string {
-	const method = detectInstallMethod();
-	const command = getSelfUpdateCommandForMethod(method, packageName);
-	if (command) {
-		return `Run: ${command.display}`;
+	if (getSelfUpdateCommandForMethod(detectInstallMethod(), packageName)) {
+		return `Run: ${APP_NAME} update`;
 	}
 	return getSelfUpdateUnavailableInstruction(packageName);
 }

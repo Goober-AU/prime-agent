@@ -7,6 +7,7 @@ next to this file. Cells execute with top-level await in one persistent
 
 from __future__ import annotations
 
+import _thread
 import ast
 import asyncio
 import codecs
@@ -29,7 +30,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .bash import _kill_live_handles
+from .bash import BashHandle, _kill_live_handles
 
 PROTOCOL_VERSION = 3
 
@@ -383,25 +384,17 @@ def _request_interrupt(target: str | None) -> None:
             return
         else:
             return
-    # SIGINT must land on the main thread, where cells execute. Windows has no
-    # signal.pthread_kill: fall back to cancelling the active task on the loop
-    # (sync-blocked cells and the finishing repr/drain cannot be broken there;
-    # best-effort parity).
+    # Cancelling via the loop cannot interrupt synchronous Python on Windows:
+    # that code occupies the same loop thread. Schedule its SIGINT handler.
     if hasattr(signal, "pthread_kill"):
         signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
         if _loop is not None:
             # Wake the selector so a cancel scheduled by the handler runs promptly.
             _loop.call_soon_threadsafe(lambda: None)
         return
+    _thread.interrupt_main(signal.SIGINT)
     if _loop is not None:
-
-        def cancel_active() -> None:
-            current = _active["task"]
-            if current is task and current is not None and not current.done():
-                _active["interrupted"] = True
-                current.cancel()
-
-        _loop.call_soon_threadsafe(cancel_active)
+        _loop.call_soon_threadsafe(lambda: None)
 
 
 def _consume_pending_interrupt(rid: str) -> bool:
@@ -655,6 +648,14 @@ def _snapshot_state(
         if value is missing:
             # A background thread deleted the name after the key listing.
             skipped.append({"name": name, "reason": "deleted during snapshot"})
+            continue
+        if isinstance(value, BashHandle):
+            # Skip before dill traverses locks, pipes, threads or job handles.
+            # __reduce_ex__ also rejects a handle nested in another variable.
+            skipped.append({
+                "name": name,
+                "reason": "BashHandle is a runtime-owned process handle and cannot be snapshotted",
+            })
             continue
         remaining = max_bytes - total
         limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, remaining)

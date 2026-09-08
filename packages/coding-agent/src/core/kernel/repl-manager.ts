@@ -3,10 +3,10 @@
 // a diagnostics tail. The protocol is documented in prime-agent-runtime/src/rlm/repl.md.
 import type { ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { v4 as uuid } from "uuid";
-import { spawnHidden } from "../../utils/child-process.js";
+import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
 import { ensureKernelPython } from "./bootstrap.js";
 import {
@@ -25,7 +25,6 @@ import {
 	installSignalHandlersOnce,
 	isRecord,
 	KERNEL_ABORT_GRACE_MS,
-	KERNEL_BUSY_INTERRUPT_INTERVAL_MS,
 	KERNEL_BUSY_REUSE_WAIT_MS,
 	KERNEL_SHUTDOWN_TIMEOUT_MS,
 	type KernelAttachment,
@@ -99,6 +98,7 @@ interface ActiveExecution {
 	status: ExecuteResult["status"];
 	doneFields?: Record<string, unknown>;
 	settled: boolean;
+	interruptRequestedAt?: number;
 	resolve: (result: InternalExecuteResult) => void;
 	reject: (error: Error) => void;
 }
@@ -170,6 +170,7 @@ export class ReplKernelManager {
 	private executionQueue: Promise<unknown> = Promise.resolve();
 	private activeExecution?: ActiveExecution;
 	private readonly activeExecutionIdleWaiters = new Set<() => void>();
+	private activeExecutionReconciliation?: Promise<boolean>;
 	private readonly lateSentAgentMessageHandlers = new Map<string, (message: KernelSentAgentMessage) => void>();
 	/** Resolvers for done events outside the active execution (the shutdown reply). */
 	private readonly pendingDoneWaiters = new Map<string, () => void>();
@@ -998,6 +999,8 @@ export class ReplKernelManager {
 			this.resolveExecution(execution, { clearActive: false });
 		};
 		const onAbort = () => {
+			if (execution.interruptRequestedAt !== undefined) return;
+			execution.interruptRequestedAt = Date.now();
 			void this.interrupt().catch(() => undefined);
 			clearAbortTimer();
 			abortTimer = globalThis.setTimeout(forceAbort, KERNEL_ABORT_GRACE_MS);
@@ -1191,25 +1194,49 @@ export class ReplKernelManager {
 		});
 	}
 
+	private async reconcileSettledActiveExecution(signal?: AbortSignal): Promise<boolean> {
+		const execution = this.activeExecution;
+		if (!execution || !execution.settled || signal?.aborted) return !execution;
+		if (this.activeExecutionReconciliation) return this.activeExecutionReconciliation;
+		const operation = (async () => {
+			const requestId = uuid();
+			const done = new Promise<void>((resolve) => this.pendingDoneWaiters.set(requestId, resolve));
+			try {
+				// The original done, cancellation, or disposal may arrive before the
+				// barrier reply. Do not hold a cancelled caller until the deadline.
+				const cleared = this.waitForActiveExecutionToClear(signal, KERNEL_BUSY_REUSE_WAIT_MS);
+				const send = this.writeLine({ type: "execute", id: requestId, code: "None" });
+				const confirmed = await Promise.race([Promise.all([send, done]).then(() => true), cleared]);
+				if (confirmed && !signal?.aborted && this.activeExecution === execution) {
+					// Requests are serialized in Python. A correlated barrier done proves
+					// the previous request ended; elapsed time alone never proves that.
+					this.finishActiveExecution(execution);
+					return true;
+				}
+				return !this.activeExecution;
+			} finally {
+				this.pendingDoneWaiters.delete(requestId);
+			}
+		})();
+		this.activeExecutionReconciliation = operation;
+		try {
+			return await operation;
+		} finally {
+			if (this.activeExecutionReconciliation === operation) this.activeExecutionReconciliation = undefined;
+		}
+	}
+
 	private async waitForActiveExecutionToClearForReuse(signal?: AbortSignal): Promise<void> {
-		const started = Date.now();
-		while (this.activeExecution && Date.now() - started < KERNEL_BUSY_REUSE_WAIT_MS) {
-			if ((this.state as string) === "shutdown") {
-				throw new Error("Kernel has been shut down");
-			}
-			void this.interrupt().catch(() => undefined);
-			const remaining = KERNEL_BUSY_REUSE_WAIT_MS - (Date.now() - started);
-			const cleared = await this.waitForActiveExecutionToClear(
-				signal,
-				Math.max(1, Math.min(KERNEL_BUSY_INTERRUPT_INTERVAL_MS, remaining)),
-			);
-			if (cleared || signal?.aborted) {
-				return;
-			}
+		if (!this.activeExecution || signal?.aborted) return;
+		if (this.state === "shutdown") throw new Error("Kernel has been shut down");
+		if (this.activeExecution.settled) {
+			if (await this.reconcileSettledActiveExecution(signal)) return;
+		} else {
+			// The abort path requested the interrupt. Reuse must not send more.
+			if (await this.waitForActiveExecutionToClear(signal, KERNEL_BUSY_REUSE_WAIT_MS)) return;
+			if (this.activeExecution?.settled && (await this.reconcileSettledActiveExecution(signal))) return;
 		}
-		if (this.activeExecution) {
-			throw new KernelBusyAfterInterruptError();
-		}
+		if (this.activeExecution && !signal?.aborted) throw new KernelBusyAfterInterruptError();
 	}
 
 	private startHostRequest(requestId: string, data: unknown): void {
@@ -1303,14 +1330,40 @@ export class ReplKernelManager {
 				child.stderr?.destroy();
 			}
 			const pid = child.pid;
-			let signaled = false;
-			try {
-				signaled = child.kill(killSignal);
-			} catch {
-				// The kernel has already exited.
+			const alreadyExited = child.exitCode != null || child.signalCode != null;
+			let signaled = alreadyExited;
+			let treeCleanupFailed = false;
+			if (process.platform === "win32" && pid !== undefined && !alreadyExited) {
+				// A venv python.exe can be a shim. Killing only it leaves the real REPL alive.
+				try {
+					const taskkill = join(process.env.SystemRoot || "C:\\Windows", "System32", "taskkill.exe");
+					const result = spawnSyncHidden(taskkill, ["/PID", String(pid), "/T", "/F"], {
+						stdio: "ignore",
+						timeout: 5000,
+					});
+					signaled = result.status === 0;
+					if (!signaled) {
+						treeCleanupFailed = true;
+						this.appendKernelDiagnostic(
+							`Windows kernel tree cleanup failed: ${result.error ? errorMessage(result.error) : `exit ${result.status}`}`,
+						);
+					}
+				} catch (error) {
+					treeCleanupFailed = true;
+					this.appendKernelDiagnostic(`Windows kernel tree cleanup failed: ${errorMessage(error)}`);
+				}
+			}
+			if (!signaled) {
+				try {
+					signaled = child.kill(killSignal);
+				} catch {
+					// The kernel has already exited.
+				}
 			}
 			// Inactive only when the signal proved the pid still named our un-reaped child.
-			if (pid !== undefined && signaled) recordOrphanProcessState(pid, false);
+			// Killing a venv shim alone does not prove its CPython descendants died.
+			// Preserve recovery evidence when tree cleanup failed.
+			if (pid !== undefined && signaled && !treeCleanupFailed) recordOrphanProcessState(pid, false);
 			// A killed/crashed kernel cannot run its own shutdown hook, so the host
 			// reaps the bash() process groups it journaled under this kernel pid.
 			if (pid !== undefined) reapKernelOrphanProcesses(pid);

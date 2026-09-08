@@ -61,6 +61,9 @@ function parseTextSignature(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	onOutputItemDone?: (
+		item: Extract<ResponseStreamEvent, { type: "response.output_item.done" }>["item"],
+	) => void | Promise<void>;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	resolveServiceTier?: (
 		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -127,6 +130,11 @@ export function convertResponsesMessages<TApi extends Api>(
 	let msgIndex = 0;
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
+			if (msg.providerContext) {
+				// The server owns this opaque window; SDK unions can lag new response item types.
+				messages.push(...(msg.providerContext.items as unknown as ResponseInput));
+				continue;
+			}
 			if (typeof msg.content === "string") {
 				messages.push({
 					role: "user",
@@ -420,6 +428,7 @@ export async function processResponsesStream<TApi extends Api>(
 				}
 			}
 		} else if (event.type === "response.output_item.done") {
+			await options?.onOutputItemDone?.(event.item);
 			const item = event.item;
 
 			if (item.type === "reasoning" && currentBlock?.type === "thinking") {
