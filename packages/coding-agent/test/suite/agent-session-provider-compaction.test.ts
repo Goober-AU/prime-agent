@@ -78,9 +78,9 @@ describe("durable provider compaction", () => {
 			harnesses.push(harness);
 			harness.session.setServiceTier("priority");
 			expect(harness.session.serviceTier).toBe("priority");
-			const threshold = provider === "openai" ? 905_616 : 244_800;
-			expect(shouldCompactForModel(threshold, model, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
-			expect(shouldCompactForModel(threshold + 1, model, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
+			const threshold = 250_000;
+			expect(shouldCompactForModel(threshold - 1, model, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
+			expect(shouldCompactForModel(threshold, model, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
 			const assistant: AssistantMessage = {
 				...fauxAssistantMessage("Large successful response"),
 				api: model.api,

@@ -1,6 +1,6 @@
 import { appendFileSync, chmodSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type * as PiAi from "@earendil-works/pi-ai";
 import type { AssistantMessage, Model } from "@earendil-works/pi-ai";
@@ -217,10 +217,12 @@ describe("harness refinement", () => {
 		const statePath = saveHarnessState(harnessStateDir, state);
 
 		expect(loadHarnessState(harnessStateDir).entries.memory.memory_entry).toBeDefined();
-		expect(readdirSync(harnessStateDir)).toEqual([statePath.split("/").at(-1)]);
+		expect(readdirSync(harnessStateDir)).toEqual([basename(statePath)]);
 		chmodSync(statePath, 0o600);
+		const mode = statSync(statePath).mode & 0o777;
 		saveHarnessState(harnessStateDir, state);
-		expect(statSync(statePath).mode & 0o777).toBe(0o600);
+		expect(statSync(statePath).mode & 0o777).toBe(mode);
+		if (process.platform !== "win32") expect(mode).toBe(0o600);
 	});
 
 	it("applies create, update, and delete for every editable harness kind", () => {
@@ -1111,11 +1113,12 @@ describe("harness refinement", () => {
 		const state = loadHarnessState(makeTempDir());
 		// Complete and balanced, but not valid JSON: this is a model formatting
 		// failure, not a truncation, and must not blame the output budget.
-		completeSimpleMock.mockResolvedValueOnce(assistantText('Here is the result: {"edits": [oops]}'));
+		completeSimpleMock.mockResolvedValue(assistantText('Here is the result: {"edits": [oops]}'));
 
 		await expect(refineHarness([], state, [], createRefineModel(false), "api-key", {})).rejects.toThrow(
-			/did not return valid JSON/,
+			/still invalid JSON/,
 		);
+		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
 	});
 
 	it("rolls back created, updated, and deleted entries from refinement history", async () => {

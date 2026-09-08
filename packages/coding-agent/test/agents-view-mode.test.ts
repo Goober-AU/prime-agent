@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { setKeybindings } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
@@ -504,6 +505,7 @@ describe("AgentsViewMode", () => {
 			savedCatalogRefreshPending: false,
 			lastSuccessfulSavedSessions: [],
 			savedSessions: [],
+			ui: { requestRender: vi.fn() },
 			requireClient: () => ({ request }),
 			getSavedSessionCatalogContext: () => ({ cwd: "/tmp" }),
 			reconcileCatalogs: vi.fn(),
@@ -690,12 +692,12 @@ describe("AgentsViewMode", () => {
 		const expandedRows = rowsOf(expandedView.self);
 		expect(
 			expandedRows.find((row) => row.kind === "agent" && row.summary.sessionId === "root-session")?.identity,
-		).toBe("file:/tmp/root.jsonl");
+		).toBe(`file:${resolve("/tmp/root.jsonl")}`);
 		expect(expandedRows.some((row) => row.kind === "subagent-summary")).toBe(false);
 		expect(expandedRows.some((row) => row.kind === "subagent" && row.summary.sessionId === "child-session")).toBe(
 			true,
 		);
-		expect([...expandedView.expandedSubagentParents]).toEqual(["file:/tmp/root.jsonl"]);
+		expect([...expandedView.expandedSubagentParents]).toEqual([`file:${resolve("/tmp/root.jsonl")}`]);
 
 		const collapsedView = buildView(false);
 		const collapsedRows = rowsOf(collapsedView.self);

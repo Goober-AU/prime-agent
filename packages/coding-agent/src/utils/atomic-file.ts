@@ -42,7 +42,7 @@ export interface WriteFileAtomicOptions {
 	mode?: number;
 	/** fsync the temp file before the rename. */
 	fsync?: boolean;
-	/** Best-effort directory fsync after the rename. */
+	/** Directory fsync after the rename; tolerates only unsupported Windows directory fsync. */
 	fsyncDir?: boolean;
 	/** Runs on the written temp file before it replaces the destination (validation, ownership). */
 	beforeRename?: (tempPath: string) => void;
@@ -81,8 +81,11 @@ export function writeFileAtomicSync(path: string, data: string, options: WriteFi
 			} finally {
 				closeSync(directoryDescriptor);
 			}
-		} catch {
-			// Unavailable on some platforms; the atomic rename still protects readers.
+		} catch (error) {
+			const failure = error as NodeJS.ErrnoException;
+			if (!(process.platform === "win32" && failure?.code === "EPERM" && failure?.syscall === "fsync")) {
+				throw error;
+			}
 		}
 	}
 }

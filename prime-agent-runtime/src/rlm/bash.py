@@ -350,6 +350,11 @@ class BashHandle:
         threading.Thread(target=self._watch, daemon=True).start()
         self._schedule_background_completion_notice()
 
+    def __reduce_ex__(self, protocol: int) -> Any:
+        """Live process handles are not durable state, including inside containers."""
+        del protocol
+        raise TypeError("BashHandle is a runtime-owned process handle and cannot be snapshotted")
+
     @property
     def pid(self) -> int:
         self._released = True

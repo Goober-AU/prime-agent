@@ -48,7 +48,12 @@ import {
 	requestOpenAICompaction,
 	supportsOpenAICompaction,
 } from "./openai-compaction.js";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	type OpenAIResponsesStreamOptions,
+	processResponsesStream,
+} from "./openai-responses-shared.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 export const compactOpenAICodexResponses: CompactFunction<"openai-codex-responses"> = async (
@@ -138,6 +143,7 @@ const CODEX_RESPONSE_STATUSES = new Set<CodexResponseStatus>([
 ]);
 
 export interface OpenAICodexResponsesOptions extends StreamOptions {
+	onOutputItemDone?: OpenAIResponsesStreamOptions["onOutputItemDone"];
 	reasoningEffort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningSummary?: "auto" | "concise" | "detailed" | "off" | "on" | null;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
@@ -220,52 +226,63 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			}
 
 			if (transport !== "sse" && !websocketDisabledForSession) {
-				let websocketStarted = false;
-				try {
-					await processWebSocketStream(
-						resolveCodexWebSocketUrl(model.baseUrl),
-						body,
-						websocketHeaders,
-						output,
-						stream,
-						model,
-						() => {
-							websocketStarted = true;
-						},
-						options,
-					);
-
-					if (options?.signal?.aborted) {
-						throw new Error("Request was aborted");
+				let websocketError: unknown;
+				// A dead cached connection gets one fresh attempt, but a partial turn
+				// must never be replayed over either transport.
+				for (let websocketAttempt = 0; websocketAttempt < 2; websocketAttempt++) {
+					let websocketStarted = false;
+					try {
+						await processWebSocketStream(
+							resolveCodexWebSocketUrl(model.baseUrl),
+							body,
+							websocketHeaders,
+							output,
+							stream,
+							model,
+							() => {
+								websocketStarted = true;
+							},
+							options,
+						);
+						if (options?.signal?.aborted) throw new Error("Request was aborted");
+						stream.push({
+							type: "done",
+							reason: output.stopReason as "stop" | "length" | "toolUse",
+							message: output,
+						});
+						stream.end();
+						return;
+					} catch (error) {
+						if (options?.signal?.aborted || isCodexNonTransportError(error)) throw error;
+						if (websocketStarted) {
+							appendAssistantMessageDiagnostic(
+								output,
+								createAssistantMessageDiagnostic("provider_transport_failure", error, {
+									configuredTransport: transport,
+									eventsEmitted: true,
+									phase: "after_message_stream_start",
+									requestBytes: new TextEncoder().encode(bodyJson).byteLength,
+								}),
+							);
+							recordWebSocketFailure(options?.sessionId, error);
+							throw error;
+						}
+						websocketError = error;
 					}
-					stream.push({
-						type: "done",
-						reason: output.stopReason as "stop" | "length" | "toolUse",
-						message: output,
-					});
-					stream.end();
-					return;
-				} catch (error) {
-					const aborted = options?.signal?.aborted;
-					if (aborted || isCodexNonTransportError(error)) {
-						throw error;
-					}
-					appendAssistantMessageDiagnostic(
-						output,
-						createAssistantMessageDiagnostic("provider_transport_failure", error, {
-							configuredTransport: transport,
-							fallbackTransport: websocketStarted ? undefined : "sse",
-							eventsEmitted: websocketStarted,
-							phase: websocketStarted ? "after_message_stream_start" : "before_message_stream_start",
-							requestBytes: new TextEncoder().encode(bodyJson).byteLength,
-						}),
-					);
-					recordWebSocketFailure(options?.sessionId, error);
-					if (websocketStarted) {
-						throw error;
-					}
-					recordWebSocketSseFallback(options?.sessionId);
 				}
+				appendAssistantMessageDiagnostic(
+					output,
+					createAssistantMessageDiagnostic("provider_transport_failure", websocketError, {
+						configuredTransport: transport,
+						fallbackTransport: "sse",
+						eventsEmitted: false,
+						phase: "before_message_stream_start",
+						requestBytes: new TextEncoder().encode(bodyJson).byteLength,
+						websocketReconnectAttempts: 1,
+					}),
+				);
+				recordWebSocketFailure(options?.sessionId, websocketError);
+				recordWebSocketSseFallback(options?.sessionId);
 			}
 
 			if (options?.signal?.aborted) {
@@ -460,6 +477,7 @@ async function processStream(
 		serviceTier: options?.serviceTier,
 		resolveServiceTier: resolveCodexServiceTier,
 		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+		onOutputItemDone: options?.onOutputItemDone,
 	});
 }
 
@@ -1211,6 +1229,7 @@ async function processWebSocketStream(
 				serviceTier: options?.serviceTier,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				onOutputItemDone: options?.onOutputItemDone,
 			},
 		);
 		if (options?.signal?.aborted) {

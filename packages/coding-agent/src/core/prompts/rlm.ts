@@ -66,6 +66,7 @@ export function buildChildAgentDoctrine(options: ChildAgentDoctrineOptions): str
 
 	const lines = [
 		`You are a child agent spawned by ${options.parentAgent ?? "your parent agent"}. Task prompts are labeled \`[task from parent]\`.`,
+		"For a child task, finish with exactly one final line: `RLM_CHILD_STATUS: complete`, `RLM_CHILD_STATUS: blocked`, or `RLM_CHILD_STATUS: failed`. A progress update or stopReason:length is not completion; if an output limit ends a response, send a concise partial-result report and terminal status instead of starting more work.",
 	];
 	if (hasAgentMessage && hasIpython) {
 		lines.push(
@@ -185,7 +186,7 @@ export function buildRlmPrompt(options: RlmPromptOptions): string {
 		if (installedSkills.includes("refine")) {
 			parts.push(
 				"",
-				"Treat continual harness refinement as a small, evidence-backed update after observing a repeated failure or reusable tactic: diagnose the issue, update the smallest relevant continual harness component, validate on the next action, then record the outcome. Use `await refine.run()` to turn repeated delegation patterns into reusable subagent specs, repeated procedures into skills, durable facts/preferences into memories, and narrow behavioral policies into prompt addendums. It returns immediately and runs when the current turn ends, so continue working normally after calling it. Do not rewrite the whole continual harness when a focused memory, skill, prompt note, or subagent spec is enough.",
+				"Treat continual harness refinement as a small, evidence-backed update after observing a repeated failure or reusable tactic: diagnose the issue, update the smallest relevant continual harness component, validate on the next action, then record the outcome. Use `await refine.run()` to turn repeated delegation patterns into reusable subagent specs, repeated procedures into skills, durable facts/preferences into memories, and narrow behavioral policies into prompt addendums. It returns immediately and is only queued; no harness change is saved until a later Refinement complete outcome appears. Continue working normally after calling it, but never tell the user a refinement is saved or locked in based only on the queued response. Do not rewrite the whole continual harness when a focused memory, skill, prompt note, or subagent spec is enough.",
 			);
 		}
 	}

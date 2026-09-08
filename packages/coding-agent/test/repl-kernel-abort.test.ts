@@ -4,6 +4,7 @@ import {
 	type KernelSentAgentMessage,
 	ReplKernelManager,
 } from "../src/core/kernel/index.js";
+import { KERNEL_BUSY_REUSE_WAIT_MS, SNAPSHOT_EXECUTION_TIMEOUT_MS } from "../src/core/kernel/shared.js";
 
 async function waitForCalls(mock: { mock: { calls: unknown[][] } }, count: number): Promise<void> {
 	for (let i = 0; i < 20; i++) {
@@ -145,15 +146,16 @@ describe("ReplKernelManager abort handling", () => {
 				target: { activeSessionId: "beta", sessionId: "session-beta" },
 			},
 		]);
-		// The next execute waits for the stale cell's done before sending.
+		// The next execute queues a passive barrier, never another interrupt.
 		const secondExecutePromise = manager.execute("x = 1");
-		await Promise.resolve();
-		expect(writeLine.mock.calls.filter((call) => (call[0] as { type?: string }).type === "execute")).toHaveLength(1);
+		await waitForCalls(writeLine, 3);
+		expect(writeLine.mock.calls.filter((call) => call[0].type === "execute")).toHaveLength(2);
+		expect(writeLine.mock.calls.at(-1)?.[0].code).toBe("None");
 
 		internals.handleEvent({ event: "done", id: activeExecution.requestId, status: "error" });
 		await vi.waitFor(() => {
 			expect(writeLine.mock.calls.filter((call) => (call[0] as { type?: string }).type === "execute")).toHaveLength(
-				2,
+				3,
 			);
 		});
 
@@ -205,14 +207,14 @@ describe("ReplKernelManager abort handling", () => {
 
 		const secondExecutePromise = manager.execute("x = 1");
 		const secondExecuteExpectation = expect(secondExecutePromise).rejects.toThrow(
-			"The Python kernel is still running the previously interrupted cell",
+			"The Python kernel is still busy after Prime requested an interrupt",
 		);
 		await Promise.resolve();
-		await vi.advanceTimersByTimeAsync(5000);
+		await vi.advanceTimersByTimeAsync(KERNEL_BUSY_REUSE_WAIT_MS);
 
 		await secondExecuteExpectation;
-		expect(writeLine.mock.calls.filter((call) => (call[0] as { type?: string }).type === "execute")).toHaveLength(1);
-		expect(writeLine.mock.calls.some((call) => (call[0] as { type?: string }).type === "interrupt")).toBe(true);
+		expect(writeLine.mock.calls.filter((call) => call[0].type === "execute")).toHaveLength(2);
+		expect(writeLine.mock.calls.filter((call) => call[0].type === "interrupt")).toHaveLength(1);
 		manager.disposeSync();
 	});
 
@@ -258,7 +260,7 @@ describe("ReplKernelManager abort handling", () => {
 		await waitForCalls(executeInner, 1);
 		const signal = executeInner.mock.calls[0]?.[2].signal;
 		expect(signal?.aborted).toBe(false);
-		await vi.advanceTimersByTimeAsync(4999);
+		await vi.advanceTimersByTimeAsync(SNAPSHOT_EXECUTION_TIMEOUT_MS - 1);
 		expect(signal?.aborted).toBe(false);
 		expect(cleanupResources).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(1);
@@ -298,7 +300,7 @@ describe("ReplKernelManager abort handling", () => {
 
 		const disposal = manager.shutdown({ snapshot: true, drainHostRequests: true });
 		expect(interrupt).toHaveBeenCalledOnce();
-		await vi.advanceTimersByTimeAsync(4999);
+		await vi.advanceTimersByTimeAsync(SNAPSHOT_EXECUTION_TIMEOUT_MS - 1);
 		expect(cleanupResources).not.toHaveBeenCalled();
 		await vi.advanceTimersByTimeAsync(1);
 
@@ -349,7 +351,7 @@ describe("ReplKernelManager abort handling", () => {
 		releaseQueue();
 		await waitForCalls(executeInner, 1);
 		expect(executeInner.mock.calls[0]?.[0].type).toBe("snapshot");
-		await vi.advanceTimersByTimeAsync(5000);
+		await vi.advanceTimersByTimeAsync(SNAPSHOT_EXECUTION_TIMEOUT_MS);
 
 		await expect(disposal).resolves.toBe(true);
 		expect(executeInner).toHaveBeenCalledOnce();

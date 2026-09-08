@@ -127,6 +127,9 @@ export interface CompactionResult<T = unknown> {
 }
 export const COMPACT_SKILL_NAME = "compact";
 
+/** Automatic compaction policy; this does not change the model's advertised window. */
+export const MAX_COMPACTION_CONTEXT_TOKENS = 250_000;
+
 export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
@@ -232,16 +235,12 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
 	if (contextWindow <= 0) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	return contextTokens >= Math.min(MAX_COMPACTION_CONTEXT_TOKENS, contextWindow - settings.reserveTokens);
 }
 
 export function shouldCompactForModel(contextTokens: number, model: Model<Api>, settings: CompactionSettings): boolean {
 	const inputLimit = getModelInputLimit(model);
-	const reserveTokens =
-		model.provider === "openai-codex" && model.api === "openai-codex-responses" && model.id === "gpt-6-astra"
-			? Math.max(settings.reserveTokens, Math.ceil(inputLimit * 0.1))
-			: settings.reserveTokens;
-	return shouldCompact(contextTokens, inputLimit, { ...settings, reserveTokens });
+	return shouldCompact(contextTokens, inputLimit, settings);
 }
 /**
  * Estimate token count for a message using chars/4 heuristic.
@@ -627,7 +626,21 @@ async function generateBoundedSummary(
 								? { reasoning: thinkingLevel }
 								: {}),
 						},
-					),
+					).then((message) => {
+						// Keep one retry owner. An empty successful response is not a usable
+						// checkpoint, so let the existing bounded provider policy retry it.
+						if (
+							message.stopReason === "stop" &&
+							!message.content.some((part) => part.type === "text" && part.text.trim())
+						) {
+							return {
+								...message,
+								stopReason: "error" as const,
+								errorMessage: "Summarization returned an empty summary",
+							};
+						}
+						return message;
+					}),
 				{ policy: retry, signal },
 			),
 		);

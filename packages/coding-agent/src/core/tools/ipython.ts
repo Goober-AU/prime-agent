@@ -22,6 +22,21 @@ import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/st
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
+const UNSAFE_WINDOWS_CAPTURED_LAUNCHER_MESSAGE =
+	"A persistent PowerShell launcher must not use subprocess.run(..., capture_output=True) on Windows: " +
+	"a long-lived child can inherit the captured pipes and prevent the Python call from returning. " +
+	"Use stdout=subprocess.DEVNULL and stderr=subprocess.DEVNULL, or explicit log files, " +
+	"with a hard timeout and a separate bounded process/health check.";
+
+export function isUnsafeWindowsCapturedLauncher(code: string, platform: NodeJS.Platform = process.platform): boolean {
+	return (
+		platform === "win32" &&
+		/\bsubprocess\s*\.\s*run\s*\(/i.test(code) &&
+		/capture_output\s*=\s*True/i.test(code) &&
+		/(?:^|[^A-Za-z0-9_-])(?:start|serve|launch|run)\.ps1(?:[^A-Za-z0-9_-]|$)/i.test(code)
+	);
+}
+
 const RLM_BOOTSTRAP_HEADER_CODE = `
 import asyncio
 import os as _prime_agent_os
@@ -155,9 +170,9 @@ const ipythonSchema = Type.Object({
 const BUSY_KERNEL_WAIT_CHOICE = "Wait and preserve state";
 const BUSY_KERNEL_KILL_CHOICE = "Kill kernel and restart";
 const BUSY_KERNEL_PROMPT = [
-	"Interrupted Python cell is still running",
-	"Ctrl+C sent an interrupt, but the previous cell has not stopped yet. A new command cannot start until it finishes.",
-	"Waiting preserves the current kernel state. Killing restarts the kernel and loses in-memory variables, imports, and running tasks.",
+	"Python kernel is still busy",
+	"Prime requested an interrupt for the previous Python operation, but the kernel has not yet confirmed completion.",
+	"Wait to preserve state, or explicitly kill and restart the kernel. Killing loses in-memory variables, imports, and running tasks.",
 ].join("\n");
 const KERNEL_RESTART_NOTICE = [
 	"<ipython_kernel_reset>",
@@ -631,6 +646,19 @@ export function createIpythonToolDefinition(
 		executionMode: "sequential",
 		parameters: ipythonSchema,
 		execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+			if (isUnsafeWindowsCapturedLauncher(params.code)) {
+				return {
+					content: [{ type: "text", text: UNSAFE_WINDOWS_CAPTURED_LAUNCHER_MESSAGE }],
+					isError: true,
+					details: {
+						durationMs: 0,
+						status: "error",
+						errorEname: "UnsafeWindowsCapturedLauncher",
+						stdout: "",
+						stderr: "",
+					},
+				};
+			}
 			let hasWorkingMessage = false;
 			const setToolWorkingMessage = (message?: string) => {
 				setWorkingMessage(ctx, message);

@@ -61,6 +61,9 @@ function parseTextSignature(
 }
 
 export interface OpenAIResponsesStreamOptions {
+	onOutputItemDone?: (
+		item: Extract<ResponseStreamEvent, { type: "response.output_item.done" }>["item"],
+	) => void | Promise<void>;
 	serviceTier?: ResponseCreateParamsStreaming["service_tier"];
 	resolveServiceTier?: (
 		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -425,6 +428,7 @@ export async function processResponsesStream<TApi extends Api>(
 				}
 			}
 		} else if (event.type === "response.output_item.done") {
+			await options?.onOutputItemDone?.(event.item);
 			const item = event.item;
 
 			if (item.type === "reasoning" && currentBlock?.type === "thinking") {

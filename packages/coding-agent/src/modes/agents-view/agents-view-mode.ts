@@ -682,6 +682,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private savedCatalogGeneration = 0;
 	private heartbeatCatalogGeneration = 0;
 	private savedCatalogRefreshPending = false;
+	private savedCatalogProgress = 0;
 	private expandedSubagentParents = new Set<string>();
 	// Agent row identities whose full spawn program is currently shown.
 	// The program key toggles each agent shown ↔ hidden.
@@ -2218,7 +2219,7 @@ export class AgentsViewMode implements Component, Focusable {
 	private async refreshSavedSessions(
 		options: { duringReconnect?: boolean; preserveStatusOnError?: boolean } = {},
 	): Promise<boolean> {
-		if ((!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived) {
+		if (this.stopped || (!options.duringReconnect && this.reconnectPromise) || this.daemonShutdownReceived) {
 			this.rearmSavedSearchFetch();
 			return false;
 		}
@@ -2227,16 +2228,15 @@ export class AgentsViewMode implements Component, Focusable {
 		this.savedCatalogRefreshPending = true;
 		this.savedCatalogReady = false;
 		const successfulSessions = this.lastSuccessfulSavedSessions;
-		const progressiveSessions = new Map(
-			successfulSessions.map((session) => [resolvePath(canonicalizePath(session.path)), session]),
-		);
+		this.savedCatalogProgress = 0;
+		this.ui.requestRender();
 		try {
-			const onSession = (session: AgentConnectionSavedSessionInfo) => {
-				if (generation !== this.savedCatalogGeneration) return;
-				progressiveSessions.set(resolvePath(canonicalizePath(session.path)), session);
-				this.savedSessions = [...progressiveSessions.values()];
-				this.persistentState.savedSessions = this.savedSessions;
-				this.reconcileCatalogs();
+			const onSession = () => {
+				if (generation !== this.savedCatalogGeneration || this.stopped || this.daemonShutdownReceived) return;
+				// Rebuilding/canonicalizing the full tree per streamed record is quadratic,
+				// particularly expensive on Windows. Keep the last complete catalog visible.
+				this.savedCatalogProgress += 1;
+				this.ui.requestRender();
 			};
 			const sessions = await listDaemonSavedSessions(
 				this.requireClient(),
@@ -2246,7 +2246,7 @@ export class AgentsViewMode implements Component, Focusable {
 					onSession,
 				},
 			);
-			if (generation !== this.savedCatalogGeneration) return false;
+			if (generation !== this.savedCatalogGeneration || this.stopped || this.daemonShutdownReceived) return false;
 			this.savedSessions = sessions;
 			this.lastSuccessfulSavedSessions = sessions;
 			this.savedCatalogReady = true;
@@ -2256,14 +2256,17 @@ export class AgentsViewMode implements Component, Focusable {
 			this.reconcileCatalogs();
 			return true;
 		} catch (error) {
-			if (generation === this.savedCatalogGeneration) {
+			if (generation === this.savedCatalogGeneration && !this.stopped && !this.daemonShutdownReceived) {
 				this.savedSessions = successfulSessions;
 				this.persistentState.savedSessions = successfulSessions;
 				// Treat a terminal failure as settled so scope fallback cannot soft-lock.
 				this.savedCatalogReady = true;
 				this.rearmSavedSearchFetch();
 				this.reconcileCatalogs();
-				if (!options.preserveStatusOnError && !this.reconnectPromise && !this.daemonShutdownReceived) {
+				if (
+					(!options.preserveStatusOnError || !this.persistentState.savedCatalogLoaded) &&
+					!this.reconnectPromise
+				) {
 					this.setStatusMessage(formatError("Failed to load saved sessions", error));
 				}
 			}
@@ -2271,7 +2274,10 @@ export class AgentsViewMode implements Component, Focusable {
 		} finally {
 			if (generation === this.savedCatalogGeneration) {
 				this.savedCatalogRefreshPending = false;
-				this.resolveMissingSelectionAnchor();
+				if (!this.stopped && !this.daemonShutdownReceived) {
+					this.resolveMissingSelectionAnchor();
+					this.ui.requestRender();
+				}
 			}
 		}
 	}
@@ -2499,7 +2505,8 @@ export class AgentsViewMode implements Component, Focusable {
 
 	private getAgentCountsText(): string {
 		const counts = countRowsBySection(this.allRows);
-		return `${counts.running} running, ${counts.idle} idle, ${counts.inactive} inactive`;
+		const loading = this.savedCatalogRefreshPending ? ` · loading saved chats (${this.savedCatalogProgress})...` : "";
+		return `${counts.running} running, ${counts.idle} idle, ${counts.inactive} inactive${loading}`;
 	}
 
 	private renderSessionRows(width: number, maxRows: number): string[] {
@@ -2524,7 +2531,12 @@ export class AgentsViewMode implements Component, Focusable {
 			}
 		}
 		if (displayItems.length === 0) {
-			return [theme.fg("dim", "No sessions match your search.")];
+			return [
+				theme.fg(
+					"dim",
+					this.savedCatalogRefreshPending ? "Loading saved chats..." : "No sessions match your search.",
+				),
+			];
 		}
 		// Reserve the shared column header before calculating the selection viewport.
 		const headerRows = maxRows > 1 ? 1 : 0;

@@ -17,9 +17,8 @@ export class CompactionRequestError extends Error {
 
 export function supportsOpenAICompaction(model: Model<Api>): boolean {
 	return (
-		model.id === "gpt-6-astra" &&
-		((model.provider === "openai" && model.api === "openai-responses") ||
-			(model.provider === "openai-codex" && model.api === "openai-codex-responses"))
+		(model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
+		(model.id === "gpt-6-astra" && model.provider === "openai" && model.api === "openai-responses")
 	);
 }
 
@@ -53,7 +52,7 @@ export async function requestOpenAICompaction(
 	options?: CompactionOptions,
 	decode: (response: Response) => Promise<unknown> = (response) => response.json(),
 ): Promise<ProviderCompactionResult | undefined> {
-	const timeout = AbortSignal.timeout(options?.timeoutMs ?? 600_000);
+	const timeout = AbortSignal.timeout(options?.timeoutMs ?? 1_200_000);
 	const signal = options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
 	const replacement = await options?.onPayload?.(body, model);
 	const response = await fetch(url, {

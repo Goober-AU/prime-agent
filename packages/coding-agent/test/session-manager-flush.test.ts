@@ -70,6 +70,10 @@ function createTempDir(): string {
 	return dir;
 }
 
+function rewriteSession(mgr: SessionManager): void {
+	(mgr as unknown as { _rewriteFile(): void })._rewriteFile();
+}
+
 describe("SessionManager.flushNow", () => {
 	it("writes the session file with all in-memory entries before any assistant message", () => {
 		const dir = createTempDir();
@@ -109,13 +113,12 @@ describe("SessionManager.flushNow", () => {
 		const before = readFileSync(file);
 		const tempPrefix = `${basename(file)}.`;
 
-		mgr.appendMessage({ role: "user", content: "pending", timestamp: Date.now() });
 		fsMocks.writeSync.mockImplementationOnce(((fd: number, data: string) => {
 			fsMocks.actualWriteSync!(fd, Buffer.from(String(data)).subarray(0, 12));
 			throw new Error("disk full");
 		}) as unknown as WriteSync);
 
-		expect(() => mgr.flushNow()).toThrow("disk full");
+		expect(() => rewriteSession(mgr)).toThrow("disk full");
 		expect(readFileSync(file)).toEqual(before);
 		expect(readdirSync(dirname(file)).filter((name) => name.startsWith(tempPrefix) && name.endsWith(".tmp"))).toEqual(
 			[],
@@ -135,8 +138,7 @@ describe("SessionManager.flushNow", () => {
 		fsMocks.chmodSync.mockClear();
 		fsMocks.renameSync.mockClear();
 
-		mgr.appendMessage({ role: "user", content: "pending", timestamp: Date.now() });
-		mgr.flushNow();
+		rewriteSession(mgr);
 
 		const tempPath = fsMocks.chownSync.mock.calls[0]?.[0];
 		expect(tempPath).toEqual(expect.any(String));
@@ -171,9 +173,7 @@ describe("SessionManager.flushNow", () => {
 		});
 		fsMocks.renameSync.mockClear();
 
-		mgr.appendMessage({ role: "user", content: "pending", timestamp: Date.now() });
-
-		expect(() => mgr.flushNow()).toThrow(permissionError);
+		expect(() => rewriteSession(mgr)).toThrow(permissionError);
 		expect(fsMocks.renameSync).not.toHaveBeenCalled();
 		expect(readFileSync(file)).toEqual(before);
 		expect(readdirSync(dirname(file)).filter((name) => name.startsWith(tempPrefix) && name.endsWith(".tmp"))).toEqual(
@@ -200,6 +200,7 @@ describe("SessionManager.flushNow", () => {
 			})}\n`,
 		);
 		chmodSync(target, 0o640);
+		const targetMode = statSync(target).mode & 0o777;
 		symlinkSync(target, alias);
 
 		const mgr = SessionManager.open(alias);
@@ -207,7 +208,8 @@ describe("SessionManager.flushNow", () => {
 		expect(mgr.getSessionFile()).toBe(alias);
 		expect(lstatSync(alias).isSymbolicLink()).toBe(true);
 		expect(JSON.parse(readFileSync(target, "utf8")).version).toBe(3);
-		expect(statSync(target).mode & 0o777).toBe(0o640);
+		expect(statSync(target).mode & 0o777).toBe(targetMode);
+		if (process.platform !== "win32") expect(targetMode).toBe(0o640);
 	});
 
 	it("is a no-op for in-memory (non-persisted) sessions", () => {
@@ -217,7 +219,7 @@ describe("SessionManager.flushNow", () => {
 		expect(mgr.getSessionFile()).toBeUndefined();
 	});
 
-	it("preserves subsequent rewrite behavior after flush with user then assistant", () => {
+	it("persists a user immediately after flush, before an assistant exists", () => {
 		const dir = createTempDir();
 		const sessionDir = join(dir, "sessions");
 		const mgr = SessionManager.create(dir, sessionDir);
@@ -228,16 +230,17 @@ describe("SessionManager.flushNow", () => {
 		const file = mgr.getSessionFile()!;
 		expect(existsSync(file)).toBe(true);
 
-		// Append a USER message first — this sets flushed=false because
-		// no assistant exists yet, exercising the pending full-rewrite path.
+		const prefix = readFileSync(file, "utf8");
+		const rewriteFile = vi.spyOn(mgr as unknown as { _rewriteFile(): void }, "_rewriteFile");
 		mgr.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "hello" }],
 			timestamp: Date.now(),
 		});
+		const reloaded = SessionManager.open(file);
+		expect(reloaded.getEntries()).toEqual(mgr.getEntries());
+		expect(readFileSync(file, "utf8").startsWith(prefix)).toBe(true);
 
-		// Then append an ASSISTANT message — this triggers the full rewrite
-		// (not appendFileSync) because flushed is false.
 		mgr.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
@@ -278,6 +281,36 @@ describe("SessionManager.flushNow", () => {
 		expect(custom.parentId).toBeNull();
 		expect(userMsg.parentId).toBe(custom.id);
 		expect(assistantMsg.parentId).toBe(userMsg.id);
+		expect(rewriteFile).not.toHaveBeenCalled();
+	});
+
+	it("keeps custom entries and model changes durable after a pre-assistant flush and reload", () => {
+		const dir = createTempDir();
+		const mgr = SessionManager.create(dir, join(dir, "sessions"));
+		mgr.appendCustomEntry("thread_goal_state", { status: "active" });
+		mgr.flushNow();
+		const file = mgr.getSessionFile()!;
+		const prefix = readFileSync(file, "utf8");
+		mgr.appendCustomEntry("refinement_outcome", { status: "saved" });
+		expect(SessionManager.open(file).getEntries()).toEqual(mgr.getEntries());
+
+		const reopened = SessionManager.open(file);
+		reopened.appendModelChange("test-provider", "test-model");
+		expect(SessionManager.open(file).getEntries()).toEqual(reopened.getEntries());
+		const content = readFileSync(file, "utf8");
+		expect(content.startsWith(prefix)).toBe(true);
+		expect(content.trim().split("\n")).toHaveLength(4);
+		expect(reopened.getEntries().some((entry) => entry.type === "message")).toBe(false);
+	});
+
+	it("continues appending after a session-state entry materializes a draft", () => {
+		const dir = createTempDir();
+		const mgr = SessionManager.create(dir, join(dir, "sessions"));
+		mgr.appendSessionState({ status: "active" });
+		mgr.appendMessage({ role: "user", content: "durable before a reply", timestamp: Date.now() });
+		const file = mgr.getSessionFile()!;
+		expect(SessionManager.open(file).getEntries()).toEqual(mgr.getEntries());
+		expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(3);
 	});
 
 	it("does not rewrite an already-flushed session after an appended entry", () => {
