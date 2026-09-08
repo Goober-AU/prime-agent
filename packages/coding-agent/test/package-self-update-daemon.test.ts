@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -522,7 +522,14 @@ describe("self-update daemon restart", () => {
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ npmCommand: ["npm"] }, null, 2));
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => Response.json({ version: "999.0.0" })),
+			vi.fn(async () =>
+				Response.json({
+					channel: "main",
+					version: "999.0.0",
+					package: "prime-agent",
+					tarball: "https://github.com/telemusai/prime-agent/releases/download/v999.0.0/prime-agent-999.0.0.tgz",
+				}),
+			),
 		);
 	});
 
@@ -569,13 +576,61 @@ describe("self-update daemon restart", () => {
 		process.env[SELF_UPDATE_INTERACTIVE_CHILD_ENV] = "1";
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => Response.json({ version: "0.2.6" })),
+			vi.fn(async () =>
+				Response.json({
+					channel: "main",
+					version: VERSION,
+					package: "prime-agent",
+					tarball: `https://github.com/telemusai/prime-agent/releases/download/v${VERSION}/prime-agent-${VERSION}.tgz`,
+				}),
+			),
 		);
 
 		await expect(handlePackageCommand(["update", "--self"])).resolves.toBe(true);
 
 		expect(process.exitCode).toBe(SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE);
 		expect(mockState.calls.some((call) => call.startsWith("spawn:npm "))).toBe(false);
+	});
+
+	it.each(["unavailable", "network", "invalid"])(
+		"keeps the install and daemon untouched when the main release is %s",
+		async (failure) => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => {
+					if (failure === "network") throw new Error("network unavailable");
+					return failure === "unavailable"
+						? new Response("not found", { status: 404 })
+						: Response.json({ channel: "stable", version: "999.0.0" });
+				}),
+			);
+			const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+			try {
+				await expect(handlePackageCommand(["update", "--self", "--force"])).resolves.toBe(true);
+				expect(process.exitCode).toBe(1);
+				expect(mockState.calls).toEqual([]);
+			} finally {
+				errorSpy.mockRestore();
+			}
+		},
+	);
+
+	it("installs the fork artifact and preserves model and auth files", async () => {
+		const modelsPath = join(agentDir, "models.json");
+		const authPath = join(agentDir, "auth.json");
+		writeFileSync(modelsPath, '{"providers":{"custom":{"models":[]}}}\n');
+		writeFileSync(authPath, "{}\n");
+		const modelStat = statSync(modelsPath);
+		const authStat = statSync(authPath);
+		await handlePackageCommand(["update", "--self"]);
+		expect(process.exitCode).toBeUndefined();
+		expect(mockState.calls.find((call) => call.startsWith("spawn:npm "))).toContain(
+			"install -g https://github.com/telemusai/prime-agent/releases/download/v999.0.0/prime-agent-999.0.0.tgz",
+		);
+		expect(statSync(modelsPath).mtimeMs).toBe(modelStat.mtimeMs);
+		expect(statSync(authPath).mtimeMs).toBe(authStat.mtimeMs);
+		expect(readFileSync(modelsPath, "utf8")).toBe('{"providers":{"custom":{"models":[]}}}\n');
+		expect(readFileSync(authPath, "utf8")).toBe("{}\n");
 	});
 
 	it("does not use the no-change sentinel when interactive self-update is cancelled", async () => {

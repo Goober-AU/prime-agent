@@ -1,14 +1,14 @@
 import { getPiUserAgent } from "./pi-user-agent.js";
+import { PRIME_AGENT_UPDATE_RELEASE_URL, PRIME_AGENT_UPDATE_REPOSITORY_URL } from "./update-source.js";
 
-const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = "https://pub-728493de92a943e2a9b2d17b4719f318.r2.dev";
-const STABLE_VERSION_MANIFEST_PATH = "latest.json";
-const BETA_VERSION_MANIFEST_PATH = "beta.json";
+const DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL = `${PRIME_AGENT_UPDATE_RELEASE_URL}/download`;
+const MAIN_VERSION_MANIFEST_PATH = "main.json";
 const DEFAULT_VERSION_CHECK_TIMEOUT_MS = 10000;
 
 export interface LatestPiRelease {
 	version: string;
-	packageName?: string;
-	installSpec?: string;
+	packageName: string;
+	installSpec: string;
 }
 
 interface ParsedVersion {
@@ -85,6 +85,14 @@ export function isNewerPackageVersion(candidateVersion: string, currentVersion: 
 	return candidateVersion.trim() !== currentVersion.trim();
 }
 
+export function isMainBuildUpdateAvailable(candidateVersion: string, currentVersion: string): boolean {
+	const current = parsePackageVersion(currentVersion);
+	if (current?.prerelease?.startsWith("telemusai.main.")) {
+		return isNewerPackageVersion(candidateVersion, currentVersion);
+	}
+	return normalizeReleaseVersion(candidateVersion) !== normalizeReleaseVersion(currentVersion);
+}
+
 function getPrimeAgentDownloadBaseUrl(): string {
 	return (process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim() || DEFAULT_PRIME_AGENT_DOWNLOAD_BASE_URL).replace(
 		/\/+$/,
@@ -96,18 +104,14 @@ function normalizeReleaseVersion(version: string): string {
 	return version.trim().replace(/^v/, "");
 }
 
-function getReleaseManifestPath(currentVersion: string): string {
-	const prerelease = parsePackageVersion(currentVersion)?.prerelease;
-	return prerelease?.match(/^beta(?:\.|$)/) ? BETA_VERSION_MANIFEST_PATH : STABLE_VERSION_MANIFEST_PATH;
-}
-
 function resolveReleaseUrl(baseUrl: string, pathOrUrl: string): string | undefined {
 	const trimmed = pathOrUrl.trim();
 	if (!trimmed) return undefined;
 	try {
-		return new URL(trimmed).toString();
+		const url = new URL(trimmed, `${baseUrl}/`);
+		return url.protocol === "https:" || url.protocol === "http:" ? url.toString() : undefined;
 	} catch {
-		return `${baseUrl}/${trimmed.replace(/^\/+/, "")}`;
+		return undefined;
 	}
 }
 
@@ -118,7 +122,7 @@ export async function getLatestPiRelease(
 	if (process.env.PI_SKIP_VERSION_CHECK || process.env.PI_OFFLINE) return undefined;
 
 	const baseUrl = getPrimeAgentDownloadBaseUrl();
-	const response = await fetch(`${baseUrl}/${getReleaseManifestPath(currentVersion)}`, {
+	const response = await fetch(`${baseUrl}/${MAIN_VERSION_MANIFEST_PATH}`, {
 		headers: {
 			"User-Agent": getPiUserAgent(currentVersion),
 			accept: "application/json",
@@ -127,30 +131,30 @@ export async function getLatestPiRelease(
 	});
 	if (!response.ok) return undefined;
 
-	const data = (await response.json()) as {
-		package?: unknown;
-		packageName?: unknown;
-		tarball?: unknown;
-		version?: unknown;
-	};
-	if (typeof data.version !== "string" || !data.version.trim()) {
+	const data: unknown = await response.json();
+	if (typeof data !== "object" || data === null || Array.isArray(data)) return undefined;
+	if (
+		!("channel" in data) ||
+		data.channel !== "main" ||
+		!("version" in data) ||
+		typeof data.version !== "string" ||
+		!parsePackageVersion(data.version) ||
+		!("package" in data) ||
+		data.package !== "prime-agent" ||
+		!("tarball" in data) ||
+		typeof data.tarball !== "string"
+	) {
 		return undefined;
 	}
-	const packageName =
-		typeof data.package === "string" && data.package.trim()
-			? data.package.trim()
-			: typeof data.packageName === "string" && data.packageName.trim()
-				? data.packageName.trim()
-				: undefined;
-	const installSpec = typeof data.tarball === "string" ? resolveReleaseUrl(baseUrl, data.tarball) : undefined;
-	const release: LatestPiRelease = { version: normalizeReleaseVersion(data.version) };
-	if (packageName) {
-		release.packageName = packageName;
-	}
-	if (installSpec) {
-		release.installSpec = installSpec;
-	}
-	return release;
+	const version = normalizeReleaseVersion(data.version);
+	const installSpec = resolveReleaseUrl(baseUrl, data.tarball);
+	if (!installSpec || !new URL(installSpec).pathname.endsWith(`/prime-agent-${version}.tgz`)) return undefined;
+	if (
+		!process.env.PRIME_AGENT_DOWNLOAD_BASE_URL?.trim() &&
+		installSpec !== `${PRIME_AGENT_UPDATE_REPOSITORY_URL}/releases/download/v${version}/prime-agent-${version}.tgz`
+	)
+		return undefined;
+	return { version, packageName: data.package, installSpec };
 }
 
 export async function getLatestPiVersion(
@@ -163,7 +167,8 @@ export async function getLatestPiVersion(
 export async function checkForNewPiVersion(currentVersion: string): Promise<string | undefined> {
 	try {
 		const latestVersion = await getLatestPiVersion(currentVersion);
-		if (latestVersion && isNewerPackageVersion(latestVersion, currentVersion)) {
+		// A main build may have a lower semver than an installed stable or custom build.
+		if (latestVersion && isMainBuildUpdateAvailable(latestVersion, currentVersion)) {
 			return latestVersion;
 		}
 		return undefined;

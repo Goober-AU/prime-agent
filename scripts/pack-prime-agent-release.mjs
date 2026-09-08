@@ -20,7 +20,7 @@ const defaultOutputDir = join(root, "packages", "coding-agent", "release");
 const defaultBaseUrl = process.env.PRIME_AGENT_DOWNLOAD_BASE_URL;
 const publicPackageName = process.env.PRIME_AGENT_PACKAGE_NAME || "prime-agent";
 const publicCommandName = process.env.PRIME_AGENT_CMD || "prime-agent";
-const releaseChannels = new Set(["stable", "beta"]);
+const releaseChannels = new Set(["stable", "beta", "main"]);
 
 const releasePackages = [
 	{ packageDir: "ai", publicName: undefined, artifactName: "prime-agent-ai" },
@@ -32,6 +32,7 @@ const releasePackages = [
 function parseArgs(args) {
 	const parsed = {
 		baseUrl: defaultBaseUrl,
+		githubRepository: undefined,
 		channel: "stable",
 		outDir: defaultOutputDir,
 		version: undefined,
@@ -43,9 +44,18 @@ function parseArgs(args) {
 			case "--channel": {
 				const value = args[i + 1];
 				if (!value || !releaseChannels.has(value)) {
-					throw new Error("--channel must be stable or beta");
+					throw new Error("--channel must be stable, beta, or main");
 				}
 				parsed.channel = value;
+				i += 1;
+				break;
+			}
+			case "--github-repository": {
+				const value = args[i + 1];
+				if (!value || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(value)) {
+					throw new Error("--github-repository requires owner/repository");
+				}
+				parsed.githubRepository = value;
 				i += 1;
 				break;
 			}
@@ -80,18 +90,18 @@ function parseArgs(args) {
 		}
 	}
 
-	if (!parsed.baseUrl) {
-		throw new Error("--base-url or PRIME_AGENT_DOWNLOAD_BASE_URL is required");
+	if (!parsed.baseUrl && !parsed.githubRepository) {
+		throw new Error("--github-repository, --base-url, or PRIME_AGENT_DOWNLOAD_BASE_URL is required");
 	}
 
-	parsed.baseUrl = parsed.baseUrl.replace(/\/+$/, "");
+	parsed.baseUrl = parsed.baseUrl?.replace(/\/+$/, "");
 	return parsed;
 }
 
 function printHelp() {
-	console.log(`Usage: node scripts/pack-prime-agent-release.mjs --base-url url [--channel stable|beta] [--version x.y.z] [--out-dir path]
+	console.log(`Usage: node scripts/pack-prime-agent-release.mjs (--base-url url | --github-repository owner/repo) [--channel stable|beta|main] [--version x.y.z] [--out-dir path]
 
-Creates private npm tarballs for R2 distribution:
+Creates npm tarballs for GitHub Releases or a custom download host:
 
   <out-dir>/artifacts/prime-agent-<version>.tgz
   <out-dir>/artifacts/prime-agent-ai-<version>.tgz
@@ -99,7 +109,7 @@ Creates private npm tarballs for R2 distribution:
   <out-dir>/artifacts/prime-agent-tui-<version>.tgz
   <out-dir>/artifacts/SHA256SUMS
   <out-dir>/artifacts/<channel>
-  <out-dir>/artifacts/latest.json (stable) or beta.json (beta)
+  <out-dir>/artifacts/latest.json (stable), beta.json (beta), or main.json (main)
 `);
 }
 
@@ -152,7 +162,8 @@ function npmTarballName(packageName, version) {
 	return `${packageName.replace(/^@/, "").replace("/", "-")}-${version}.tgz`;
 }
 
-function releaseTarballUrl(baseUrl, version, tarballFile) {
+function releaseTarballUrl(baseUrl, version, tarballFile, githubRepository) {
+	if (githubRepository) return `https://github.com/${githubRepository}/releases/download/v${version}/${tarballFile}`;
 	return `${baseUrl}/releases/v${version}/${tarballFile}`;
 }
 
@@ -268,7 +279,7 @@ function main() {
 		if (releasePackage.packageDir === "coding-agent") continue;
 		const sourcePackageName = sourcePackageNames.get(releasePackage.packageDir);
 		const artifactFile = artifactFiles.get(releasePackage.packageDir);
-		internalPackageUrls.set(sourcePackageName, releaseTarballUrl(args.baseUrl, releaseVersion, artifactFile));
+		internalPackageUrls.set(sourcePackageName, releaseTarballUrl(args.baseUrl, releaseVersion, artifactFile, args.githubRepository));
 	}
 
 	const stagingRoot = join(args.outDir, "packages");
@@ -324,11 +335,14 @@ function main() {
 		tarballs.map((tarball) => `${tarball.sha256}  ${tarball.file}`).join("\n") + "\n",
 	);
 	writeFileSync(join(artifactsDir, args.channel), `v${releaseVersion}\n`);
-	const manifestName = args.channel === "stable" ? "latest.json" : "beta.json";
+	const manifestName = args.channel === "stable" ? "latest.json" : `${args.channel}.json`;
 	writeJson(join(artifactsDir, manifestName), {
+		channel: args.channel,
 		version: `v${releaseVersion}`,
 		package: publicPackageName,
-		tarball: `releases/v${releaseVersion}/${artifactFiles.get("coding-agent")}`,
+		tarball: args.githubRepository
+			? releaseTarballUrl(args.baseUrl, releaseVersion, artifactFiles.get("coding-agent"), args.githubRepository)
+			: `releases/v${releaseVersion}/${artifactFiles.get("coding-agent")}`,
 		tarballs: tarballs.map((tarball) => ({
 			package: tarball.name,
 			file: tarball.file,

@@ -68,7 +68,8 @@ import {
 	DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 } from "./modes/daemon/daemon-worker-protocol.js";
 import { shouldUseWindowsShell } from "./utils/child-process.js";
-import { getLatestPiRelease, isNewerPackageVersion } from "./utils/version-check.js";
+import { PRIME_AGENT_UPDATE_REPOSITORY_URL } from "./utils/update-source.js";
+import { getLatestPiRelease, isMainBuildUpdateAvailable } from "./utils/version-check.js";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -439,25 +440,15 @@ function setSelfUpdateNoChangeExitCode(): void {
 }
 
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
-	try {
-		const latestRelease = await getLatestPiRelease(VERSION);
-		const packageName = latestRelease?.packageName ?? PACKAGE_NAME;
-		const installSpec = latestRelease?.installSpec ?? packageName;
-		const packageRenameRequiresUpdate = !latestRelease?.installSpec && packageName !== PACKAGE_NAME;
-		if (
-			force ||
-			!latestRelease ||
-			packageRenameRequiresUpdate ||
-			isNewerPackageVersion(latestRelease.version, VERSION)
-		) {
-			return { installSpec, packageName, shouldRun: true, targetVersion: latestRelease?.version };
-		}
-	} catch {
-		return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: true };
+	const latestRelease = await getLatestPiRelease(VERSION);
+	if (!latestRelease) {
+		throw new Error(
+			`No installable main build is available from ${PRIME_AGENT_UPDATE_REPOSITORY_URL}. Check the connection and the main release build, then retry.`,
+		);
 	}
-
-	console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
-	return { installSpec: PACKAGE_NAME, packageName: PACKAGE_NAME, shouldRun: false };
+	const shouldRun = force || isMainBuildUpdateAvailable(latestRelease.version, VERSION);
+	if (!shouldRun) console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
+	return { ...latestRelease, shouldRun, targetVersion: latestRelease.version };
 }
 
 async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
