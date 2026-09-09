@@ -865,50 +865,73 @@ describe("AgentsViewMode", () => {
 		}
 	});
 
-	it("keeps collapsed inactive sessions out of navigation and reveals them for search", () => {
-		const live = summary({ sessionName: "live" });
-		const saved = summary({
-			id: "saved",
-			activeSessionId: undefined,
-			sessionId: "saved-session",
-			sessionName: "archive-match",
-			sessionFile: "/tmp/saved.jsonl",
-			rosterStatus: "inactive",
-			lifecycle: "archived",
-		});
-		const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, { savedCatalogLoaded: true });
-		const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
-		try {
-			Reflect.set(view, "lastListedSummaries", [live]);
-			Reflect.set(view, "savedSessions", [
-				{
-					path: saved.sessionFile!,
-					id: saved.sessionId,
-					cwd: saved.cwd,
-					name: saved.sessionName,
-					created: new Date(),
-					modified: new Date(),
-					messageCount: 1,
-					firstMessage: "archive-match",
-					allMessagesText: "archive-match",
-				},
-			]);
-			invoke("reconcileCatalogs", view);
-			expect(rows().map((row) => row.summary.sessionId)).toEqual([live.sessionId]);
-			invoke("moveSelection", view, 1);
-			expect(rows()[Reflect.get(view, "selectedIndex") as number]?.summary.sessionId).toBe(live.sessionId);
-			view.handleInput("\x1bi");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
-			view.handleInput("\x1bi");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
-			invoke("setSearchQuery", view, "archive-match");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
-			invoke("setSearchQuery", view, "");
-			expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
-		} finally {
-			stopThemeWatcher();
-		}
-	});
+	it.each([undefined, false, true])(
+		"shows inactive sessions by default with legacy inactiveExpanded=%s and preserves explicit collapse",
+		(inactiveExpanded) => {
+			const live = summary({ sessionName: "live" });
+			const saved = summary({
+				id: "saved",
+				activeSessionId: undefined,
+				sessionId: "saved-session",
+				sessionName: "archive-match",
+				sessionFile: "/tmp/saved.jsonl",
+				rosterStatus: "inactive",
+				lifecycle: "archived",
+			});
+			const persistentState: AgentsViewPersistentState = { savedCatalogLoaded: true, inactiveExpanded };
+			const view = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
+			const rows = () => Reflect.get(view, "rows") as AgentsViewRow[];
+			try {
+				Reflect.set(view, "lastListedSummaries", [live]);
+				Reflect.set(view, "savedSessions", [
+					{
+						path: saved.sessionFile!,
+						id: saved.sessionId,
+						cwd: saved.cwd,
+						name: saved.sessionName,
+						created: new Date(),
+						modified: new Date(),
+						messageCount: 1,
+						firstMessage: "archive-match",
+						allMessagesText: "archive-match",
+					},
+				]);
+				invoke("reconcileCatalogs", view);
+				expect(rows().map((row) => row.summary.sessionId)).toEqual([live.sessionId, saved.sessionId]);
+				invoke("moveSelection", view, 1);
+				expect(rows()[Reflect.get(view, "selectedIndex") as number]?.summary.sessionId).toBe(saved.sessionId);
+				view.handleInput("\x1bi");
+				expect(persistentState).toMatchObject({ inactiveExpanded: false, inactiveVisibilityExplicit: true });
+				expect(rows().map((row) => row.summary.sessionId)).toEqual([live.sessionId]);
+				invoke("moveSelection", view, 1);
+				expect(rows()[Reflect.get(view, "selectedIndex") as number]?.summary.sessionId).toBe(live.sessionId);
+				view.handleInput("\x1bi");
+				expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
+				view.handleInput("\x1bi");
+				expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
+				invoke("setSearchQuery", view, "archive-match");
+				expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(true);
+				invoke("setSearchQuery", view, "");
+				expect(rows().some((row) => row.summary.sessionId === saved.sessionId)).toBe(false);
+				const remount = new AgentsViewMode({ config: {}, uiServices: createUiServices() }, persistentState);
+				Reflect.set(remount, "lastListedSummaries", [live]);
+				Reflect.set(remount, "savedSessions", Reflect.get(view, "savedSessions"));
+				invoke("reconcileCatalogs", remount);
+				expect((Reflect.get(remount, "rows") as AgentsViewRow[]).map((row) => row.summary.sessionId)).toEqual([
+					live.sessionId,
+				]);
+				remount.handleInput("\x1bi");
+				expect(persistentState.inactiveExpanded).toBe(true);
+				expect(
+					(Reflect.get(remount, "rows") as AgentsViewRow[]).some(
+						(row) => row.summary.sessionId === saved.sessionId,
+					),
+				).toBe(true);
+			} finally {
+				stopThemeWatcher();
+			}
+		},
+	);
 
 	it("opens a parent with Enter and reveals its spawn program only on request", () => {
 		const parent = summary({ sessionName: "parent" });

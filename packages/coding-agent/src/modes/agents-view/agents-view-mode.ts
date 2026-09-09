@@ -161,6 +161,8 @@ export type AgentsViewPersistentState = {
 	expandedSubagentParents?: Set<string>;
 	programShownParents?: Set<string>;
 	inactiveExpanded?: boolean;
+	/** Distinguish a deliberate collapse from the legacy collapsed-by-default state. */
+	inactiveVisibilityExplicit?: boolean;
 	statusMessage?: string;
 	// Gathered once and reused across agents-view instances so the notices survive
 	// re-entry and render the moment they resolve, even if the first view was left early.
@@ -981,7 +983,8 @@ export class AgentsViewMode implements Component, Focusable {
 				return;
 			}
 			if (this.keybindings.matches(data, "app.agents.inactiveCollapse")) {
-				this.persistentState.inactiveExpanded = !this.persistentState.inactiveExpanded;
+				this.persistentState.inactiveExpanded = !isInactiveExpanded(this.persistentState);
+				this.persistentState.inactiveVisibilityExplicit = true;
 				this.rebuildRows();
 				this.syncSelectedRowState();
 				this.ui.requestRender();
@@ -1331,7 +1334,7 @@ export class AgentsViewMode implements Component, Focusable {
 		);
 		this.rows = compactSessionRows(
 			this.allRows,
-			this.persistentState.inactiveExpanded === true ||
+			isInactiveExpanded(this.persistentState) ||
 				((this.replyTarget || this.renameTarget ? this.actionModeSearchQuery : this.editor.getText()) ?? "").trim()
 					.length > 0,
 		);
@@ -2203,7 +2206,7 @@ export class AgentsViewMode implements Component, Focusable {
 		);
 		this.rows = compactSessionRows(
 			this.allRows,
-			this.persistentState.inactiveExpanded === true ||
+			isInactiveExpanded(this.persistentState) ||
 				((this.replyTarget || this.renameTarget ? this.actionModeSearchQuery : this.editor.getText()) ?? "").trim()
 					.length > 0,
 		);
@@ -2795,6 +2798,11 @@ type DisplayItem =
 	| { type: "heading"; section: AgentsViewSection }
 	| { type: "running-subagents"; row: AgentsViewRow }
 	| { type: "row"; row: AgentsViewRow };
+
+function isInactiveExpanded(state: AgentsViewPersistentState): boolean {
+	// Older clients persisted false even when the user never chose to hide saved chats.
+	return state.inactiveVisibilityExplicit !== true || state.inactiveExpanded !== false;
+}
 
 function compactSessionRows(rows: readonly AgentsViewRow[], showInactive: boolean): AgentsViewRow[] {
 	let visible = true;

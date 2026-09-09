@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentConnectionSavedSessionInfo } from "../src/modes/agent-connection/types.js";
 import { AgentsViewMode, type AgentsViewPersistentState } from "../src/modes/agents-view/agents-view-mode.js";
+import type { AgentsViewRow } from "../src/modes/agents-view/agents-view-state.js";
 import { listDaemonSavedSessions } from "../src/modes/daemon/saved-session-catalog.js";
 
 vi.mock("../src/modes/daemon/saved-session-catalog.js", () => ({
@@ -72,6 +73,45 @@ describe("saved catalog publication", () => {
 		expect(fixture.state.savedSessions).toBe(sessions);
 		expect(fixture.state.savedCatalogLoaded).toBe(true);
 		expect(fixture.view.savedCatalogRefreshPending).toBe(false);
+	});
+	it("publishes all 234 saved chats once and makes them visible despite the legacy collapse default", async () => {
+		const fixture = viewFixture();
+		fixture.state.inactiveExpanded = false;
+		Object.assign(fixture.view, {
+			lastListedSummaries: [],
+			heartbeats: [],
+			inactiveAgentIdentities: new Set<string>(),
+			expandedSubagentParents: new Set<string>(),
+			programShownParents: new Set<string>(),
+			editor: { getText: () => "" },
+			rows: [],
+			selectedIndex: 0,
+			withPendingDeleteSession: (sessions: unknown[]) => sessions,
+			getFilteredRecords: () => Reflect.get(fixture.view, "scopedRecords"),
+			applyPendingAncestorExpansion: vi.fn(),
+			restoreSelection: vi.fn(),
+		});
+		fixture.view.reconcileCatalogs.mockImplementation(() => {
+			(Reflect.get(AgentsViewMode.prototype, "reconcileCatalogs") as () => void).call(fixture.view);
+		});
+		const sessions = Array.from({ length: 234 }, (_, index) => saved(`saved-${index}`));
+		vi.mocked(listDaemonSavedSessions).mockImplementationOnce(async (_client, _context, _scope, options) => {
+			for (const session of sessions) {
+				options?.onSession?.(session);
+				expect(fixture.view.reconcileCatalogs).not.toHaveBeenCalled();
+			}
+			expect(fixture.view.savedCatalogProgress).toBe(234);
+			return sessions;
+		});
+		await expect(fixture.refresh()).resolves.toBe(true);
+		expect(fixture.view.reconcileCatalogs).toHaveBeenCalledOnce();
+		const rows = Reflect.get(fixture.view, "rows") as AgentsViewRow[];
+		expect(rows).toHaveLength(234);
+		expect(rows.every((row) => row.section === "inactive" && row.selectable)).toBe(true);
+		expect(new Set(rows.map((row) => row.summary.sessionId))).toEqual(new Set(sessions.map((session) => session.id)));
+		(Reflect.get(AgentsViewMode.prototype, "rebuildRows") as () => void).call(fixture.view);
+		expect(Reflect.get(fixture.view, "rows")).toHaveLength(234);
+		expect(fixture.state.savedSessions).toBe(sessions);
 	});
 	it.each(["stopped", "daemonShutdownReceived"])("does not publish late results after %s", async (field) => {
 		const fixture = viewFixture();
