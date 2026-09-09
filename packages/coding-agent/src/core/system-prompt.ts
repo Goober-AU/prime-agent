@@ -31,7 +31,7 @@ export interface BuildSystemPromptOptions {
 	rlmDepth?: number;
 	/** Human-readable parent name or id for child communication doctrine. */
 	rlmParentAgent?: string;
-	/** Global harness state to inject as compact persistent context. */
+	/** @deprecated Explicit legacy SDK injection. AgentSession delivers harness state in context to preserve prompt caching. */
 	harnessState?: HarnessState;
 	/** Enabled user-configured servers available through the generic kernel MCP API. */
 	genericMcpServers?: string[];

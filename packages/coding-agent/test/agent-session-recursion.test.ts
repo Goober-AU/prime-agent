@@ -38,6 +38,7 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.js";
 import type { BashOperations } from "../src/core/tools/bash.js";
 import { type ActiveSessionState, resolveActiveSessionState } from "../src/modes/daemon/active-session-state.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
+import { getMessageText } from "./suite/harness.js";
 import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.js";
 
 const model = getModel("anthropic", "claude-sonnet-4-5")!;
@@ -70,10 +71,16 @@ function usage(input = 7, output = 3): Usage {
 	};
 }
 
+function terminalText(text: string): string {
+	return text ? `${text}\nRLM_CHILD_STATUS: complete` : text;
+}
+
+// These fixtures exercise lifecycle, not missing-marker recovery (covered by
+// rlm-continuation-stability.test.ts). Their successful answers obey the protocol.
 function assistantMessage(text: string, messageUsage = usage()): AssistantMessage {
 	return {
 		role: "assistant",
-		content: [{ type: "text", text }],
+		content: [{ type: "text", text: terminalText(text) }],
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
@@ -588,7 +595,7 @@ describe("AgentSession rlm recursion", () => {
 		expect(root.getRlmChildSnapshots()).toEqual([
 			expect.objectContaining({
 				id: childId,
-				answerPreview: "restored answer",
+				answerPreview: "restored answer RLM_CHILD_STATUS: complete",
 				toolUseCount: 1,
 				tokenCount: 10,
 				recap: "restored recap",
@@ -839,7 +846,7 @@ describe("AgentSession rlm recursion", () => {
 		expect(childUpdates[0]?.label).toBe("summarize shard 1");
 		await waitFor(() => childUpdates.some((update) => update.status === "done"));
 		const doneUpdate = [...childUpdates].reverse().find((update) => update.status === "done");
-		expect(doneUpdate?.answerPreview).toBe("child answer: summarize shard 1");
+		expect(doneUpdate?.answerPreview).toBe("child answer: summarize shard 1 RLM_CHILD_STATUS: complete");
 		expect(root.getRlmChildSnapshots()).toEqual([
 			expect.objectContaining({
 				id: result.rlm_child_id,
@@ -849,7 +856,10 @@ describe("AgentSession rlm recursion", () => {
 			}),
 		]);
 		const child = root.getRlmChildSession(result.rlm_child_id);
-		expect(child?.messages[0]).toMatchObject({
+		expect(getMessageText(child?.messages[0])).toContain(
+			"The persistent memories produced across this session so far:",
+		);
+		expect(child?.messages[1]).toMatchObject({
 			role: "custom",
 			customType: "agent_message",
 			content: "[task from parent]\n\nsummarize shard 1",
@@ -1276,6 +1286,7 @@ describe("AgentSession rlm recursion", () => {
 		});
 		const steer = findLastMessage(child.messages, isAgentSessionMessage);
 		expect(steer && isAgentSessionMessage(steer) ? steer.content : undefined).toContain("[from parent]");
+		await child.waitForHeadlessIdle();
 		expect(child.repliedToParentSinceTask).toBe(false);
 	});
 
@@ -1291,11 +1302,12 @@ describe("AgentSession rlm recursion", () => {
 		});
 
 		await child.acceptAgentMessagePrompt(message.content as string, { customMessage: message });
+		await child.waitForHeadlessIdle();
 
 		expect(child.repliedToParentSinceTask).toBe(false);
 	});
 
-	it("resets replied state when a parent follow-up is queued", async () => {
+	it("resets replied state only when a queued parent follow-up is delivered", async () => {
 		const child = createSession({ depth: 1 });
 		(child as unknown as { _repliedToParentSinceTask: boolean })._repliedToParentSinceTask = true;
 		const message = createAgentSessionMessage({
@@ -1308,6 +1320,9 @@ describe("AgentSession rlm recursion", () => {
 
 		await child.queueAgentMessagePrompt(message.content as string, "followUp", message);
 
+		expect(child.repliedToParentSinceTask).toBe(true);
+		child.resumeQueuedWork();
+		await child.waitForHeadlessIdle();
 		expect(child.repliedToParentSinceTask).toBe(false);
 	});
 
@@ -1411,7 +1426,7 @@ describe("AgentSession rlm recursion", () => {
 				),
 				details: {
 					kind: "completed_without_reply",
-					lastAssistantTextPreview: "child answer: silent child",
+					lastAssistantTextPreview: terminalText("child answer: silent child"),
 				},
 			});
 		});
@@ -1436,7 +1451,7 @@ describe("AgentSession rlm recursion", () => {
 		).toHaveLength(0);
 	});
 
-	it("does not inject a terminal notice when a parent follow-up resets reply state after a reply", async () => {
+	it("does not inject a duplicate terminal notice while a replied child's follow-up is only queued", async () => {
 		const child = createSession({
 			depth: 1,
 			rlmSessionDir: join(tempDir, "replying-child"),
@@ -1467,7 +1482,7 @@ describe("AgentSession rlm recursion", () => {
 				target: { activeSessionId: "child-active", sessionId: child.sessionId },
 			});
 			await child.queueAgentMessagePrompt(followUp.content as string, "followUp", followUp);
-			expect(child.repliedToParentSinceTask).toBe(false);
+			expect(child.repliedToParentSinceTask).toBe(true);
 		});
 		const root = createSession({
 			subagentRuntimeHost: {
@@ -2153,7 +2168,9 @@ describe("AgentSession rlm recursion", () => {
 		daemonChildId = basename(result.session_dir);
 		await waitFor(() => root.getRlmChildSession(daemonChildId)?.getLastAssistantText() !== undefined);
 
-		expect(root.getRlmChildSession(daemonChildId)?.getLastAssistantText()).toBe("child answer: retained worker");
+		expect(root.getRlmChildSession(daemonChildId)?.getLastAssistantText()).toBe(
+			terminalText("child answer: retained worker"),
+		);
 		const expectedSessionName = createDefaultRlmSubagentSessionName("retained worker", daemonChildId);
 		expect(root.getRlmChildSession(daemonChildId)?.sessionName).toBe(expectedSessionName);
 		const expectedRegistry = {
@@ -2605,7 +2622,7 @@ describe("AgentSession rlm recursion", () => {
 		try {
 			await hookEntered.promise;
 			await waitFor(() => root.getRlmChildSnapshots().some((snapshot) => snapshot.status === "done"));
-			expect(child?.getLastAssistantText()).toBe("child done");
+			expect(child?.getLastAssistantText()).toBe(terminalText("child done"));
 			expect(parentAssistant?.usage.cost.total).toBe(13);
 			expect(
 				root.sessionManager
@@ -4811,7 +4828,7 @@ describe("AgentSession RLM session dir", () => {
 		expect(env.RLM_HARNESS_STATE_DIR).toBe(join(ephemeralDir, "harness"));
 	});
 
-	it("loads the ephemeral RLM harness path into the host system prompt", () => {
+	it("loads the ephemeral RLM harness path into the session-start harness digest", () => {
 		const ephemeralDir = join(tempDir, "ephemeral-rlm");
 		mkdirSync(join(ephemeralDir, "harness"), { recursive: true });
 		writeFileSync(
@@ -4846,10 +4863,11 @@ describe("AgentSession RLM session dir", () => {
 		);
 		const root = createSession(SessionManager.inMemory(tempDir), undefined, undefined, false, ephemeralDir);
 
-		const prompt = root.systemPrompt;
+		const digest = (root as unknown as { _harnessDigest(): string })._harnessDigest();
 
-		expect(prompt).toContain("Ephemeral note");
-		expect(prompt).toContain("Loaded from the RLM session harness path.");
+		expect(root.systemPrompt).not.toContain("Ephemeral note");
+		expect(digest).toContain("Ephemeral note");
+		expect(digest).toContain("Loaded from the RLM session harness path.");
 	});
 
 	it("exports the configured agentDir to the kernel so skills find auth.json", () => {
