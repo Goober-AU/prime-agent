@@ -8,7 +8,12 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, ProviderCompactionCheckpoint, TextContent } from "@earendil-works/pi-ai";
 import type { AgentCronJob } from "./cron-jobs.js";
-import type { AppliedRefinementEdit, HarnessScope, RefinementResult } from "./refinement/refinement.js";
+import {
+	type AppliedRefinementEdit,
+	formatRefinementNoticeBody,
+	type HarnessScope,
+	type RefinementResult,
+} from "./refinement/refinement.js";
 import { isSessionSlashCommandName, parseSessionSlashCommand, type SessionSlashCommand } from "./slash-commands.js";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
@@ -33,6 +38,8 @@ export const SESSION_SLASH_COMMAND_CUSTOM_TYPE = "session_slash_command";
 export const SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE = "session_slash_command_result";
 export const COMPACTION_OUTCOME_CUSTOM_TYPE = "compaction_outcome";
 export const REFINEMENT_OUTCOME_CUSTOM_TYPE = "refinement_outcome";
+export const REFINEMENT_NOTICE_CUSTOM_TYPE = "refinement_notice";
+export const HARNESS_DIGEST_CUSTOM_TYPE = "harness_digest";
 export const RLM_CHILD_FAILURE_CUSTOM_TYPE = "rlm_child_failure";
 export const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE = "rlm_child_terminal_notice";
 export const ASYNC_BASH_COMPLETION_CUSTOM_TYPE = "async_bash_completion";
@@ -89,6 +96,45 @@ export interface RefinementOutcomeMessage extends CustomMessage<RefinementOutcom
 	customType: typeof REFINEMENT_OUTCOME_CUSTOM_TYPE;
 	content: string;
 	details: RefinementOutcomeDetails;
+}
+
+/** How a refinement was initiated: reviewer-triggered auto-refine, the /refine slash command, or the model's own refine.run(). */
+export type RefinementSource = "auto" | "user" | "self";
+
+export interface RefinementNoticeDetails extends RefinementOutcomeDetails {
+	source: RefinementSource;
+}
+
+export interface RefinementNoticeMessage extends CustomMessage<RefinementNoticeDetails> {
+	customType: typeof REFINEMENT_NOTICE_CUSTOM_TYPE;
+	content: string;
+	details: RefinementNoticeDetails;
+}
+
+export interface HarnessDigestDetails {
+	digest: string;
+}
+
+export const HARNESS_DIGEST_PREFIX = `The persistent memories produced across this session so far:
+
+<harness_state>
+`;
+
+export const HARNESS_DIGEST_SUFFIX = `
+</harness_state>`;
+
+export function createHarnessDigestMessage(
+	digest: string,
+	timestamp = Date.now(),
+): CustomMessage<HarnessDigestDetails> {
+	return {
+		role: "custom",
+		customType: HARNESS_DIGEST_CUSTOM_TYPE,
+		content: HARNESS_DIGEST_PREFIX + digest + HARNESS_DIGEST_SUFFIX,
+		display: false,
+		details: { digest },
+		timestamp,
+	};
 }
 
 export interface RlmChildFailureDetails {
@@ -232,6 +278,8 @@ export interface CompactionSummaryMessage {
 	retainedMessageCount?: number;
 	/** User instructions that guided the summary (from `/compact <instructions>`) */
 	customInstructions?: string;
+	/** Harness digest snapshot rendered before the summary in LLM context. Attached mechanically at compaction, never summarized. */
+	harnessDigest?: string;
 	timestamp: number;
 }
 
@@ -298,6 +346,7 @@ export function createCompactionSummaryMessage(
 	customInstructions?: string,
 	retainedMessageCount?: number,
 	providerContext?: ProviderCompactionCheckpoint,
+	harnessDigest?: string,
 ): CompactionSummaryMessage {
 	return {
 		role: "compactionSummary",
@@ -306,6 +355,7 @@ export function createCompactionSummaryMessage(
 		retainedMessageCount,
 		providerContext,
 		customInstructions,
+		harnessDigest,
 		timestamp: new Date(timestamp).getTime(),
 	};
 }
@@ -392,6 +442,29 @@ export function createRefinementOutcomeMessage(
 			scope: result.scope ?? "local",
 			...(result.rollbackOf ? { rollbackOf: result.rollbackOf } : {}),
 			edits: result.appliedEdits,
+		},
+		timestamp,
+	};
+}
+
+/** Model-facing refinement notice: passes convertToLlm (unlike the refinement_outcome audit entry); display false because the TUI renders the outcome message. */
+export function createRefinementNoticeMessage(
+	result: RefinementResult,
+	source: RefinementSource,
+	timestamp = Date.now(),
+): RefinementNoticeMessage {
+	return {
+		role: "custom",
+		customType: REFINEMENT_NOTICE_CUSTOM_TYPE,
+		content: `[${source}-refinement]\n\n${formatRefinementNoticeBody(result)}`,
+		display: false,
+		details: {
+			refinementId: result.id,
+			summary: result.summary,
+			scope: result.scope ?? "local",
+			...(result.rollbackOf ? { rollbackOf: result.rollbackOf } : {}),
+			edits: result.appliedEdits,
+			source,
 		},
 		timestamp,
 	};
@@ -520,9 +593,20 @@ export function createHeartbeatPromptMessage(
  * - Compaction's generateSummary (for summarization)
  * - Custom extensions and tools
  */
+/** Mechanical memory snapshots are regenerated after compaction, never summarized. */
+export function withoutHarnessDigestsForCompaction(messages: readonly AgentMessage[]): AgentMessage[] {
+	return messages
+		.filter((message) => message.role !== "custom" || message.customType !== HARNESS_DIGEST_CUSTOM_TYPE)
+		.map((message) =>
+			message.role === "compactionSummary" && message.harnessDigest !== undefined
+				? { ...message, harnessDigest: undefined }
+				: message,
+		);
+}
+
 export function convertToLlm(messages: AgentMessage[]): Message[] {
 	return messages
-		.map((m): Message | undefined => {
+		.flatMap((m): Message | Message[] | undefined => {
 			switch (m.role) {
 				case "bashExecution":
 					if (m.excludeFromContext) {
@@ -555,15 +639,37 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
 						timestamp: m.timestamp,
 					};
-				case "compactionSummary":
-					return {
+				case "compactionSummary": {
+					const digestBlock = m.harnessDigest
+						? `${HARNESS_DIGEST_PREFIX}${m.harnessDigest}${HARNESS_DIGEST_SUFFIX}\n\n`
+						: "";
+					const summary: Message = {
 						role: "user",
 						providerContext: m.providerContext,
 						content: [
-							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
+							{
+								type: "text" as const,
+								text:
+									(m.providerContext ? "" : digestBlock) +
+									COMPACTION_SUMMARY_PREFIX +
+									m.summary +
+									COMPACTION_SUMMARY_SUFFIX,
+							},
 						],
 						timestamp: m.timestamp,
 					};
+					// Opaque checkpoint replay replaces the carrier's text; memories must be a separate message.
+					return m.providerContext && digestBlock
+						? [
+								summary,
+								{
+									role: "user",
+									content: [{ type: "text", text: digestBlock.trimEnd() }],
+									timestamp: m.timestamp,
+								},
+							]
+						: summary;
+				}
 				case "user":
 				case "assistant":
 				case "toolResult":

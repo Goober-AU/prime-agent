@@ -28,6 +28,7 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	HARNESS_DIGEST_CUSTOM_TYPE,
 } from "../messages.js";
 import { completeWithProviderRetry, type ProviderRetryPolicy, requestWithProviderRetry } from "../provider-retry.js";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.js";
@@ -110,6 +111,10 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 
 function getMessageFromEntryForCompaction(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "compaction") {
+		return undefined;
+	}
+	// Harness digests are regenerated on the new compaction head; never summarizer input.
+	if (entry.type === "custom_message" && entry.customType === HARNESS_DIGEST_CUSTOM_TYPE) {
 		return undefined;
 	}
 	return getMessageFromEntry(entry);
@@ -248,7 +253,11 @@ export function shouldCompactForModel(contextTokens: number, model: Model<Api>, 
  */
 export function estimateTokens(message: AgentMessage): number {
 	if ((message.role === "user" || message.role === "compactionSummary") && message.providerContext) {
-		return message.providerContext.estimatedTokens;
+		const digestTokens =
+			message.role === "compactionSummary" && message.harnessDigest
+				? Math.ceil(message.harnessDigest.length / 4)
+				: 0;
+		return message.providerContext.estimatedTokens + digestTokens;
 	}
 	let chars = 0;
 
@@ -302,6 +311,7 @@ export function estimateTokens(message: AgentMessage): number {
 		case "branchSummary":
 		case "compactionSummary": {
 			chars = message.summary.length;
+			if (message.role === "compactionSummary") chars += message.harnessDigest?.length ?? 0;
 			return Math.ceil(chars / 4);
 		}
 	}

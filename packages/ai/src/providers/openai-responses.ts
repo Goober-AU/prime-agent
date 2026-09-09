@@ -26,6 +26,7 @@ import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js"
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { requestOpenAICompaction, supportsOpenAICompaction } from "./openai-compaction.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
+import { withOpenCodeHeaders } from "./opencode-headers.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 export const compactOpenAIResponses: CompactFunction<"openai-responses"> = async (model, context, options) => {
@@ -119,7 +120,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
+			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, options?.sessionId);
 			let params = buildParams(model, context, options);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
@@ -191,7 +192,8 @@ function createClient(
 	context: Context,
 	apiKey?: string,
 	optionsHeaders?: Record<string, string>,
-	sessionId?: string,
+	cacheSessionId?: string,
+	conversationId?: string,
 ) {
 	if (!apiKey) {
 		if (!process.env.OPENAI_API_KEY) {
@@ -213,11 +215,11 @@ function createClient(
 		Object.assign(headers, copilotHeaders);
 	}
 
-	if (sessionId) {
+	if (cacheSessionId) {
 		if (compat.sendSessionIdHeader) {
-			headers.session_id = sessionId;
+			headers.session_id = cacheSessionId;
 		}
-		headers["x-client-request-id"] = sessionId;
+		headers["x-client-request-id"] = cacheSessionId;
 	}
 
 	if (optionsHeaders) {
@@ -237,7 +239,7 @@ function createClient(
 		apiKey,
 		baseURL: isCloudflareProvider(model.provider) ? resolveCloudflareBaseUrl(model) : model.baseUrl,
 		dangerouslyAllowBrowser: true,
-		defaultHeaders,
+		defaultHeaders: withOpenCodeHeaders(model.provider, conversationId, defaultHeaders),
 		maxRetries: 0,
 	});
 }

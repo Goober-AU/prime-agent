@@ -5839,6 +5839,7 @@ export class InteractiveMode {
 					this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 					this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 				mermaidTransform: this.mermaidMarkdownTransform,
+				cwd: this.getCurrentCwd(),
 			},
 		);
 		this.streamingMessage = message;
@@ -6487,6 +6488,7 @@ export class InteractiveMode {
 							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
 							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
 						mermaidTransform: this.mermaidMarkdownTransform,
+						cwd: this.getCurrentCwd(),
 					},
 				);
 				this.chatContainer.addChild(assistantComponent);
@@ -8696,7 +8698,7 @@ export class InteractiveMode {
 				);
 			}
 		} else if (!selectedModel) {
-			this.showError("Prime Inference login succeeded, but the default GLM 5.2 model is unavailable.");
+			this.showError("Prime Inference login succeeded, but the default GLM 5.3 model is unavailable.");
 		}
 
 		return true;
