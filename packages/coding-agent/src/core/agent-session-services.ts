@@ -10,6 +10,7 @@ import { AuthStorage } from "./auth-storage.js";
 import type { AgentAutonomousConfig } from "./autonomous.js";
 import type { AgentRlmHeartbeatController } from "./cron-jobs.js";
 import { createHerdrAgentStateExtension } from "./extensions/builtin/herdr-agent-state.js";
+import { createTelegramExtension } from "./extensions/builtin/telegram.js";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.js";
 import { McpManager } from "./mcp/mcp-manager.js";
 import { ModelRegistry } from "./model-registry.js";
@@ -170,6 +171,7 @@ export async function createAgentSessionServices(
 	const builtinExtensionFactories = skipHerdrReporter
 		? []
 		: [createHerdrAgentStateExtension(() => resourceLoader.getLoadedExtensionPaths())];
+	if (!options.resourceLoaderOptions?.noExtensions) builtinExtensionFactories.push(createTelegramExtension(agentDir));
 	const resourceLoader: DefaultResourceLoader = new DefaultResourceLoader({
 		...(options.resourceLoaderOptions ?? {}),
 		extensionFactories: [...builtinExtensionFactories, ...userExtensionFactories],
