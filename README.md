@@ -1,129 +1,121 @@
-<p align="center">
-  <a href="https://primeintellect.ai">
-    <picture>
-      <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/40c36e38-c5bd-4c5a-9cb3-f7b902cd155d">
-      <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8">
-      <img alt="Prime Intellect" src="https://github.com/user-attachments/assets/6414bc9b-126b-41ca-9307-9e982430cde8" width="312" style="max-width: 100%;">
-    </picture>
-  </a>
-</p>
+# Optimus
 
-<h3 align="center">
-Prime Agent: A Self-Improving RLM Harness
-</h3>
+**An open-source coding and research agent, maintained by Telemus AI.**
 
-<p align="center">
-  <a href="packages/coding-agent/docs/index.md">Documentation</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/verifiers">Verifiers</a> &bull;
-  <a href="https://github.com/PrimeIntellect-ai/prime-rl">PRIME-RL</a>
-</p>
+[Documentation](packages/coding-agent/docs/index.md) · [Telegram setup](packages/coding-agent/docs/telegram.md) · [Development](packages/coding-agent/docs/development.md)
 
-<p align="center">
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/ci.yml/badge.svg" alt="CI" />
-  </a>
-  <a href="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml">
-    <img src="https://github.com/PrimeIntellect-ai/prime-agent/actions/workflows/build-binaries.yml/badge.svg" alt="Build Binaries" />
-  </a>
-  <a href="https://arxiv.org/abs/2608.23552">
-    <img src="https://img.shields.io/badge/arXiv-2608.23552-b31b1b.svg" alt="arXiv" />
-  </a>
-</p>
+Optimus brings code, tools, and persistent context into one workspace. Use it to explore a repository, implement changes, investigate a problem, or carry a task across multiple sessions. A persistent Python environment lets the agent inspect data, run commands, call skills, and coordinate subagents through code.
 
-<p align="center">
-  <a href="https://trendshift.io/repositories/104249?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-104249" target="_blank" rel="noopener noreferrer">
-    <img src="https://trendshift.io/api/badge/repositories/104249" alt="PrimeIntellect-ai%2Fprime-agent | Trendshift" width="250" height="55" />
-  </a>
-</p>
+## What Optimus Can Do
 
-Prime Agent is an open-source coding and research agent for general and long-running work. It is designed around two core abstractions:
-
-- The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
-- The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
-
-Prime Agent combines a persistent Python control environment with durable harness state, so useful working context and reusable operating patterns can outlive a single chat window.
-
-- **Everything is programmatic:** a persistent Python REPL is the built-in model tool; file operations, shell commands, tool use, subagents, and context management happen through code.
-- **Subagents are built in:** `rlm(...)` spawns real child agents for parallel or background work and returns their results programmatically.
-- **The harness can improve:** `/refine` reviews the current trajectory and can apply small, evidence-backed updates to supplemental harness state. It never rewrites the immutable base system prompt, and recorded snapshots support rollback.
-- **Skills are executable:** skills are importable Python packages, and the built-in skill creator can turn recurring workflows into project or personal skills.
-- **Sessions run in the background:** daemon-backed agents keep running when the terminal disconnects and can be reattached later.
-- **Agents communicate directly:** running agents can exchange messages and orchestrate one another without routing everything through the user.
-- **Long tasks keep moving:** automatic compaction, persistent goals, heartbeats, schedules, autonomous mode, and retained subagents preserve progress across turns and terminal sessions.
+- **Work with your code and data.** Read and edit files, run project commands, and retain useful variables in a persistent Python REPL.
+- **Coordinate subagents.** Delegate independent work to recursive agents that can run in parallel, exchange messages, and report results.
+- **Keep sessions running.** Background workers preserve active work when the terminal disconnects, so you can reattach later.
+- **Manage long tasks.** Compaction, persistent goals, heartbeats, and schedules help work continue across turns. Autonomous mode supports explicit turn, token, and time limits.
+- **Improve reusable instructions.** `/refine` can update supplemental prompts, memories, skill descriptions, and subagent specifications, with recorded history and rollback.
+- **Extend the workspace.** Add executable Python skills, prompt templates, TypeScript extensions, and MCP integrations.
+- **Connect through Telegram.** Pair a private bot chat with a session and use familiar commands to manage work from your phone.
 
 ## Getting Started
 
-Install the latest stable release on macOS or Linux:
+Run from source on macOS or Linux with Node.js 22.9.0 or newer and npm 11.10.0 or newer:
 
 ```bash
-curl -fsSL https://app.primeintellect.ai/prime-agent/install.sh | sh
+git clone https://github.com/telemusai/prime-agent.git optimus
+cd optimus
+npm ci
+./prime-agent.sh
 ```
 
-The installer downloads a versioned release, verifies its SHA-256 checksum, installs the `prime-agent` command, and can prepare the Python runtime used by the agent.
+The source launcher is currently named `prime-agent.sh`. These instructions use the existing launcher; the project name is Optimus.
 
-Start Prime Agent from the repository or directory you want it to work in:
+On first launch, use `/login` to configure a provider. Choose a model with `/model`, set its reasoning level with `/effort`, and enter a request:
 
-```bash
-cd /path/to/project
-prime-agent
+```text
+Explain this repository, identify its main components, and tell me how to run its checks.
 ```
 
-On first launch, run `/login` to choose a subscription or API-key provider. Prime Agent works in the current directory and can run commands and modify files there. Use a disposable clone, clean worktree, or another checkpoint you can inspect and restore.
+The Python runtime is prepared automatically on first use. See the [provider guide](packages/coding-agent/docs/providers.md) for authentication options and the [Windows guide](packages/coding-agent/docs/windows.md) for platform-specific setup.
 
 > [!WARNING]
-> Prime Agent executes model-generated Python and project commands with your user permissions. Its worker and kernel processes improve lifecycle isolation and recovery; they are **not** a security sandbox. Review changes and use trusted repositories, instructions, skills, and extensions only. Run untrusted code or instructions in an external sandbox or restricted environment.
+> Optimus can execute model-generated code and project commands with your user permissions. Worker processes are not a security sandbox. Use trusted repositories, instructions, skills, and extensions, and keep changes reviewable with Git or another checkpointing workflow. Run untrusted workloads in an external sandbox or restricted environment.
 
-Useful commands:
+## Everyday Commands
+
+| Command | Purpose |
+| --- | --- |
+| `/login` | Configure provider authentication |
+| `/model`, `/effort` | Choose a model and reasoning level |
+| `/new`, `/resume` | Start a session or return to previous work |
+| `/name`, `/session` | Name a session or inspect its status |
+| `/context`, `/usage` | Review context, token usage, and cost |
+| `/compact` | Compact the session context |
+| `/goal` | Set or manage a persistent objective |
+| `/autonomous` | Configure autonomous continuation |
+| `/heartbeat` | Set up recurring prompts |
+| `/refine` | Refine reusable instructions and memory |
+| `/tree`, `/fork`, `/clone` | Navigate history or branch a session |
+| `/telegram` | Open bot setup and connection controls |
+| `/settings`, `/mcp`, `/reload` | Manage settings, integrations, and resources |
+
+From the source checkout, you can also inspect and control background sessions:
 
 ```bash
-prime-agent agents                   # Browse running, idle, and saved sessions
-prime-agent attach <agent>           # Reattach to a running session
-prime-agent --resume [path|id]       # Browse sessions or resume one directly
-prime-agent status                   # Inspect background service state
-prime-agent doctor [--fix]           # Inspect or repair background services
-prime-agent update [--force]         # Update Prime Agent
-prime-agent shutdown [--force]       # Stop every agent, worker, and background service
+./prime-agent.sh agents              # Browse active and saved sessions
+./prime-agent.sh status              # Inspect background services
+./prime-agent.sh doctor              # Diagnose service problems
+./prime-agent.sh schedule list       # List scheduled prompts
+./prime-agent.sh shutdown            # Stop background services
 ```
 
-## Built for Long-Running Work
-Prime Agent is built for long-running work, especially for evaluations in research. These features are available in the TUI, and when run autonomously.
+See the [CLI reference](packages/coding-agent/docs/usage.md) for attachment, session selection, scheduling, and automation options.
 
-- **Continual Harness:** `/refine` can persist focused, reviewable lessons as supplemental prompts, memories, reusable skill descriptions, or subagent specifications, with recorded refinement history. It does not replace packaging and reviewing new executable skills.
-- **Direct agent-to-agent communication:** running agents and retained subagents can discover one another, exchange messages, and steer active work.
-- **Daemon-backed continuity:** active sessions, Python REPL state, schedules, and subagents keep running when the terminal detaches and can be reattached later.
-- **Heartbeats and schedules:** `/heartbeat`, `rlm_heartbeat`, and `prime-agent schedule` can re-enter a session periodically or at a specific time.
-- **Persistent goals:** `/goal` keeps an objective and its progress active across turns until it is completed, paused, or cleared.
-- **Bounded autonomous mode:** `/autonomous` continues within configured turn, token, and time budgets and can run user-defined quality gates. A passed gate checks only what that gate verifies; reaching a limit does not imply task success.
+## Telegram
+
+Run `/telegram` in the terminal and select **Setup with BotFather**. The setup guide walks you through creating a bot, entering its token, and opening a one-time pairing link.
+
+Once paired, your private Telegram chat controls the connected session. Send text or use commands such as `/new`, `/resume`, `/model`, `/effort`, `/compact`, `/goal`, and `/context`. Use `/stop` to interrupt work and `/help` to see the available commands.
+
+The connector runs in the background while the computer and agent service remain running. The initial version supports one paired private account and text messages. Read the [Telegram guide](packages/coding-agent/docs/telegram.md) for connection controls, permissions, storage, and recovery.
+
+## Work That Spans Sessions
+
+Optimus combines a persistent execution environment with durable session state. The agent can keep working after you detach from the terminal, and you can return to its history, goals, and running tasks later.
+
+The recursive language model approach treats context as data the agent can inspect and manipulate in Python. Subagents provide separate execution contexts for independent tasks. Skills package recurring workflows into reusable capabilities.
+
+Compaction helps manage the model's context window. Goals track an objective over time, while heartbeats and schedules bring work back into a session. Autonomous mode can continue within configured budgets and run user-defined checks; reaching a limit does not mean a task is complete.
+
+Refinement records lessons as supplemental state, local to the session by default. It can update reusable instructions and retain a rollback history without rewriting the base system prompt. Executable skill changes still need their own review and validation.
 
 ## Documentation
 
-- [Quickstart](packages/coding-agent/docs/quickstart.md) — install, authenticate, and run a first session
-- [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, autonomous limits, and output modes
-- [Long-running and background agents](packages/coding-agent/docs/long-running-agents.md) — detach and reattach, goals, heartbeats, and schedules
-- [RLM programming model](packages/coding-agent/docs/rlm.md) — the persistent Python REPL, subagents, skills, and the trust model
-- [JSON mode](packages/coding-agent/docs/json.md) and [RPC mode](packages/coding-agent/docs/rpc.md) — headless automation and integrations
+- [Usage and CLI reference](packages/coding-agent/docs/usage.md) — commands, sessions, and output modes
+- [Telegram](packages/coding-agent/docs/telegram.md) — bot setup, pairing, and remote session commands
+- [Background agents](packages/coding-agent/docs/long-running-agents.md) — detach, reattach, goals, and schedules
+- [RLM programming model](packages/coding-agent/docs/rlm.md) — Python execution, subagents, and context management
 - [Skills](packages/coding-agent/docs/skills.md) — install and create reusable capabilities
-- [Provider setup](packages/coding-agent/docs/providers.md) — subscription and API-key providers
-- [Architecture overview](packages/coding-agent/docs/architecture.md) — daemon, worker, kernel, and persistence boundaries
-- [Development](packages/coding-agent/docs/development.md) — build and run from source
+- [MCP integrations](packages/coding-agent/docs/mcp-integrations.md) — connect external tools and services
+- [Providers](packages/coding-agent/docs/providers.md) — authentication and model configuration
+- [Settings](packages/coding-agent/docs/settings.md) — user and project configuration
+- [JSON mode](packages/coding-agent/docs/json.md) and [RPC mode](packages/coding-agent/docs/rpc.md) — headless automation
+- [Architecture](packages/coding-agent/docs/architecture.md) — daemon, worker, kernel, and persistence boundaries
+- [Development](packages/coding-agent/docs/development.md) — source setup and validation
 
 ## Contributing
 
-Start with a GitHub Discussion for [general questions](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general), [bug reports](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports), and [feature requests](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests). Maintainers promote accepted work into Issues, and pull requests are reviewed from maintainers and vouched contributors.
-
-Read the [contribution guidelines](CONTRIBUTING.md) for the full process. Report security vulnerabilities privately by following the [security policy](SECURITY.md).
+Development takes place in the [Telemus AI fork](https://github.com/telemusai/prime-agent). Follow [AGENTS.md](AGENTS.md) for repository conventions and validation requirements. Keep pull requests focused, explain the resulting behavior, and include the checks used to verify it.
 
 ## Acknowledgements
 
-Our agent and TUI is built on top of [`pi`](https://github.com/earendil-works/pi). We thank the authors of `pi` for their valuable work.
+Optimus is based on **[Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent)** and **[Pi](https://github.com/earendil-works/pi)**. We thank the Prime Intellect team, Mario Zechner, and the maintainers and contributors of both projects for the foundations of this work.
 
-## License
+Prime Agent builds on Pi's agent toolkit and terminal interface. Optimus continues that lineage as a fork maintained by Telemus AI. The original copyright notices are retained in [LICENSE](LICENSE).
 
-Prime Agent is fully open source and released under the [MIT License](LICENSE).
+For the research behind Prime Agent, see [Prime Agent: A Self-Improving RLM Harness](https://arxiv.org/abs/2608.23552), the [RLM overview](https://www.primeintellect.ai/blog/rlm), and [Continual Harness](https://arxiv.org/abs/2605.09998).
 
-## Citation
-
-If you use this codebase in your research, please cite Prime Agent:
+<details>
+<summary>Prime Agent research citation</summary>
 
 ```bibtex
 @article{karten2026prime,
@@ -134,4 +126,8 @@ If you use this codebase in your research, please cite Prime Agent:
 }
 ```
 
-Available at [https://arxiv.org/abs/2608.23552](https://arxiv.org/abs/2608.23552).
+</details>
+
+## License
+
+Optimus is distributed under the [MIT License](LICENSE).
