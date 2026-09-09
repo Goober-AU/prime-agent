@@ -1,5 +1,5 @@
-import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { PRIME_BUTTERFLY_LOGO } from "../../../themes/prime-logo.js";
+import { type Component, getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
+import { colorizeOptimusLogo, getOptimusLogo } from "../../../themes/optimus-logo.js";
 import { type ThemeColor, theme } from "../theme/theme.js";
 
 interface PrimeOnboardingSplashOptions {
@@ -9,14 +9,14 @@ interface PrimeOnboardingSplashOptions {
 	continueActionLabel?: string;
 }
 
-const LOGO_LINES = PRIME_BUTTERFLY_LOGO.split("\n");
-const LOGO_WIDTH = LOGO_LINES.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
 const ANIMATION_INTERVAL_MS = 120;
 const LAB_FIELD_HEIGHT = 14;
 const LAB_FIELD_MIN_WIDTH = 42;
 const LAB_FIELD_MAX_WIDTH = 78;
 
-type SplashTone = Extract<ThemeColor, "accent" | "borderMuted" | "dim" | "mdLink" | "muted" | "text" | "warning">;
+type SplashTone =
+	| Extract<ThemeColor, "accent" | "borderMuted" | "dim" | "mdLink" | "muted" | "text" | "warning">
+	| "brand";
 
 interface SplashCell {
 	char: string;
@@ -86,10 +86,11 @@ export class PrimeOnboardingSplashComponent implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		const panelLines = this.renderPanel(safeWidth);
+		const logo = getOptimusLogo(safeWidth, Math.max(1, (this.options.getRows?.() ?? 36) - 9));
+		const panelLines = this.renderPanel(safeWidth, logo);
 		const targetRows = this.getTargetRows(panelLines.length);
 		const topPadding = Math.max(0, Math.floor((targetRows - panelLines.length) / 2));
-		const logoZone = this.logoQuietZone(safeWidth, topPadding, targetRows);
+		const logoZone = this.logoQuietZone(safeWidth, topPadding, targetRows, logo);
 		const canvas = this.renderBackdrop(safeWidth, targetRows, logoZone);
 		panelLines.forEach((line, index) => {
 			this.drawStyledText(canvas, line.left, topPadding + index, line.parts, 8);
@@ -126,18 +127,16 @@ export class PrimeOnboardingSplashComponent implements Component {
 	private formatBrandLine(): PanelTextLine {
 		return [
 			{ text: "Welcome to ", tone: "text" },
-			{ text: "PRIME", tone: "text", bold: true },
-			{ text: " Agent", tone: "text", italic: true },
+			{ text: "OPTIMUS", tone: "brand", bold: true },
 		];
 	}
 
-	private renderPanel(width: number): PanelLine[] {
+	private renderPanel(width: number, logo: readonly string[]): PanelLine[] {
 		const lines: PanelLine[] = [];
 
-		for (const line of this.renderLogoBlock(width)) {
+		for (const line of this.renderLogoBlock(logo)) {
 			lines.push(this.centerParts(line, width));
 		}
-		lines.push({ left: 0, parts: [] });
 		lines.push({ left: 0, parts: [] });
 		lines.push({ left: 0, parts: [] });
 		lines.push(this.centerParts(this.formatBrandLine(), width));
@@ -146,11 +145,11 @@ export class PrimeOnboardingSplashComponent implements Component {
 		return lines;
 	}
 
-	private renderLogoBlock(width: number): PanelTextLine[] {
-		const logoWidth = Math.min(LOGO_WIDTH, width);
-		return LOGO_LINES.map((line) => {
-			const paddedLine = line + " ".repeat(Math.max(0, LOGO_WIDTH - visibleWidth(line)));
-			return [{ text: truncateToWidth(paddedLine, logoWidth, ""), tone: "text", transparentSpaces: true }];
+	private renderLogoBlock(logo: readonly string[]): PanelTextLine[] {
+		const logoWidth = Math.max(...logo.map((line) => visibleWidth(line)));
+		return logo.map((line) => {
+			const paddedLine = line + " ".repeat(Math.max(0, logoWidth - visibleWidth(line)));
+			return [{ text: paddedLine, tone: "brand", transparentSpaces: true }];
 		});
 	}
 
@@ -182,7 +181,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 				if (!cell) {
 					continue;
 				}
-				if (cell.tone === "mdLink" && this.isInsideQuietZone(x, y, quietZone)) {
+				if (this.isInsideQuietZone(x, y, quietZone)) {
 					continue;
 				}
 				this.put(canvas, x, y, cell.char, cell.tone, cell.priority);
@@ -312,7 +311,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 
 		const flush = () => {
 			if (!segment || !currentTone) return;
-			let styled = theme.fg(currentTone, segment);
+			let styled = currentTone === "brand" ? colorizeOptimusLogo(segment) : theme.fg(currentTone, segment);
 			if (currentItalic) {
 				styled = theme.italic(styled);
 			}
@@ -346,8 +345,13 @@ export class PrimeOnboardingSplashComponent implements Component {
 		return parts.reduce((sum, part) => sum + visibleWidth(part.text), 0);
 	}
 
-	private logoQuietZone(width: number, topPadding: number, rows: number): QuietZone | undefined {
-		const logoWidth = Math.min(LOGO_WIDTH, width);
+	private logoQuietZone(
+		width: number,
+		topPadding: number,
+		rows: number,
+		logo: readonly string[],
+	): QuietZone | undefined {
+		const logoWidth = Math.max(...logo.map((line) => visibleWidth(line)));
 		if (logoWidth < 1 || rows < 1) {
 			return undefined;
 		}
@@ -356,7 +360,7 @@ export class PrimeOnboardingSplashComponent implements Component {
 			left,
 			right: Math.min(width - 1, left + logoWidth - 1),
 			top: Math.max(0, topPadding),
-			bottom: Math.min(rows - 1, topPadding + LOGO_LINES.length - 1),
+			bottom: Math.min(rows - 1, topPadding + logo.length - 1),
 		};
 	}
 

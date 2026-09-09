@@ -135,7 +135,7 @@ import {
 	type TelemetryOnboardingOutcome,
 } from "../../core/telemetry.js";
 import { type TruncationResult, truncateTail } from "../../core/tools/truncate.js";
-import { PRIME_BUTTERFLY_LOGO } from "../../themes/prime-logo.js";
+import { colorizeOptimusLogo, getOptimusLogo } from "../../themes/optimus-logo.js";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.js";
 import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { copyToClipboard } from "../../utils/clipboard.js";
@@ -446,14 +446,13 @@ export interface BrandSplashMetadataLine {
 export interface BrandSplashHeaderOptions {
 	logo?: string;
 	topPadding?: boolean;
+	getRows?: () => number;
 	getExtraMetadata?: () => readonly BrandSplashMetadataLine[];
 	getHideStartHint?: () => boolean;
 	getStartHint?: () => string;
 }
 
 export class BrandSplashHeader implements Component {
-	private readonly logoRaw: string[];
-	private readonly logoCanvasWidth: number;
 	private readonly gutter = 4;
 	private readonly labelWidth = 9;
 
@@ -463,10 +462,7 @@ export class BrandSplashHeader implements Component {
 		private readonly getCwd: () => string,
 		private readonly verboseInstructions?: string,
 		private readonly options: BrandSplashHeaderOptions = {},
-	) {
-		this.logoRaw = (options.logo ?? PRIME_BUTTERFLY_LOGO).split("\n");
-		this.logoCanvasWidth = this.logoRaw.reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
-	}
+	) {}
 
 	invalidate(): void {
 		// Render output is derived from current theme/session state.
@@ -474,9 +470,14 @@ export class BrandSplashHeader implements Component {
 
 	render(width: number): string[] {
 		const safeWidth = Math.max(1, width);
-		const paddingX = safeWidth > 1 ? 1 : 0;
+		const paddingX = safeWidth >= 3 ? 1 : 0;
 		const contentWidth = Math.max(1, safeWidth - paddingX * 2);
-		const metaWidth = contentWidth - this.logoCanvasWidth - this.gutter;
+		const terminalRows = this.options.getRows?.() ?? process.stdout.rows ?? 40;
+		const logoMaxRows = Math.min(32, Math.max(10, terminalRows - 16));
+		const logoMaxWidth = contentWidth >= 50 ? contentWidth - this.gutter - 29 : contentWidth;
+		const logoRaw = this.options.logo?.split("\n") ?? getOptimusLogo(logoMaxWidth, logoMaxRows);
+		const logoCanvasWidth = Math.max(...logoRaw.map((line) => visibleWidth(line)));
+		const metaWidth = contentWidth - logoCanvasWidth - this.gutter;
 		const showMeta = metaWidth >= this.labelWidth + 8;
 		const valueWidth = Math.max(1, metaWidth - this.labelWidth);
 		const labelled = (label: string, value: string) => {
@@ -489,6 +490,7 @@ export class BrandSplashHeader implements Component {
 		const startHint = this.options.getStartHint?.() ?? "type to search sessions";
 		const metaLines = showMeta
 			? [
+					...(this.options.logo === undefined ? [theme.bold(colorizeOptimusLogo("OPTIMUS")), ""] : []),
 					labelled("version", `v${this.version}`),
 					labelled("model", this.getModelId() ?? "—"),
 					labelled("cwd", formatSplashCwd(this.getCwd())),
@@ -496,21 +498,24 @@ export class BrandSplashHeader implements Component {
 					...(hideStartHint ? [] : ["", theme.fg("dim", startHint)]),
 				]
 			: [];
-		const metaStart = Math.max(0, Math.floor((this.logoRaw.length - metaLines.length) / 2));
+		const rowCount = Math.max(logoRaw.length, metaLines.length);
+		const metaStart = Math.max(0, Math.floor((rowCount - metaLines.length) / 2));
 		const lines = this.options.topPadding ? [""] : [];
 		lines.push(
-			...this.logoRaw.map((line, index) => {
-				const colored = theme.fg("text", line);
+			...Array.from({ length: rowCount }, (_, index) => {
+				const line = logoRaw[index] ?? "";
+				const colored = this.options.logo === undefined ? colorizeOptimusLogo(line) : theme.fg("text", line);
 				const meta = index >= metaStart && index < metaStart + metaLines.length ? metaLines[index - metaStart] : "";
-				const padding = showMeta
-					? " ".repeat(Math.max(0, this.logoCanvasWidth - visibleWidth(line) + this.gutter))
-					: "";
+				const padding = showMeta ? " ".repeat(Math.max(0, logoCanvasWidth - visibleWidth(line) + this.gutter)) : "";
 				const content = truncateToWidth(colored + padding + meta, contentWidth, "");
 				return (
 					" ".repeat(paddingX) + content + " ".repeat(Math.max(0, safeWidth - paddingX - visibleWidth(content)))
 				);
 			}),
 		);
+		if (!showMeta && this.options.logo === undefined) {
+			lines.push(" ".repeat(paddingX) + truncateToWidth(theme.bold(colorizeOptimusLogo("OPTIMUS")), contentWidth));
+		}
 
 		if (this.verboseInstructions) {
 			lines.push(" ".repeat(safeWidth));

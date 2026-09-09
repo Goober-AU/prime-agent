@@ -1,4 +1,4 @@
-import { Container, setKeybindings } from "@earendil-works/pi-tui";
+import { Container, setKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 import stripAnsi from "strip-ansi";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.js";
@@ -51,6 +51,7 @@ describe("InteractiveMode startup hints", () => {
 		const output = stripAnsi(lines.join("\n"));
 
 		expect(lines[0]).toBe("");
+		expect(output).toContain("OPTIMUS");
 		expect(output).toContain("version  v0.0.0");
 		expect(output).toContain("model    test-model");
 		expect(output).toContain("cwd      /tmp/project");
@@ -65,6 +66,61 @@ describe("InteractiveMode startup hints", () => {
 			() => "/tmp/project",
 		);
 		expect(unpadded.render(120)[0]).not.toBe("");
+	});
+
+	it("shrinks the robot on resize while retaining agent metadata and room for the session list", () => {
+		let rows = 40;
+		const header = new BrandSplashHeader(
+			"0.9.3",
+			() => "astra",
+			() => "/tmp/project",
+			undefined,
+			{
+				topPadding: true,
+				getRows: () => rows,
+				getExtraMetadata: () => [
+					{ label: "agents", value: "3 sessions" },
+					{ label: "scope", value: "global" },
+					{ label: "depth", value: "0" },
+				],
+			},
+		);
+		const large = header.render(120);
+		rows = 24;
+		const small = header.render(80);
+		expect(small.length).toBeLessThan(large.length);
+		expect(small.length).toBeLessThanOrEqual(11);
+		const output = stripAnsi(small.join("\n"));
+		for (const text of [
+			"OPTIMUS",
+			"astra",
+			"/tmp/project",
+			"3 sessions",
+			"scope",
+			"depth",
+			"type to search sessions",
+		]) {
+			expect(output).toContain(text);
+		}
+		for (const width of [1, 2, 24, 40, 80, 120]) {
+			for (const line of header.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
+	});
+
+	it("preserves custom splash artwork and its theme coloring", () => {
+		const header = new BrandSplashHeader(
+			"0.9.3",
+			() => "astra",
+			() => "/tmp/project",
+			undefined,
+			{
+				logo: "CUSTOM\n LOGO",
+			},
+		);
+		const output = stripAnsi(header.render(80).join("\n"));
+		expect(output).toContain("CUSTOM");
+		expect(output).toContain(" LOGO");
+		expect(output).not.toContain("OPTIMUS");
 	});
 
 	it("randomly selects from five concise filepath prompts", () => {
