@@ -150,6 +150,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/effort` | Set reasoning/thinking level |
 | `/scoped-models` | Enable/disable models for Ctrl+P cycling |
 | `/settings` | Thinking level, theme, message delivery, transport |
+| `/telegram` | Connect a Telegram bot with guided BotFather setup and private pairing ([guide](docs/telegram.md)) |
 | `/resume [id\|path]` | Open the agents view, or resume a session directly |
 | `/new`, `/clear` | Start a new session |
 | `/name <name>` | Set session display name |

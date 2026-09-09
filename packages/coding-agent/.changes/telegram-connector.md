@@ -1,0 +1,1 @@
+- Added `/telegram` with BotFather setup, private account pairing, background messaging, and Prime session commands in Telegram.
