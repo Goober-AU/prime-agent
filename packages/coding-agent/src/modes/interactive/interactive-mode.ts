@@ -470,16 +470,24 @@ export class BrandSplashHeader implements Component {
 		// Render output is derived from current theme/session state.
 	}
 
-	render(width: number): string[] {
+	render(width: number, maxRows = Number.POSITIVE_INFINITY): string[] {
 		const safeWidth = Math.max(1, width);
 		const paddingX = safeWidth >= 3 ? 1 : 0;
 		const contentWidth = Math.max(1, safeWidth - paddingX * 2);
 		const terminalRows = this.options.getRows?.() ?? process.stdout.rows ?? 40;
-		const logoMaxRows = Math.min(32, Math.max(10, terminalRows - 16));
-		const logoMaxWidth = contentWidth >= 50 ? contentWidth - this.gutter - 29 : contentWidth;
-		const logoRaw = this.options.logo?.split("\n") ?? getOptimusLogo(logoMaxWidth, logoMaxRows);
-		const logoCanvasWidth = Math.max(...logoRaw.map((line) => visibleWidth(line)));
-		const metaWidth = contentWidth - logoCanvasWidth - this.gutter;
+		const availableRows = Math.max(0, Math.min(maxRows, terminalRows - 8));
+		if (availableRows === 0) return [];
+		const topPadding = this.options.topPadding && terminalRows >= 24 && availableRows > 1;
+		const bodyRows = availableRows - (topPadding ? 1 : 0);
+		const logoMaxRows = Math.min(12, Math.max(0, terminalRows - 16), bodyRows);
+		const logoMaxWidth = Math.min(26, contentWidth - this.gutter - this.labelWidth - 8);
+		// Decorative art yields before metadata or the caller's search/session rows.
+		const logoRaw =
+			this.options.logo?.split("\n") ??
+			(logoMaxRows >= 8 && logoMaxWidth >= 16 ? getOptimusLogo(logoMaxWidth, logoMaxRows) : []);
+		const logoCanvasWidth = Math.max(0, ...logoRaw.map((line) => visibleWidth(line)));
+		const logoGutter = logoRaw.length > 0 ? this.gutter : 0;
+		const metaWidth = contentWidth - logoCanvasWidth - logoGutter;
 		const showMeta = metaWidth >= this.labelWidth + 8;
 		const valueWidth = Math.max(1, metaWidth - this.labelWidth);
 		const labelled = (label: string, value: string) => {
@@ -500,15 +508,22 @@ export class BrandSplashHeader implements Component {
 					...(hideStartHint ? [] : ["", theme.fg("dim", startHint)]),
 				]
 			: [];
+		if (metaLines.length > bodyRows) {
+			for (let index = metaLines.length - 1; index >= 0; index--) {
+				if (metaLines[index] === "") metaLines.splice(index, 1);
+			}
+			if (metaLines.length > bodyRows && !hideStartHint) metaLines.pop();
+			metaLines.length = Math.min(metaLines.length, bodyRows);
+		}
 		const rowCount = Math.max(logoRaw.length, metaLines.length);
 		const metaStart = Math.max(0, Math.floor((rowCount - metaLines.length) / 2));
-		const lines = this.options.topPadding ? [""] : [];
+		const lines = topPadding ? [""] : [];
 		lines.push(
 			...Array.from({ length: rowCount }, (_, index) => {
 				const line = logoRaw[index] ?? "";
 				const colored = this.options.logo === undefined ? colorizeOptimusLogo(line) : theme.fg("text", line);
 				const meta = index >= metaStart && index < metaStart + metaLines.length ? metaLines[index - metaStart] : "";
-				const padding = showMeta ? " ".repeat(Math.max(0, logoCanvasWidth - visibleWidth(line) + this.gutter)) : "";
+				const padding = showMeta ? " ".repeat(Math.max(0, logoCanvasWidth - visibleWidth(line) + logoGutter)) : "";
 				const content = truncateToWidth(colored + padding + meta, contentWidth, "");
 				return (
 					" ".repeat(paddingX) + content + " ".repeat(Math.max(0, safeWidth - paddingX - visibleWidth(content)))
@@ -1540,6 +1555,7 @@ export class InteractiveMode {
 				verboseInstructions,
 				{
 					topPadding: true,
+					getRows: () => this.ui.terminal.rows,
 					getHideStartHint: () => !this.isNewChat(),
 					getStartHint: () => this.startHint,
 				},

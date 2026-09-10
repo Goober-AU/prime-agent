@@ -3786,10 +3786,7 @@ export class DaemonSupervisor {
 				worker.descriptor.lastError = error instanceof Error ? error.message : String(error);
 				this.requireWorkerDescriptorTransitionCurrent(worker, adoptionTransition);
 				adoptionTransition = this.beginWorkerDescriptorTransition(worker);
-				await this.persistWorkerDescriptorTransition(worker, adoptionTransition);
-				void this.recoverWorker(worker).catch((recoveryError) =>
-					this.log(`Could not recover worker ${worker.descriptor.workerId}: ${String(recoveryError)}`),
-				);
+				await this.persistAndRecoverWorker(worker, adoptionTransition, false);
 				return;
 			}
 			await this.recoverWorker(worker);
@@ -3887,8 +3884,40 @@ export class DaemonSupervisor {
 		worker.descriptor.lifecycle = "recovering";
 		worker.descriptor.lastError = error.message;
 		const recoveryTransition = this.beginWorkerDescriptorTransition(worker);
-		await this.persistWorkerDescriptorTransition(worker, recoveryTransition);
-		void this.recoverWorker(worker);
+		await this.persistAndRecoverWorker(worker, recoveryTransition, false);
+	}
+
+	private async persistAndRecoverWorker(
+		worker: ResidentWorker,
+		transition: WorkerDescriptorTransition,
+		waitForRecovery = true,
+	): Promise<void> {
+		const persisted = this.persistWorkerDescriptorTransition(worker, transition);
+		let admitted = false;
+		// Publish the durable admission before yielding so concurrent touches join it.
+		const recovery = persisted
+			.then(() => {
+				admitted = true;
+				if (worker.recovery === recovery) {
+					worker.recovery = undefined;
+				}
+				// Hand off synchronously: the ladder publishes its promise before yielding.
+				return this.recoverWorker(worker);
+			})
+			.finally(() => {
+				if (worker.recovery === recovery) {
+					worker.recovery = undefined;
+				}
+			});
+		worker.recovery ??= recovery;
+		if (waitForRecovery) {
+			await recovery;
+		} else {
+			void recovery.catch((error) => {
+				if (admitted) this.log(`Could not recover worker ${worker.descriptor.workerId}: ${String(error)}`);
+			});
+			await persisted;
+		}
 	}
 
 	private isWorkerRecoveryEligible(worker: ResidentWorker): boolean {
@@ -3914,8 +3943,7 @@ export class DaemonSupervisor {
 		worker.descriptor.consecutiveFailures = 0;
 		worker.deferredRecoveryRounds = 0;
 		const recoveryTransition = this.beginWorkerDescriptorTransition(worker);
-		await this.persistWorkerDescriptorTransition(worker, recoveryTransition);
-		await this.recoverWorker(worker);
+		await this.persistAndRecoverWorker(worker, recoveryTransition);
 	}
 
 	private isWorkerRecoveryCandidate(worker: ResidentWorker): boolean {
@@ -3978,8 +4006,7 @@ export class DaemonSupervisor {
 			worker.descriptor.lifecycle = "recovering";
 			worker.descriptor.lastError = disconnectError.message;
 			const recoveryTransition = this.beginWorkerDescriptorTransition(worker);
-			await this.persistWorkerDescriptorTransition(worker, recoveryTransition);
-			void this.recoverWorker(worker);
+			await this.persistAndRecoverWorker(worker, recoveryTransition, false);
 			return;
 		}
 	}
@@ -4196,17 +4223,17 @@ export class DaemonSupervisor {
 		if (this.isWorkerRecoveryCancelled(worker)) {
 			return;
 		}
-		if (worker.descriptor.ownerClientId && !worker.launchEnv && !isProcessAlive(worker.descriptor.pid)) {
-			worker.descriptor.lifecycle = "failed";
-			worker.descriptor.lastError = "Waiting for the owning client to reconnect";
-			this.beginWorkerDescriptorTransition(worker);
-			await this.persistWorker(worker);
-			return;
-		}
 		if (worker.recovery) {
 			return worker.recovery;
 		}
 		worker.recovery = (async () => {
+			if (worker.descriptor.ownerClientId && !worker.launchEnv && !isProcessAlive(worker.descriptor.pid)) {
+				worker.descriptor.lifecycle = "failed";
+				worker.descriptor.lastError = "Waiting for the owning client to reconnect";
+				this.beginWorkerDescriptorTransition(worker);
+				await this.persistWorker(worker);
+				return;
+			}
 			let keepProbingLiveWorker = false;
 			for (const retryDelay of WORKER_RETRY_DELAYS_MS) {
 				await delay(retryDelay);

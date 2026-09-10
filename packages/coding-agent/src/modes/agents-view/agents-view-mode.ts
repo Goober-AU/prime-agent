@@ -852,6 +852,7 @@ export class AgentsViewMode implements Component, Focusable {
 			undefined,
 			{
 				topPadding: true,
+				getRows: () => this.ui.terminal.rows,
 				getExtraMetadata: () => {
 					const root = this.scopeRootSummary;
 					return [
@@ -1037,19 +1038,20 @@ export class AgentsViewMode implements Component, Focusable {
 		if (height <= 0) {
 			return [];
 		}
-		const headerLines = this.splash.render(width);
+		const promptLines = this.renderPrompt(width);
+		const listGap = height >= promptLines.length + 2 ? 1 : 0;
+		const reservedListRows = Math.min(3, Math.max(1, height - promptLines.length - listGap));
+		const headerRows = Math.max(0, height - promptLines.length - listGap - reservedListRows);
 		const noticeLines = this.renderStartupNotices(width);
+		const noticeRows = noticeLines.length > 0 ? noticeLines.length + 1 : 0;
+		// Select a complete smaller portrait before rendering, never crop it to
+		// reclaim the search prompt or useful session rows on a short terminal.
+		const headerLines = this.splash.render(width, Math.max(0, headerRows - noticeRows - 1));
 		if (noticeLines.length > 0) {
 			headerLines.push("", ...noticeLines);
 		}
 		headerLines.push("");
 
-		// The prompt belongs to the scroll pane rather than the fullscreen dock, but
-		// it must remain usable when a short viewport or wrapped notices exhaust the
-		// header. Trim optional header chrome first and reserve one session-list row.
-		const promptLines = this.renderPrompt(width);
-		const listGap = height >= promptLines.length + 2 ? 1 : 0;
-		const headerRows = Math.max(0, height - promptLines.length - listGap - 1);
 		const lines = headerLines.slice(0, headerRows);
 		lines.push(...promptLines);
 		if (listGap > 0) lines.push("");
