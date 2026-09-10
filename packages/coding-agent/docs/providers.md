@@ -183,6 +183,37 @@ export AWS_BEDROCK_SKIP_AUTH=1
 export AWS_BEDROCK_FORCE_HTTP1=1
 ```
 
+#### GPT-6 Astra: Oregon and Sydney
+
+Two Astra entries are bundled under **Amazon Bedrock** in `/model`:
+
+| Picker name | Model ID | Endpoint |
+| --- | --- | --- |
+| GPT-6 Astra (Oregon) | `openai.gpt-6-astra` | `https://bedrock-mantle.us-west-2.api.aws/openai/v1` |
+| GPT-6 Astra (Sydney / Global) | `global.openai.gpt-6-astra` | `https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1` |
+
+The Sydney endpoint uses **global cross-region inference**: model processing may happen outside Australia. Oregon uses Mantle in-region inference. See [AWS's Astra model card](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html) for current availability and pricing.
+
+Use your existing AWS profile, IAM credentials (including `AWS_SESSION_TOKEN` for temporary credentials), ECS/IRSA role, or `AWS_BEARER_TOKEN_BEDROCK`. A Bedrock bearer key can also be stored for `amazon-bedrock` through `/login`. OpenAI and Azure credentials are separate and are never used for Bedrock.
+
+```bash
+export AWS_PROFILE=your-profile
+# Oregon, in-region
+prime-agent --provider amazon-bedrock --model openai.gpt-6-astra --thinking high
+# Sydney endpoint, global cross-region inference
+prime-agent --provider amazon-bedrock --model global.openai.gpt-6-astra --thinking high
+```
+
+Each catalog entry uses its named endpoint and signing region, regardless of `AWS_REGION`. No region change is needed when switching between the two. For a proxy or a different supported Runtime region, set `AWS_BEDROCK_BASE_URL` to the full API root ending in `/openai/v1`, or override the model's `baseUrl` in `models.json`. Explicit SDK `region` options must match canonical AWS endpoints. The Converse-only proxy settings above do not configure Responses.
+
+Both entries support text/images, streaming, client-side tools, encrypted reasoning replay, and the `low`, `medium`, `high`, `xhigh`, and `max` effort levels. Requests use `store: false` and Standard tier; Fast/Priority/Flex are unavailable. Context is 1,050,000 tokens with 128,000 maximum output; input budgeting conservatively reserves the full output allowance (922,000 input tokens). Estimated costs apply the AWS long-context rates above 272K input tokens.
+
+Bedrock Astra uses Prime's existing summary compaction. Provider-native `/responses/compact` is not enabled without a verified Bedrock endpoint; Azure's verified native-compaction setting does not transfer to AWS.
+
+IAM needs model access and `bedrock-mantle:CreateInference` for Oregon, or Runtime streaming permissions on the global inference profile/destination models and access to the default project for Sydney. Refer to [AWS Responses permissions](https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html#bedrock-mantle-runtime) for policies, including any cross-region organization restrictions.
+
+The CLI, interactive TUI, and Telegram sessions share this catalog and provider. Direct browser execution of Bedrock remains unsupported; use a backend service. This change does not modify the separate vr-ai-chat 3D or Web surfaces.
+
 ### Cloudflare AI Gateway
 
 `CLOUDFLARE_API_KEY` can be set via `/login`. The account ID and gateway slug must be set as environment variables.

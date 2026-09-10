@@ -1464,7 +1464,53 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 	}
 }
 
+// AWS model card, 2026-09-11: Mantle in Oregon; Global CRIS via Sydney Runtime.
+// https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html
+function addBedrockAstraModels(providers: Record<string, Record<string, Model<Api>>>): void {
+	providers["amazon-bedrock"] ??= {};
+	const bedrockModels = providers["amazon-bedrock"];
+	for (const route of [
+		{
+			id: "openai.gpt-6-astra",
+			name: "GPT-6 Astra (Oregon)",
+			baseUrl: "https://bedrock-mantle.us-west-2.api.aws/openai/v1",
+			input: 11,
+			output: 55,
+		},
+		{
+			id: "global.openai.gpt-6-astra",
+			name: "GPT-6 Astra (Sydney / Global)",
+			baseUrl: "https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1",
+			input: 10,
+			output: 50,
+		},
+	]) {
+		bedrockModels[route.id] = {
+			id: route.id,
+			name: route.name,
+			baseUrl: route.baseUrl,
+			provider: "amazon-bedrock",
+			api: "bedrock-responses",
+			reasoning: true,
+			thinkingLevelMap: { off: null, minimal: null, xhigh: "xhigh", max: "max" },
+			input: ["text", "image"],
+			cost: { input: route.input, output: route.output, cacheRead: route.input / 10, cacheWrite: route.input * 1.25 },
+			contextWindow: 1_050_000,
+			maxTokens: 128_000,
+			// Reserve the full output allowance when budgeting input.
+			maxInputTokens: 922_000,
+		};
+	}
+}
+
 async function generateModels() {
+	if (process.argv.includes("--offline")) {
+		const providers: Record<string, Record<string, Model<Api>>> = structuredClone(EXISTING_MODELS);
+		addBedrockAstraModels(providers);
+		writeFileSync(join(packageRoot, "src/models.generated.ts"), renderModelsFile(providers));
+		console.log("Generated src/models.generated.ts from the snapshot and local overrides (offline)");
+		return;
+	}
 	// Fetch models from both sources
 	// models.dev: Anthropic, Google, OpenAI, Groq, Cerebras
 	// OpenRouter: xAI and other providers (excluding Anthropic, Google, OpenAI)
@@ -2271,6 +2317,8 @@ async function generateModels() {
 			providers[model.provider][model.id] = model;
 		}
 	}
+
+	addBedrockAstraModels(providers);
 
 	// Generate TypeScript file. JSON string literals prevent remote catalog
 	// text from becoming executable source code.

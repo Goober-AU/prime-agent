@@ -38,6 +38,7 @@ export const MODELS = {
 			output += `\t\t\t},\n`;
 			output += `\t\t\tcontextWindow: ${model.contextWindow},\n`;
 			output += `\t\t\tmaxTokens: ${model.maxTokens},\n`;
+			if (model.maxInputTokens !== undefined) output += `\t\t\tmaxInputTokens: ${model.maxInputTokens},\n`;
 			if (model.featured) output += `\t\t\tfeatured: true,\n`;
 			output += `\t\t} satisfies Model<${JSON.stringify(model.api)}>,\n`;
 		}
