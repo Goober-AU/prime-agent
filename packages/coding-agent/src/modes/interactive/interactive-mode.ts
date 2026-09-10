@@ -151,6 +151,8 @@ import type {
 	AgentConnectionExtensionUiRequest,
 	AgentConnectionExtensionUiResponse,
 	AgentConnectionHeartbeat,
+	AgentConnectionHistoryRange,
+	AgentConnectionHistoryWindow,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
 	AgentConnectionQueuedMessageMutationStatus,
@@ -909,6 +911,52 @@ export function formatAgentDepthLabel(depth: number | undefined, hasChildren: bo
 	return `depth ${depth}`;
 }
 
+export type LoadedAgentConnectionHistory = AgentConnectionHistoryWindow & { messages: AgentMessage[] };
+
+export function mergeOlderAgentConnectionHistory(
+	current: LoadedAgentConnectionHistory,
+	range: AgentConnectionHistoryRange,
+): LoadedAgentConnectionHistory {
+	if (
+		current.version !== 1 ||
+		current.order !== "chronological" ||
+		typeof current.representation !== "string" ||
+		current.representation.length === 0 ||
+		current.entryIds.length !== current.messages.length ||
+		current.startIndex < 0 ||
+		current.startIndex + current.messages.length !== current.totalMessageCount ||
+		current.hasOlder !== current.startIndex > 0 ||
+		range.version !== 1 ||
+		range.order !== "chronological" ||
+		range.generation !== current.generation ||
+		range.representation !== current.representation ||
+		range.tipEntryId !== current.tipEntryId ||
+		range.totalMessageCount !== current.totalMessageCount ||
+		range.startIndex < 0 ||
+		range.startIndex + range.messages.length !== current.startIndex ||
+		range.entryIds.length !== range.messages.length ||
+		range.hasOlder !== range.startIndex > 0 ||
+		current.entryIds.some((entryId) => typeof entryId !== "string") ||
+		range.entryIds.some((entryId) => typeof entryId !== "string")
+	) {
+		throw new Error("Older history range does not continue the pinned snapshot");
+	}
+	const existingIds = new Set(current.entryIds);
+	const rangeIds = new Set(range.entryIds);
+	if (
+		existingIds.size !== current.entryIds.length ||
+		rangeIds.size !== range.entryIds.length ||
+		range.entryIds.some((entryId) => existingIds.has(entryId))
+	) {
+		throw new Error("Older history range overlaps already loaded messages");
+	}
+	return {
+		...range,
+		entryIds: [...range.entryIds, ...current.entryIds],
+		messages: [...range.messages, ...current.messages],
+	};
+}
+
 export class InteractiveMode {
 	private static readonly EXIT_HINT_DURATION_MS = 2000;
 	private static readonly ESCAPE_REPEAT_WINDOW_MS = 500;
@@ -918,6 +966,7 @@ export class InteractiveMode {
 	private localSessionHost: InteractiveModeLocalSessionHost | undefined;
 	private bindLocalSessionExtensions: boolean;
 	private ui: TUI;
+	private historyContainer: Container;
 	private chatContainer: Container;
 	private shortcutGuideContainer: Container;
 	private pendingMessagesContainer: Container;
@@ -1077,6 +1126,11 @@ export class InteractiveMode {
 	private nextImageMarkerId = 1;
 
 	private unsubscribe?: () => void;
+	private historyInputUnsubscribe?: () => void;
+	private historyRangeAbortController?: AbortController;
+	private historyRangeLoad?: Promise<void>;
+	private historyLoadGeneration = 0;
+	private pagedHistory?: LoadedAgentConnectionHistory;
 	private signalCleanupHandlers: Array<() => void> = [];
 
 	private autoCompactionLoader: Loader | undefined = undefined;
@@ -1152,6 +1206,7 @@ export class InteractiveMode {
 		this.agentConnection.onBeforeSessionInvalidate(() => {
 			this.resetExtensionUI();
 			this.resetSideQuestion();
+			this.resetPagedHistory();
 		});
 		this.version = VERSION;
 		this.ui = new TUI(new ProcessTerminal(), this.settingsManager.getShowHardwareCursor());
@@ -1160,6 +1215,7 @@ export class InteractiveMode {
 			void this.copyFullscreenSelection(text);
 		};
 		this.headerContainer = new Container();
+		this.historyContainer = new Container();
 		this.chatContainer = new Container();
 		this.shortcutGuideContainer = new Container();
 		this.pendingMessagesContainer = new Container();
@@ -1172,6 +1228,14 @@ export class InteractiveMode {
 		this.recapContainer = new Container();
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
+		this.historyInputUnsubscribe = this.ui.addInputListener((data) => {
+			const requested =
+				this.keybindings.matches(data, "tui.viewport.pageUp") ||
+				this.keybindings.matches(data, "tui.viewport.top") ||
+				/^\x1b\[<64;/.test(data);
+			if (requested) void this.loadOlderHistoryRange();
+			return undefined;
+		});
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
@@ -1186,6 +1250,7 @@ export class InteractiveMode {
 		this.mainViewContainer = new Container();
 		this.promptDock = new Container();
 		this.footerSlot = new Container();
+		this.mainViewContainer.addChild(this.historyContainer);
 		this.mainViewContainer.addChild(this.chatContainer);
 		this.mainViewContainer.addChild(this.shortcutGuideContainer);
 		this.mainViewContainer.addChild(this.pendingMessagesContainer);
@@ -2896,6 +2961,7 @@ export class InteractiveMode {
 
 	private resetCurrentSessionRenderState(options?: { clearPromptStash?: boolean }): void {
 		this.endFeatureHintRun();
+		this.resetPagedHistory();
 		this.chatContainer.clear();
 		this.shortcutGuideContainer.clear();
 		this.pendingMessagesContainer.clear();
@@ -2981,10 +3047,7 @@ export class InteractiveMode {
 		this.streamingMessage = undefined;
 		this.rlmNodeId = snapshot.parent?.childId;
 		this.replaceSubagentSummary(snapshot.children);
-		await this.renderSessionContext(this.getSessionContextFromConnectionSnapshot(snapshot), {
-			clearChat: true,
-			updateFooter: true,
-		});
+		await this.renderSnapshotTranscript(snapshot, { updateFooter: true });
 		await this.restoreStreamingMessageFromSnapshot(snapshot.streamingMessage);
 		this.updatePendingMessagesDisplay();
 		if (bashFinished) {
@@ -6378,11 +6441,15 @@ export class InteractiveMode {
 		);
 	}
 
-	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
+	private addMessageToChat(
+		message: AgentMessage,
+		options?: { populateHistory?: boolean; container?: Container },
+	): void {
+		const container = options?.container ?? this.chatContainer;
 		switch (message.role) {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext, {
-					suppressLeadingSpace: this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+					suppressLeadingSpace: container.children.at(-1) instanceof AgentMessageComponent,
 				});
 				if (message.output) {
 					component.appendOutput(message.output);
@@ -6393,7 +6460,7 @@ export class InteractiveMode {
 					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
 					message.fullOutputPath,
 				);
-				this.chatContainer.addChild(component);
+				container.addChild(component);
 				break;
 			}
 			case "custom": {
@@ -6405,25 +6472,25 @@ export class InteractiveMode {
 					if (hasEditDiffsExpansion(component)) {
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
 					}
-					if (isSessionSlashCommandMessage(message) && this.chatContainer.children.length > 0) {
-						this.chatContainer.addChild(new Spacer(1));
+					if (isSessionSlashCommandMessage(message) && container.children.length > 0) {
+						container.addChild(new Spacer(1));
 					}
-					this.chatContainer.addChild(component);
+					container.addChild(component);
 				}
 				break;
 			}
 			case "compactionSummary": {
-				this.chatContainer.addChild(new Spacer(1));
+				container.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
+				container.addChild(component);
 				break;
 			}
 			case "branchSummary": {
-				this.chatContainer.addChild(new Spacer(1));
+				container.addChild(new Spacer(1));
 				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
+				container.addChild(component);
 				break;
 			}
 			case "user": {
@@ -6431,20 +6498,20 @@ export class InteractiveMode {
 				if (textContent) {
 					const heartbeatMessage = this.createLegacyHeartbeatPromptMessage(message, textContent);
 					if (heartbeatMessage) {
-						if (this.chatContainer.children.length > 0) {
-							this.chatContainer.addChild(new Spacer(1));
+						if (container.children.length > 0) {
+							container.addChild(new Spacer(1));
 						}
 						const component = new InjectedPromptMessageComponent(
 							heartbeatMessage,
 							this.getMarkdownThemeWithSettings(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						container.addChild(component);
 						break;
 					}
 
-					if (this.chatContainer.children.length > 0) {
-						this.chatContainer.addChild(new Spacer(1));
+					if (container.children.length > 0) {
+						container.addChild(new Spacer(1));
 					}
 					const skillBlock = parseSkillBlock(textContent);
 					if (skillBlock) {
@@ -6453,14 +6520,14 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 						);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						container.addChild(component);
 						if (skillBlock.userMessage) {
 							const userComponent = new UserMessageComponent(
 								skillBlock.userMessage,
 								this.getMarkdownThemeWithSettings(),
 								(name) => this.isRecognizedSlashCommand(name),
 							);
-							this.chatContainer.addChild(userComponent);
+							container.addChild(userComponent);
 						}
 					} else {
 						const userComponent = new UserMessageComponent(
@@ -6468,7 +6535,7 @@ export class InteractiveMode {
 							this.getMarkdownThemeWithSettings(),
 							(name) => this.isRecognizedSlashCommand(name),
 						);
-						this.chatContainer.addChild(userComponent);
+						container.addChild(userComponent);
 					}
 					if (options?.populateHistory) {
 						this.editor.addToHistory?.(textContent);
@@ -6485,13 +6552,13 @@ export class InteractiveMode {
 					{
 						expanded: this.toolOutputExpanded,
 						precededByToolActivity:
-							this.chatContainer.children.at(-1) instanceof ToolExecutionComponent ||
-							this.chatContainer.children.at(-1) instanceof AgentMessageComponent,
+							container.children.at(-1) instanceof ToolExecutionComponent ||
+							container.children.at(-1) instanceof AgentMessageComponent,
 						mermaidTransform: this.mermaidMarkdownTransform,
 						cwd: this.getCurrentCwd(),
 					},
 				);
-				this.chatContainer.addChild(assistantComponent);
+				container.addChild(assistantComponent);
 				break;
 			}
 			case "toolResult": {
@@ -6538,10 +6605,18 @@ export class InteractiveMode {
 			populateHistory?: boolean;
 			clearChat?: boolean;
 			limitTranscript?: boolean;
+			targetContainer?: Container;
+			messagesAlreadyChronological?: boolean;
+			totalMessageCount?: number;
+			/** Rechecked after async tool-definition preload, before this render can mutate its target. */
+			shouldContinue?: () => boolean;
 		} = {},
 	): Promise<void> {
 		this.resetPendingToolState();
-		const transcriptMessages = this.orderMessagesForTranscript(sessionContext.messages);
+		const targetContainer = options.targetContainer ?? this.chatContainer;
+		const transcriptMessages = options.messagesAlreadyChronological
+			? sessionContext.messages
+			: this.orderMessagesForTranscript(sessionContext.messages);
 		const messagesToRender = options.limitTranscript ? initialRenderMessages(transcriptMessages) : transcriptMessages;
 		this.ipythonToolComponents.clear();
 		this.lateIpythonSentAgentMessages.clear();
@@ -6558,9 +6633,10 @@ export class InteractiveMode {
 			}
 		}
 		await this.preloadToolDefinitions(toolNames);
+		if (options.shouldContinue && !options.shouldContinue()) return;
 
 		if (options.clearChat) {
-			this.chatContainer.clear();
+			targetContainer.clear();
 		}
 
 		if (options.updateFooter) {
@@ -6574,26 +6650,20 @@ export class InteractiveMode {
 			}
 		}
 
-		const renderOptions = { ...options, populateHistory: false };
-
-		if (messagesToRender.length < sessionContext.messages.length) {
-			this.chatContainer.addChild(
-				new Text(
-					theme.fg(
-						"dim",
-						`Showing latest ${messagesToRender.length} of ${sessionContext.messages.length} messages for faster open.`,
-					),
-					1,
-					0,
-				),
-			);
-			this.chatContainer.addChild(new Spacer(1));
+		const totalMessageCount = options.totalMessageCount ?? sessionContext.messages.length;
+		if (messagesToRender.length < totalMessageCount) {
+			const banner =
+				this.pagedHistory !== undefined && targetContainer === this.historyContainer
+					? `Showing ${messagesToRender.length} of ${totalMessageCount} messages. Scroll up or use PageUp to load earlier history.`
+					: `Showing latest ${messagesToRender.length} of ${totalMessageCount} messages for faster open.`;
+			targetContainer.addChild(new Text(theme.fg("dim", banner), 1, 0));
+			targetContainer.addChild(new Spacer(1));
 		}
 
 		for (const message of messagesToRender) {
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				this.addMessageToChat(message);
+				this.addMessageToChat(message, { container: targetContainer });
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
@@ -6612,8 +6682,8 @@ export class InteractiveMode {
 						component.setExpanded(this.toolOutputExpanded);
 						component.setAgentMessagesExpanded(this.agentMessagesExpanded);
 						component.setEditDiffsExpanded(this.editDiffsExpanded);
-						selectLatestToolExpandHint(this.chatContainer.children, component);
-						this.chatContainer.addChild(component);
+						selectLatestToolExpandHint(targetContainer.children, component);
+						targetContainer.addChild(component);
 						this.registerIpythonToolComponent(content.name, content.id, component);
 
 						if (message.stopReason === "aborted" || message.stopReason === "error") {
@@ -6644,7 +6714,7 @@ export class InteractiveMode {
 				}
 			} else {
 				// All other messages use standard rendering
-				this.addMessageToChat(message, renderOptions);
+				this.addMessageToChat(message, { container: targetContainer });
 			}
 		}
 
@@ -6653,6 +6723,118 @@ export class InteractiveMode {
 			this.pendingTools.set(toolCallId, component);
 		}
 		this.ui.requestRender();
+	}
+
+	private resetPagedHistory(): void {
+		this.historyLoadGeneration++;
+		this.historyRangeAbortController?.abort();
+		this.historyRangeAbortController = undefined;
+		this.historyRangeLoad = undefined;
+		this.pagedHistory = undefined;
+		this.historyContainer.clear();
+	}
+
+	private async renderSnapshotTranscript(
+		snapshot: AgentConnectionSnapshot,
+		options: { updateFooter?: boolean; populateHistory?: boolean; initialLimitForLegacy?: boolean } = {},
+	): Promise<void> {
+		const context = this.getSessionContextFromConnectionSnapshot(snapshot);
+		const history = snapshot.history;
+		if (!history) {
+			this.resetPagedHistory();
+			await this.renderSessionContext(context, {
+				clearChat: true,
+				updateFooter: options.updateFooter,
+				populateHistory: options.populateHistory,
+				limitTranscript: options.initialLimitForLegacy,
+			});
+			return;
+		}
+		if (
+			history.version !== 1 ||
+			history.order !== "chronological" ||
+			typeof history.representation !== "string" ||
+			history.representation.length === 0 ||
+			history.entryIds.length !== snapshot.messages.length ||
+			history.startIndex + snapshot.messages.length > history.totalMessageCount
+		) {
+			throw new Error("Received an invalid recent-first session history window");
+		}
+		this.resetPagedHistory();
+		this.pagedHistory = { ...history, entryIds: [...history.entryIds], messages: [...snapshot.messages] };
+		this.chatContainer.clear();
+		await this.renderSessionContext(
+			{ ...context, messages: this.pagedHistory.messages },
+			{
+				clearChat: true,
+				updateFooter: options.updateFooter,
+				populateHistory: options.populateHistory,
+				targetContainer: this.historyContainer,
+				messagesAlreadyChronological: true,
+				totalMessageCount: history.totalMessageCount,
+			},
+		);
+	}
+
+	private loadOlderHistoryRange(): Promise<void> | undefined {
+		const current = this.pagedHistory;
+		if (
+			!current?.hasOlder ||
+			!this.agentConnection.getHistoryRange ||
+			this.historyRangeLoad ||
+			this.connectionState?.isStreaming ||
+			this.connectionState?.isCompacting ||
+			this.connectionState?.isBashRunning
+		) {
+			return this.historyRangeLoad;
+		}
+		const boundary = current.entryIds[0];
+		if (!boundary) return undefined;
+		const generation = this.historyLoadGeneration;
+		const controller = new AbortController();
+		this.historyRangeAbortController = controller;
+		const load = (async () => {
+			try {
+				const range: AgentConnectionHistoryRange = await this.agentConnection.getHistoryRange!(
+					{
+						generation: current.generation,
+						representation: current.representation,
+						tipEntryId: current.tipEntryId,
+						beforeEntryId: boundary,
+					},
+					{ signal: controller.signal },
+				);
+				if (controller.signal.aborted || generation !== this.historyLoadGeneration) return;
+				const merged = mergeOlderAgentConnectionHistory(current, range);
+				this.pagedHistory = merged;
+				const ownsRender = () =>
+					!controller.signal.aborted && generation === this.historyLoadGeneration && this.pagedHistory === merged;
+				const context = this.getSessionContextFromConnectionSnapshot({
+					state: this.connectionState!,
+					messages: merged.messages,
+				});
+				await this.renderSessionContext(context, {
+					clearChat: true,
+					targetContainer: this.historyContainer,
+					messagesAlreadyChronological: true,
+					totalMessageCount: current.totalMessageCount,
+					shouldContinue: ownsRender,
+				});
+				if (ownsRender()) this.ui.requestRenderPreservingViewport();
+			} catch (error) {
+				if (!controller.signal.aborted) {
+					this.showStatus(
+						`Could not load earlier history: ${error instanceof Error ? error.message : String(error)}`,
+						"warning",
+					);
+				}
+			} finally {
+				if (this.historyRangeAbortController === controller) this.historyRangeAbortController = undefined;
+				if (generation === this.historyLoadGeneration) this.historyRangeLoad = undefined;
+			}
+		})();
+		this.historyRangeLoad = load;
+		return load;
 	}
 
 	async renderInitialMessages(): Promise<void> {
@@ -6664,10 +6846,10 @@ export class InteractiveMode {
 		this.seedSubagentSummary(snapshot.children);
 		this.applyConnectionStateSnapshot(state);
 		this.restoreTurnStartFromMessages(context.messages);
-		await this.renderSessionContext(context, {
+		await this.renderSnapshotTranscript(snapshot, {
 			updateFooter: true,
 			populateHistory: true,
-			limitTranscript: true,
+			initialLimitForLegacy: true,
 		});
 		await this.restoreStreamingMessageFromSnapshot(streamingMessage);
 
@@ -6719,6 +6901,7 @@ export class InteractiveMode {
 
 	private async rebuildChatFromMessages(): Promise<void> {
 		const context = await this.agentConnection.getSessionContext();
+		this.resetPagedHistory();
 		await this.renderSessionContext(context, { clearChat: true });
 	}
 
@@ -10132,6 +10315,9 @@ ${interrupt ? `| \`${interrupt}\` | Interrupt current operation |\n` : ""}${shor
 		this.stopGoalTrayTimer();
 		this.closeHeartbeatManager();
 		this.clearExtensionTerminalInputListeners();
+		this.resetPagedHistory();
+		this.historyInputUnsubscribe?.();
+		this.historyInputUnsubscribe = undefined;
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {

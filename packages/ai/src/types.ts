@@ -76,6 +76,19 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
+/** Content-free raw token observation for process-local performance metrics. */
+export interface ProviderUsageObservation {
+	inputTokens: number | null;
+	cachedInputTokens: number | null;
+	outputTokens: number | null;
+	reasoningTokens: number | null;
+	totalTokens: number | null;
+	/** True when raw inputTokens already includes cachedInputTokens. */
+	cachedInputIncludedInInput: boolean | null;
+	/** True when raw outputTokens already includes reasoningTokens. */
+	reasoningIncludedInOutput: boolean | null;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
@@ -108,6 +121,8 @@ export interface StreamOptions {
 	 * its body stream is consumed.
 	 */
 	onResponse?: (response: ProviderResponse, model: Model<Api>) => void | Promise<void>;
+	/** Local observation only. Providers must never serialize this callback. */
+	onUsageObservation?: (observation: ProviderUsageObservation, model: Model<Api>) => void | Promise<void>;
 	/**
 	 * Optional custom HTTP headers to include in API requests.
 	 * Merged with provider defaults; can override default headers.
@@ -317,6 +332,25 @@ export interface OpenAICompletionsCompat {
 	supportsLongCacheRetention?: boolean;
 }
 
+/** Validation state for an exact native compaction route. Only `live-verified` may execute. */
+export type NativeCompactionValidation = "unverified" | "documentation-verified" | "live-verified";
+
+/**
+ * Explicit capability for an OpenAI Responses v1 compact endpoint.
+ *
+ * This is model scoped on purpose. A shared serializer, display name, or provider-wide
+ * boolean is not evidence that another route implements this protocol.
+ */
+export interface NativeCompactionCapability {
+	protocol: "openai-responses-compact-v1";
+	provider: string;
+	model: string;
+	endpoint: string;
+	apiVersion: "v1";
+	enabled: boolean;
+	validation: NativeCompactionValidation;
+}
+
 /** Compatibility settings for OpenAI Responses APIs. */
 export interface OpenAIResponsesCompat {
 	/** Whether to send the OpenAI `session_id` cache-affinity header from `options.sessionId` when caching is enabled. Default: true. */
@@ -452,6 +486,8 @@ export interface Model<TApi extends Api> {
 	maxTokens: number;
 	/** Flagship model surfaced above non-featured models of the same provider in pickers. */
 	featured?: boolean;
+	/** Exact, explicitly validated native compaction route. Absent means unsupported. */
+	nativeCompaction?: NativeCompactionCapability;
 	headers?: Record<string, string>;
 	/** Compatibility overrides for OpenAI-compatible APIs. If not set, auto-detected from baseUrl. */
 	compat?: TApi extends "openai-completions"

@@ -1,6 +1,13 @@
+import type { PerformanceMetricRecorder } from "@earendil-works/pi-agent-core";
 import { registerSessionResourceCleanup } from "@earendil-works/pi-ai";
 import type { KernelBootstrapProgressHandler, KernelPythonSkill } from "./bootstrap.js";
-import type { RestoreResult, SnapshotResult } from "./state-snapshot.js";
+import type {
+	KernelRestoreSource,
+	KernelSnapshotFormat,
+	RestoreResult,
+	SnapshotLegacyExportResult,
+	SnapshotResult,
+} from "./state-snapshot.js";
 
 export const DEFAULT_MAX_OUTPUT_CHARS = 65536;
 export const HOST_REQUEST_SHUTDOWN_TIMEOUT_MS = 5000;
@@ -32,11 +39,15 @@ export type HostRequestHandlers = Record<string, HostRequestHandler>;
 
 /** Where and how to persist the kernel's user namespace so it survives resume. */
 export interface KernelSnapshotConfig {
-	/** Absolute path for the dill payload. */
+	/** Absolute path for the legacy dill payload. */
 	path: string;
-	/** Absolute path for the JSON manifest written alongside the payload. */
+	/** Absolute path for the legacy JSON manifest written alongside the payload. */
 	manifestPath: string;
-	/** Maximum aggregate snapshot size. Default 256 MiB. */
+	/** Session-scoped CAS root. Derived from `path` when omitted. */
+	casRootPath?: string;
+	/** Explicitly initialize CAS v2. Absence defaults fresh roots to legacy. */
+	format?: KernelSnapshotFormat;
+	/** Maximum aggregate legacy-equivalent payload size. Default 256 MiB. */
 	maxBytes?: number;
 	/** Maximum serialized size of one variable. Default 16 MiB. */
 	maxVariableBytes?: number;
@@ -54,6 +65,8 @@ export interface KernelManagerOptions {
 	pythonSkills?: readonly KernelPythonSkill[];
 	/** Persist/revive the user namespace across kernel restarts and session resume. */
 	snapshot?: KernelSnapshotConfig;
+	/** Disposable content-free performance recorder; never an execution dependency. */
+	performanceMetrics?: PerformanceMetricRecorder;
 	/** Runtime bootstrap re-run on a protocol-repaired kernel so live handles (rlm, bash, skills) exist again. */
 	bootstrapCode?: string;
 	/** File receiving the kernel process's stderr, rotated once at each spawn. */
@@ -279,6 +292,11 @@ export interface KernelShutdownOptions {
 	drainHostRequests?: boolean;
 }
 
+export interface KernelRestoreOptions {
+	/** Auto prefers any v2 root. Previous and legacy are explicit recovery actions. */
+	source?: KernelRestoreSource;
+}
+
 /** Public surface every kernel client exposes to the provisioner and session layer. */
 export interface KernelClient {
 	readonly ownerSessionId: string | undefined;
@@ -294,7 +312,9 @@ export interface KernelClient {
 	disposeSync(): void;
 	snapshotState(): Promise<SnapshotResult | null>;
 	pruneOversizedVariables(): Promise<SnapshotResult | null>;
-	restoreState(): Promise<RestoreResult | null>;
+	restoreState(options?: KernelRestoreOptions): Promise<RestoreResult | null>;
+	/** Explicit compatibility export; callers must gate older-runtime launch on success. */
+	exportStateForLegacyRuntime?(source?: "current" | "previous"): Promise<SnapshotLegacyExportResult | null>;
 	listNamespaceNames(signal?: AbortSignal): Promise<string[] | null>;
 }
 

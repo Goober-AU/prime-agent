@@ -10,7 +10,7 @@ import {
 	type TextContent,
 	type Usage,
 } from "@earendil-works/pi-ai";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
 	appendFileSync,
 	chownSync,
@@ -99,6 +99,16 @@ export interface NewSessionOptions {
 }
 
 export type SessionPersistListener = (sessionFile: string) => void;
+
+/** Bytes returned by the primary transcript read that populated this manager. Repair/header probes are excluded. */
+export interface SessionLoadObservation {
+	readonly readBytes: number;
+}
+
+interface LoadedSessionEntries {
+	entries: FileEntry[];
+	observation?: SessionLoadObservation;
+}
 
 export interface SessionEntryBase {
 	type: string;
@@ -237,6 +247,193 @@ export type SessionEntry =
 
 export type FileEntry = SessionHeader | SessionEntry;
 
+const INLINE_TOOL_TEXT_REFERENCE_KEY = "$primeToolText";
+const INLINE_TOOL_TEXT_REFERENCE_VERSION = 1;
+const INLINE_TOOL_TEXT_ENCODING_KEY = "$primeSessionEncoding";
+const INLINE_TOOL_TEXT_ENCODING_KIND = "inline_tool_text";
+const TOOL_DETAIL_TEXT_KEYS = ["stdout", "stderr", "result", "backgroundOutput"] as const;
+
+type ToolDetailTextKey = (typeof TOOL_DETAIL_TEXT_KEYS)[number];
+
+interface InlineToolTextReference {
+	$primeToolText: {
+		version: 1;
+		source: "content";
+		contentIndex: number;
+		start: number;
+		length: number;
+		sha256: string;
+	};
+}
+
+interface InlineToolTextEncoding {
+	$primeSessionEncoding: {
+		version: 1;
+		kind: "inline_tool_text";
+		fields: ToolDetailTextKey[];
+	};
+}
+
+function sha256Text(value: string): string {
+	// JSON's escaped string form is lossless for every JavaScript UTF-16 code unit,
+	// including lone surrogates that raw UTF-8 would normalize to U+FFFD.
+	return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+function toolResultContentText(message: Record<string, unknown>, contentIndex: number): string | undefined {
+	const content = message.content;
+	if (typeof content === "string") return contentIndex === 0 ? content : undefined;
+	if (!Array.isArray(content)) return undefined;
+	const part = content[contentIndex];
+	if (!part || typeof part !== "object") return undefined;
+	const candidate = part as { type?: unknown; text?: unknown };
+	return candidate.type === "text" && typeof candidate.text === "string" ? candidate.text : undefined;
+}
+
+function inlineToolTextReference(message: Record<string, unknown>, value: string): InlineToolTextReference | undefined {
+	if (value.length === 0) return undefined;
+	const content = message.content;
+	const contentCount = Array.isArray(content) ? content.length : typeof content === "string" ? 1 : 0;
+	for (let contentIndex = 0; contentIndex < contentCount; contentIndex++) {
+		const text = toolResultContentText(message, contentIndex);
+		const start = text?.indexOf(value) ?? -1;
+		if (start < 0) continue;
+		const reference: InlineToolTextReference = {
+			[INLINE_TOOL_TEXT_REFERENCE_KEY]: {
+				version: INLINE_TOOL_TEXT_REFERENCE_VERSION,
+				source: "content",
+				contentIndex,
+				start,
+				length: value.length,
+				sha256: sha256Text(value),
+			},
+		};
+		// Small values cost more as references and are intentionally left inline.
+		if (Buffer.byteLength(JSON.stringify(reference), "utf8") < Buffer.byteLength(JSON.stringify(value), "utf8")) {
+			return reference;
+		}
+	}
+	return undefined;
+}
+
+function isToolDetailTextKey(value: unknown): value is ToolDetailTextKey {
+	return typeof value === "string" && (TOOL_DETAIL_TEXT_KEYS as readonly string[]).includes(value);
+}
+
+function encodedInlineToolTextFields(entry: FileEntry): ToolDetailTextKey[] | undefined {
+	const envelope = (entry as unknown as Record<string, unknown>)[INLINE_TOOL_TEXT_ENCODING_KEY];
+	if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) return undefined;
+	const encoding = envelope as Record<string, unknown>;
+	if (
+		encoding.version !== INLINE_TOOL_TEXT_REFERENCE_VERSION ||
+		encoding.kind !== INLINE_TOOL_TEXT_ENCODING_KIND ||
+		!Array.isArray(encoding.fields) ||
+		encoding.fields.length === 0 ||
+		!encoding.fields.every(isToolDetailTextKey) ||
+		new Set(encoding.fields).size !== encoding.fields.length
+	) {
+		return undefined;
+	}
+	return encoding.fields;
+}
+
+function isNonnegativeSafeInteger(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+/**
+ * Encode exact tool detail/content duplication within one JSONL entry.
+ * The source text remains inline and the reference is versioned, hashed and reconstructible without external state.
+ */
+export function serializeSessionFileEntry(entry: FileEntry): string {
+	const original = JSON.stringify(entry);
+	if (entry.type !== "message" || entry.message.role !== "toolResult") return original;
+	const message = entry.message as unknown as Record<string, unknown>;
+	const details = message.details;
+	if (!details || typeof details !== "object" || Array.isArray(details)) return original;
+	let encodedDetails: Record<string, unknown> | undefined;
+	const encodedFields: ToolDetailTextKey[] = [];
+	for (const key of TOOL_DETAIL_TEXT_KEYS) {
+		const value = (details as Record<string, unknown>)[key];
+		if (typeof value !== "string") continue;
+		const reference = inlineToolTextReference(message, value);
+		if (!reference) continue;
+		encodedDetails ??= { ...(details as Record<string, unknown>) };
+		encodedDetails[key] = reference;
+		encodedFields.push(key);
+	}
+	if (!encodedDetails) return original;
+	const encoding: InlineToolTextEncoding = {
+		[INLINE_TOOL_TEXT_ENCODING_KEY]: {
+			version: INLINE_TOOL_TEXT_REFERENCE_VERSION,
+			kind: INLINE_TOOL_TEXT_ENCODING_KIND,
+			fields: encodedFields,
+		},
+	};
+	const candidate = JSON.stringify({ ...entry, ...encoding, message: { ...message, details: encodedDetails } });
+	// The disk-only discriminator has a fixed cost; never expand a row merely to encode references.
+	return Buffer.byteLength(candidate, "utf8") < Buffer.byteLength(original, "utf8") ? candidate : original;
+}
+
+function decodeInlineToolTextReference(message: Record<string, unknown>, value: unknown): string | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const candidate = (value as Record<string, unknown>)[INLINE_TOOL_TEXT_REFERENCE_KEY];
+	if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return undefined;
+	const reference = candidate as Record<string, unknown>;
+	if (
+		reference.version !== INLINE_TOOL_TEXT_REFERENCE_VERSION ||
+		reference.source !== "content" ||
+		!isNonnegativeSafeInteger(reference.contentIndex) ||
+		!isNonnegativeSafeInteger(reference.start) ||
+		!isNonnegativeSafeInteger(reference.length) ||
+		typeof reference.sha256 !== "string" ||
+		!/^[0-9a-f]{64}$/.test(reference.sha256)
+	) {
+		return undefined;
+	}
+	const source = toolResultContentText(message, reference.contentIndex);
+	if (source === undefined || reference.length > source.length || reference.start > source.length - reference.length) {
+		return undefined;
+	}
+	const decoded = source.slice(reference.start, reference.start + reference.length);
+	return sha256Text(decoded) === reference.sha256 ? decoded : undefined;
+}
+
+/** Rehydrate explicitly tagged disk-only references before entries reach model, UI, export or observation callers. */
+export function rehydrateSessionFileEntry(entry: FileEntry): FileEntry {
+	const encodedFields = encodedInlineToolTextFields(entry);
+	if (!encodedFields || entry.type !== "message" || entry.message.role !== "toolResult") return entry;
+	const { [INLINE_TOOL_TEXT_ENCODING_KEY]: _encoding, ...publicEntry } = entry as unknown as Record<string, unknown>;
+	const message = entry.message as unknown as Record<string, unknown>;
+	const details = message.details;
+	const sourceDetails =
+		details && typeof details === "object" && !Array.isArray(details) ? (details as Record<string, unknown>) : {};
+	const decodedDetails: Record<string, unknown> = { ...sourceDetails };
+	const failedKeys: ToolDetailTextKey[] = [];
+	for (const key of encodedFields) {
+		const decoded = decodeInlineToolTextReference(message, sourceDetails[key]);
+		if (decoded === undefined) {
+			failedKeys.push(key);
+			decodedDetails[key] = `[session recovery error: invalid inline ${key} reference]`;
+		} else {
+			decodedDetails[key] = decoded;
+		}
+	}
+	if (failedKeys.length === 0) {
+		return { ...publicEntry, message: { ...message, details: decodedDetails } } as unknown as FileEntry;
+	}
+	const diagnostic = `[session recovery error: could not reconstruct ${failedKeys.join(", ")} from tool-result content]`;
+	const content = Array.isArray(message.content)
+		? [...message.content, { type: "text", text: diagnostic }]
+		: typeof message.content === "string"
+			? `${message.content}\n${diagnostic}`
+			: [{ type: "text", text: diagnostic }];
+	return {
+		...publicEntry,
+		message: { ...message, content, details: decodedDetails, isError: true },
+	} as unknown as FileEntry;
+}
+
 export interface SessionTreeFlatNode {
 	entry: SessionEntry;
 	label?: string;
@@ -252,6 +449,23 @@ export interface SessionContext {
 	thinkingLevel: string;
 	serviceTier: ServiceTier;
 	model: { provider: string; modelId: string } | null;
+}
+
+export interface SessionContextWithEntryIds extends SessionContext {
+	/** Stable session-entry id aligned by index with messages. */
+	entryIds: string[];
+}
+
+export interface SessionHistorySnapshot {
+	/** Chronological presentation order; model-facing context order is unchanged. */
+	messages: AgentMessage[];
+	entryIds: string[];
+	tipEntryId: string | null;
+}
+
+interface SessionContextMessage {
+	entryId: string;
+	message: AgentMessage;
 }
 
 export interface SessionInfo {
@@ -394,7 +608,7 @@ export function parseSessionEntries(content: string): FileEntry[] {
 		if (!line.trim()) continue;
 		try {
 			const entry = JSON.parse(line) as FileEntry;
-			entries.push(entry);
+			entries.push(rehydrateSessionFileEntry(entry));
 		} catch {
 			// Skip malformed lines.
 		}
@@ -429,12 +643,12 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
-export function buildSessionContext(
+export function buildSessionContextWithEntryIds(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 	targetModel?: Model<Api>,
-): SessionContext {
+): SessionContextWithEntryIds {
 	if (!byId) {
 		byId = new Map<string, SessionEntry>();
 		for (const entry of entries) {
@@ -444,7 +658,7 @@ export function buildSessionContext(
 
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
-		return { messages: [], thinkingLevel: "off", serviceTier: "default", model: null };
+		return { messages: [], entryIds: [], thinkingLevel: "off", serviceTier: "default", model: null };
 	}
 	if (leafId) {
 		leaf = byId.get(leafId);
@@ -454,7 +668,7 @@ export function buildSessionContext(
 	}
 
 	if (!leaf) {
-		return { messages: [], thinkingLevel: "off", serviceTier: "default", model: null };
+		return { messages: [], entryIds: [], thinkingLevel: "off", serviceTier: "default", model: null };
 	}
 
 	// push+reverse, not unshift-per-entry: unshift is O(n), making this O(n^2) on long sessions.
@@ -497,17 +711,27 @@ export function buildSessionContext(
 	// Build messages and collect corresponding entries
 	// When there's a compaction, model context remains summary-first while the
 	// summary records where clients should present it among retained messages.
-	const messages: AgentMessage[] = [];
+	const messageEntries: SessionContextMessage[] = [];
 
-	const appendMessage = (entry: SessionEntry, target = messages) => {
+	const appendMessage = (entry: SessionEntry, target = messageEntries) => {
 		if (entry.type === "message") {
-			target.push(entry.message);
+			target.push({ entryId: entry.id, message: entry.message });
 		} else if (entry.type === "custom_message") {
-			target.push(
-				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-			);
+			target.push({
+				entryId: entry.id,
+				message: createCustomMessage(
+					entry.customType,
+					entry.content,
+					entry.display,
+					entry.details,
+					entry.timestamp,
+				),
+			});
 		} else if (entry.type === "branch_summary" && entry.summary) {
-			target.push(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
+			target.push({
+				entryId: entry.id,
+				message: createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
+			});
 		}
 	};
 
@@ -518,7 +742,7 @@ export function buildSessionContext(
 		// Collect kept messages (before compaction, starting from firstKeptEntryId).
 		// The context remains summary-first for the model; retainedMessageCount records
 		// the exact chronological presentation boundary for clients.
-		const retainedMessages: AgentMessage[] = [];
+		const retainedMessages: SessionContextMessage[] = [];
 		let foundFirstKept = false;
 		for (let i = 0; !providerContext && i < compactionIdx; i++) {
 			const entry = path[i];
@@ -530,16 +754,19 @@ export function buildSessionContext(
 			}
 		}
 
-		messages.push(
-			createCompactionSummaryMessage(
-				compaction.summary,
-				compaction.tokensBefore,
-				compaction.timestamp,
-				compaction.customInstructions,
-				retainedMessages.length,
-				providerContext,
-				compaction.harnessDigest,
-			),
+		messageEntries.push(
+			{
+				entryId: compaction.id,
+				message: createCompactionSummaryMessage(
+					compaction.summary,
+					compaction.tokensBefore,
+					compaction.timestamp,
+					compaction.customInstructions,
+					retainedMessages.length,
+					providerContext,
+					compaction.harnessDigest,
+				),
+			},
 			...retainedMessages,
 		);
 
@@ -553,7 +780,45 @@ export function buildSessionContext(
 		}
 	}
 
-	return { messages, thinkingLevel, serviceTier, model };
+	return {
+		messages: messageEntries.map((item) => item.message),
+		entryIds: messageEntries.map((item) => item.entryId),
+		thinkingLevel,
+		serviceTier,
+		model,
+	};
+}
+
+export function buildSessionContext(
+	entries: SessionEntry[],
+	leafId?: string | null,
+	byId?: Map<string, SessionEntry>,
+	targetModel?: Model<Api>,
+): SessionContext {
+	const { entryIds: _entryIds, ...context } = buildSessionContextWithEntryIds(entries, leafId, byId, targetModel);
+	return context;
+}
+
+export function orderSessionContextForTranscript(context: SessionContextWithEntryIds): SessionHistorySnapshot {
+	const pairs = context.messages.map((message, index) => ({ message, entryId: context.entryIds[index]! }));
+	const summaryIndex = pairs.findIndex(({ message }) => message.role === "compactionSummary");
+	if (summaryIndex !== -1) {
+		const summaryPair = pairs[summaryIndex];
+		const summary = summaryPair.message;
+		const remaining = pairs.filter((_pair, index) => index !== summaryIndex);
+		if (summary.role === "compactionSummary") {
+			const boundary =
+				Number.isSafeInteger(summary.retainedMessageCount) && summary.retainedMessageCount! >= 0
+					? Math.min(summary.retainedMessageCount!, remaining.length)
+					: remaining.filter(({ message }) => message.timestamp < summary.timestamp).length;
+			pairs.splice(0, pairs.length, ...remaining.slice(0, boundary), summaryPair, ...remaining.slice(boundary));
+		}
+	}
+	return {
+		messages: pairs.map(({ message }) => message),
+		entryIds: pairs.map(({ entryId }) => entryId),
+		tipEntryId: null,
+	};
 }
 
 export function getDefaultSessionDir(_cwd: string, agentDir: string = getDefaultAgentDir()): string {
@@ -569,7 +834,7 @@ export function getDefaultSessionDir(_cwd: string, agentDir: string = getDefault
 function appendEntryFromBuffer(entries: FileEntry[], buffer: Buffer, start = 0, end = buffer.length): void {
 	if (end <= start) return;
 	try {
-		entries.push(JSON.parse(buffer.toString("utf8", start, end)) as FileEntry);
+		entries.push(rehydrateSessionFileEntry(JSON.parse(buffer.toString("utf8", start, end)) as FileEntry));
 	} catch {
 		// Skip malformed or blank lines.
 	}
@@ -734,27 +999,45 @@ function finalizeLoadedEntries(entries: FileEntry[]): FileEntry[] {
 	return entries;
 }
 
+function loadEntriesFromFileObserved(filePath: string): LoadedSessionEntries {
+	if (!existsSync(filePath)) return { entries: [] };
+	const buffer = readFileSync(filePath);
+	const entries = finalizeLoadedEntries(parseEntriesFromBuffer(buffer));
+	return entries.length > 0 ? { entries, observation: { readBytes: buffer.length } } : { entries };
+}
+
 export function loadEntriesFromFile(filePath: string): FileEntry[] {
-	if (!existsSync(filePath)) return [];
-	return finalizeLoadedEntries(parseEntriesFromBuffer(readFileSync(filePath)));
+	return loadEntriesFromFileObserved(filePath).entries;
 }
 
 // Async loader for the daemon: reads off the event loop and yields while parsing so a
 // large load doesn't freeze other sessions. Large files stream to avoid retaining both
 // the full input Buffer and the parsed entry graph at the same time.
-export async function loadEntriesFromFileAsync(
+async function loadEntriesFromFileAsyncObserved(
 	filePath: string,
 	options: { streamThresholdBytes?: number } = {},
-): Promise<FileEntry[]> {
-	if (!existsSync(filePath)) return [];
+): Promise<LoadedSessionEntries> {
+	if (!existsSync(filePath)) return { entries: [] };
 	const streamThresholdBytes = options.streamThresholdBytes ?? SESSION_STREAMING_LOAD_THRESHOLD_BYTES;
-	if ((await stat(filePath)).size < streamThresholdBytes) {
-		return finalizeLoadedEntries(await parseEntriesFromBufferAsync(await readFile(filePath)));
+	const sizeAtOpen = (await stat(filePath)).size;
+	if (sizeAtOpen < streamThresholdBytes) {
+		const buffer = await readFile(filePath);
+		const entries = finalizeLoadedEntries(await parseEntriesFromBufferAsync(buffer));
+		return entries.length > 0 ? { entries, observation: { readBytes: buffer.length } } : { entries };
 	}
 
 	const entries: FileEntry[] = [];
 	let bytesSinceYield = 0;
-	for await (const line of readLinesAsBuffers(filePath)) {
+	let readBytes = 0;
+	// Pin the stream to the measured boundary. A concurrent append belongs to the next reload,
+	// and onBytesRead counts the chunks actually returned rather than treating stat size as I/O.
+	const range = sizeAtOpen > 0 ? { end: sizeAtOpen - 1 } : undefined;
+	for await (const line of readLinesAsBuffers(filePath, {
+		...range,
+		onBytesRead: (bytes) => {
+			readBytes += bytes;
+		},
+	})) {
 		appendEntryFromBuffer(entries, line);
 		bytesSinceYield += line.length + 1;
 		if (bytesSinceYield >= SESSION_ASYNC_PARSE_YIELD_BYTES) {
@@ -762,7 +1045,15 @@ export async function loadEntriesFromFileAsync(
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	}
-	return finalizeLoadedEntries(entries);
+	const finalized = finalizeLoadedEntries(entries);
+	return finalized.length > 0 ? { entries: finalized, observation: { readBytes } } : { entries: finalized };
+}
+
+export async function loadEntriesFromFileAsync(
+	filePath: string,
+	options: { streamThresholdBytes?: number } = {},
+): Promise<FileEntry[]> {
+	return (await loadEntriesFromFileAsyncObserved(filePath, options)).entries;
 }
 
 function readSessionHeader(filePath: string): Partial<SessionHeader> | undefined {
@@ -1447,6 +1738,7 @@ export class SessionManager {
 	private labelTimestampsById: Map<string, string> = new Map();
 	private leafId: string | null = null;
 	private persistListeners = new Set<SessionPersistListener>();
+	private loadObservation?: SessionLoadObservation;
 
 	private constructor(
 		cwd: string,
@@ -1454,6 +1746,7 @@ export class SessionManager {
 		sessionFile: string | undefined,
 		persist: boolean,
 		preloadedEntries?: FileEntry[],
+		preloadedObservation?: SessionLoadObservation,
 	) {
 		this.cwd = cwd;
 		this.sessionDir = sessionDir;
@@ -1463,7 +1756,7 @@ export class SessionManager {
 		}
 
 		if (sessionFile) {
-			this.setSessionFile(sessionFile, preloadedEntries);
+			this.setSessionFile(sessionFile, preloadedEntries, preloadedObservation);
 		} else {
 			this.newSession();
 		}
@@ -1474,11 +1767,24 @@ export class SessionManager {
 	 * preloadedEntries must be loadEntriesFromFile(sessionFile) for the same path; it
 	 * lets the async daemon path skip the synchronous re-read.
 	 */
-	setSessionFile(sessionFile: string, preloadedEntries?: FileEntry[]): void {
+	setSessionFile(
+		sessionFile: string,
+		preloadedEntries?: FileEntry[],
+		preloadedObservation?: SessionLoadObservation,
+	): void {
+		// A switch/reload must never report the prior transcript's bytes.
+		this.loadObservation = undefined;
 		this.sessionFile = resolve(sessionFile);
 		if (existsSync(this.sessionFile)) {
 			if (this.persist && preloadedEntries === undefined) repairJsonlDamage(this.sessionFile);
-			this.fileEntries = preloadedEntries ?? loadEntriesFromFile(this.sessionFile);
+			if (preloadedEntries === undefined) {
+				const loaded = loadEntriesFromFileObserved(this.sessionFile);
+				this.fileEntries = loaded.entries;
+				this.loadObservation = loaded.observation;
+			} else {
+				this.fileEntries = preloadedEntries;
+				this.loadObservation = preloadedEntries.length > 0 ? preloadedObservation : undefined;
+			}
 
 			// If file was empty or corrupted (no valid header), truncate and start fresh
 			// to avoid appending messages without a session header (which breaks the session)
@@ -1513,6 +1819,7 @@ export class SessionManager {
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
+		this.loadObservation = undefined;
 		let sessionId = options?.id ?? createSessionId();
 		let sessionFile: string | undefined;
 		const hasExplicitRlmDepth = options !== undefined && Object.hasOwn(options, "rlmDepth");
@@ -1591,7 +1898,7 @@ export class SessionManager {
 
 	private _rewriteFile(): void {
 		if (!this.persist || !this.sessionFile) return;
-		const content = `${this.fileEntries.map((e) => JSON.stringify(e)).join("\n")}\n`;
+		const content = `${this.fileEntries.map(serializeSessionFileEntry).join("\n")}\n`;
 		const targetPath = realpathIfPresentSync(this.sessionFile);
 		const directory = dirname(targetPath);
 		mkdirSync(directory, { recursive: true });
@@ -1643,6 +1950,11 @@ export class SessionManager {
 
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
+	}
+
+	/** Primary transcript-read bytes for the most recent successful file load, excluding header/repair probes. */
+	getLoadObservation(): SessionLoadObservation | undefined {
+		return this.loadObservation ? { ...this.loadObservation } : undefined;
 	}
 
 	materializeSessionFile(sessionDir?: string): string {
@@ -1709,7 +2021,7 @@ export class SessionManager {
 			this.flushed = true;
 		} else {
 			mkdirSync(dirname(this.sessionFile), { recursive: true });
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			appendFileSync(this.sessionFile, `${serializeSessionFileEntry(entry)}\n`);
 			this._notifyPersistListeners();
 		}
 	}
@@ -2108,6 +2420,23 @@ export class SessionManager {
 		return buildSessionContext(this.fileEntries as SessionEntry[], this.leafId, this.byId, targetModel);
 	}
 
+	buildSessionContextWithEntryIds(targetModel?: Model<Api>): SessionContextWithEntryIds {
+		return buildSessionContextWithEntryIds(this.fileEntries as SessionEntry[], this.leafId, this.byId, targetModel);
+	}
+
+	buildSessionHistory(tipEntryId: string | null = this.leafId, targetModel?: Model<Api>): SessionHistorySnapshot {
+		if (tipEntryId !== null && !this.byId.has(tipEntryId)) {
+			throw new Error(`Session history tip no longer exists: ${tipEntryId}`);
+		}
+		const context = buildSessionContextWithEntryIds(
+			this.fileEntries as SessionEntry[],
+			tipEntryId,
+			this.byId,
+			targetModel,
+		);
+		return { ...orderSessionContextForTranscript(context), tipEntryId };
+	}
+
 	getHeader(): SessionHeader | null {
 		const h = this.fileEntries.find((e) => e.type === "session");
 		return h ? (h as SessionHeader) : null;
@@ -2327,13 +2656,13 @@ export class SessionManager {
 			return SessionManager.open(path, sessionDir, cwdOverride);
 		}
 		repairJsonlDamage(path);
-		const entries = await loadEntriesFromFileAsync(path);
-		if (entries.length === 0) {
+		const loaded = await loadEntriesFromFileAsyncObserved(path);
+		if (loaded.entries.length === 0) {
 			return SessionManager.open(path, sessionDir, cwdOverride);
 		}
-		const cwd = cwdOverride ?? (entries[0] as SessionHeader).cwd;
+		const cwd = cwdOverride ?? (loaded.entries[0] as SessionHeader).cwd;
 		const dir = sessionDir ?? resolve(path, "..");
-		return new SessionManager(cwd ?? process.cwd(), dir, path, true, entries);
+		return new SessionManager(cwd ?? process.cwd(), dir, path, true, loaded.entries, loaded.observation);
 	}
 
 	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
@@ -2398,7 +2727,7 @@ export class SessionManager {
 			if (entry.type === "session" || entry.type === "git_state") continue;
 			const parentId = liveParent(entry.parentId);
 			const out = parentId === entry.parentId ? entry : { ...entry, parentId };
-			appendFileSync(newSessionFile, `${JSON.stringify(out)}\n`);
+			appendFileSync(newSessionFile, `${serializeSessionFileEntry(out)}\n`);
 		}
 
 		return new SessionManager(targetCwd, dir, newSessionFile, true);

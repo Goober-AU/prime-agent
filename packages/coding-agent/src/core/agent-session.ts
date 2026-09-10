@@ -11,8 +11,14 @@ import {
 	type AgentMessage,
 	type AgentState,
 	type AgentTool,
+	elapsedMetricMs,
+	finalizePerformanceMetricLogicalRequest,
 	type GetContinuationMessagesContext,
+	getPerformanceMetricRequestCorrelation,
+	type PerformanceMetricRecorder,
+	type PerformanceMetricUsageV1,
 	type ShouldStopAfterTurnContext,
+	safeRecordPerformanceMetric,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
 import type {
@@ -452,6 +458,36 @@ type UserBashEndDetails = {
 };
 
 export class CompactionSkippedError extends Error {}
+
+function safePerformanceMetricNow(recorder: PerformanceMetricRecorder | undefined): number | undefined {
+	try {
+		const value = recorder?.monotonicNow();
+		return value !== undefined && Number.isFinite(value) ? value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function performanceMetricUsageFromCompaction(usage: Usage | undefined): PerformanceMetricUsageV1 | undefined {
+	if (!usage) return undefined;
+	const hasAuthoritativeUsage = [usage.input, usage.cacheRead, usage.output, usage.totalTokens].some(
+		(value) => Number.isFinite(value) && value > 0,
+	);
+	if (!hasAuthoritativeUsage) return undefined;
+	// Normalized compaction Usage uses zero as an unavailable placeholder.
+	// Without a raw provider observation, only positive fields prove availability.
+	const token = (value: number): number | null => (Number.isFinite(value) && value > 0 ? value : null);
+	return {
+		source: "provider",
+		inputTokens: token(usage.input),
+		cachedInputTokens: token(usage.cacheRead),
+		outputTokens: token(usage.output),
+		reasoningTokens: null,
+		totalTokens: token(usage.totalTokens),
+		cachedInputIncludedInInput: null,
+		reasoningIncludedInOutput: null,
+	};
+}
 
 /** Thrown when a session_before_refine extension skips the refinement round. */
 export class RefineSkippedError extends Error {}
@@ -1208,6 +1244,7 @@ export class AgentSession {
 	private _retryGeneration = 0;
 	private _retryPromise: Promise<void> | undefined = undefined;
 	private _retryResolve: (() => void) | undefined = undefined;
+	private _retryMetricMessage: AssistantMessage | undefined = undefined;
 	private _retryAuthFailureSources: AuthSourceToken[] = [];
 	private _agentMessageClearEpoch = 0;
 	private _agentMessageOutcomes = new Map<string, AgentMessageOutcome>();
@@ -1349,6 +1386,12 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		if (this.agent.performanceMetrics) {
+			this.agent.performanceMetrics = {
+				...this.agent.performanceMetrics,
+				hostOwnsLogicalRequestTerminal: true,
+			};
+		}
 		this.sessionManager = config.sessionManager;
 		this.settingsManager = config.settingsManager;
 		this._serviceTierPreference = config.serviceTierPreference ?? config.agent.state.serviceTier;
@@ -4088,6 +4131,15 @@ export class AgentSession {
 
 	private async _processAgentEvent(event: AgentEvent): Promise<void> {
 		let clearedDispatchEnded = false;
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			const assistantMessage = event.message as AssistantMessage;
+			if (assistantMessage.stopReason !== "error") {
+				const cancelled =
+					assistantMessage.stopReason === "aborted" ||
+					this._capturingCancelledAction(assistantMessage) !== undefined;
+				finalizePerformanceMetricLogicalRequest(assistantMessage, cancelled ? "cancelled" : "success");
+			}
+		}
 		if ((event.type === "message_start" || event.type === "message_end") && event.message.role === "toolResult") {
 			this._applyLateIpythonSentAgentMessages(event.message);
 		}
@@ -4118,6 +4170,10 @@ export class AgentSession {
 				this.agent.state.messages = this.agent.state.messages.filter((message) => !removed.has(message));
 				(this.agent.state as { errorMessage?: string }).errorMessage = undefined;
 				this._lastAssistantMessage = undefined;
+				const cancelledMetricMessage = this._findLastAssistantInMessages(event.messages);
+				if (cancelledMetricMessage) {
+					finalizePerformanceMetricLogicalRequest(cancelledMetricMessage, "cancelled");
+				}
 				for (const action of cleared) this._actionStore.releaseTerminal(action);
 				this._notifySessionInputCheckpointChange();
 				this._resolveRetry();
@@ -4226,17 +4282,33 @@ export class AgentSession {
 				if (retryConcreteAuthFailure) {
 					this._captureRetryAuthFailureSource(msg);
 				}
-				const didRetry = await this._handleRetryableError(msg, {
-					markAuthStaleOnFailure: retryConcreteAuthFailure,
-					authSourceTokens: retryConcreteAuthFailure ? this._retryAuthFailureSources : undefined,
-				});
+				let didRetry: boolean;
+				try {
+					didRetry = await this._handleRetryableError(msg, {
+						markAuthStaleOnFailure: retryConcreteAuthFailure,
+						authSourceTokens: retryConcreteAuthFailure ? this._retryAuthFailureSources : undefined,
+					});
+				} catch (error) {
+					finalizePerformanceMetricLogicalRequest(msg, "failure");
+					throw error;
+				}
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
 
-			const compactionWillRetry = await this._checkCompaction(msg);
+			let compactionWillRetry: boolean;
+			try {
+				compactionWillRetry = await this._checkCompaction(msg);
+			} catch (error) {
+				finalizePerformanceMetricLogicalRequest(msg, "failure");
+				throw error;
+			}
 			if (compactionWillRetry && this._retryAttempt > 0) {
 				return;
 			}
+			finalizePerformanceMetricLogicalRequest(
+				msg,
+				msg.stopReason === "aborted" ? "cancelled" : msg.stopReason === "error" ? "failure" : "success",
+			);
 			this._finishActiveRetryWithFailure(msg);
 			this._resolveRetry();
 			if (!compactionWillRetry) {
@@ -4261,6 +4333,22 @@ export class AgentSession {
 	private _resolveRetry(): void {
 		this._retryGeneration += 1;
 		this._semanticEdges.clearTurnRetry();
+		const metrics = this.agent.performanceMetrics;
+		if (
+			metrics &&
+			(metrics.logicalRequestId ||
+				metrics.logicalRequestStartedAt ||
+				metrics.providerAttemptNumber ||
+				metrics.logicalRequestSettlement)
+		) {
+			// Host retry correlation applies to one stream invocation only. Keep the
+			// session recorder and ownership, but do not leak an id into a later turn.
+			this.agent.performanceMetrics = {
+				recorder: metrics.recorder,
+				hostOwnsLogicalRequestTerminal: true,
+			};
+		}
+		this._retryMetricMessage = undefined;
 		if (this._retryResolve) {
 			this._retryResolve();
 			this._retryResolve = undefined;
@@ -8096,6 +8184,56 @@ export class AgentSession {
 		customInstructions?: string;
 		signal: AbortSignal;
 	}): Promise<CompactionResult> {
+		const recorder = this.agent.performanceMetrics?.recorder;
+		const logicalRequestId = this.agent.performanceMetrics?.logicalRequestId;
+		const startedAt = safePerformanceMetricNow(recorder);
+		try {
+			const result = await this._performCompactionUnmeasured(options);
+			safeRecordPerformanceMetric(recorder, {
+				operation: "compaction",
+				correlation: logicalRequestId ? { logicalRequestId } : undefined,
+				identity: {
+					provider: options.model.provider,
+					model: options.model.id,
+					api: options.model.api,
+					component: "compaction",
+				},
+				outcome: "success",
+				measurements: {
+					total_ms: elapsedMetricMs(startedAt, safePerformanceMetricNow(recorder)),
+				},
+				usage: performanceMetricUsageFromCompaction(result.usage),
+			});
+			return result;
+		} catch (error) {
+			const cancelled =
+				options.signal.aborted ||
+				(error instanceof Error && (error.name === "AbortError" || error.message === "Compaction cancelled"));
+			safeRecordPerformanceMetric(recorder, {
+				operation: "compaction",
+				correlation: logicalRequestId ? { logicalRequestId } : undefined,
+				identity: {
+					provider: options.model.provider,
+					model: options.model.id,
+					api: options.model.api,
+					component: "compaction",
+				},
+				outcome: cancelled ? "cancelled" : error instanceof CompactionSkippedError ? "unavailable" : "failure",
+				measurements: {
+					total_ms: elapsedMetricMs(startedAt, safePerformanceMetricNow(recorder)),
+				},
+			});
+			throw error;
+		}
+	}
+
+	private async _performCompactionUnmeasured(options: {
+		model: Model<any>;
+		apiKey: string;
+		headers?: Record<string, string>;
+		customInstructions?: string;
+		signal: AbortSignal;
+	}): Promise<CompactionResult> {
 		const { model, apiKey, headers, customInstructions, signal } = options;
 		const pathEntries = this.sessionManager.getBranch();
 		const settings = this.settingsManager.getCompactionSettings();
@@ -8260,7 +8398,7 @@ export class AgentSession {
 		await this._syncKernelStateAfterCompaction();
 		await this._reapDeletedRlmSubagentRuntimesAfterCompaction();
 
-		return { summary, firstKeptEntryId, tokensBefore, details };
+		return { summary, firstKeptEntryId, tokensBefore, details, usage };
 	}
 
 	private async _reapDeletedRlmSubagentRuntimesAfterCompaction(): Promise<void> {
@@ -9948,6 +10086,8 @@ export class AgentSession {
 				hostHandlers: this._createKernelHostHandlers(),
 				pythonSkills,
 				snapshotDir: this._ipythonKernelSnapshotDir,
+				performanceMetrics: this.agent.performanceMetrics?.recorder,
+				modelToolOutputPolicy: this.settingsManager.getModelToolOutputPolicy(),
 				readyGate: previousDispose,
 				onRestore: notifyRestore ? (result) => this._onIpythonStateRestored(result) : undefined,
 			});
@@ -12033,6 +12173,8 @@ export class AgentSession {
 		}
 
 		const delayMs = delay.delayMs;
+		const metricCorrelation = getPerformanceMetricRequestCorrelation(message);
+		this._retryMetricMessage = message;
 		// Park now: the retry re-issues the failed call and must reuse its Idempotency-Key.
 		// Payload hooks mutate the wire body after the hash point, so reuse is forfeited.
 		if (!this._extensionRunner.hasHandlers("before_provider_request")) {
@@ -12066,6 +12208,7 @@ export class AgentSession {
 				attempt,
 				finalError: "Retry cancelled",
 			});
+			finalizePerformanceMetricLogicalRequest(message, "cancelled");
 			this._resolveRetry();
 			this._retryAuthFailureSources = [];
 			return false;
@@ -12074,6 +12217,19 @@ export class AgentSession {
 
 		const retryGeneration = this._retryGeneration;
 		setTimeout(() => {
+			const metrics = this.agent.performanceMetrics;
+			if (metrics) {
+				this.agent.performanceMetrics = {
+					recorder: metrics.recorder,
+					logicalRequestId: metricCorrelation?.logicalRequestId ?? metrics.logicalRequestId,
+					logicalRequestStartedAt: metricCorrelation?.logicalRequestStartedAt ?? metrics.logicalRequestStartedAt,
+					providerAttemptNumber:
+						(metricCorrelation?.providerAttemptNumber ?? metrics.providerAttemptNumber ?? 1) + 1,
+					hostOwnsLogicalRequestTerminal: true,
+					logicalRequestSettlement:
+						metricCorrelation?.logicalRequestSettlement ?? metrics.logicalRequestSettlement,
+				};
+			}
 			this.agent.continue().catch((error: unknown) => {
 				// A continue that never starts must still resolve the retry (else isRetrying
 				// sticks forever) — unless a newer retry owns the state by now.
@@ -12088,6 +12244,7 @@ export class AgentSession {
 					attempt,
 					finalError: error instanceof Error ? error.message : String(error),
 				});
+				finalizePerformanceMetricLogicalRequest(message, "failure");
 				this._resolveRetry();
 			});
 		}, 0);
@@ -12110,6 +12267,9 @@ export class AgentSession {
 				finalError: "Retry cancelled",
 			});
 			this._retryAttempt = 0;
+			if (this._retryMetricMessage) {
+				finalizePerformanceMetricLogicalRequest(this._retryMetricMessage, "cancelled");
+			}
 		}
 		this._retryAuthFailureSources = [];
 		this._resolveRetry();

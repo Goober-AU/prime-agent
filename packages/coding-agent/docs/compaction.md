@@ -78,6 +78,14 @@ What the LLM sees:
 
 On repeated compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Prime Agent also recalculates `tokensBefore` from the rebuilt session context before writing the new `CompactionEntry`, so the token count reflects the actual pre-compaction context being replaced.
 
+#### Optional iterative-summary consolidation
+
+`compaction.summaryUpdatePolicy: "consolidate-repeated-v1"` changes only the prompt used by the existing update call. The old summary remains in `<previous-summary>`, and the messages that newly moved out of the retained tail remain the `<conversation>` input. It adds no merge pass and no segment ledger. Split turns retain their existing two calls.
+
+The prompt permits consolidation only for demonstrably repeated facts and replacement only for status that new evidence demonstrably supersedes. Enduring constraints, corrections, refinements, decisions and reasons, blockers and their resolution provenance, exact paths/IDs/hashes/sizes, critical errors, tool pairings, kernel-state facts, harness facts, and provider-checkpoint separation must remain. New facts may grow the summary; no fixed cap or tail truncation is applied. The selected session model and reasoning level are unchanged.
+
+The policy is `"off"` by default because deterministic mechanics tests do not prove semantic quality. A separately authorized same-model, same-reasoning quality evaluation is still required before default enablement. `PRIME_AGENT_SUMMARY_UPDATE_POLICY=consolidate-repeated-v1` is the equivalent process-local opt-in. Failed or cancelled updates do not publish a compaction entry and retain existing queued-input and RLM-continuation behavior.
+
 ### Split Turns
 
 A "turn" starts with a user message and includes all assistant responses and tool calls until the next user message. Normally, compaction cuts at turn boundaries.
@@ -381,7 +389,8 @@ Configure compaction in `~/.prime/agent/settings.json` or `<project-dir>/.prime/
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
-    "keepRecentTokens": 20000
+    "keepRecentTokens": 20000,
+    "summaryUpdatePolicy": "off"
   }
 }
 ```
@@ -391,5 +400,6 @@ Configure compaction in `~/.prime/agent/settings.json` or `<project-dir>/.prime/
 | `enabled` | `true` | Enable auto-compaction |
 | `reserveTokens` | `16384` | Tokens to reserve for LLM response |
 | `keepRecentTokens` | `20000` | Recent tokens to keep (not summarized) |
+| `summaryUpdatePolicy` | `"off"` | Optional `"consolidate-repeated-v1"` iterative update prompt |
 
 Disable auto-compaction with `"enabled": false`. You can still compact manually with `/compact`.

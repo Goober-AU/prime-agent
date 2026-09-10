@@ -80,6 +80,7 @@ describe("Astra server compaction", () => {
 			service_tier: "priority",
 		});
 		const checkpoint = result!.checkpoint;
+		expect(checkpoint.endpoint).toBeUndefined();
 		expect(isCompactionCheckpoint(JSON.parse(JSON.stringify(checkpoint)))).toBe(true);
 		const replay = convertResponsesMessages(
 			model,

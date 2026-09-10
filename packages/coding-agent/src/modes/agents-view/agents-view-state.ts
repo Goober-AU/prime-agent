@@ -848,7 +848,9 @@ export function buildAgentsViewRows(
 		}
 	};
 	const scopedRootRow = scopeRoot ? baseRows.find((row) => row.summary === scopeRoot.summary) : undefined;
-	const visibleRoots = scopedRootRow ? roots.filter((row) => row !== scopedRootRow) : roots;
+	const visibleRoots = scopedRootRow
+		? roots.filter((row) => row !== scopedRootRow)
+		: roots.filter((row) => row.section !== "inactive" || !isSubagentSummary(row.summary));
 	for (const root of visibleRoots.sort(compareRows)) {
 		emit(root, 0);
 	}
@@ -1043,8 +1045,12 @@ function findParentRow(
 }
 
 export function isSubagentSummary(summary: SessionSummary): boolean {
+	if (summary.runtimeKind === "subagent" || (Number.isInteger(summary.rlmDepth) && (summary.rlmDepth ?? 0) > 0)) {
+		return true;
+	}
+	if (summary.rlmDepth === 0) return false;
 	if (summary.runtimeKind) {
-		return summary.runtimeKind === "subagent";
+		return false;
 	}
 	// Summaries from daemons that predate runtimeKind still carry subagent
 	// linkage; never surface those as top-level agents.

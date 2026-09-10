@@ -31,11 +31,18 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .bash import BashHandle, _kill_live_handles
+from .snapshot import (
+    DEFAULT_SNAPSHOT_MAX_BYTES,
+    DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+    _fsync_directory,
+    cas_root_for_legacy_path,
+    cas_state_present,
+    read_cas_payload,
+    restore_cas_v2,
+    snapshot_cas_v2,
+)
 
 PROTOCOL_VERSION = 3
-
-DEFAULT_SNAPSHOT_MAX_BYTES = 256 * 1024 * 1024
-DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES = 16 * 1024 * 1024
 
 # Names the session bootstrap re-creates on every start; never snapshotted.
 _ALWAYS_SKIP = {"rlm", "mcp", "bash", "asyncio", "In", "Out", "get_ipython", "exit", "quit", "open"}
@@ -605,16 +612,21 @@ class _SnapshotSizeLimitExceeded(Exception):
 
 
 class _CappedWriter:
-    def __init__(self, sink: Any, limit: int) -> None:
+    def __init__(self, sink: Any, limit: int, *, measure_io: bool = False) -> None:
         self._sink = sink
         self._limit = limit
+        self._measure_io = measure_io
         self.written = 0
+        self.io_ns = 0
 
     def write(self, chunk: Any) -> int:
         size = len(chunk)
         if self.written + size > self._limit:
             raise _SnapshotSizeLimitExceeded()
+        started = time.monotonic_ns() if self._measure_io else 0
         self._sink.write(chunk)
+        if self._measure_io:
+            self.io_ns += time.monotonic_ns() - started
         self.written += size
         return size
 
@@ -627,7 +639,29 @@ def _snapshot_state(
     max_variable_bytes: int,
     prune_oversized: bool,
     committed: list[dict[str, Any]] | None = None,
+    *,
+    snapshot_format: str = "auto",
+    cas_root: str | None = None,
 ) -> dict[str, Any]:
+    if snapshot_format not in {"auto", "legacy", "cas-v2"}:
+        return {"error": "snapshot_format must be auto, legacy, or cas-v2"}
+    effective_cas_root = cas_root or cas_root_for_legacy_path(path)
+    has_cas = cas_state_present(effective_cas_root)
+    if snapshot_format == "legacy" and has_cas:
+        return {"error": "CAS v2 state exists; refusing to fork newer work into stale legacy state"}
+    if snapshot_format == "cas-v2" or (snapshot_format == "auto" and has_cas):
+        return snapshot_cas_v2(
+            ns,
+            effective_cas_root,
+            max_bytes,
+            max_variable_bytes,
+            prune_oversized,
+            _ALWAYS_SKIP,
+            BashHandle,
+            committed,
+        )
+
+    total_started = time.monotonic_ns()
     import datetime
 
     try:
@@ -635,6 +669,11 @@ def _snapshot_state(
     except Exception as err:  # noqa: BLE001 - dill is provisioned by the host, not a hard dep
         return {"error": f"dill unavailable: {err}"}
     dill.settings["recurse"] = True
+
+    serialization_wall_ns = 0
+    serialization_cpu_ns = 0
+    outer_serialization_wall_ns = 0
+    thread_clock = getattr(time, "thread_time_ns", None)
 
     payload: dict[str, bytes] = {}
     skipped: list[dict[str, str]] = []
@@ -660,6 +699,8 @@ def _snapshot_state(
         remaining = max_bytes - total
         limit = max_variable_bytes if prune_oversized else min(max_variable_bytes, remaining)
         buffer = io.BytesIO()
+        serialization_started = time.monotonic_ns()
+        serialization_cpu_started = thread_clock() if thread_clock is not None else None
         try:
             dill.dump(value, _CappedWriter(buffer, limit))
             blob = buffer.getvalue()
@@ -673,12 +714,18 @@ def _snapshot_state(
         except Exception as err:  # noqa: BLE001 - one unpicklable name must not abort the snapshot
             skipped.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
             continue
+        finally:
+            serialization_wall_ns += time.monotonic_ns() - serialization_started
+            if serialization_cpu_started is not None and thread_clock is not None:
+                serialization_cpu_ns += thread_clock() - serialization_cpu_started
         if total + len(blob) > max_bytes:
             skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
             continue
         payload[name] = blob
         total += len(blob)
 
+    persistence_started = time.monotonic_ns()
+    disk_bytes_written = 0
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     temps: list[str] = []
 
@@ -713,11 +760,21 @@ def _snapshot_state(
             fh, tmp = stage_temp(path, "wb")
             with fh:
                 def dump_to_temp(candidate: dict[str, bytes]) -> int | None:
-                    writer = _CappedWriter(fh, max_bytes)
+                    nonlocal disk_bytes_written, outer_serialization_wall_ns, serialization_cpu_ns
+                    writer = _CappedWriter(fh, max_bytes, measure_io=True)
+                    started = time.monotonic_ns()
+                    cpu_started = thread_clock() if thread_clock is not None else None
                     try:
                         dill.dump(candidate, writer)
                     except _SnapshotSizeLimitExceeded:
                         return None
+                    finally:
+                        elapsed = time.monotonic_ns() - started
+                        non_io = max(0, elapsed - writer.io_ns)
+                        outer_serialization_wall_ns += non_io
+                        disk_bytes_written += writer.written
+                        if cpu_started is not None and thread_clock is not None:
+                            serialization_cpu_ns += thread_clock() - cpu_started
                     return writer.written
 
                 def redump_to_temp(candidate: dict[str, bytes]) -> int | None:
@@ -760,6 +817,7 @@ def _snapshot_state(
             fh, manifest_tmp = stage_temp(manifest_path, "w")
             with fh:
                 json.dump(manifest, fh)
+            disk_bytes_written += os.path.getsize(manifest_tmp)
         except BaseException as err:  # noqa: BLE001 - Exception -> error dict, rest propagates
             if not isinstance(err, Exception):
                 raise  # e.g. KeyboardInterrupt: clean up (outer finally), then propagate
@@ -779,9 +837,27 @@ def _snapshot_state(
         except OSError as err:
             # Fail before the prune deletions so a bad manifest path never destroys state.
             return {"error": f"manifest write failed: {err}"}
+        persistence_elapsed_ns = time.monotonic_ns() - persistence_started
         for name in pruned:
             ns.pop(name, None)
-        result = {"saved": saved, "skipped": skipped, "pruned": pruned, "bytes": bytes_written}
+        result = {
+            "saved": saved,
+            "skipped": skipped,
+            "pruned": pruned,
+            "bytes": bytes_written,
+            "format": "legacy",
+            "logical_bytes": sum(len(blob) for blob in payload.values()),
+            "written_bytes": disk_bytes_written,
+            "backward_readable": True,
+            "metrics": {
+                "serialization_wall_ms": (serialization_wall_ns + outer_serialization_wall_ns) / 1_000_000,
+                "serialization_cpu_ms": serialization_cpu_ns / 1_000_000 if thread_clock is not None else None,
+                "serialized_bytes": sum(len(blob) for blob in payload.values()),
+                "write_ms": max(0, persistence_elapsed_ns - outer_serialization_wall_ns) / 1_000_000,
+                "written_bytes": disk_bytes_written,
+                "total_wall_ms": (time.monotonic_ns() - total_started) / 1_000_000,
+            },
+        }
         # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).
         if committed is not None:
             committed.append(result)
@@ -803,10 +879,36 @@ def _snapshot_state(
 
 
 def _restore_state(
-    ns: dict[str, Any], path: str, committed: list[dict[str, Any]] | None = None
+    ns: dict[str, Any],
+    path: str,
+    committed: list[dict[str, Any]] | None = None,
+    *,
+    cas_root: str | None = None,
+    source: str = "auto",
+    max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
+    max_variable_bytes: int = DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
 ) -> dict[str, Any]:
+    if source not in {"auto", "current", "previous", "legacy"}:
+        return {"error": "restore source must be auto, current, previous, or legacy"}
+    effective_cas_root = cas_root or cas_root_for_legacy_path(path)
+    has_cas = cas_state_present(effective_cas_root)
+    if source in {"current", "previous"} or (source == "auto" and has_cas):
+        cas_source = "previous" if source == "previous" else "current"
+        return restore_cas_v2(
+            ns,
+            effective_cas_root,
+            _RESTORE_SKIP,
+            cas_source,
+            committed,
+            max_bytes=max_bytes,
+            max_variable_bytes=max_variable_bytes,
+        )
+
     if not os.path.exists(path):
-        return {"restored": [], "failed": [], "reason": "snapshot not found"}
+        result: dict[str, Any] = {"restored": [], "failed": [], "reason": "snapshot not found"}
+        if source == "legacy" and has_cas:
+            result.update({"legacy_recovery": True, "unsaved_work_possible": True})
+        return result
     try:
         import dill
     except Exception as err:  # noqa: BLE001
@@ -828,7 +930,9 @@ def _restore_state(
             staged[name] = dill.loads(blob)
         except Exception as err:  # noqa: BLE001 - revive every other name regardless
             failed.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
-    result = {"restored": sorted(staged), "failed": failed}
+    result: dict[str, Any] = {"restored": sorted(staged), "failed": failed, "format": "legacy"}
+    if source == "legacy" and has_cas:
+        result.update({"legacy_recovery": True, "unsaved_work_possible": True})
     # Park SIGINT across the whole apply so it is all-or-nothing; the parked interrupt is consumed by the commit (as in snapshot).
     previous = signal.signal(signal.SIGINT, lambda signum, frame: None)
     try:
@@ -842,23 +946,143 @@ def _restore_state(
     return result
 
 
+def _export_legacy_state(
+    path: str,
+    manifest_path: str,
+    cas_root: str,
+    source: str,
+    committed: list[dict[str, Any]] | None = None,
+    *,
+    max_bytes: int = DEFAULT_SNAPSHOT_MAX_BYTES,
+    max_variable_bytes: int = DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+) -> dict[str, Any]:
+    """Explicitly export one validated v2 generation for an older reader."""
+    import datetime
+
+    try:
+        import dill
+    except Exception as err:  # noqa: BLE001
+        return {"error": f"dill unavailable: {err}"}
+    if source not in {"current", "previous"}:
+        return {"error": "export source must be current or previous"}
+    try:
+        payload, generation = read_cas_payload(
+            cas_root,
+            source,
+            max_bytes=max_bytes,
+            max_variable_bytes=max_variable_bytes,
+        )
+    except Exception as err:  # noqa: BLE001 - integrity failures are visible protocol failures
+        return {"error": f"legacy export load failed: {_safe_str(err)}"}
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    temps: list[str] = []
+
+    def stage_temp(target: str, mode: str):
+        fd, name = tempfile.mkstemp(
+            dir=os.path.dirname(target) or ".", prefix=os.path.basename(target) + ".", suffix=".tmp"
+        )
+        temps.append(name)
+        try:
+            return os.fdopen(fd, mode), name
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def discard_temps() -> None:
+        for stale in temps:
+            try:
+                os.remove(stale)
+            except OSError:
+                pass
+
+    parked: list[int] = []
+    handler_installed = False
+    previous = None
+    try:
+        try:
+            fh, payload_tmp = stage_temp(path, "wb")
+            with fh:
+                dill.dump(payload, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+            bytes_written = os.path.getsize(payload_tmp)
+            if bytes_written != generation["legacyEnvelopeBytes"]:
+                return {"error": "legacy export encoding differs from the committed generation"}
+            manifest = {
+                "version": 1,
+                "savedNames": generation["savedNames"],
+                "skipped": generation["skipped"],
+                "pruned": generation["pruned"],
+                "bytes": bytes_written,
+                "pythonVersion": sys.version.split()[0],
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "exportedFromCasGeneration": generation["generation"],
+            }
+            fh, manifest_tmp = stage_temp(manifest_path, "w")
+            with fh:
+                json.dump(manifest, fh)
+                fh.flush()
+                os.fsync(fh.fileno())
+        except BaseException as err:  # noqa: BLE001
+            if not isinstance(err, Exception):
+                raise
+            return {"error": f"legacy export write failed: {_safe_str(err)}"}
+
+        previous = signal.signal(signal.SIGINT, lambda signum, frame: parked.append(signum))
+        handler_installed = True
+        try:
+            os.replace(payload_tmp, path)
+            os.replace(manifest_tmp, manifest_path)
+            for directory in {os.path.dirname(path) or ".", os.path.dirname(manifest_path) or "."}:
+                _fsync_directory(directory)
+        except OSError as err:
+            return {"error": f"legacy export commit failed: {_safe_str(err)}"}
+        result = {
+            "exported": generation["savedNames"],
+            "bytes": bytes_written,
+            "source_generation": generation["generation"],
+            "source": source,
+            "backward_readable": True,
+        }
+        if committed is not None:
+            committed.append(result)
+    finally:
+        try:
+            discard_temps()
+        finally:
+            if handler_installed:
+                signal.signal(signal.SIGINT, previous)
+    return result
+
+
 async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
     """Run snapshot/restore as an interruptible task and reply in the done event."""
     rid = req["id"]
     committed: list[dict[str, Any]] = []
 
     async def run() -> dict[str, Any]:
-        if req["type"] == "snapshot":
+        request_type = req["type"]
+        cas_root = req.get("cas_root")
+        if cas_root is not None and not isinstance(cas_root, str):
+            return {"error": "cas_root must be a string"}
+        for field in ("max_bytes", "max_variable_bytes"):
+            # Restore and export must enforce the same configured budget as save.
+            if field in req and (
+                isinstance(req[field], bool) or not isinstance(req[field], int) or req[field] < 0
+            ):
+                return {"error": f"{field} must be a non-negative integer"}
+        max_bytes = req.get("max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES)
+        max_variable_bytes = req.get(
+            "max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES
+        )
+        if request_type == "snapshot":
             prune = req.get("prune_oversized", False)
             if not isinstance(prune, bool):
                 return {"error": "prune_oversized must be a boolean"}
-            for field in ("max_bytes", "max_variable_bytes"):
-                # Any present value must be a non-negative int; a JSON null is not a valid way to ask
-                # for the default, and a negative cap would prune every user variable from ns.
-                if field in req and (
-                    isinstance(req[field], bool) or not isinstance(req[field], int) or req[field] < 0
-                ):
-                    return {"error": f"{field} must be a non-negative integer"}
+            snapshot_format = req.get("snapshot_format", "auto")
+            if not isinstance(snapshot_format, str):
+                return {"error": "snapshot_format must be a string"}
             # realpath resolves symlinks, so aliased paths cannot silently clobber the payload.
             if os.path.realpath(req["path"]) == os.path.realpath(req["manifest_path"]):
                 return {"error": "path and manifest_path must differ"}
@@ -866,12 +1090,42 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
                 ns,
                 req["path"],
                 req["manifest_path"],
-                req.get("max_bytes", DEFAULT_SNAPSHOT_MAX_BYTES),
-                req.get("max_variable_bytes", DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES),
+                max_bytes,
+                max_variable_bytes,
                 prune,
                 committed,
+                snapshot_format=snapshot_format,
+                cas_root=cas_root,
             )
-        return _restore_state(ns, req["path"], committed)
+        if request_type == "snapshot_export_legacy":
+            source = req.get("source", "current")
+            if not isinstance(source, str):
+                return {"error": "export source must be a string"}
+            if cas_root is None:
+                return {"error": "cas_root is required for legacy export"}
+            if os.path.realpath(req["path"]) == os.path.realpath(req["manifest_path"]):
+                return {"error": "path and manifest_path must differ"}
+            return _export_legacy_state(
+                req["path"],
+                req["manifest_path"],
+                cas_root,
+                source,
+                committed,
+                max_bytes=max_bytes,
+                max_variable_bytes=max_variable_bytes,
+            )
+        source = req.get("source", "auto")
+        if not isinstance(source, str):
+            return {"error": "restore source must be a string"}
+        return _restore_state(
+            ns,
+            req["path"],
+            committed,
+            cas_root=cas_root,
+            source=source,
+            max_bytes=max_bytes,
+            max_variable_bytes=max_variable_bytes,
+        )
 
     assert _loop is not None
     task = _loop.create_task(run())
@@ -913,7 +1167,26 @@ async def _handle_state(req: dict[str, Any], ns: dict[str, Any]) -> None:
         _send({"event": "done", "id": rid, "status": "error", "reason": reason})
         return
     if "error" in result:
-        _send({"event": "done", "id": rid, "status": "error", "reason": result["error"]})
+        metrics = result.get("metrics")
+        safe_metrics = (
+            metrics
+            if isinstance(metrics, dict)
+            and all(
+                isinstance(key, str)
+                and (value is None or (not isinstance(value, bool) and isinstance(value, (int, float))))
+                for key, value in metrics.items()
+            )
+            else None
+        )
+        _send(
+            {
+                "event": "done",
+                "id": rid,
+                "status": "error",
+                "reason": result["error"],
+                **({"metrics": safe_metrics} if safe_metrics is not None else {}),
+            }
+        )
         return
     _send({"event": "done", "id": rid, "status": "ok", **result})
 
@@ -975,7 +1248,7 @@ async def _serve(queue: asyncio.Queue[dict[str, Any]], ns: dict[str, Any]) -> No
             return
         if rtype == "execute":
             await _handle_request(_handle_execute, req, ns)
-        elif rtype in ("snapshot", "restore"):
+        elif rtype in ("snapshot", "restore", "snapshot_export_legacy"):
             await _handle_request(_handle_state, req, ns)
         elif rtype == "list_names":
             await _handle_request(_handle_list_names, req, ns)
@@ -985,6 +1258,7 @@ _REQUIRED_FIELDS = {
     "execute": ("id", "code"),
     "snapshot": ("id", "path", "manifest_path"),
     "restore": ("id", "path"),
+    "snapshot_export_legacy": ("id", "path", "manifest_path", "cas_root"),
     "list_names": ("id",),
     "shutdown": (),
 }
@@ -1023,7 +1297,7 @@ def _handle_request_line(raw: bytes, queue: asyncio.Queue[dict[str, Any]]) -> No
     if missing:
         _protocol_error(f"{rtype} request needs string fields: {', '.join(missing)}")
         return
-    if rtype in ("execute", "snapshot", "restore"):
+    if rtype in ("execute", "snapshot", "restore", "snapshot_export_legacy"):
         with _interrupt_lock:
             # A reused in-flight id would corrupt interrupt/finish bookkeeping.
             duplicate = req["id"] in _inflight
@@ -1172,7 +1446,14 @@ def main() -> None:
     signal.signal(signal.SIGINT, _sigint_handler)
     threading.Thread(target=_read_requests, args=(stdin_fd, queue), daemon=True).start()
 
-    _send({"event": "ready", "protocol": PROTOCOL_VERSION, "python": platform.python_version()})
+    _send(
+        {
+            "event": "ready",
+            "protocol": PROTOCOL_VERSION,
+            "python": platform.python_version(),
+            "snapshotFormats": ["legacy", "cas-v2"],
+        }
+    )
 
     _serve_task = _loop.create_task(_serve(queue, user_module.__dict__))
     # A KeyboardInterrupt escaping a cell or background task stops

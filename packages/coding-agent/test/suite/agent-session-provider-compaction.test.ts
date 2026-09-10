@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import type { PerformanceMetricEvent, PerformanceMetricRecorder } from "@earendil-works/pi-agent-core";
 import {
 	type AssistantMessage,
 	type CompactFunction,
@@ -21,6 +22,31 @@ import { convertToLlm } from "../../src/core/messages.js";
 import { requestWithProviderRetry } from "../../src/core/provider-retry.js";
 import { SessionManager } from "../../src/core/session-manager.js";
 import { createHarness, getMessageText, type Harness } from "./harness.js";
+
+class CompactionMetricRecorder implements PerformanceMetricRecorder {
+	readonly sessionId = "compaction-metric-session";
+	readonly events: PerformanceMetricEvent[] = [];
+	private clock = 0;
+	throwOnClock = false;
+	throwOnRecord = false;
+
+	monotonicNow(): number {
+		if (this.throwOnClock) throw new Error("metric clock failed");
+		return ++this.clock;
+	}
+
+	nextId(scope: "logical_request" | "provider_attempt"): string {
+		return `${scope}-${this.clock}`;
+	}
+
+	record(event: PerformanceMetricEvent): void {
+		if (this.throwOnRecord) throw new Error("metric record failed");
+		this.events.push(event);
+	}
+
+	async flush(): Promise<void> {}
+	async close(): Promise<void> {}
+}
 
 const harnesses: Harness[] = [];
 afterEach(() => {
@@ -114,11 +140,21 @@ describe("durable provider compaction", () => {
 	});
 	it("persists the entire window, resumes it, and continues without duplicating retained history", async () => {
 		const harness = await seededHarness();
+		const recorder = new CompactionMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder, logicalRequestId: "logical-compaction" };
 		const checkpoint = checkpointFor(harness);
 		const compact = vi.fn<CompactFunction>().mockResolvedValue({ checkpoint });
 		installCompactor(harness, compact);
 		await harness.session.compact("Keep paths");
 		expect(compact).toHaveBeenCalledOnce();
+		expect(recorder.events.filter((event) => event.operation === "compaction")).toEqual([
+			expect.objectContaining({
+				correlation: { logicalRequestId: "logical-compaction" },
+				outcome: "success",
+				identity: expect.objectContaining({ component: "compaction" }),
+				measurements: { total_ms: 1 },
+			}),
+		]);
 		expect(compact.mock.calls[0][1].systemPrompt).toBe(harness.session.agent.state.systemPrompt);
 		expect(
 			compact.mock.calls[0][1].messages.some((message) =>
@@ -196,13 +232,86 @@ describe("durable provider compaction", () => {
 		expect(preparation?.previousSummary).toBeUndefined();
 	});
 
-	it("falls back to the existing local summarizer when a provider reports unsupported", async () => {
+	it("keeps the legacy local fallback text unchanged for non-Azure providers", async () => {
 		const harness = await seededHarness();
 		installCompactor(harness, async () => undefined);
 		harness.setResponses([fauxAssistantMessage("Local history summary"), fauxAssistantMessage("Local turn summary")]);
 		const result = await harness.session.compact();
 		expect(result.summary).toContain("Local history summary");
+		expect(result.summary).not.toContain("**Compaction fallback:**");
 		expect(getProviderCheckpoint(result.details)).toBeUndefined();
+	});
+
+	it("makes only an explicitly unsupported staged Azure fallback visible", async () => {
+		const harness = await createHarness({
+			persistSession: true,
+			api: "openai-responses",
+			provider: "azure-openai-managed",
+			models: [{ id: "gpt-6-astra" }],
+			settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+		});
+		harnesses.push(harness);
+		const model = harness.session.model!;
+		model.baseUrl = "http://127.0.0.1:43119/azure-openai/v1";
+		model.nativeCompaction = {
+			protocol: "openai-responses-compact-v1",
+			provider: model.provider,
+			model: model.id,
+			endpoint: `${model.baseUrl}/responses/compact`,
+			apiVersion: "v1",
+			enabled: true,
+			validation: "live-verified",
+		};
+		harness.setResponses([fauxAssistantMessage("First response"), fauxAssistantMessage("Second response")]);
+		await harness.session.prompt("Remember exact Azure fallback reason");
+		await harness.session.prompt("Continue");
+		installCompactor(harness, async () => undefined);
+		harness.setResponses([fauxAssistantMessage("Azure local history"), fauxAssistantMessage("Azure local turn")]);
+		const result = await harness.session.compact();
+		expect(result.summary).toContain("**Compaction fallback:**");
+		expect(result.summary).toContain("explicit unsupported response");
+		expect(result.summary).toContain("request-size");
+		expect(result.summary).toContain("No provider checkpoint was committed");
+		expect(getProviderCheckpoint(result.details)).toBeUndefined();
+	});
+
+	it("records only proven per-field compaction usage and returns it to the caller", async () => {
+		const harness = await seededHarness();
+		const recorder = new CompactionMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder };
+		const providerUsage = {
+			input: 100,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 100,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		installCompactor(harness, async () => ({ checkpoint: checkpointFor(harness), usage: providerUsage }));
+		const result = await harness.session.compact();
+		expect(result.usage).toEqual(providerUsage);
+		expect(recorder.events.find((event) => event.operation === "compaction")?.usage).toEqual({
+			source: "provider",
+			inputTokens: 100,
+			cachedInputTokens: null,
+			outputTokens: null,
+			reasoningTokens: null,
+			totalTokens: 100,
+			cachedInputIncludedInInput: null,
+			reasoningIncludedInOutput: null,
+		});
+	});
+
+	it("does not let metric clock or recorder failures affect compaction", async () => {
+		const harness = await seededHarness();
+		const recorder = new CompactionMetricRecorder();
+		recorder.throwOnClock = true;
+		recorder.throwOnRecord = true;
+		harness.session.agent.performanceMetrics = { recorder };
+		installCompactor(harness, async () => ({ checkpoint: checkpointFor(harness) }));
+		await expect(harness.session.compact()).resolves.toMatchObject({
+			details: expect.objectContaining({ providerCheckpoint: expect.any(Object) }),
+		});
 	});
 
 	it("retries transient unary failures before committing one checkpoint", async () => {
@@ -219,6 +328,8 @@ describe("durable provider compaction", () => {
 
 	it("preserves the live and saved history when cancelled", async () => {
 		const harness = await seededHarness();
+		const recorder = new CompactionMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder };
 		const compact = vi.fn<CompactFunction>().mockImplementation(
 			(_model, _context, options) =>
 				new Promise((_resolve, reject) => {
@@ -233,6 +344,9 @@ describe("durable provider compaction", () => {
 		await vi.waitFor(() => expect(compact).toHaveBeenCalledOnce());
 		harness.session.abortCompaction();
 		await rejected;
+		expect(recorder.events.filter((event) => event.operation === "compaction")).toEqual([
+			expect.objectContaining({ outcome: "cancelled" }),
+		]);
 		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
 		expect(
 			harness.session.messages.some((message) => getMessageText(message).includes("original project paths")),
@@ -241,6 +355,8 @@ describe("durable provider compaction", () => {
 
 	it("rolls back a checkpoint when its disk append fails", async () => {
 		const harness = await seededHarness();
+		const recorder = new CompactionMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder };
 		installCompactor(harness, async () => ({ checkpoint: checkpointFor(harness) }));
 		const persist = harness.sessionManager._persist.bind(harness.sessionManager);
 		vi.spyOn(harness.sessionManager, "_persist").mockImplementation((entry) => {
@@ -248,6 +364,9 @@ describe("durable provider compaction", () => {
 			persist(entry);
 		});
 		await expect(harness.session.compact()).rejects.toThrow("disk full");
+		expect(recorder.events.filter((event) => event.operation === "compaction")).toEqual([
+			expect.objectContaining({ outcome: "failure" }),
+		]);
 		expect(harness.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
 		expect(
 			SessionManager.open(harness.sessionManager.getSessionFile()!)

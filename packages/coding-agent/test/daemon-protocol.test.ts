@@ -143,6 +143,41 @@ describe("daemon protocol helpers", () => {
 		);
 	});
 
+	it("capability- and schema-gates pinned history ranges while legacy attach stays compatible", () => {
+		expect(DAEMON_SCHEMA_REVISION).toBeGreaterThanOrEqual(29);
+		expect(DAEMON_COMMAND_COMPATIBILITY.get_history_range).toEqual({
+			minProtocol: 7,
+			minSchemaRevision: 29,
+			capability: "history_ranges",
+		});
+		expect(DAEMON_DEFAULT_SERVER_CAPABILITIES).toContain("history_ranges");
+		expect(DAEMON_COMMAND_PLANE.get_history_range).toBe("session");
+		expect(
+			meetsDaemonCommandCompatibility(
+				{
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaRevision: 28,
+					serverCapabilities: ["history_ranges"],
+				},
+				DAEMON_COMMAND_COMPATIBILITY.get_history_range,
+			),
+		).toBe(false);
+		expect(
+			meetsDaemonCommandCompatibility(
+				{
+					protocol: DAEMON_PROTOCOL_INFO,
+					schemaRevision: 29,
+					serverCapabilities: [],
+				},
+				DAEMON_COMMAND_COMPATIBILITY.get_history_range,
+			),
+		).toBe(false);
+		expect(isDaemonMutatingCommand({ type: "get_history_range" })).toBe(false);
+		// An old attach omits the capability and still uses the unchanged full snapshot shape.
+		const legacyAttach: DaemonCommand = { type: "attach", activeSessionId: "active-1" };
+		expect(getDaemonCommandCompatibilities(legacyAttach)).toEqual([{ minProtocol: 7 }]);
+	});
+
 	it("capability-gates explicit subagent deletion instead of schema-gating it", () => {
 		expect(DAEMON_COMMAND_COMPATIBILITY.delete_rlm_subagent).toEqual({
 			minProtocol: 7,

@@ -8,6 +8,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, Message, ProviderCompactionCheckpoint, TextContent } from "@earendil-works/pi-ai";
 import type { AgentCronJob } from "./cron-jobs.js";
+import { applyModelToolOutputPolicy, type ModelToolOutputPolicyOptions } from "./model-tool-output-policy.js";
 import {
 	type AppliedRefinementEdit,
 	formatRefinementNoticeBody,
@@ -604,8 +605,8 @@ export function withoutHarnessDigestsForCompaction(messages: readonly AgentMessa
 		);
 }
 
-export function convertToLlm(messages: AgentMessage[]): Message[] {
-	return messages
+export function convertToLlm(messages: AgentMessage[], options: ModelToolOutputPolicyOptions = {}): Message[] {
+	return applyModelToolOutputPolicy(messages, options)
 		.flatMap((m): Message | Message[] | undefined => {
 			switch (m.role) {
 				case "bashExecution":

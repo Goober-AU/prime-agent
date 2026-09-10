@@ -2,6 +2,7 @@ import stripAnsi from "strip-ansi";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { initTheme, Theme } from "../src/modes/interactive/theme/theme.js";
 import { colorizeOptimusLogo, getOptimusLogo, OPTIMUS_ROBOT_LOGO } from "../src/themes/optimus-logo.js";
+import { OPTIMUS_ART } from "../src/themes/optimus-logo-data.js";
 
 describe("Optimus robot artwork", () => {
 	beforeEach(() => {
@@ -15,6 +16,9 @@ describe("Optimus robot artwork", () => {
 	});
 
 	it("preserves the supplied artwork at its original size", () => {
+		expect(getOptimusLogo(50, 25)).toEqual(OPTIMUS_ART.hero);
+		expect(OPTIMUS_ART.hero).toHaveLength(25);
+		expect(Math.max(...OPTIMUS_ART.hero.map((line) => line.length))).toBe(50);
 		expect(getOptimusLogo(100, 49).join("\n")).toBe(OPTIMUS_ROBOT_LOGO);
 		expect(getOptimusLogo(200, 100).join("\n")).toBe(OPTIMUS_ROBOT_LOGO);
 	});
@@ -32,12 +36,12 @@ describe("Optimus robot artwork", () => {
 		expect(lines.at(-1)?.trim()).not.toBe("");
 		for (const line of lines) {
 			expect(line.length).toBeLessThanOrEqual(width);
-			expect(line).toMatch(/^[ .:\-=+*#%@]*$/);
+			expect(line).toMatch(/^[ *\u2800-\u28ff]*$/);
 		}
 	});
 
 	it.each(["truecolor", "256color"] as const)(
-		"uses %s green shading without changing text or leaking color",
+		"uses %s portrait colors without changing text or leaking color",
 		(mode) => {
 			vi.spyOn(Theme.prototype, "getColorMode").mockReturnValue(mode);
 			const raw = " .:-=+*#%@";
@@ -49,6 +53,31 @@ describe("Optimus robot artwork", () => {
 			expect(colorizeOptimusLogo(raw)).not.toBe(colored);
 		},
 	);
+
+	it("preserves every approved colored dot and does not expose cached arrays for mutation", () => {
+		vi.spyOn(Theme.prototype, "getColorMode").mockReturnValue("truecolor");
+		for (const variant of OPTIMUS_ART.variants) {
+			variant.lines.forEach((line, row) => {
+				let tone = -1;
+				let expected = "";
+				Array.from(line).forEach((char, col) => {
+					if (char !== " ") {
+						const next = variant.tones[row][col];
+						if (next !== tone) {
+							const hex = OPTIMUS_ART.palettes.dark[next];
+							expected += `\x1b[38;2;${Number.parseInt(hex.slice(1, 3), 16)};${Number.parseInt(hex.slice(3, 5), 16)};${Number.parseInt(hex.slice(5, 7), 16)}m`;
+						}
+						tone = next;
+					}
+					expected += char;
+				});
+				expect(colorizeOptimusLogo(line)).toBe(expected + (tone < 0 ? "" : "\x1b[39m"));
+			});
+		}
+		const first = getOptimusLogo(50, 25) as string[];
+		first[0] = "mutated";
+		expect(getOptimusLogo(50, 25)).toEqual(OPTIMUS_ART.hero);
+	});
 
 	it("honors NO_COLOR for the artwork and wordmark", () => {
 		vi.stubEnv("NO_COLOR", "1");

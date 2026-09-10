@@ -568,4 +568,25 @@ describe("SettingsManager", () => {
 			expect(manager.getTelemetryEnabled()).toBe(false);
 		});
 	});
+	describe("model-facing context policies", () => {
+		it("keeps both policies off by default and preserves explicit opt-in or opt-out", () => {
+			const defaults = SettingsManager.inMemory({});
+			expect(defaults.getSummaryUpdatePolicy()).toBe("off");
+			expect(defaults.getModelToolOutputPolicy()).toBe("off");
+
+			const enabled = SettingsManager.inMemory({
+				compaction: { summaryUpdatePolicy: "consolidate-repeated-v1" },
+				modelToolOutputPolicy: "repeated-large-text-v1",
+			});
+			expect(enabled.getCompactionSettings().summaryUpdatePolicy).toBe("consolidate-repeated-v1");
+			expect(enabled.getModelToolOutputPolicy()).toBe("repeated-large-text-v1");
+
+			const disabled = SettingsManager.inMemory({
+				compaction: { summaryUpdatePolicy: "off" },
+				modelToolOutputPolicy: "off",
+			});
+			expect(disabled.getSummaryUpdatePolicy()).toBe("off");
+			expect(disabled.getModelToolOutputPolicy()).toBe("off");
+		});
+	});
 });

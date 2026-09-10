@@ -105,6 +105,20 @@ const ThinkingLevelMapSchema = Type.Object({
 	max: Type.Optional(ThinkingLevelMapValueSchema),
 });
 
+const NativeCompactionCapabilitySchema = Type.Object({
+	protocol: Type.Literal("openai-responses-compact-v1"),
+	provider: Type.String({ minLength: 1 }),
+	model: Type.String({ minLength: 1 }),
+	endpoint: Type.String({ minLength: 1 }),
+	apiVersion: Type.Literal("v1"),
+	enabled: Type.Boolean(),
+	validation: Type.Union([
+		Type.Literal("unverified"),
+		Type.Literal("documentation-verified"),
+		Type.Literal("live-verified"),
+	]),
+});
+
 const OpenAICompletionsCompatSchema = Type.Object({
 	supportsStore: Type.Optional(Type.Boolean()),
 	supportsDeveloperRole: Type.Optional(Type.Boolean()),
@@ -168,6 +182,7 @@ const ModelDefinitionSchema = Type.Object({
 	contextWindow: Type.Optional(Type.Number()),
 	maxInputTokens: Type.Optional(Type.Integer({ minimum: 1 })),
 	maxTokens: Type.Optional(Type.Number()),
+	nativeCompaction: Type.Optional(NativeCompactionCapabilitySchema),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
 });
@@ -244,6 +259,49 @@ function stripJsonComments(input: string): string {
 	return input
 		.replace(/"(?:\\.|[^"\\])*"|\/\/[^\n]*/g, (m) => (m[0] === '"' ? m : ""))
 		.replace(/"(?:\\.|[^"\\])*"|,(\s*[}\]])/g, (m, tail) => tail ?? (m[0] === '"' ? m : ""));
+}
+
+function normalizedHttpEndpoint(value: string): string | undefined {
+	try {
+		const url = new URL(value);
+		if (url.protocol !== "http:" && url.protocol !== "https:") return undefined;
+		if (url.username || url.password || url.search || url.hash) return undefined;
+		url.pathname = url.pathname.replace(/\/+$/, "");
+		return url.toString().replace(/\/$/, "");
+	} catch {
+		return undefined;
+	}
+}
+
+function validateNativeCompactionCapability(
+	providerName: string,
+	modelDef: Static<typeof ModelDefinitionSchema>,
+	providerConfig: Static<typeof ProviderConfigSchema>,
+): void {
+	const capability = modelDef.nativeCompaction;
+	if (!capability) return;
+	const label = `Provider ${providerName}, model ${modelDef.id}: nativeCompaction`;
+	if (providerName !== "azure-openai-managed" || modelDef.id !== "gpt-6-astra") {
+		throw new Error(`${label} is allowlisted only for azure-openai-managed/gpt-6-astra.`);
+	}
+	const api = modelDef.api ?? providerConfig.api;
+	if (api !== "openai-responses") {
+		throw new Error(`${label} requires api "openai-responses".`);
+	}
+	if (capability.provider !== providerName || capability.model !== modelDef.id) {
+		throw new Error(`${label} provider/model ownership does not match its enclosing model.`);
+	}
+	if (capability.enabled && capability.validation !== "live-verified") {
+		throw new Error(`${label} cannot be enabled until validation is "live-verified".`);
+	}
+	const baseUrl = normalizedHttpEndpoint(modelDef.baseUrl ?? providerConfig.baseUrl ?? "");
+	const endpoint = normalizedHttpEndpoint(capability.endpoint);
+	if (!baseUrl || !endpoint || new URL(baseUrl).pathname !== "/azure-openai/v1") {
+		throw new Error(`${label} requires a safe /azure-openai/v1 gateway base URL.`);
+	}
+	if (endpoint !== normalizedHttpEndpoint(`${baseUrl}/responses/compact`)) {
+		throw new Error(`${label}.endpoint must equal the model base URL plus /responses/compact.`);
+	}
 }
 
 /** Provider override config (baseUrl, compat) without request auth/headers */
@@ -723,6 +781,7 @@ export class ModelRegistry {
 
 			for (const modelDef of models) {
 				const hasModelApi = !!modelDef.api;
+				validateNativeCompactionCapability(providerName, modelDef, providerConfig);
 
 				if (!hasProviderApi && !hasModelApi && !isBuiltIn) {
 					throw new Error(
@@ -784,6 +843,7 @@ export class ModelRegistry {
 					contextWindow: modelDef.contextWindow ?? 128000,
 					maxInputTokens: modelDef.maxInputTokens,
 					maxTokens: modelDef.maxTokens ?? 16384,
+					nativeCompaction: modelDef.nativeCompaction,
 					headers: undefined,
 					compat,
 				} as Model<Api>);
@@ -1637,6 +1697,7 @@ export class ModelRegistry {
 		}
 
 		for (const modelDef of config.models) {
+			validateNativeCompactionCapability(providerName, modelDef, config);
 			const api = modelDef.api || config.api;
 			if (!api) {
 				throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
@@ -1687,6 +1748,7 @@ export class ModelRegistry {
 					contextWindow: modelDef.contextWindow,
 					maxInputTokens: modelDef.maxInputTokens,
 					maxTokens: modelDef.maxTokens,
+					nativeCompaction: modelDef.nativeCompaction,
 					headers: undefined,
 					compat: modelDef.compat,
 				} as Model<Api>);
@@ -1734,6 +1796,7 @@ export interface ProviderConfigInput {
 		contextWindow: number;
 		maxInputTokens?: number;
 		maxTokens: number;
+		nativeCompaction?: Model<Api>["nativeCompaction"];
 		headers?: Record<string, string>;
 		compat?: Model<Api>["compat"];
 	}>;

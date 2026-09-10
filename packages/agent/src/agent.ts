@@ -10,6 +10,7 @@ import {
 	type Transport,
 } from "@earendil-works/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+import type { AgentLoopPerformanceMetrics } from "./performance-metrics.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -113,6 +114,7 @@ export interface AgentOptions {
 	thinkingBudgets?: ThinkingBudgets;
 	transport?: Transport;
 	toolExecution?: ToolExecutionMode;
+	performanceMetrics?: AgentLoopPerformanceMetrics;
 }
 
 class PendingMessageQueue {
@@ -216,6 +218,7 @@ export class Agent {
 	public thinkingBudgets?: ThinkingBudgets;
 	public transport: Transport;
 	public toolExecution: ToolExecutionMode;
+	public performanceMetrics?: AgentLoopPerformanceMetrics;
 
 	constructor(options: AgentOptions = {}) {
 		this._state = createMutableAgentState(options.initialState);
@@ -236,6 +239,7 @@ export class Agent {
 		this.thinkingBudgets = options.thinkingBudgets;
 		this.transport = options.transport ?? "auto";
 		this.toolExecution = options.toolExecution ?? "parallel";
+		this.performanceMetrics = options.performanceMetrics;
 	}
 
 	/**
@@ -468,6 +472,7 @@ export class Agent {
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			toolExecution: this.toolExecution,
+			performanceMetrics: this.performanceMetrics,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
 			shouldStopAfterTurn: async (context) => this.shouldStopAfterTurn?.(context) ?? false,

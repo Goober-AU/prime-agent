@@ -9,11 +9,16 @@ import { writeFileAtomicSync } from "../utils/atomic-file.js";
 const RECENT_MODELS_LIMIT = 20;
 export const DEFAULT_IDLE_EVICTION_MINUTES = 90;
 
+export type SummaryUpdatePolicySetting = "off" | "consolidate-repeated-v1";
+export type ModelToolOutputPolicySetting = "off" | "repeated-large-text-v1";
+
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
 	agentCallable?: boolean; // default: true - expose the compact skill so the model can request compaction
+	/** Behavior-changing iterative summary prompt. Default: off until semantic quality is proven. */
+	summaryUpdatePolicy?: SummaryUpdatePolicySetting;
 }
 
 export interface BranchSummarySettings {
@@ -143,6 +148,8 @@ export interface Settings {
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
 	compaction?: CompactionSettings;
+	/** Model-facing duplicate-output reduction. Default: off until quality is proven. */
+	modelToolOutputPolicy?: ModelToolOutputPolicySetting;
 	autoRefine?: AutoRefineSettings;
 	agentTraces?: AgentTracesSettings;
 	telemetry?: TelemetrySettings;
@@ -894,11 +901,33 @@ export class SettingsManager {
 		return this.settings.compaction?.agentCallable ?? true;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getSummaryUpdatePolicy(): SummaryUpdatePolicySetting {
+		const configured = this.settings.compaction?.summaryUpdatePolicy;
+		if (configured === "consolidate-repeated-v1" || configured === "off") return configured;
+		return process.env.PRIME_AGENT_SUMMARY_UPDATE_POLICY === "consolidate-repeated-v1"
+			? "consolidate-repeated-v1"
+			: "off";
+	}
+
+	getModelToolOutputPolicy(): ModelToolOutputPolicySetting {
+		const configured = this.settings.modelToolOutputPolicy;
+		if (configured === "repeated-large-text-v1" || configured === "off") return configured;
+		return process.env.PRIME_AGENT_MODEL_TOOL_OUTPUT_POLICY === "repeated-large-text-v1"
+			? "repeated-large-text-v1"
+			: "off";
+	}
+
+	getCompactionSettings(): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		summaryUpdatePolicy: SummaryUpdatePolicySetting;
+	} {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+			summaryUpdatePolicy: this.getSummaryUpdatePolicy(),
 		};
 	}
 

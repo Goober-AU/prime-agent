@@ -151,6 +151,14 @@ export type {
 	ResolvedResource,
 } from "./core/package-manager.js";
 export { DefaultPackageManager } from "./core/package-manager.js";
+export {
+	createLocalPerformanceMetricRecorder,
+	createLocalPerformanceMetricRecorderFromEnvironment,
+	type EnvironmentPerformanceMetricRecorderOptions,
+	LocalPerformanceMetricRecorder,
+	type LocalPerformanceMetricRecorderOptions,
+	type PerformanceMetricFileIO,
+} from "./core/performance-metrics.js";
 export type {
 	HarnessState,
 	RefinementEdit,

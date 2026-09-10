@@ -4,6 +4,11 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } f
 import { createServer, type Server, type Socket } from "node:net";
 import { basename, dirname, join, resolve } from "node:path";
 import { Writable } from "node:stream";
+import {
+	elapsedMetricMs,
+	type PerformanceMetricRecorder,
+	safeRecordPerformanceMetric,
+} from "@earendil-works/pi-agent-core";
 import { getLogger } from "@earendil-works/pi-ai";
 import { createCliSubprocessEnv, createCliSubprocessLaunchSpec } from "../../cli/subprocess-launch.js";
 import {
@@ -42,6 +47,7 @@ import {
 	readActiveOrphanProcesses,
 	shouldReapOrphanProcess,
 } from "../../core/orphan-process-journal.js";
+import { createLocalPerformanceMetricRecorderFromEnvironment } from "../../core/performance-metrics.js";
 import { PromptAdmissionCancelledError, waitForPromptAdmission } from "../../core/prompt-admission.js";
 import {
 	canEvictWorker,
@@ -52,7 +58,7 @@ import { canonicalSessionPath, getProcessStartId, SessionAlreadyActiveError } fr
 import { getSessionArtifactPathForFile, readSessionInfo, type SessionInfo } from "../../core/session-manager.js";
 import { looksLikeSessionPath } from "../../core/session-resolver.js";
 import { SettingsManager } from "../../core/settings-manager.js";
-import { writeFileAtomicSync } from "../../utils/atomic-file.js";
+import { AtomicFileWriteCoordinator, removeFileDurably, writeFileAtomicSync } from "../../utils/atomic-file.js";
 import {
 	isProcessAlive,
 	processIdExists,
@@ -209,6 +215,8 @@ const STOP_FINALIZATION_RECHECK_MS = 250;
 const STOP_FINALIZATION_SIGKILL_GRACE_MS = 5000;
 const STOP_FINALIZATION_RETRY_MS = 5000;
 const STALE_RECLAIM_WAIT_MS = 10_000;
+const DESCRIPTOR_WRITE_DRAIN_TIMEOUT_MS = 5_000;
+const MAX_SUPERVISOR_PERFORMANCE_RECORDERS = 32;
 // Polling loops probe existence cheaply via kill(0); the ps-backed zombie and
 // identity checks are throttled so a wedged worker cannot saturate the
 // supervisor event loop with synchronous subprocess spawns.
@@ -269,6 +277,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_state",
 	"get_connection_state",
 	"get_messages",
+	"get_history_range",
 	"get_rlm_children",
 	"get_session_stats",
 	"get_context_tree",
@@ -365,8 +374,16 @@ interface ResidentWorker {
 	deferredRecoveryRounds?: number;
 	/** Bumped per applied roster frame; a summaries pull that straddles a frame must not gap-fill. */
 	rosterEpoch?: number;
+	/** Bumped for each in-memory lifecycle/ownership transition that can straddle an async descriptor write. */
+	descriptorRevision?: number;
+	/** Once set, queued descriptor writes must not resurrect a removed registration. */
+	descriptorRetired?: boolean;
 	rosterApplyChain?: Promise<void>;
 	rosterRepairPull?: Promise<void>;
+}
+interface WorkerDescriptorTransition {
+	revision: number;
+	descriptor: DaemonWorkerDescriptor;
 }
 
 interface SnapshotDuplicateValidation {
@@ -387,10 +404,17 @@ interface SnapshotTranscriptGeneration {
 	validation?: SnapshotDuplicateValidation;
 }
 
+export type DaemonSupervisorPerformanceMetricRecorderFactory = (options: {
+	agentDir: string;
+	sessionId: string;
+}) => PerformanceMetricRecorder | undefined;
+
 interface DaemonSupervisorOptions {
 	socketPath?: string;
 	defaultSessionConfig: AgentSessionRuntimeConfig;
 	descriptorDir?: string;
+	/** Injectable only for isolated tests; the default remains the shared opt-in environment factory. */
+	performanceMetricRecorderFactory?: DaemonSupervisorPerformanceMetricRecorderFactory;
 }
 
 interface PersistedSupervisorConfig {
@@ -443,6 +467,10 @@ class SupervisorRecoveryCancelledError extends Error {
 class SnapshotLoadInvalidatedError extends Error {}
 
 class WorkerStopTimeoutError extends Error {}
+
+class WorkerDescriptorTransitionStaleError extends Error {
+	readonly code = "supervisor_generation_stale" as const;
+}
 
 function isSupervisorGenerationStale(error: unknown): boolean {
 	return (
@@ -712,6 +740,9 @@ export class DaemonSupervisor {
 	private readonly detachingInputPauseSessions = new WeakMap<DaemonSocketClient, Set<string>>();
 	private readonly protocolClientIds = new WeakMap<DaemonSocketClient, string>();
 	private readonly workers = new Map<string, ResidentWorker>();
+	private readonly descriptorWrites = new AtomicFileWriteCoordinator();
+	private readonly performanceMetricRecorderFactory: DaemonSupervisorPerformanceMetricRecorderFactory;
+	private readonly performanceMetricRecorders = new Map<string, PerformanceMetricRecorder | undefined>();
 	private workerStopCounts?: Map<ResidentWorker, number>;
 	private readonly openingWorkers = new Map<string, Promise<ResidentWorker>>();
 	/** Public admission ids are scoped to the socket that registered them. */
@@ -767,6 +798,9 @@ export class DaemonSupervisor {
 		this.snapshotCacheRoot = join(this.descriptorDir, "snapshot-cache", this.generation);
 		this.catalog = new DaemonCatalogClient((message) => this.log(message));
 		this.settingsManager = SettingsManager.create(process.cwd(), this.defaultSessionConfig.agentDir ?? agentDir);
+		this.performanceMetricRecorderFactory =
+			options.performanceMetricRecorderFactory ??
+			((factoryOptions) => createLocalPerformanceMetricRecorderFromEnvironment(factoryOptions));
 	}
 
 	async start(): Promise<void> {
@@ -796,7 +830,7 @@ export class DaemonSupervisor {
 			rmSync(this.snapshotCacheRoot, { recursive: true, force: true });
 			mkdirSync(this.snapshotCacheRoot, { recursive: true, mode: 0o700 });
 			this.commandJournal = new CommandRecoveryJournal(join(this.descriptorDir, "command-journal.jsonl"));
-			this.loadWorkerDescriptors();
+			await this.loadWorkerDescriptors();
 			const workersToAdopt = [...this.workers.values()];
 
 			this.server = createServer((socket) => this.handleConnection(socket));
@@ -932,7 +966,7 @@ export class DaemonSupervisor {
 			if (!context || !intent.descriptor.rootSessionId) continue;
 			try {
 				await this.cancelScheduledJobsForSessionTree(intent.descriptor.rootSessionId, context.sessionFile);
-				this.deleteWorkerDescriptor(intent);
+				await this.deleteWorkerDescriptor(intent);
 			} catch {
 				// Still owned until the cancel lands; the tree stays excluded below.
 				pendingCancelRoots.add(canonicalSessionPath(context.sessionFile));
@@ -1314,7 +1348,7 @@ export class DaemonSupervisor {
 		};
 	}
 
-	private loadWorkerDescriptors(): void {
+	private async loadWorkerDescriptors(): Promise<void> {
 		for (const name of readdirSync(this.descriptorDir)) {
 			if (name === SUPERVISOR_CONFIG_FILE_NAME || !name.endsWith(".json")) {
 				continue;
@@ -1340,8 +1374,9 @@ export class DaemonSupervisor {
 					snapshotLoads: new Map(),
 					intentionalStop: durableDescriptor.stopRequestedAt !== undefined,
 					stopRevision: 0,
+					descriptorRevision: 0,
 				};
-				this.persistWorker(worker);
+				await this.persistWorker(worker);
 				this.workers.set(durableDescriptor.workerId, worker);
 			} catch (error) {
 				this.log(`Ignoring invalid worker descriptor ${path}: ${String(error)}`);
@@ -1411,21 +1446,180 @@ export class DaemonSupervisor {
 		);
 	}
 
-	private persistWorker(worker: ResidentWorker): void {
-		worker.descriptor.updatedAt = new Date().toISOString();
-		const persisted = durableDaemonWorkerDescriptor(worker.descriptor);
-		writeFileAtomicSync(worker.descriptorPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
+	private beginWorkerDescriptorTransition(
+		worker: ResidentWorker,
+		nextDescriptor: DaemonWorkerDescriptor = worker.descriptor,
+	): WorkerDescriptorTransition {
+		const revision = (worker.descriptorRevision ?? 0) + 1;
+		worker.descriptorRevision = revision;
+		// A fresh identity plus the revision catches both replacement and in-place transition races.
+		worker.descriptor = { ...nextDescriptor };
+		return { revision, descriptor: worker.descriptor };
 	}
 
-	private deleteWorkerDescriptor(worker: { descriptorPath: string; descriptor: DaemonWorkerDescriptor }): void {
+	private isWorkerDescriptorTransitionCurrent(
+		worker: ResidentWorker,
+		transition: WorkerDescriptorTransition,
+	): boolean {
+		return (
+			worker.descriptorRetired !== true &&
+			(worker.descriptorRevision ?? 0) === transition.revision &&
+			worker.descriptor === transition.descriptor
+		);
+	}
+
+	private requireWorkerDescriptorTransitionCurrent(
+		worker: ResidentWorker,
+		transition: WorkerDescriptorTransition,
+	): void {
+		if (!this.isWorkerDescriptorTransitionCurrent(worker, transition)) {
+			throw new WorkerDescriptorTransitionStaleError(
+				`Worker ${worker.descriptor.workerId} lifecycle changed while its descriptor write was pending`,
+			);
+		}
+	}
+
+	private async persistWorkerDescriptorTransition(
+		worker: ResidentWorker,
+		transition: WorkerDescriptorTransition,
+	): Promise<void> {
 		try {
-			rmSync(worker.descriptorPath, { force: true });
-			rmSync(worker.descriptor.recoveryJournalPath, { force: true });
-			if (worker.descriptor.orphanProcessJournalPath) {
-				rmSync(worker.descriptor.orphanProcessJournalPath, { force: true });
+			await this.persistWorker(worker);
+		} catch (error) {
+			if (!this.isWorkerDescriptorTransitionCurrent(worker, transition)) {
+				throw new WorkerDescriptorTransitionStaleError(
+					`Worker ${worker.descriptor.workerId} lifecycle changed while an older descriptor write failed`,
+				);
 			}
+			throw error;
+		}
+		this.requireWorkerDescriptorTransitionCurrent(worker, transition);
+	}
+
+	private invalidateWorkerDescriptorTransitions(worker: { descriptorRevision?: number }): void {
+		worker.descriptorRevision = (worker.descriptorRevision ?? 0) + 1;
+	}
+
+	private performanceMetricRecorderForSession(sessionId: string | undefined): PerformanceMetricRecorder | undefined {
+		if (typeof sessionId !== "string" || sessionId.trim().length === 0) return undefined;
+		if (this.performanceMetricRecorders.has(sessionId)) {
+			return this.performanceMetricRecorders.get(sessionId);
+		}
+		if (this.performanceMetricRecorders.size >= MAX_SUPERVISOR_PERFORMANCE_RECORDERS) return undefined;
+		let recorder: PerformanceMetricRecorder | undefined;
+		try {
+			recorder = this.performanceMetricRecorderFactory({
+				agentDir: this.defaultSessionConfig.agentDir!,
+				sessionId,
+			});
+			if (recorder && recorder.sessionId !== sessionId) {
+				this.closePerformanceMetricRecorder(recorder);
+				recorder = undefined;
+			}
+		} catch {
+			// Metrics construction is disposable; descriptor durability is not.
+			recorder = undefined;
+		}
+		this.performanceMetricRecorders.set(sessionId, recorder);
+		return recorder;
+	}
+
+	private performanceMetricNow(recorder: PerformanceMetricRecorder | undefined): number | undefined {
+		if (!recorder) return undefined;
+		try {
+			return recorder.monotonicNow();
+		} catch {
+			return undefined;
+		}
+	}
+
+	private recordDescriptorWriteMetric(
+		recorder: PerformanceMetricRecorder | undefined,
+		startedAt: number | undefined,
+		retryCount: number,
+		outcome: "success" | "failure",
+	): void {
+		if (!recorder) return;
+		safeRecordPerformanceMetric(recorder, {
+			operation: "file_retry",
+			identity: { component: "persistence" },
+			outcome,
+			measurements: {
+				total_ms: elapsedMetricMs(startedAt, this.performanceMetricNow(recorder)),
+				retry_count: retryCount,
+			},
+		});
+	}
+
+	private closePerformanceMetricRecorder(recorder: PerformanceMetricRecorder): void {
+		try {
+			void Promise.resolve(recorder.close()).catch(() => undefined);
+		} catch {
+			// Closing telemetry must not delay or fail supervisor shutdown.
+		}
+	}
+
+	private disposePerformanceMetricRecorders(): void {
+		const recorders = new Set(
+			[...this.performanceMetricRecorders.values()].filter(
+				(recorder): recorder is PerformanceMetricRecorder => recorder !== undefined,
+			),
+		);
+		this.performanceMetricRecorders.clear();
+		// Deliberately start every close without serial awaits. Injected or filesystem-backed
+		// telemetry cannot hold the required descriptor drain or supervisor shutdown open.
+		for (const recorder of recorders) this.closePerformanceMetricRecorder(recorder);
+	}
+
+	private async persistWorker(worker: ResidentWorker): Promise<void> {
+		if (worker.descriptorRetired) {
+			throw new Error(`Worker descriptor ${worker.descriptor.workerId} was already removed`);
+		}
+		worker.descriptor.updatedAt = new Date().toISOString();
+		const persisted = durableDaemonWorkerDescriptor(worker.descriptor);
+		// The durable snapshot is the authority. Early writes without a real root session id
+		// remain intentionally unobserved rather than fabricating a supervisor session id.
+		const recorder = this.performanceMetricRecorderForSession(persisted.rootSessionId);
+		const startedAt = this.performanceMetricNow(recorder);
+		let retryCount = 0;
+		try {
+			await this.descriptorWrites.write(worker.descriptorPath, `${JSON.stringify(persisted, null, 2)}\n`, {
+				mode: 0o600,
+				fsync: true,
+				fsyncDir: true,
+				renameRetry: {
+					onRetry: () => {
+						retryCount++;
+					},
+				},
+			});
+		} catch (error) {
+			this.recordDescriptorWriteMetric(recorder, startedAt, retryCount, "failure");
+			throw error;
+		}
+		this.recordDescriptorWriteMetric(recorder, startedAt, retryCount, "success");
+	}
+
+	private async deleteWorkerDescriptor(worker: {
+		descriptorPath: string;
+		descriptor: DaemonWorkerDescriptor;
+		descriptorRetired?: boolean;
+		descriptorRevision?: number;
+	}): Promise<void> {
+		worker.descriptorRetired = true;
+		this.invalidateWorkerDescriptorTransitions(worker);
+		try {
+			await this.descriptorWrites.run(worker.descriptorPath, async () => {
+				await removeFileDurably(worker.descriptor.recoveryJournalPath);
+				if (worker.descriptor.orphanProcessJournalPath) {
+					await removeFileDurably(worker.descriptor.orphanProcessJournalPath);
+				}
+				// Remove the ownership descriptor last, then persist that directory mutation.
+				await removeFileDurably(worker.descriptorPath, { fsyncDir: true });
+			});
 		} catch (error) {
 			this.log(`Failed to remove worker descriptor ${worker.descriptorPath}: ${String(error)}`);
+			throw error;
 		}
 	}
 
@@ -2631,7 +2825,7 @@ export class DaemonSupervisor {
 				}
 				return await forward();
 			}
-			this.persistWorkerStopTombstone(match.worker, true);
+			await this.persistWorkerStopTombstone(match.worker, true);
 			const releaseStopOwnership = this.acquireWorkerStopOwnership(match.worker);
 			let response: DaemonResponse;
 			try {
@@ -3015,7 +3209,7 @@ export class DaemonSupervisor {
 			this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
 			this.workers.delete(worker.descriptor.workerId);
 			this.flipWorkerRosterEntriesInactive(worker);
-			this.deleteWorkerDescriptor(worker);
+			await this.deleteWorkerDescriptor(worker);
 			return true;
 		}
 		// Fail fast before waiting on anything: only a confirmed-dead process is
@@ -3053,13 +3247,22 @@ export class DaemonSupervisor {
 			throw new Error("Session is not owned by this client");
 		}
 		const previousDescriptor = worker.descriptor;
-		worker.descriptor = { ...previousDescriptor, ownerClientId: undefined };
+		const transition = this.beginWorkerDescriptorTransition(worker, {
+			...previousDescriptor,
+			ownerClientId: undefined,
+		});
 		try {
-			this.persistWorker(worker);
+			await this.persistWorker(worker);
 		} catch (error) {
-			worker.descriptor = previousDescriptor;
+			// A later stop/recovery transition owns the live object. Never roll it back
+			// merely because this older ownership write completed with an error.
+			if (this.isWorkerDescriptorTransitionCurrent(worker, transition)) {
+				this.invalidateWorkerDescriptorTransitions(worker);
+				worker.descriptor = previousDescriptor;
+			}
 			throw error;
 		}
+		if (!this.isWorkerDescriptorTransitionCurrent(worker, transition)) return;
 		worker.promotedOwnerClientId = clientId;
 		for (const entry of this.workerRosterEntries(worker)) {
 			this.roster().amend(entry.agentId, {});
@@ -3090,7 +3293,9 @@ export class DaemonSupervisor {
 		if (existing && this.isWorkerRecoveryCancelled(existing)) {
 			throw new Error(`Session worker ${existing.descriptor.workerId} recovery was cancelled`);
 		}
-		const recoveryStopRevision = existing?.stopRevision;
+		const recoveryStopRevision = existing?.stopRevision ?? 0;
+		const existingDescriptorRevision = existing?.descriptorRevision ?? 0;
+		const existingDescriptor = existing?.descriptor;
 		const launchEnv = command.launchEnv ?? existing?.launchEnv;
 		const createCommand: DaemonCreateCommand = {
 			...withoutSupervisorCreateFields(command),
@@ -3157,6 +3362,7 @@ export class DaemonSupervisor {
 		const previousDescriptor = existing?.descriptor;
 		const previousIntentionalStop = existing?.intentionalStop;
 		let descriptorAssigned = false;
+		let descriptorTransition: WorkerDescriptorTransition | undefined;
 		let childPid: number;
 		let childProcessStartId: string | undefined;
 		let worker: ResidentWorker;
@@ -3206,15 +3412,27 @@ export class DaemonSupervisor {
 				snapshotLoads: new Map(),
 				intentionalStop: false,
 				stopRevision: 0,
+				descriptorRevision: 0,
 				launchEnv,
 				transientCreateCommand: ownerClientId ? createCommand : undefined,
 			};
 			await this.assertRecoveryAllowed();
-			worker.descriptor = descriptor;
+			if (
+				existing &&
+				(existing.descriptor !== existingDescriptor ||
+					(existing.descriptorRevision ?? 0) !== existingDescriptorRevision ||
+					existing.stopRevision !== recoveryStopRevision ||
+					this.isWorkerRecoveryCancelled(existing))
+			) {
+				throw new WorkerDescriptorTransitionStaleError(
+					`Session worker ${workerId} lifecycle changed before its launch descriptor was assigned`,
+				);
+			}
 			worker.launchEnv = launchEnv;
 			worker.transientCreateCommand = descriptor.ownerClientId ? createCommand : undefined;
+			descriptorTransition = this.beginWorkerDescriptorTransition(worker, descriptor);
 			descriptorAssigned = true;
-			this.persistWorker(worker);
+			await this.persistWorkerDescriptorTransition(worker, descriptorTransition);
 			worker.intentionalStop = false;
 			this.workers.set(workerId, worker);
 		} catch (error) {
@@ -3228,8 +3446,15 @@ export class DaemonSupervisor {
 			} catch (cleanupError) {
 				this.reportCleanupFailure(`worker launch temp ${workerId}`, cleanupError);
 			}
-			if (existing && descriptorAssigned && previousDescriptor) {
+			if (
+				existing &&
+				descriptorAssigned &&
+				previousDescriptor &&
+				descriptorTransition &&
+				this.isWorkerDescriptorTransitionCurrent(existing, descriptorTransition)
+			) {
 				try {
+					this.invalidateWorkerDescriptorTransitions(existing);
 					existing.descriptor = previousDescriptor;
 				} catch (cleanupError) {
 					this.reportCleanupFailure(`worker launch descriptor ${workerId}`, cleanupError);
@@ -3260,20 +3485,27 @@ export class DaemonSupervisor {
 			if ((summary.activeSessionId ?? summary.id) !== rootActiveSessionId) {
 				throw new Error("Session worker did not preserve its assigned active session id");
 			}
+			this.requireWorkerDescriptorTransitionCurrent(worker, descriptorTransition);
 			this.writeRosterEntry(workerRosterEntryFromSummary(summary), worker);
 			worker.descriptor.rootSessionId = summary.sessionId;
 			worker.descriptor.sessionFile = summary.sessionFile;
 			await this.subscribeWorker(worker, rootActiveSessionId);
 			await this.refreshWorkerSummaries(worker, true);
-			if (existing && (this.isWorkerRecoveryCancelled(worker) || worker.stopRevision !== recoveryStopRevision)) {
-				throw new Error(`Session worker ${workerId} recovery was cancelled`);
+			this.requireWorkerDescriptorTransitionCurrent(worker, descriptorTransition);
+			if (this.isWorkerRecoveryCancelled(worker) || worker.stopRevision !== recoveryStopRevision) {
+				throw new WorkerDescriptorTransitionStaleError(`Session worker ${workerId} launch was cancelled`);
 			}
 			await this.assertRecoveryAllowed();
+			this.requireWorkerDescriptorTransitionCurrent(worker, descriptorTransition);
+			if (this.isWorkerRecoveryCancelled(worker) || worker.stopRevision !== recoveryStopRevision) {
+				throw new WorkerDescriptorTransitionStaleError(`Session worker ${workerId} launch was cancelled`);
+			}
 			worker.descriptor.lifecycle = "ready";
 			worker.descriptor.consecutiveFailures = 0;
 			worker.deferredRecoveryRounds = 0;
 			worker.descriptor.lastError = undefined;
-			this.persistWorker(worker);
+			const readyTransition = this.beginWorkerDescriptorTransition(worker);
+			await this.persistWorkerDescriptorTransition(worker, readyTransition);
 			if (!worker.descriptor.ownerClientId) {
 				worker.launchEnv = undefined;
 				worker.transientCreateCommand = undefined;
@@ -3285,35 +3517,48 @@ export class DaemonSupervisor {
 				throw error;
 			}
 			if (isSupervisorShutdownAdmissionCancelled(error)) {
-				let rolledBack = false;
+				let stoppedTransition: WorkerDescriptorTransition | undefined;
 				try {
-					await this.stopWorker(worker, existing === undefined, true, false, existing !== undefined, {
-						child,
-						closed: childClosed,
-					});
-					rolledBack = true;
+					stoppedTransition = await this.stopWorker(
+						worker,
+						existing === undefined,
+						true,
+						false,
+						existing !== undefined,
+						{ child, closed: childClosed },
+					);
 				} catch (cleanupError) {
 					this.reportCleanupFailure(`cancelled worker launch ${workerId}`, cleanupError);
 				}
 				const mappedWorker = this.workers.get(workerId);
 				if (
-					rolledBack &&
+					stoppedTransition &&
 					existing &&
 					previousDescriptor &&
+					this.isWorkerDescriptorTransitionCurrent(existing, stoppedTransition) &&
 					!this.shuttingDown &&
 					existing.stopRevision === recoveryStopRevision &&
 					existing.descriptor.stopRequestedAt === undefined &&
 					(mappedWorker === undefined || mappedWorker === existing)
 				) {
-					existing.descriptor = previousDescriptor;
 					existing.intentionalStop = previousIntentionalStop ?? false;
+					this.invalidateWorkerDescriptorTransitions(existing);
+					existing.descriptor = previousDescriptor;
+					const rollbackTransition = {
+						revision: existing.descriptorRevision ?? 0,
+						descriptor: previousDescriptor,
+					};
 					this.workers.set(workerId, existing);
+					let rollbackPersisted = false;
 					try {
-						this.persistWorker(existing);
+						await this.persistWorker(existing);
+						rollbackPersisted = this.isWorkerDescriptorTransitionCurrent(existing, rollbackTransition);
 					} catch (cleanupError) {
 						this.reportCleanupFailure(`cancelled worker recovery ${workerId}`, cleanupError);
 					}
-					this.deferWorkerRecovery(existing, error instanceof Error ? error : new Error(String(error)));
+					if (rollbackPersisted) {
+						await this.deferWorkerRecovery(existing, error instanceof Error ? error : new Error(String(error)));
+					}
 				}
 				throw error;
 			}
@@ -3323,11 +3568,20 @@ export class DaemonSupervisor {
 				!this.shuttingDown &&
 				worker.descriptor.stopRequestedAt === undefined &&
 				worker.stopRevision === recoveryStopRevision;
-			await this.stopWorker(worker, existing === undefined, true, false, existing !== undefined).catch((stopError) =>
-				this.log(`Could not stop failed worker ${workerId}: ${String(stopError)}`),
-			);
+			const stoppedTransition = await this.stopWorker(
+				worker,
+				existing === undefined,
+				true,
+				false,
+				existing !== undefined,
+			).catch((stopError) => {
+				this.log(`Could not stop failed worker ${workerId}: ${String(stopError)}`);
+				return undefined;
+			});
 			if (
 				shouldResumeRecovery &&
+				stoppedTransition &&
+				this.isWorkerDescriptorTransitionCurrent(worker, stoppedTransition) &&
 				!this.shuttingDown &&
 				worker.descriptor.stopRequestedAt === undefined &&
 				worker.stopRevision === recoveryStopRevision
@@ -3336,7 +3590,8 @@ export class DaemonSupervisor {
 				worker.intentionalStop = false;
 				worker.descriptor.lifecycle = "recovering";
 				this.workers.set(workerId, worker);
-				this.persistWorker(worker);
+				const recoveryTransition = this.beginWorkerDescriptorTransition(worker);
+				await this.persistWorkerDescriptorTransition(worker, recoveryTransition);
 			}
 			throw error;
 		}
@@ -3420,6 +3675,10 @@ export class DaemonSupervisor {
 
 	private async adoptOrRecoverWorker(worker: ResidentWorker): Promise<void> {
 		await this.assertRecoveryAllowed();
+		let adoptionTransition: WorkerDescriptorTransition = {
+			revision: worker.descriptorRevision ?? 0,
+			descriptor: worker.descriptor,
+		};
 		if (worker.descriptor.stopRequestedAt) {
 			try {
 				// A descriptor persisted before identity tracking has no
@@ -3432,22 +3691,49 @@ export class DaemonSupervisor {
 					const observedProcessStartId = getProcessStartId(worker.descriptor.pid);
 					try {
 						await this.connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS);
+						if (
+							!this.isWorkerDescriptorTransitionCurrent(worker, adoptionTransition) ||
+							worker.descriptor.stopRequestedAt === undefined
+						) {
+							return;
+						}
 						if (observedProcessStartId) {
 							worker.descriptor.processStartId = observedProcessStartId;
-							this.persistWorker(worker);
+							adoptionTransition = this.beginWorkerDescriptorTransition(worker);
+							await this.persistWorkerDescriptorTransition(worker, adoptionTransition);
 						}
-					} catch {
+					} catch (error) {
+						if (
+							isSupervisorRecoveryCancelled(error) ||
+							!this.isWorkerDescriptorTransitionCurrent(worker, adoptionTransition) ||
+							worker.descriptor.stopRequestedAt === undefined
+						) {
+							return;
+						}
 						// Unverifiable identity stays untrusted; the stop below
 						// still runs its graceful path and the finalizer keeps
 						// waiting rather than signalling a possibly-recycled pid.
 					}
 				}
+				if (
+					!this.isWorkerDescriptorTransitionCurrent(worker, adoptionTransition) ||
+					worker.descriptor.stopRequestedAt === undefined
+				) {
+					return;
+				}
 				await this.stopWorker(worker, true, true, worker.descriptor.archiveOnStop === true);
 				this.log(`Completed intentional stop for worker ${worker.descriptor.workerId} during supervisor adoption`);
 			} catch (error) {
+				if (
+					isSupervisorRecoveryCancelled(error) ||
+					!this.isWorkerDescriptorTransitionCurrent(worker, adoptionTransition)
+				) {
+					return;
+				}
 				worker.descriptor.lifecycle = "failed";
 				worker.descriptor.lastError = error instanceof Error ? error.message : String(error);
-				this.persistWorker(worker);
+				adoptionTransition = this.beginWorkerDescriptorTransition(worker);
+				await this.persistWorkerDescriptorTransition(worker, adoptionTransition);
 				this.log(`Could not complete intentional stop for worker ${worker.descriptor.workerId}: ${String(error)}`);
 			}
 			return;
@@ -3461,17 +3747,23 @@ export class DaemonSupervisor {
 			await this.connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS);
 			await this.subscribeWorker(worker, worker.descriptor.rootActiveSessionId);
 			await this.refreshWorkerSummaries(worker, true);
+			await this.assertRecoveryAllowed();
+			if (this.isWorkerRecoveryCancelled(worker)) return;
+			this.requireWorkerDescriptorTransitionCurrent(worker, adoptionTransition);
 			if (worker.descriptor.processStartId === undefined && observedProcessStartId) {
 				worker.descriptor.processStartId = observedProcessStartId;
 			}
-			await this.assertRecoveryAllowed();
 			worker.descriptor.lifecycle = "ready";
 			worker.descriptor.consecutiveFailures = 0;
 			worker.deferredRecoveryRounds = 0;
-			this.persistWorker(worker);
+			adoptionTransition = this.beginWorkerDescriptorTransition(worker);
+			await this.persistWorkerDescriptorTransition(worker, adoptionTransition);
 			this.broadcastHeartbeatsChanged();
 		} catch (error) {
-			if (isSupervisorRecoveryCancelled(error)) {
+			if (
+				isSupervisorRecoveryCancelled(error) ||
+				!this.isWorkerDescriptorTransitionCurrent(worker, adoptionTransition)
+			) {
 				return;
 			}
 			this.log(`Could not adopt worker ${worker.descriptor.workerId}: ${String(error)}`);
@@ -3487,11 +3779,14 @@ export class DaemonSupervisor {
 					this.log(`Could not restart pre-roster worker ${worker.descriptor.workerId}: ${String(restartError)}`);
 				}
 			}
+			if (!this.isWorkerDescriptorTransitionCurrent(worker, adoptionTransition)) return;
 			const identityNow = this.processIdentity(worker.descriptor.pid, worker.descriptor.processStartId);
 			if (isDaemonWorkerProbeTimeout(error) && (identityNow === "current" || identityNow === "unknown")) {
 				worker.descriptor.lifecycle = "recovering";
 				worker.descriptor.lastError = error instanceof Error ? error.message : String(error);
-				this.persistWorker(worker);
+				this.requireWorkerDescriptorTransitionCurrent(worker, adoptionTransition);
+				adoptionTransition = this.beginWorkerDescriptorTransition(worker);
+				await this.persistWorkerDescriptorTransition(worker, adoptionTransition);
 				void this.recoverWorker(worker).catch((recoveryError) =>
 					this.log(`Could not recover worker ${worker.descriptor.workerId}: ${String(recoveryError)}`),
 				);
@@ -3521,12 +3816,14 @@ export class DaemonSupervisor {
 			}
 		}
 		const finalIdentity = identity();
+		if (this.isWorkerRecoveryCancelled(worker)) return;
 		if (finalIdentity !== "gone" && finalIdentity !== "replaced") {
 			// A live or unverifiable survivor parks failed with no destructive cleanup: interruption
 			// marking and orphan reaping must never run against a possibly-active worker.
 			worker.descriptor.lifecycle = "failed";
 			worker.descriptor.lastError = `Pre-roster worker process ${worker.descriptor.pid} is still running and cannot be replaced safely`;
-			this.persistWorker(worker);
+			const failedTransition = this.beginWorkerDescriptorTransition(worker);
+			await this.persistWorkerDescriptorTransition(worker, failedTransition);
 			this.markWorkerRosterEntries(worker, "failed");
 			this.log(`Kept pre-roster worker ${worker.descriptor.workerId} failed: ${worker.descriptor.lastError}`);
 			return;
@@ -3580,7 +3877,7 @@ export class DaemonSupervisor {
 			await this.assertRecoveryAllowed();
 		} catch (recoveryError) {
 			if (!isSupervisorGenerationStale(recoveryError)) {
-				this.deferWorkerRecovery(worker, error);
+				await this.deferWorkerRecovery(worker, error);
 			}
 			return;
 		}
@@ -3589,7 +3886,8 @@ export class DaemonSupervisor {
 		}
 		worker.descriptor.lifecycle = "recovering";
 		worker.descriptor.lastError = error.message;
-		this.persistWorker(worker);
+		const recoveryTransition = this.beginWorkerDescriptorTransition(worker);
+		await this.persistWorkerDescriptorTransition(worker, recoveryTransition);
 		void this.recoverWorker(worker);
 	}
 
@@ -3615,7 +3913,8 @@ export class DaemonSupervisor {
 		worker.descriptor.lifecycle = "recovering";
 		worker.descriptor.consecutiveFailures = 0;
 		worker.deferredRecoveryRounds = 0;
-		this.persistWorker(worker);
+		const recoveryTransition = this.beginWorkerDescriptorTransition(worker);
+		await this.persistWorkerDescriptorTransition(worker, recoveryTransition);
 		await this.recoverWorker(worker);
 	}
 
@@ -3629,7 +3928,7 @@ export class DaemonSupervisor {
 		);
 	}
 
-	private deferWorkerRecovery(worker: ResidentWorker, disconnectError: Error): void {
+	private async deferWorkerRecovery(worker: ResidentWorker, disconnectError: Error): Promise<void> {
 		if (worker.deferredRecovery) {
 			return;
 		}
@@ -3640,7 +3939,8 @@ export class DaemonSupervisor {
 		if (worker.deferredRecoveryRounds > MAX_DEFERRED_RECOVERY_ROUNDS) {
 			worker.descriptor.lifecycle = "failed";
 			worker.descriptor.lastError = `Live session worker did not answer recovery probes for ${MAX_DEFERRED_RECOVERY_ROUNDS} rounds: ${disconnectError.message}`;
-			this.persistWorker(worker);
+			const failedTransition = this.beginWorkerDescriptorTransition(worker);
+			await this.persistWorkerDescriptorTransition(worker, failedTransition);
 			this.markWorkerRosterEntries(worker, "failed");
 			this.log(
 				`Worker ${worker.descriptor.workerId} is unresponsive; parked failed after ${MAX_DEFERRED_RECOVERY_ROUNDS} probe rounds`,
@@ -3677,7 +3977,8 @@ export class DaemonSupervisor {
 			}
 			worker.descriptor.lifecycle = "recovering";
 			worker.descriptor.lastError = disconnectError.message;
-			this.persistWorker(worker);
+			const recoveryTransition = this.beginWorkerDescriptorTransition(worker);
+			await this.persistWorkerDescriptorTransition(worker, recoveryTransition);
 			void this.recoverWorker(worker);
 			return;
 		}
@@ -3898,7 +4199,8 @@ export class DaemonSupervisor {
 		if (worker.descriptor.ownerClientId && !worker.launchEnv && !isProcessAlive(worker.descriptor.pid)) {
 			worker.descriptor.lifecycle = "failed";
 			worker.descriptor.lastError = "Waiting for the owning client to reconnect";
-			this.persistWorker(worker);
+			this.beginWorkerDescriptorTransition(worker);
+			await this.persistWorker(worker);
 			return;
 		}
 		if (worker.recovery) {
@@ -3933,10 +4235,12 @@ export class DaemonSupervisor {
 								}
 							}
 							await this.assertRecoveryAllowed();
+							if (this.isWorkerRecoveryCancelled(worker)) return;
 							worker.descriptor.lifecycle = "ready";
 							worker.descriptor.consecutiveFailures = 0;
 							worker.deferredRecoveryRounds = 0;
-							this.persistWorker(worker);
+							const readyTransition = this.beginWorkerDescriptorTransition(worker);
+							await this.persistWorkerDescriptorTransition(worker, readyTransition);
 							this.broadcastHeartbeatsChanged();
 							return;
 						} catch (error) {
@@ -3944,6 +4248,7 @@ export class DaemonSupervisor {
 								throw error;
 							}
 							await this.assertRecoveryAllowed();
+							if (this.isWorkerRecoveryCancelled(worker)) return;
 							worker.client?.close();
 							worker.client = undefined;
 							// A worker with the same durable process identity may be load-slow.
@@ -3961,9 +4266,11 @@ export class DaemonSupervisor {
 					const recoveryCommand = worker.descriptor.ownerClientId ? worker.transientCreateCommand : undefined;
 					if (!recoveryCommand || !worker.launchEnv) {
 						await this.recoverUncertainWorkerOperations(worker);
+						if (this.isWorkerRecoveryCancelled(worker)) return;
 						worker.descriptor.lifecycle = "failed";
 						worker.descriptor.lastError = "Waiting for a client with fresh runtime context";
-						this.persistWorker(worker);
+						const failedTransition = this.beginWorkerDescriptorTransition(worker);
+						await this.persistWorkerDescriptorTransition(worker, failedTransition);
 						this.markWorkerRosterEntries(worker, "failed");
 						return;
 					}
@@ -3982,12 +4289,14 @@ export class DaemonSupervisor {
 					} catch {
 						return;
 					}
+					if (this.isWorkerRecoveryCancelled(worker)) return;
 					worker.client?.close();
 					worker.client = undefined;
 					worker.descriptor.consecutiveFailures++;
 					worker.descriptor.lastFailureAt = new Date().toISOString();
 					worker.descriptor.lastError = error instanceof Error ? error.message : String(error);
-					this.persistWorker(worker);
+					const failureTransition = this.beginWorkerDescriptorTransition(worker);
+					await this.persistWorkerDescriptorTransition(worker, failureTransition);
 				}
 			}
 			if (keepProbingLiveWorker) {
@@ -3996,9 +4305,11 @@ export class DaemonSupervisor {
 				} catch {
 					return;
 				}
+				if (this.isWorkerRecoveryCancelled(worker)) return;
 				worker.descriptor.lifecycle = "recovering";
-				this.persistWorker(worker);
-				this.deferWorkerRecovery(
+				const recoveryTransition = this.beginWorkerDescriptorTransition(worker);
+				await this.persistWorkerDescriptorTransition(worker, recoveryTransition);
+				await this.deferWorkerRecovery(
 					worker,
 					new Error(worker.descriptor.lastError ?? "Live session worker did not answer recovery probes"),
 				);
@@ -4009,11 +4320,13 @@ export class DaemonSupervisor {
 			} catch {
 				return;
 			}
+			if (this.isWorkerRecoveryCancelled(worker)) return;
 			// Leak-over-kill: a live worker that keeps failing for non-timeout reasons parks failed with
 			// its process intact. A verified-identity survivor is reclaimed by the next fresh create;
 			// an unverifiable one waits for exit — killing a pid we cannot verify as ours is worse.
 			worker.descriptor.lifecycle = "failed";
-			this.persistWorker(worker);
+			const failedTransition = this.beginWorkerDescriptorTransition(worker);
+			await this.persistWorkerDescriptorTransition(worker, failedTransition);
 			this.markWorkerRosterEntries(worker, "failed");
 			this.log(`Worker ${worker.descriptor.workerId} failed after three recovery attempts`);
 		})().finally(() => {
@@ -4166,7 +4479,7 @@ export class DaemonSupervisor {
 			if (recovery) {
 				await this.assertRecoveryAllowed();
 			}
-			await this.chainWorkerRosterApply(worker, pullSource, () => {
+			await this.chainWorkerRosterApply(worker, pullSource, async () => {
 				if ((worker.rosterEpoch ?? 0) !== epochAtStart) return;
 				worker.descriptor.rootSessionId = root.sessionId;
 				worker.descriptor.sessionFile = root.sessionFile;
@@ -4175,7 +4488,7 @@ export class DaemonSupervisor {
 					sessionPath: root.sessionFile,
 					noSession: worker.descriptor.createCommand.noSession,
 				});
-				this.persistWorker(worker);
+				await this.persistWorker(worker);
 			});
 		}
 	}
@@ -4376,10 +4689,6 @@ export class DaemonSupervisor {
 		worker.rosterEpoch = (worker.rosterEpoch ?? 0) + 1;
 		const applySource = source ?? worker.client ?? worker.pendingClient;
 		if (!this.isWorkerRosterApplyCurrent(worker, applySource)) return;
-		if (delta.snapshot !== true && worker.rosterApplyChain === undefined) {
-			this.applyWorkerRosterDelta(worker, delta);
-			return;
-		}
 		this.chainWorkerRosterApply(worker, applySource, () =>
 			delta.snapshot === true
 				? this.applyWorkerRosterSnapshot(worker, delta, applySource)
@@ -4429,13 +4738,13 @@ export class DaemonSupervisor {
 			});
 	}
 
-	private applyWorkerRosterDelta(
+	private async applyWorkerRosterDelta(
 		worker: ResidentWorker,
 		delta: Extract<DaemonWorkerRosterOutbound, { type: "roster_delta" }>,
-	): void {
+	): Promise<void> {
 		for (const entry of delta.entries) {
 			this.writeRosterEntry(entry, worker);
-			this.syncRootDescriptorFromRosterEntry(worker, entry);
+			await this.syncRootDescriptorFromRosterEntry(worker, entry);
 		}
 		for (const agentId of delta.removedAgentIds ?? []) {
 			this.roster().delete(agentId);
@@ -4491,7 +4800,7 @@ export class DaemonSupervisor {
 		for (const entry of unclaimed.values()) this.roster().delete(entry.agentId);
 		for (const entry of delta.entries) {
 			this.writeRosterEntry(entry, worker);
-			this.syncRootDescriptorFromRosterEntry(worker, entry);
+			await this.syncRootDescriptorFromRosterEntry(worker, entry);
 		}
 		for (const agentId of removed) this.roster().delete(agentId);
 		if (edgesFailed) {
@@ -4512,7 +4821,7 @@ export class DaemonSupervisor {
 		}
 	}
 
-	private syncRootDescriptorFromRosterEntry(worker: ResidentWorker, entry: WorkerRosterEntry): void {
+	private async syncRootDescriptorFromRosterEntry(worker: ResidentWorker, entry: WorkerRosterEntry): Promise<void> {
 		const summary = entry.summary;
 		if (summary.activeSessionId !== worker.descriptor.rootActiveSessionId) return;
 		if (
@@ -4528,7 +4837,7 @@ export class DaemonSupervisor {
 			sessionPath: summary.sessionFile,
 			noSession: worker.descriptor.createCommand.noSession,
 		});
-		this.persistWorker(worker);
+		await this.persistWorker(worker);
 	}
 
 	// Behind the pull-epoch guard the pull is never staler than the row it replaces; never steal another worker's claim.
@@ -5085,16 +5394,21 @@ export class DaemonSupervisor {
 		client.capabilities = normalizeCapabilities(command.capabilities, command.supportsExtensionUi);
 		client.supportsExtensionUi = client.capabilities.has("extension_ui");
 
+		const wantsHistoryRanges = client.capabilities.has("history_ranges");
 		let result = match.worker.snapshotCache.get(activeSessionId);
+		if (result && Boolean(result.snapshot.history) !== wantsHistoryRanges) {
+			result = undefined;
+		}
 		if (
 			result &&
+			!wantsHistoryRanges &&
 			!client.capabilities.has("chunked_snapshot") &&
 			result.snapshot.messages.length < result.snapshot.summary.messageCount
 		) {
 			result = undefined;
 		}
 		if (!result) {
-			const snapshotLoadKey = `${activeSessionId}:${client.capabilities.has("chunked_snapshot") ? "chunked" : "full"}`;
+			const snapshotLoadKey = `${activeSessionId}:${client.capabilities.has("chunked_snapshot") ? "chunked" : "full"}:${wantsHistoryRanges ? "history" : "legacy"}`;
 			let retryInvalidatedLoad = true;
 			while (!result) {
 				let loading = match.worker.snapshotLoads.get(snapshotLoadKey);
@@ -5107,9 +5421,13 @@ export class DaemonSupervisor {
 						const response = await workerClient.request({
 							type: "attach",
 							activeSessionId,
-							capabilities: client.capabilities.has("chunked_snapshot")
-								? ["attach_snapshot", "event_sequence", "slim_attach", "chunked_snapshot"]
-								: ["attach_snapshot", "event_sequence", "slim_attach"],
+							capabilities: [
+								"attach_snapshot",
+								"event_sequence",
+								"slim_attach",
+								...(client.capabilities.has("chunked_snapshot") ? (["chunked_snapshot"] as const) : []),
+								...(wantsHistoryRanges ? (["history_ranges"] as const) : []),
+							],
 							supportsExtensionUi: false,
 							env: command.env ?? collectDaemonClientEnv(),
 						});
@@ -5251,6 +5569,7 @@ export class DaemonSupervisor {
 		if (
 			currentSnapshotId &&
 			currentSnapshotId !== loadedSnapshotId &&
+			Boolean(currentResult?.snapshot.history) === Boolean(loaded.snapshot.history) &&
 			(currentSnapshotId !== observedSnapshotId ||
 				(currentResult?.lastEventSequence ?? -1) > loaded.lastEventSequence)
 		) {
@@ -5936,7 +6255,9 @@ export class DaemonSupervisor {
 				this.invalidateWorkerSessionInputPauses(worker, "Session worker stopped while input was paused");
 				this.workers.delete(worker.descriptor.workerId);
 				this.flipWorkerRosterEntriesInactive(worker);
-				this.deleteWorkerDescriptor(worker);
+				void this.deleteWorkerDescriptor(worker).catch((error) =>
+					this.log(`Could not retire worker descriptor ${worker.descriptor.workerId}: ${String(error)}`),
+				);
 			}
 		}
 	}
@@ -6345,10 +6666,17 @@ export class DaemonSupervisor {
 		archiveSession = false,
 		recoveryCleanup = false,
 		directChild?: { child: ChildProcess; closed: Promise<void> },
-	): Promise<void> {
+	): Promise<WorkerDescriptorTransition> {
 		const releaseStopOwnership = this.acquireWorkerStopOwnership(worker);
 		try {
-			await this.stopWorkerUntracked(worker, removeDescriptor, force, archiveSession, recoveryCleanup, directChild);
+			return await this.stopWorkerUntracked(
+				worker,
+				removeDescriptor,
+				force,
+				archiveSession,
+				recoveryCleanup,
+				directChild,
+			);
 		} finally {
 			releaseStopOwnership();
 		}
@@ -6361,7 +6689,7 @@ export class DaemonSupervisor {
 		archiveSession = false,
 		recoveryCleanup = false,
 		directChild?: { child: ChildProcess; closed: Promise<void> },
-	): Promise<void> {
+	): Promise<WorkerDescriptorTransition> {
 		if (worker.ownerCleanupTimer) {
 			clearTimeout(worker.ownerCleanupTimer);
 			worker.ownerCleanupTimer = undefined;
@@ -6376,31 +6704,37 @@ export class DaemonSupervisor {
 		// (rescinded, even before the successor pid lands).
 		const entryPid = worker.descriptor.pid;
 		const entryStartId = worker.descriptor.processStartId;
-		const assertStopStillApplies = () => {
-			if (directChild) {
-				return;
-			}
-			if (
-				worker.descriptor.pid !== entryPid ||
-				(removeDescriptor && worker.descriptor.stopRequestedAt === undefined)
-			) {
-				throw new Error(`Session worker ${worker.descriptor.workerId} was relaunched during stop`);
-			}
-		};
+		worker.intentionalStop = true;
+		if (removeDescriptor) {
+			worker.descriptor.stopRequestedAt ??= new Date().toISOString();
+			worker.descriptor.archiveOnStop ||= archiveSession;
+		} else {
+			worker.descriptor.lifecycle = "recovering";
+		}
+		const stopTransition = this.beginWorkerDescriptorTransition(worker);
 		try {
 			if (removeDescriptor) {
-				this.persistWorkerStopTombstone(worker, archiveSession);
+				await this.persistWorkerStopTombstone(worker, archiveSession, stopTransition);
 			} else {
-				worker.intentionalStop = true;
-				worker.descriptor.lifecycle = "recovering";
-				this.persistWorker(worker);
+				await this.persistWorkerDescriptorTransition(worker, stopTransition);
 			}
 		} catch (error) {
-			if (!directChild) {
+			if (!directChild || !this.isWorkerDescriptorTransitionCurrent(worker, stopTransition)) {
 				throw error;
 			}
 			this.reportCleanupFailure(`worker rollback state ${worker.descriptor.workerId}`, error);
 		}
+		const assertStopStillApplies = () => {
+			if (
+				!this.isWorkerDescriptorTransitionCurrent(worker, stopTransition) ||
+				worker.descriptor.pid !== entryPid ||
+				(removeDescriptor && worker.descriptor.stopRequestedAt === undefined)
+			) {
+				throw new WorkerDescriptorTransitionStaleError(
+					`Session worker ${worker.descriptor.workerId} was relaunched during stop`,
+				);
+			}
+		};
 		const transferError = new Error("Session worker stopped during snapshot transfer");
 		const generationTranscripts = new Set<SnapshotTranscriptCache>();
 		for (const [activeSessionId, generations] of [...(worker.snapshotGenerations ?? new Map())]) {
@@ -6424,15 +6758,17 @@ export class DaemonSupervisor {
 		worker.snapshotCache.clear();
 		worker.snapshotGenerations?.clear();
 		if (worker.client) {
+			const stopClient = worker.client;
 			if (archiveSession) {
-				await worker.client
+				await stopClient
 					.requestWorker({ type: "worker_archive_and_shutdown" }, force ? 1000 : 5000)
 					.catch(() => undefined);
 			} else {
-				await worker.client.request({ type: "shutdown" }, force ? 1000 : 5000).catch(() => undefined);
+				await stopClient.request({ type: "shutdown" }, force ? 1000 : 5000).catch(() => undefined);
 			}
-			worker.client.close();
-			worker.client = undefined;
+			assertStopStillApplies();
+			stopClient.close();
+			if (worker.client === stopClient) worker.client = undefined;
 		} else if (directChild) {
 			directChild.child.kill("SIGTERM");
 		} else if (this.processIdentity(entryPid, entryStartId) === "current") {
@@ -6462,8 +6798,10 @@ export class DaemonSupervisor {
 		while (isWorkerProcessAlive() && Date.now() < gracefulDeadline) {
 			await delay(25);
 		}
+		assertStopStillApplies();
 		let sigkillSent = false;
 		if (force && isWorkerProcessAlive()) {
+			assertStopStillApplies();
 			if (directChild) {
 				sigkillSent = directChild.child.kill("SIGKILL");
 			} else if (this.processIdentity(entryPid, entryStartId) === "current") {
@@ -6476,6 +6814,7 @@ export class DaemonSupervisor {
 				await delay(25);
 			}
 		}
+		assertStopStillApplies();
 		if (isWorkerProcessAlive()) {
 			worker.intentionalStop = worker.descriptor.stopRequestedAt !== undefined;
 			if (removeDescriptor) {
@@ -6502,16 +6841,18 @@ export class DaemonSupervisor {
 		let ephemeralCancelSettled = true;
 		if (removeDescriptor && worker.descriptor.ownerClientId !== undefined) {
 			ephemeralCancelSettled = await this.cancelEphemeralWorkerScheduledJobs(worker);
+			assertStopStillApplies();
 		}
 		this.workers.delete(worker.descriptor.workerId);
 		this.flipWorkerRosterEntriesInactive(worker);
 		// A failed cancel keeps the stop tombstone as the durable intent; the enumeration retry or the next boot finishes it.
 		if (removeDescriptor && ephemeralCancelSettled) {
-			this.deleteWorkerDescriptor(worker);
+			await this.deleteWorkerDescriptor(worker);
 		}
 		if (!this.shuttingDown) {
 			this.broadcastHeartbeatsChanged();
 		}
+		return stopTransition;
 	}
 
 	/**
@@ -6721,11 +7062,17 @@ export class DaemonSupervisor {
 		};
 	}
 
-	private persistWorkerStopTombstone(worker: ResidentWorker, archiveSession = false): void {
+	private async persistWorkerStopTombstone(
+		worker: ResidentWorker,
+		archiveSession = false,
+		transition?: WorkerDescriptorTransition,
+	): Promise<WorkerDescriptorTransition> {
 		worker.intentionalStop = true;
 		worker.descriptor.stopRequestedAt ??= new Date().toISOString();
 		worker.descriptor.archiveOnStop ||= archiveSession;
-		this.persistWorker(worker);
+		const activeTransition = transition ?? this.beginWorkerDescriptorTransition(worker);
+		await this.persistWorkerDescriptorTransition(worker, activeTransition);
+		return activeTransition;
 	}
 
 	private write(client: DaemonSocketClient, message: DaemonOutbound): boolean {
@@ -6885,6 +7232,10 @@ export class DaemonSupervisor {
 			worker.snapshotCache.clear();
 			worker.snapshotLoads.clear();
 		}
+		await this.runCleanupStep("worker descriptor writes", () =>
+			this.descriptorWrites.drain(DESCRIPTOR_WRITE_DRAIN_TIMEOUT_MS),
+		);
+		this.disposePerformanceMetricRecorders();
 		this.workers.clear();
 		this.openingWorkers.clear();
 		await this.runCleanupStep("daemon catalog", () => this.catalog.stop());
@@ -6966,6 +7317,10 @@ export class DaemonSupervisor {
 				worker.client = undefined;
 			}
 		}
+		await this.runCleanupStep("worker descriptor writes", () =>
+			this.descriptorWrites.drain(DESCRIPTOR_WRITE_DRAIN_TIMEOUT_MS),
+		);
+		this.disposePerformanceMetricRecorders();
 		await this.catalog.stop();
 		for (const client of this.clients) {
 			client.detachInput();

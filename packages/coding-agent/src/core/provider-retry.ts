@@ -61,22 +61,77 @@ export function isPermanentProviderFailureKind(kind: string | undefined, retries
 
 export type ProviderRetryDelay = { kind: "wait"; delayMs: number } | { kind: "exceeds-cap"; retryAfterMs: number };
 
+export interface ProviderRetryDelayOptions {
+	/** Uniform source in [0, 1]. Injected by deterministic tests. */
+	random?: () => number;
+	/** Fractional client-backoff jitter. */
+	jitterRatio?: number;
+}
+
+export interface ProviderRetryExecutionOptions extends ProviderRetryDelayOptions {
+	policy?: ProviderRetryPolicy;
+	signal?: AbortSignal;
+	/** Absolute deadline in the same millisecond timebase returned by now(). */
+	deadlineAtMs?: number;
+	now?: () => number;
+	sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+}
+
 /** Node caps timers at 2^31-1 ms; longer delays overflow setTimeout and fire after ~1ms. */
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const DEFAULT_PROVIDER_RETRY_BASE_DELAY_MS = 2_000;
+export const PROVIDER_RETRY_JITTER_RATIO = 0.2;
 
-/** Delay before retry `attempt` (1-based), honoring a server-requested wait. */
+function boundedRandom(source: () => number): number {
+	const value = source();
+	if (!Number.isFinite(value)) return 0.5;
+	return Math.min(1, Math.max(0, value));
+}
+
+/** Delay before retry `attempt` (1-based), honoring a server-requested not-before time. */
 export function providerRetryDelay(
 	attempt: number,
 	retryAfterMs: number | undefined,
 	policy: Pick<ProviderRetryPolicy, "baseDelayMs" | "maxRetryDelayMs">,
+	options: ProviderRetryDelayOptions = {},
 ): ProviderRetryDelay {
 	if (retryAfterMs !== undefined && policy.maxRetryDelayMs > 0 && retryAfterMs > policy.maxRetryDelayMs) {
 		return { kind: "exceeds-cap", retryAfterMs };
 	}
-	return {
-		kind: "wait",
-		delayMs: Math.min(Math.max(policy.baseDelayMs * 2 ** (attempt - 1), retryAfterMs ?? 0), MAX_TIMER_DELAY_MS),
-	};
+	// A timer longer than Node's supported range would fire immediately. Failing
+	// preserves Retry-After's not-before contract instead of replaying early.
+	if (retryAfterMs !== undefined && retryAfterMs > MAX_TIMER_DELAY_MS) {
+		return { kind: "exceeds-cap", retryAfterMs };
+	}
+	const random = boundedRandom(options.random ?? Math.random);
+	const requestedJitterRatio = options.jitterRatio ?? PROVIDER_RETRY_JITTER_RATIO;
+	const jitterRatio = Number.isFinite(requestedJitterRatio)
+		? Math.min(1, Math.max(0, requestedJitterRatio))
+		: PROVIDER_RETRY_JITTER_RATIO;
+	const requestedBaseDelayMs = policy.baseDelayMs;
+	const baseDelayMs = Number.isFinite(requestedBaseDelayMs)
+		? Math.max(0, requestedBaseDelayMs)
+		: DEFAULT_PROVIDER_RETRY_BASE_DELAY_MS;
+	const exponential = Math.min(baseDelayMs * 2 ** Math.max(0, attempt - 1), MAX_TIMER_DELAY_MS);
+	let delayMs: number;
+	if (retryAfterMs !== undefined && retryAfterMs >= exponential) {
+		// Retry-After is a floor, not a client delay to scale down. Add only a
+		// bounded positive client offset so peers given the same floor still spread.
+		delayMs = retryAfterMs + Math.round(exponential * jitterRatio * random);
+	} else {
+		const factor = 1 - jitterRatio + 2 * jitterRatio * random;
+		delayMs = Math.round(exponential * factor);
+		if (retryAfterMs !== undefined) delayMs = Math.max(retryAfterMs, delayMs);
+	}
+	return { kind: "wait", delayMs: Math.min(delayMs, MAX_TIMER_DELAY_MS) };
+}
+
+function retryWouldExceedDeadline(delayMs: number, options: ProviderRetryExecutionOptions): boolean {
+	return options.deadlineAtMs !== undefined && (options.now ?? Date.now)() + delayMs > options.deadlineAtMs;
+}
+
+function retryDeadlineReached(options: ProviderRetryExecutionOptions): boolean {
+	return options.deadlineAtMs !== undefined && (options.now ?? Date.now)() >= options.deadlineAtMs;
 }
 
 /**
@@ -85,9 +140,9 @@ export function providerRetryDelay(
  */
 export async function completeWithProviderRetry(
 	attemptCompletion: () => Promise<AssistantMessage>,
-	options?: { policy?: ProviderRetryPolicy; signal?: AbortSignal },
+	options: ProviderRetryExecutionOptions = {},
 ): Promise<AssistantMessage> {
-	const policy = options?.policy ?? DEFAULT_PROVIDER_RETRY_POLICY;
+	const policy = options.policy ?? DEFAULT_PROVIDER_RETRY_POLICY;
 	const maxRetries = policy.enabled ? policy.maxRetries : 0;
 	let retriesPerformed = 0;
 	for (;;) {
@@ -95,7 +150,7 @@ export async function completeWithProviderRetry(
 		if (message.stopReason !== "error") {
 			return message;
 		}
-		if (options?.signal?.aborted) {
+		if (options.signal?.aborted) {
 			// A cancel that raced the failure is an abort, not a provider failure.
 			return { ...message, stopReason: "aborted" };
 		}
@@ -106,15 +161,24 @@ export async function completeWithProviderRetry(
 		if (isPermanentProviderFailureKind(kind, retriesPerformed)) {
 			return message;
 		}
-		const delay = providerRetryDelay(retriesPerformed + 1, providerStreamFailureRetryAfterMs(message), policy);
-		if (delay.kind === "exceeds-cap") {
+		const delay = providerRetryDelay(
+			retriesPerformed + 1,
+			providerStreamFailureRetryAfterMs(message),
+			policy,
+			options,
+		);
+		if (delay.kind === "exceeds-cap" || retryWouldExceedDeadline(delay.delayMs, options)) {
 			return message;
 		}
 		try {
-			await sleep(delay.delayMs, options?.signal);
+			await (options.sleep ?? sleep)(delay.delayMs, options.signal);
 		} catch {
 			return { ...message, stopReason: "aborted" };
 		}
+		if (options.signal?.aborted) return { ...message, stopReason: "aborted" };
+		// Injected and real timers may resume late. Do not dispatch a provider call
+		// after the request's owner deadline; preserve the original provider error.
+		if (retryDeadlineReached(options)) return message;
 		retriesPerformed++;
 	}
 }
@@ -122,23 +186,23 @@ export async function completeWithProviderRetry(
 export const DEFAULT_PROVIDER_RETRY_POLICY: ProviderRetryPolicy = {
 	enabled: true,
 	maxRetries: 3,
-	baseDelayMs: 2000,
+	baseDelayMs: DEFAULT_PROVIDER_RETRY_BASE_DELAY_MS,
 	maxRetryDelayMs: 60000,
 };
 
 /** Unary provider requests throw instead of returning an assistant error message. */
 export async function requestWithProviderRetry<T>(
 	attemptRequest: () => Promise<T>,
-	options?: { policy?: ProviderRetryPolicy; signal?: AbortSignal },
+	options: ProviderRetryExecutionOptions = {},
 ): Promise<T> {
-	const policy = options?.policy ?? DEFAULT_PROVIDER_RETRY_POLICY;
+	const policy = options.policy ?? DEFAULT_PROVIDER_RETRY_POLICY;
 	const maxRetries = policy.enabled ? policy.maxRetries : 0;
 	for (let attempt = 0; ; attempt++) {
-		options?.signal?.throwIfAborted();
+		options.signal?.throwIfAborted();
 		try {
 			return await attemptRequest();
 		} catch (error) {
-			options?.signal?.throwIfAborted();
+			options.signal?.throwIfAborted();
 			const status = error !== null && typeof error === "object" && "status" in error ? error.status : undefined;
 			const retryAfter =
 				error !== null && typeof error === "object" && "retryAfterMs" in error ? error.retryAfterMs : undefined;
@@ -146,9 +210,17 @@ export async function requestWithProviderRetry<T>(
 				(typeof status === "number" && (status === 408 || status === 429 || status >= 500)) ||
 				(error instanceof TypeError && /fetch|network|socket/i.test(error.message));
 			if (!transient || attempt >= maxRetries) throw error;
-			const delay = providerRetryDelay(attempt + 1, typeof retryAfter === "number" ? retryAfter : undefined, policy);
-			if (delay.kind === "exceeds-cap") throw error;
-			await sleep(delay.delayMs, options?.signal);
+			const delay = providerRetryDelay(
+				attempt + 1,
+				typeof retryAfter === "number" ? retryAfter : undefined,
+				policy,
+				options,
+			);
+			if (delay.kind === "exceeds-cap" || retryWouldExceedDeadline(delay.delayMs, options)) throw error;
+			await (options.sleep ?? sleep)(delay.delayMs, options.signal);
+			options.signal?.throwIfAborted();
+			// Keep the original request failure if the backoff overshot its owner deadline.
+			if (retryDeadlineReached(options)) throw error;
 		}
 	}
 }

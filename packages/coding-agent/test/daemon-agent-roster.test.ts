@@ -521,6 +521,7 @@ interface WorkerFixture {
 	transcriptCaches: Map<string, unknown>;
 	snapshotGenerations: Map<string, unknown>;
 	snapshotLoads: Map<string, unknown>;
+	rosterApplyChain?: Promise<void>;
 }
 
 function makeWorker(workerId: string, overrides: Partial<WorkerFixture> = {}): WorkerFixture {
@@ -842,6 +843,7 @@ describe("supervisor roster ledger", () => {
 					},
 				]),
 			);
+			await worker.rosterApplyChain;
 			expect(supervisor.roster().has("queued-child")).toBe(true);
 
 			supervisor.flipWorkerRosterEntriesInactive(worker);

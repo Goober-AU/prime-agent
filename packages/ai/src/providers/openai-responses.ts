@@ -24,13 +24,19 @@ import {
 } from "../utils/stream-failure.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
-import { requestOpenAICompaction, supportsOpenAICompaction } from "./openai-compaction.js";
+import {
+	requestOpenAICompaction,
+	supportsOpenAICompaction,
+	validatedNativeCompactionEndpoint,
+} from "./openai-compaction.js";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.js";
 import { withOpenCodeHeaders } from "./opencode-headers.js";
 import { buildBaseOptions } from "./simple-options.js";
 
 export const compactOpenAIResponses: CompactFunction<"openai-responses"> = async (model, context, options) => {
 	if (!supportsOpenAICompaction(model)) return undefined;
+	const nativeEndpoint = validatedNativeCompactionEndpoint(model);
+	const toolCallProviders = nativeEndpoint ? AZURE_MANAGED_COMPACTION_TOOL_CALL_PROVIDERS : OPENAI_TOOL_CALL_PROVIDERS;
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
 	if (!apiKey) throw new Error(`No API key for provider: ${model.provider}`);
 	const headers = new Headers({ ...model.headers, ...options?.headers });
@@ -39,11 +45,11 @@ export const compactOpenAIResponses: CompactFunction<"openai-responses"> = async
 	const instructions = [context.systemPrompt, options?.customInstructions].filter(Boolean).join("\n\n");
 	const result = await requestOpenAICompaction(
 		model,
-		`${model.baseUrl.replace(/\/+$/, "")}/responses/compact`,
+		nativeEndpoint ?? `${model.baseUrl.replace(/\/+$/, "")}/responses/compact`,
 		headers,
 		{
 			model: model.id,
-			input: convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, { includeSystemPrompt: false }),
+			input: convertResponsesMessages(model, context, toolCallProviders, { includeSystemPrompt: false }),
 			instructions,
 			prompt_cache_key: options?.sessionId,
 			service_tier: options?.serviceTier,
@@ -55,6 +61,7 @@ export const compactOpenAIResponses: CompactFunction<"openai-responses"> = async
 };
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
+const AZURE_MANAGED_COMPACTION_TOOL_CALL_PROVIDERS = new Set([...OPENAI_TOOL_CALL_PROVIDERS, "azure-openai-managed"]);
 
 /**
  * Resolve cache retention preference.
@@ -136,6 +143,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
+				onUsageObservation: options?.onUsageObservation,
 				serviceTier: options?.serviceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			});

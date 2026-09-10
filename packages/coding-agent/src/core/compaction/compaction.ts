@@ -135,16 +135,47 @@ export const COMPACT_SKILL_NAME = "compact";
 /** Automatic compaction policy; this does not change the model's advertised window. */
 export const MAX_COMPACTION_CONTEXT_TOKENS = 250_000;
 
+export const SUMMARY_UPDATE_POLICY_ENV = "PRIME_AGENT_SUMMARY_UPDATE_POLICY";
+export const CONSOLIDATE_REPEATED_SUMMARY_POLICY = "consolidate-repeated-v1";
+export type SummaryUpdatePolicy = "off" | typeof CONSOLIDATE_REPEATED_SUMMARY_POLICY;
+
+export function resolveSummaryUpdatePolicy(
+	configured?: string,
+	environment: string | undefined = process.env[SUMMARY_UPDATE_POLICY_ENV],
+): SummaryUpdatePolicy {
+	if (configured === CONSOLIDATE_REPEATED_SUMMARY_POLICY || configured === "off") return configured;
+	return environment === CONSOLIDATE_REPEATED_SUMMARY_POLICY ? CONSOLIDATE_REPEATED_SUMMARY_POLICY : "off";
+}
+
+function isStagedAzureNativeCompactionModel(model: Model<Api>): boolean {
+	const capability = model.nativeCompaction;
+	return (
+		model.provider === "azure-openai-managed" &&
+		model.id === "gpt-6-astra" &&
+		model.api === "openai-responses" &&
+		capability?.provider === model.provider &&
+		capability.model === model.id &&
+		capability.protocol === "openai-responses-compact-v1" &&
+		capability.apiVersion === "v1" &&
+		capability.enabled === true &&
+		capability.validation === "live-verified" &&
+		capability.endpoint.replace(/\/+$/, "") === `${model.baseUrl.replace(/\/+$/, "")}/responses/compact`
+	);
+}
+
 export interface CompactionSettings {
 	enabled: boolean;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	/** Opt-in iterative-summary consolidation. Default off until semantic quality is proven. */
+	summaryUpdatePolicy?: SummaryUpdatePolicy;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
+	summaryUpdatePolicy: "off",
 };
 /**
  * Calculate total context tokens from usage.
@@ -538,12 +569,64 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
+const CONSOLIDATING_UPDATE_SUMMARIZATION_PROMPT = `The messages above are ONLY the NEW conversation material that moved out of the retained tail. Incorporate it into the existing summary in <previous-summary> tags in this same response. Do not make another merge pass.
+
+Update the structured summary using these rules:
+- Preserve every enduring user constraint, preference, correction, refinement, safety rule, and requested acceptance gate. Obsolete progress is not evidence that an enduring constraint expired.
+- Preserve decisions together with their reasons and provenance. Do not merge distinct decisions merely because their wording is similar.
+- Preserve unresolved work and blockers. Mark a blocker resolved or replace an old status only when the new messages demonstrate the superseding fact; record the resolution or replacement so its history remains understandable.
+- Preserve exact file and artifact anchors, including paths, IDs, hashes, sizes, commands, function names, critical errors, and evidence locations needed to inspect durable source material.
+- Preserve kernel-state and continual-harness facts, including useful Python names and persistence/reload warnings.
+- Preserve tool-call/result relationships needed to understand actions. Never treat an opaque provider checkpoint as ordinary text-summary material.
+- Consolidate demonstrably repeated statements into one complete statement. Do not accumulate another bullet for the same unchanged fact. When uncertain whether facts are duplicates or superseded, retain both and state the uncertainty.
+- Add every genuinely new fact. The summary may grow when new information exists. Do not apply a character/token cap, tail truncation, or arbitrary deletion to make it short.
+- Keep exact user wording when the prior summary or new messages identify it as verbatim or critical.
+
+Use this EXACT format:
+
+## Goal
+[Preserve existing goals and add genuinely new goals]
+
+## Constraints & Preferences
+- [Consolidated enduring constraints and preferences]
+- [Or "(none)" only if neither source contains any]
+
+## Progress
+### Done
+- [x] [Previously and newly completed work, without duplicate bullets]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Current unresolved blockers, plus resolution provenance for removed blockers when important]
+
+## Key Decisions
+- **[Decision]**: [Reason and provenance]
+
+## Next Steps
+1. [Current ordered steps]
+
+## Critical Context
+- [Exact anchors, errors, kernel/harness facts, and other facts needed to continue]
+- [Or "(none)" only if neither source contains any]
+
+Be concise only by removing demonstrable repetition and replacing demonstrably superseded status. Never omit a unique required fact.`;
+
 /**
  * Build the instruction portion of the summarization prompt: the initial or
  * update template, optional user instructions, and the kernel persistence note.
  */
-export function buildSummarizationPrompt(customInstructions?: string, previousSummary?: string): string {
-	let basePrompt = previousSummary ? UPDATE_SUMMARIZATION_PROMPT : SUMMARIZATION_PROMPT;
+export function buildSummarizationPrompt(
+	customInstructions?: string,
+	previousSummary?: string,
+	summaryUpdatePolicy: SummaryUpdatePolicy = resolveSummaryUpdatePolicy(),
+): string {
+	let basePrompt = previousSummary
+		? summaryUpdatePolicy === CONSOLIDATE_REPEATED_SUMMARY_POLICY
+			? CONSOLIDATING_UPDATE_SUMMARIZATION_PROMPT
+			: UPDATE_SUMMARIZATION_PROMPT
+		: SUMMARIZATION_PROMPT;
 	if (customInstructions) {
 		basePrompt += `\n\n<user-instructions>\nThe user provided these instructions for this summary. Follow them with high priority while keeping the section format above: emphasize what they ask to focus on, and preserve verbatim anything they ask to remember.\n${customInstructions}\n</user-instructions>`;
 	}
@@ -566,6 +649,7 @@ export async function generateSummary(
 	thinkingLevel?: ThinkingLevel,
 	retry?: ProviderRetryPolicy,
 	summaryCall: SummaryCallRunner = (call) => call(headers),
+	summaryUpdatePolicy: SummaryUpdatePolicy = resolveSummaryUpdatePolicy(),
 ): Promise<SummarySlice> {
 	return generateBoundedSummary(
 		currentMessages,
@@ -576,7 +660,7 @@ export async function generateSummary(
 		thinkingLevel,
 		retry,
 		summaryCall,
-		(summary) => buildSummarizationPrompt(customInstructions, summary),
+		(summary) => buildSummarizationPrompt(customInstructions, summary, summaryUpdatePolicy),
 		previousSummary,
 	);
 }
@@ -807,6 +891,7 @@ export async function compact(
 		fileOps,
 		settings,
 	} = preparation;
+	let nativeCompactionUnsupported = false;
 	if (providerContext && supportsCompaction(model)) {
 		const remote = await summaryCall((callHeaders) =>
 			requestWithProviderRetry(
@@ -836,6 +921,7 @@ export async function compact(
 				details: { readFiles, modifiedFiles, providerCheckpoint: remote.checkpoint } satisfies CompactionDetails,
 			};
 		}
+		nativeCompactionUnsupported = isStagedAzureNativeCompactionModel(model);
 	}
 	let summary: string;
 	const slices: SummarySlice[] = [];
@@ -856,6 +942,7 @@ export async function compact(
 						thinkingLevel,
 						retry,
 						summaryCall,
+						settings.summaryUpdatePolicy,
 					)
 				: Promise.resolve<SummarySlice>({ summary: "No prior history." }),
 			generateTurnPrefixSummary(
@@ -885,12 +972,17 @@ export async function compact(
 			thinkingLevel,
 			retry,
 			summaryCall,
+			settings.summaryUpdatePolicy,
 		);
 		slices.push(result);
 		summary = result.summary;
 	}
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);
 	summary += formatFileOperations(readFiles, modifiedFiles);
+	if (nativeCompactionUnsupported) {
+		summary +=
+			"\n\n**Compaction fallback:** The staged Azure Astra native compaction endpoint returned an explicit unsupported response, so this checkpoint was created with the selected model's ordinary text summarizer. Authentication, rate-limit, timeout, cancellation, request-size, and malformed-checkpoint failures do not use this fallback. No provider checkpoint was committed.";
+	}
 
 	if (!firstKeptEntryId) {
 		throw new Error("First kept entry has no UUID - session may need migration");
