@@ -12,6 +12,7 @@ export type KnownApi =
 	| "openai-codex-responses"
 	| "anthropic-messages"
 	| "bedrock-converse-stream"
+	| "bedrock-responses"
 	| "google-generative-ai"
 	| "google-vertex";
 

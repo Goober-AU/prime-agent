@@ -12,6 +12,7 @@ import type {
 } from "../types.js";
 import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import type { BedrockOptions } from "./amazon-bedrock.js";
+import type { BedrockResponsesOptions } from "./amazon-bedrock-responses.js";
 import type { AnthropicOptions } from "./anthropic.js";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.js";
 import type { GoogleOptions } from "./google.js";
@@ -78,7 +79,13 @@ interface OpenAIResponsesProviderModule {
 	streamSimpleOpenAIResponses: StreamFunction<"openai-responses", SimpleStreamOptions>;
 }
 
+interface BedrockResponsesProviderModule {
+	streamBedrockResponses: StreamFunction<"bedrock-responses", BedrockResponsesOptions>;
+	streamSimpleBedrockResponses: StreamFunction<"bedrock-responses", SimpleStreamOptions>;
+}
+
 interface BedrockProviderModule {
+	responses?: BedrockResponsesProviderModule;
 	streamBedrock: (
 		model: Model<"bedrock-converse-stream">,
 		context: Context,
@@ -124,7 +131,33 @@ let bedrockProviderModulePromise:
 	| Promise<LazyProviderModule<"bedrock-converse-stream", BedrockOptions, SimpleStreamOptions>>
 	| undefined;
 
+let bedrockResponsesModulePromise:
+	| Promise<LazyProviderModule<"bedrock-responses", BedrockResponsesOptions, SimpleStreamOptions>>
+	| undefined;
+let bedrockResponsesModuleOverride: BedrockResponsesProviderModule | undefined;
+
+function loadBedrockResponsesModule(): Promise<
+	LazyProviderModule<"bedrock-responses", BedrockResponsesOptions, SimpleStreamOptions>
+> {
+	bedrockResponsesModulePromise ||= (
+		bedrockResponsesModuleOverride
+			? Promise.resolve(bedrockResponsesModuleOverride)
+			: importNodeOnlyProvider("@earendil-works/pi-ai/bedrock-responses").then(
+					(module) => module as BedrockResponsesProviderModule,
+				)
+	).then((provider) => ({
+		stream: provider.streamBedrockResponses,
+		streamSimple: provider.streamSimpleBedrockResponses,
+	}));
+	return bedrockResponsesModulePromise;
+}
+
+export const streamBedrockResponses = createLazyStream(loadBedrockResponsesModule);
+export const streamSimpleBedrockResponses = createLazySimpleStream(loadBedrockResponsesModule);
+
 export function setBedrockProviderModule(module: BedrockProviderModule): void {
+	bedrockResponsesModuleOverride = module.responses;
+	bedrockResponsesModulePromise = undefined;
 	bedrockProviderModuleOverride = {
 		stream: module.streamBedrock,
 		streamSimple: module.streamSimpleBedrock,
@@ -347,6 +380,11 @@ const streamBedrockLazy = createLazyStream(loadBedrockProviderModule);
 const streamSimpleBedrockLazy = createLazySimpleStream(loadBedrockProviderModule);
 
 export function registerBuiltInApiProviders(): void {
+	registerApiProvider({
+		api: "bedrock-responses",
+		stream: streamBedrockResponses,
+		streamSimple: streamSimpleBedrockResponses,
+	});
 	registerApiProvider({
 		api: "anthropic-messages",
 		stream: streamAnthropic,

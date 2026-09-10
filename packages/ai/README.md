@@ -654,6 +654,7 @@ The library uses a registry of API implementations. Built-in APIs include:
 - **`openai-responses`**: OpenAI Responses API (`streamOpenAIResponses`, `OpenAIResponsesOptions`)
 - **`openai-codex-responses`**: OpenAI Codex Responses API (`streamOpenAICodexResponses`, `OpenAICodexResponsesOptions`)
 - **`azure-openai-responses`**: Azure OpenAI Responses API (`streamAzureOpenAIResponses`, `AzureOpenAIResponsesOptions`)
+- **`bedrock-responses`**: Amazon Bedrock Responses API for GPT-6 Astra (`streamBedrockResponses`, `BedrockResponsesOptions`). Bundled routes: `openai.gpt-6-astra` (Oregon Mantle) and `global.openai.gpt-6-astra` (Sydney Runtime, global cross-region). Uses AWS bearer tokens or SigV4 credentials, five reasoning levels, and Standard tier. See [setup and limits](../coding-agent/docs/providers.md#gpt-6-astra-oregon-and-sydney).
 - **`bedrock-converse-stream`**: Amazon Bedrock Converse API (`streamBedrock`, `BedrockOptions`)
 
 ### Faux provider for tests
@@ -1035,7 +1036,7 @@ const response = await complete(model, {
 
 ### Browser Compatibility Notes
 
-- Amazon Bedrock (`bedrock-converse-stream`) is not supported in browser environments.
+- Amazon Bedrock (`bedrock-converse-stream` and `bedrock-responses`) is not supported in browser environments.
 - OAuth login flows are not supported in browser environments. Use the `prime-agent-ai/oauth` entry point in Node.js.
 - In browser builds, Bedrock can still appear in model lists. Calls to Bedrock models fail at runtime.
 - Use a server-side proxy or backend service if you need Bedrock or OAuth-based auth from a web app.
@@ -1046,6 +1047,7 @@ In Node.js environments, you can set environment variables to avoid passing API 
 
 | Provider | Environment Variable(s) |
 |----------|------------------------|
+| Amazon Bedrock | `AWS_BEARER_TOKEN_BEDROCK`, `AWS_PROFILE`, or IAM credential-chain variables. Responses uses the catalog endpoint region; optional `AWS_BEDROCK_BASE_URL` overrides the API root. |
 | OpenAI | `OPENAI_API_KEY` |
 | Prime Inference | `PRIME_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` (e.g. `https://{resource}.openai.azure.com`) or `AZURE_OPENAI_RESOURCE_NAME`. Supports `*.openai.azure.com` and `*.cognitiveservices.azure.com`; root endpoints auto-normalize to `/openai/v1`. Optional: `AZURE_OPENAI_API_VERSION` (default `v1`), `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. |
