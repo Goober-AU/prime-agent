@@ -9,6 +9,7 @@ import { workerRosterEntryFromSummary } from "../src/modes/daemon/agent-roster.j
 import { success } from "../src/modes/daemon/daemon-protocol.js";
 import type { SessionSummary } from "../src/modes/daemon/daemon-session-list.js";
 import { DaemonSupervisor, idleEvictionSweepIntervalMs } from "../src/modes/daemon/daemon-supervisor.js";
+import { normalizeSocketPath } from "../src/utils/daemon-socket-path.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 
 interface WorkerFixture {
@@ -78,7 +79,7 @@ interface SupervisorInternals {
 	descriptorWrites: {
 		write(path: string, data: string): Promise<{ generation: number }>;
 	};
-	loadWorkerDescriptors(): void;
+	loadWorkerDescriptors(): Promise<void>;
 	adoptOrRecoverWorker(worker: WorkerFixture): Promise<void>;
 	assertRecoveryAllowed: () => Promise<void>;
 	cancelScheduledJobsForSessionTree: (id: string, file: string) => Promise<void>;
@@ -135,7 +136,7 @@ function makeSupervisor(idleEvictionMinutes: number | "off" = 90): SupervisorInt
 	tempDirs.push(directory);
 	mkdirSync(directory, { recursive: true });
 	writeFileSync(join(directory, "settings.json"), JSON.stringify({ idleEvictionMinutes }));
-	const supervisor = new DaemonSupervisor(join(directory, "daemon.sock"), {
+	const supervisor = new DaemonSupervisor(normalizeSocketPath(join(directory, "daemon.sock")), {
 		defaultSessionConfig: { agentDir: directory, cwd: directory },
 		descriptorDir: join(directory, "workers"),
 	}) as unknown as SupervisorInternals;
@@ -1150,7 +1151,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		writeFileSync(join(directory, "settings.json"), JSON.stringify({ idleEvictionMinutes: 90 }));
 		const workersDir = join(directory, "workers");
 		mkdirSync(workersDir, { recursive: true });
-		const socketPath = join(directory, "daemon.sock");
+		const socketPath = normalizeSocketPath(join(directory, "daemon.sock"));
 		const { sessionFile, store } = makeScheduledSessionFile("durable-cancel-root");
 		armHeartbeat(store, "durable-cancel-root", sessionFile, now - 10 * 60_000);
 		const bootSupervisor = (): SupervisorInternals => {
@@ -1205,7 +1206,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 
 		const rebooted = bootSupervisor();
 		rebooted.assertRecoveryAllowed = vi.fn(async () => {});
-		rebooted.loadWorkerDescriptors();
+		await rebooted.loadWorkerDescriptors();
 		expect(rebooted.workers.size).toBe(1);
 		await rebooted.adoptOrRecoverWorker([...rebooted.workers.values()][0]!);
 

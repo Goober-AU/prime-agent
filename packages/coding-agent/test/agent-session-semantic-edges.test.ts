@@ -325,7 +325,13 @@ describe("AgentSession semantic edges", () => {
 	}
 
 	it("records spawned-child ancestry from the latest turn and returns it on success", async () => {
-		const { session: root, capturedHeaders } = createSession();
+		const { session: root, capturedHeaders } = createSession({
+			responses: [
+				{ text: "parent response one" },
+				{ text: "parent response two" },
+				{ text: "Child task complete.\nRLM_CHILD_STATUS: complete" },
+			],
+		});
 
 		await root.prompt("parent turn one");
 		await root.prompt("parent turn two");

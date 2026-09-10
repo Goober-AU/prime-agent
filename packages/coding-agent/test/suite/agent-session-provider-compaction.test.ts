@@ -141,15 +141,19 @@ describe("durable provider compaction", () => {
 	it("persists the entire window, resumes it, and continues without duplicating retained history", async () => {
 		const harness = await seededHarness();
 		const recorder = new CompactionMetricRecorder();
-		harness.session.agent.performanceMetrics = { recorder, logicalRequestId: "logical-compaction" };
+		harness.session.agent.performanceMetrics = { recorder, logicalRequestId: "stale-logical-request" };
 		const checkpoint = checkpointFor(harness);
 		const compact = vi.fn<CompactFunction>().mockResolvedValue({ checkpoint });
 		installCompactor(harness, compact);
 		await harness.session.compact("Keep paths");
+		// Manual compaction aborts the old turn and must not inherit its request ID.
+		expect(harness.session.agent.performanceMetrics?.recorder).toBe(recorder);
+		expect(harness.session.agent.performanceMetrics?.hostOwnsLogicalRequestTerminal).toBe(true);
+		expect(harness.session.agent.performanceMetrics?.logicalRequestId).toBeUndefined();
 		expect(compact).toHaveBeenCalledOnce();
 		expect(recorder.events.filter((event) => event.operation === "compaction")).toEqual([
 			expect.objectContaining({
-				correlation: { logicalRequestId: "logical-compaction" },
+				correlation: undefined,
 				outcome: "success",
 				identity: expect.objectContaining({ component: "compaction" }),
 				measurements: { total_ms: 1 },
@@ -186,8 +190,18 @@ describe("durable provider compaction", () => {
 		expect(
 			resumedContext?.messages.filter((message) => getMessageText(message).includes("Continue after compaction")),
 		).toHaveLength(1);
-		await harness.session.compact();
+		// The no-abort path retains the explicitly owned current request correlation.
+		harness.session.agent.performanceMetrics = { recorder, logicalRequestId: "logical-compaction" };
+		await harness.session.compact(undefined, { skipAbort: true });
 		expect(compact.mock.calls[1][1].messages[0]).toMatchObject({ providerContext: checkpoint });
+		const compactionEvents = recorder.events.filter((event) => event.operation === "compaction");
+		expect(compactionEvents).toHaveLength(2);
+		expect(compactionEvents[1]).toMatchObject({
+			correlation: { logicalRequestId: "logical-compaction" },
+			outcome: "success",
+			identity: { component: "compaction" },
+			measurements: { total_ms: 1 },
+		});
 	});
 
 	it("rebuilds original history for a different model or endpoint and can restore the checkpoint", async () => {

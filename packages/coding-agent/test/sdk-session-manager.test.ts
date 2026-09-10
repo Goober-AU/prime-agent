@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getModel } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createAgentSession } from "../src/core/sdk.js";
@@ -12,6 +12,8 @@ describe("createAgentSession session manager defaults", () => {
 	let agentDir: string;
 
 	beforeEach(() => {
+		vi.stubEnv("PRIME_AGENT_SESSION_DIR", undefined);
+		vi.stubEnv("PRIME_AGENT_CODING_AGENT_SESSION_DIR", undefined);
 		tempDir = join(tmpdir(), `pi-sdk-session-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		cwd = join(tempDir, "project");
 		agentDir = join(tempDir, "agent");
@@ -41,7 +43,8 @@ describe("createAgentSession session manager defaults", () => {
 		const sessionFile = session.sessionManager.getSessionFile();
 
 		expect(sessionDir).toBe(expectedSessionDir);
-		expect(sessionFile?.startsWith(`${expectedSessionDir}/`)).toBe(true);
+		expect(sessionFile).toBeTruthy();
+		expect(dirname(sessionFile!)).toBe(expectedSessionDir);
 
 		session.dispose();
 	});
@@ -78,20 +81,22 @@ describe("createAgentSession session manager defaults", () => {
 			tools: ["ipython"],
 		});
 
-		expect(session.sessionManager).toBe(sessionManager);
-		expect(session.systemPrompt).toContain(`Working directory: ${sessionCwd}`);
+		try {
+			expect(session.sessionManager).toBe(sessionManager);
+			expect(session.systemPrompt).toContain(`Working directory: ${sessionCwd.replace(/\\/g, "/")}`);
 
-		const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
-		expect(ipythonTool).toBeTruthy();
-		const result = await ipythonTool!.execute("test", { code: "import os\nprint(os.getcwd())" });
-		const output = result.content
-			.filter((item): item is { type: "text"; text: string } => item.type === "text")
-			.map((item) => item.text)
-			.join("");
+			const ipythonTool = session.agent.state.tools.find((tool) => tool.name === "ipython");
+			expect(ipythonTool).toBeTruthy();
+			const result = await ipythonTool!.execute("test", { code: "import os\nprint(os.getcwd())" });
+			const output = result.content
+				.filter((item): item is { type: "text"; text: string } => item.type === "text")
+				.map((item) => item.text)
+				.join("");
 
-		expect(realpathSync(output.trim())).toBe(realpathSync(sessionCwd));
-
-		session.dispose();
+			expect(realpathSync(output.trim())).toBe(realpathSync(sessionCwd));
+		} finally {
+			await session.disposeAsync({ kernelSnapshot: false });
+		}
 	}, 120_000);
 	it("records primary transcript bytes once when an explicit persisted session is reopened", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5");

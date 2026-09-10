@@ -1,4 +1,5 @@
 import type { ChildProcess, SpawnOptions } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Socket } from "node:net";
@@ -37,6 +38,7 @@ import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journ
 import type { PrivateFrame } from "../src/modes/session-worker/private-framing.js";
 import { AtomicFileWriteCoordinator } from "../src/utils/atomic-file.js";
 import * as childProcessModule from "../src/utils/child-process.js";
+import { normalizeSocketPath } from "../src/utils/daemon-socket-path.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 import { createDeferred } from "./suite/scheduling.js";
 
@@ -1912,8 +1914,12 @@ describe("daemon worker supervisor monitoring", () => {
 	it("joins an in-flight recovery instead of failing a concurrent forwarded command", async () => {
 		const { root, worker } = retryableWorkerFixture("race");
 		const request = vi.fn(async () => ({ type: "response", command: "get_state", success: true, data: root }));
+		const persisted = createDeferred<void>();
+		const started = createDeferred<void>();
+		const persistWorker = vi.fn(() => persisted.promise);
 		const release = createDeferred<void>();
 		const recoverWorker = vi.fn(() => {
+			started.resolve();
 			worker.recovery = release.promise.then(() => {
 				worker.descriptor.lifecycle = "ready";
 				worker.client = { request };
@@ -1921,7 +1927,7 @@ describe("daemon worker supervisor monitoring", () => {
 			});
 			return worker.recovery;
 		});
-		const supervisor = retrySupervisor(worker, { recoverWorker }) as unknown as {
+		const supervisor = retrySupervisor(worker, { persistWorker, recoverWorker }) as unknown as {
 			forwardToWorker(
 				target: typeof worker,
 				command: { type: "get_state"; activeSessionId: string },
@@ -1929,11 +1935,17 @@ describe("daemon worker supervisor monitoring", () => {
 		};
 
 		const first = supervisor.forwardToWorker(worker, { type: "get_state", activeSessionId: "active-race" });
-		await Promise.resolve();
+		expect(worker.recovery).toBeDefined();
 		const second = supervisor.forwardToWorker(worker, { type: "get_state", activeSessionId: "active-race" });
-		await Promise.resolve();
+		const responses = Promise.all([first, second]);
+		expect(persistWorker).toHaveBeenCalledOnce();
+		expect(recoverWorker).not.toHaveBeenCalled();
+		expect(request).not.toHaveBeenCalled();
+		persisted.resolve();
+		await started.promise;
+		expect(request).not.toHaveBeenCalled();
 		release.resolve();
-		const [firstResponse, secondResponse] = await Promise.all([first, second]);
+		const [firstResponse, secondResponse] = await responses;
 		expect(firstResponse.success).toBe(true);
 		expect(secondResponse.success).toBe(true);
 		expect(recoverWorker).toHaveBeenCalledOnce();
@@ -2685,7 +2697,8 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(stopWorker).not.toHaveBeenCalled();
 
 			alive = false;
-			await vi.advanceTimersByTimeAsync(500);
+			// Cross the native identity-probe interval, not the real test timeout.
+			await vi.advanceTimersByTimeAsync(process.platform === "win32" ? 3_000 : 500);
 			await finalization;
 
 			expect(stopWorker).toHaveBeenCalledWith(worker, true, true, false);
@@ -3615,14 +3628,19 @@ describe("daemon worker supervisor monitoring", () => {
 	it("merges persisted host settings into fresh runtime defaults", () => {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-config-merge-"));
 		const descriptorDir = join(root, "workers");
-		const socketPath = join(root, "supervisor.sock");
+		const socketPath = normalizeSocketPath(
+			process.platform === "win32"
+				? `\\\\.\\pipe\\prime-supervisor-config-${randomUUID()}`
+				: join(root, "supervisor.sock"),
+		);
+		const persistedSocketPath = process.platform === "win32" ? socketPath.toUpperCase() : `${root}//supervisor.sock`;
 		const agentDir = join(root, "agent");
 		mkdirSync(descriptorDir, { recursive: true });
 		writeFileSync(
 			join(descriptorDir, "supervisor-config"),
 			JSON.stringify({
 				version: 1,
-				socketPath: `${root}//supervisor.sock`,
+				socketPath: persistedSocketPath,
 				defaultSessionConfig: { agentDir, cwd: "/persisted/cwd", telemetryDisabled: true },
 			}),
 		);
@@ -4574,8 +4592,11 @@ describe("daemon worker supervisor monitoring", () => {
 	});
 
 	it("limits abort admission to mutation drain", async () => {
-		const root = mkdtempSync(`/tmp/prime-update-drain-${process.pid}-`);
-		const socketPath = join(root, "supervisor.sock");
+		const root = mkdtempSync(join(tmpdir(), `prime-update-drain-${process.pid}-`));
+		const socketPath =
+			process.platform === "win32"
+				? `\\\\.\\pipe\\prime-update-drain-${process.pid}-${randomUUID()}`
+				: join(root, "supervisor.sock");
 		const supervisor = new DaemonSupervisor(socketPath, {
 			defaultSessionConfig: { cwd: root, agentDir: root },
 			descriptorDir: join(root, "workers"),
@@ -4585,10 +4606,23 @@ describe("daemon worker supervisor monitoring", () => {
 		try {
 			await supervisor.start();
 			await client.connect();
-			const prepare = client.request({ type: "prepare_update_restart" });
-			expect(await client.request({ type: "abort", activeSessionId: "missing" })).not.toMatchObject({
-				error: "Daemon is preparing an update restart",
+			const mutationDrain = (supervisor as unknown as { mutationDrain: MutationDrainLatch }).mutationDrain;
+			const draining = createDeferred<void>();
+			const waitForDrain = mutationDrain.waitForDrain.bind(mutationDrain);
+			vi.spyOn(mutationDrain, "waitForDrain").mockImplementationOnce((...args) => {
+				draining.resolve();
+				return waitForDrain(...args);
 			});
+			mutationDrain.begin();
+			const prepare = client.request({ type: "prepare_update_restart" });
+			try {
+				await draining.promise;
+				expect(await client.request({ type: "abort", activeSessionId: "missing" })).not.toMatchObject({
+					error: "Daemon is preparing an update restart",
+				});
+			} finally {
+				mutationDrain.end();
+			}
 			await prepare;
 			await expect(client.request({ type: "abort", activeSessionId: "missing" })).resolves.toMatchObject({
 				error: "Daemon is preparing an update restart",
