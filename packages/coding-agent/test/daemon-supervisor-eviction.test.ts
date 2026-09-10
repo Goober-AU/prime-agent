@@ -35,6 +35,7 @@ interface WorkerFixture {
 	transcriptCaches?: Map<string, unknown>;
 	snapshotCache?: Map<string, unknown>;
 	stopRevision?: number;
+	descriptorRevision?: number;
 	client?: {
 		request: ReturnType<typeof vi.fn>;
 		requestWorker: ReturnType<typeof vi.fn>;
@@ -69,9 +70,14 @@ interface SupervisorInternals {
 	descriptorDir: string;
 	socketPath: string;
 	defaultSessionConfig: { agentDir?: string; sessionDir?: string };
-	persistWorker(worker: WorkerFixture): void;
-	stopWorkerUntracked(worker: WorkerFixture, removeDescriptor: boolean, force?: boolean): Promise<void>;
+	persistWorker(worker: WorkerFixture): Promise<void>;
+	stopWorkerUntracked(worker: WorkerFixture, removeDescriptor: boolean, force?: boolean): Promise<unknown>;
 	promoteOwnedWorker(client: object, worker: WorkerFixture): Promise<void>;
+	retryWorkerRecovery(worker: WorkerFixture): Promise<void>;
+	recoverWorker: (worker: WorkerFixture) => Promise<void>;
+	descriptorWrites: {
+		write(path: string, data: string): Promise<{ generation: number }>;
+	};
 	loadWorkerDescriptors(): void;
 	adoptOrRecoverWorker(worker: WorkerFixture): Promise<void>;
 	assertRecoveryAllowed: () => Promise<void>;
@@ -1004,6 +1010,47 @@ describe("daemon supervisor scheduled-session wake", () => {
 		expect(store.list().map((job) => job.status)).toEqual(["active"]);
 	});
 
+	it("does not let a delayed failed promotion roll back a newer recovery transition", async () => {
+		const supervisor = makeSupervisor();
+		const owned = makeWorker("owned-transition", []);
+		owned.descriptor.ownerClientId = "owner";
+		owned.descriptorPath = join(supervisor.descriptorDir, "owned-transition.json");
+		let rejectPromotionWrite = (_error: Error) => {};
+		let promotionWriteStarted = () => {};
+		const promotionStarted = new Promise<void>((resolve) => {
+			promotionWriteStarted = resolve;
+		});
+		const persisted: string[] = [];
+		let writeCount = 0;
+		supervisor.descriptorWrites.write = vi.fn(async (_path, data) => {
+			writeCount++;
+			if (writeCount === 1) {
+				promotionWriteStarted();
+				await new Promise<never>((_resolve, reject) => {
+					rejectPromotionWrite = reject;
+				});
+			}
+			persisted.push(data);
+			return { generation: writeCount };
+		});
+		supervisor.recoverWorker = vi.fn(async () => {});
+
+		const promotion = supervisor.promoteOwnedWorker(
+			{ id: "owner", attachedActiveSessionIds: new Set<string>() },
+			owned,
+		);
+		await promotionStarted;
+		await supervisor.retryWorkerRecovery(owned);
+		rejectPromotionWrite(new Error("delayed promotion write failed"));
+
+		await expect(promotion).rejects.toThrow("delayed promotion write failed");
+		expect(owned.descriptor.ownerClientId).toBeUndefined();
+		expect(owned.descriptor.lifecycle).toBe("recovering");
+		expect(owned.descriptorRevision).toBe(2);
+		expect(persisted).toHaveLength(1);
+		expect(JSON.parse(persisted[0] ?? "{}")).toMatchObject({ lifecycle: "recovering" });
+	});
+
 	it("never parks or retries the cancel once the tree was promoted during a failing family read", async () => {
 		const supervisor = makeSupervisor();
 		supervisor.createOrReuseWorker = vi.fn();
@@ -1072,7 +1119,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		owned.descriptor.consecutiveFailures = 0;
 		owned.descriptor.stopRequestedAt = new Date(now).toISOString();
 		owned.descriptorPath = join(supervisor.descriptorDir, "owned.json");
-		supervisor.persistWorker(owned);
+		await supervisor.persistWorker(owned);
 		const treeCancel = vi
 			.spyOn(
 				supervisor as unknown as { cancelScheduledJobsForSessionTree: (id: string, file: string) => Promise<void> },
@@ -1241,7 +1288,7 @@ describe("daemon supervisor scheduled-session wake", () => {
 		stopped.descriptor.consecutiveFailures = 0;
 		stopped.descriptor.stopRequestedAt = new Date(now).toISOString();
 		stopped.descriptorPath = join(supervisor.descriptorDir, "stopped.json");
-		supervisor.persistWorker(stopped);
+		await supervisor.persistWorker(stopped);
 		const reopened = makeWorker("reopened", []);
 		reopened.descriptor.sessionFile = sessionFile;
 		supervisor.workers.set("reopened", reopened);

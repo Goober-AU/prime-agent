@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getProcessStartId } from "../src/core/session-lease.js";
 import { AgentDaemon } from "../src/modes/daemon/daemon-mode.js";
+import { normalizeSocketPath } from "../src/modes/daemon/daemon-socket.js";
 import * as childProcesses from "../src/utils/child-process.js";
 
 interface Claim {
@@ -35,7 +36,10 @@ let launcher: Launcher | undefined;
 let launched: Promise<void> | undefined;
 
 function startChild(): ChildProcess {
-	const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+	const child = spawn(process.execPath, ["--eval", "setInterval(() => {}, 1000)"], {
+		stdio: "ignore",
+		windowsHide: true,
+	});
 	children.push(child);
 	return child;
 }
@@ -70,7 +74,7 @@ function installClaim(daemon: Launcher, socketPath: string, child: ChildProcess)
 		generation,
 		pid,
 		processStartId,
-		socketPath,
+		socketPath: normalizeSocketPath(socketPath),
 		descriptorDir: directory,
 		agentDir: directory,
 		appVersion: "test",
@@ -129,11 +133,14 @@ describe("supervisor replacement launch ownership", () => {
 		expect(verify).toHaveBeenCalledWith(bound.claim);
 		expect(winner.exitCode).toBeNull();
 		expect(winner.signalCode).toBeNull();
-		if (ownWins) expect(kill).not.toHaveBeenCalled();
-		else {
-			expect(kill).toHaveBeenCalledOnce();
+		if (ownWins) {
+			expect(kill).not.toHaveBeenCalled();
+			expect(daemon.log).toHaveBeenCalledWith(`launched replacement supervisor on ${socketPath}`);
+		} else {
+			expect(kill, JSON.stringify(daemon.log.mock.calls)).toHaveBeenCalledOnce();
 			expect(child.signalCode).toBe("SIGKILL");
 			expect(winnerKill).not.toHaveBeenCalled();
+			expect(daemon.log).toHaveBeenCalledWith(`stopped losing replacement supervisor ${child.pid} on ${socketPath}`);
 		}
 	});
 

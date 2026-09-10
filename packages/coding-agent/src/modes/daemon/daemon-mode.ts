@@ -104,8 +104,10 @@ import { deleteSessionArtifacts, deleteSessionFile } from "../../core/session-fi
 import { acquireSessionLease, canonicalSessionPath, type SessionLease } from "../../core/session-lease.js";
 import {
 	getSessionArtifactPathForFile,
+	orderSessionContextForTranscript,
 	readSessionInfo,
 	resolveSessionRlmDepth,
+	type SessionHistorySnapshot,
 	type SessionInfo,
 	SessionManager,
 } from "../../core/session-manager.js";
@@ -161,6 +163,7 @@ import {
 	type DaemonClientCapability,
 	type DaemonClosingReason,
 	type DaemonCommand,
+	type DaemonHistoryRange,
 	type DaemonOutbound,
 	type DaemonResponse,
 	type DaemonSessionClosedReason,
@@ -266,6 +269,47 @@ const structuredLog = getLogger("coding-agent.daemon");
 const WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
 const UPDATE_RESTART_PREPARE_TIMEOUT_MS = 90_000;
 const MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES = 3;
+export const INITIAL_HISTORY_WINDOW_MESSAGES = 400;
+export const MAX_HISTORY_RANGE_MESSAGES = 400;
+
+function sessionHistoryRepresentation(model: Model<Api> | undefined): string {
+	const identity = model
+		? [model.provider, model.id, model.api, model.baseUrl.replace(/\/+$/, "")]
+		: [null, null, null, null];
+	return createHash("sha256").update(JSON.stringify(identity)).digest("base64url").slice(0, 22);
+}
+
+export function slicePinnedSessionHistory(
+	history: SessionHistorySnapshot,
+	options: { generation: string; representation: string; beforeEntryId?: string; limit?: number },
+): DaemonHistoryRange {
+	if (history.messages.length !== history.entryIds.length) {
+		throw new Error("Session history messages and entry ids are not aligned");
+	}
+	let endIndex = history.messages.length;
+	if (options.beforeEntryId !== undefined) {
+		endIndex = history.entryIds.indexOf(options.beforeEntryId);
+		if (endIndex < 0) throw new Error(`Session history boundary no longer exists: ${options.beforeEntryId}`);
+	}
+	const requestedLimit = options.limit ?? INITIAL_HISTORY_WINDOW_MESSAGES;
+	if (!Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) {
+		throw new Error("Session history range limit must be a positive integer");
+	}
+	const limit = Math.min(requestedLimit, MAX_HISTORY_RANGE_MESSAGES);
+	const startIndex = Math.max(0, endIndex - limit);
+	return {
+		version: 1,
+		generation: options.generation,
+		representation: options.representation,
+		tipEntryId: history.tipEntryId,
+		totalMessageCount: history.messages.length,
+		startIndex,
+		messages: history.messages.slice(startIndex, endIndex),
+		entryIds: history.entryIds.slice(startIndex, endIndex),
+		hasOlder: startIndex > 0,
+		order: "chronological",
+	};
+}
 
 const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"ack_result",
@@ -304,6 +348,7 @@ const DAEMON_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_state",
 	"get_connection_state",
 	"get_messages",
+	"get_history_range",
 	"get_rlm_children",
 	"get_session_stats",
 	"get_context_tree",
@@ -3451,12 +3496,12 @@ export class AgentDaemon {
 				: session.isSessionActive || session.hasRunningRlmChildren()
 					? "busy"
 					: state.clients.size > 0
-						? "user"
+						? "attached_idle"
 						: "idle";
 		return {
 			activeSessionId: state.activeSessionId,
 			sessionId: summary.sessionId,
-			...(summary.sessionName ? { sessionName: summary.sessionName } : {}),
+			...(summary.sessionName ? { sessionName: summary.sessionName, name: summary.sessionName } : {}),
 			...(summary.runtimeKind ? { runtimeKind: summary.runtimeKind } : {}),
 			cwd: summary.cwd,
 			status,
@@ -3465,6 +3510,10 @@ export class AgentDaemon {
 			isCompacting: summary.isCompacting,
 			attachedClients: summary.attachedClients,
 			messageCount: summary.messageCount,
+			transcriptEntryCount: session.sessionManager.getEntries().length,
+			model: session.model ? `${session.model.provider}/${session.model.id}` : null,
+			lastActivityAt: latest?.timestamp ?? null,
+			...session.rlmDiagnostics,
 			queuedCount: summary.sessionActions.queuedCount,
 			isSessionActive: summary.isSessionActive,
 			...(summary.parentActiveSessionId ? { parentActiveSessionId: summary.parentActiveSessionId } : {}),
@@ -4818,6 +4867,29 @@ export class AgentDaemon {
 				});
 			}
 
+			case "get_history_range": {
+				const state = this.getSessionState(command.activeSessionId);
+				if (command.generation !== state.eventGeneration) {
+					throw new Error("Session history snapshot generation is stale");
+				}
+				const targetModel = state.runtime.session.model;
+				const representation = sessionHistoryRepresentation(targetModel);
+				if (command.representation !== representation) {
+					throw new Error("Session history target-model representation is stale");
+				}
+				const history = state.runtime.session.sessionManager.buildSessionHistory(command.tipEntryId, targetModel);
+				return success(
+					command.id,
+					"get_history_range",
+					slicePinnedSessionHistory(history, {
+						generation: command.generation,
+						representation,
+						...(command.beforeEntryId !== undefined ? { beforeEntryId: command.beforeEntryId } : {}),
+						...(command.limit !== undefined ? { limit: command.limit } : {}),
+					}),
+				);
+			}
+
 			case "get_rlm_children": {
 				const state = this.getSessionState(command.activeSessionId);
 				return success(command.id, "get_rlm_children", {
@@ -5344,7 +5416,10 @@ export class AgentDaemon {
 		state: ActiveSessionState,
 		command: Extract<DaemonCommand, { type: "attach" }>,
 	): Promise<DaemonAttachResult> {
-		const snapshot = await this.createSessionSnapshot(state);
+		const snapshot = await this.createSessionSnapshot(
+			state,
+			daemonClientCapabilitiesForSession(client, state.activeSessionId).has("history_ranges"),
+		);
 		const replay =
 			command.resumeCursor?.activeSessionId && command.resumeCursor.activeSessionId !== state.activeSessionId
 				? {
@@ -5383,7 +5458,10 @@ export class AgentDaemon {
 		};
 	}
 
-	private async createSessionSnapshot(state: ActiveSessionState): Promise<DaemonSessionSnapshot> {
+	private async createSessionSnapshot(
+		state: ActiveSessionState,
+		recentFirstHistory = false,
+	): Promise<DaemonSessionSnapshot> {
 		const metadata = state.runtime.metadata;
 		const parent =
 			metadata.parentActiveSessionId || metadata.parentSessionId || metadata.rlmParentNodeId || metadata.rlmChildId
@@ -5406,11 +5484,56 @@ export class AgentDaemon {
 		}
 		session = state.runtime.session;
 		const connectionState = this.createConnectionState(state);
+		// Runtime hydration still parses the complete JSONL once. This capability only avoids
+		// serializing/transferring/rendering the complete resident transcript on attach.
+		let history: SessionHistorySnapshot | undefined;
+		if (recentFirstHistory) {
+			const persistedContext = session.sessionManager.buildSessionContextWithEntryIds(session.model);
+			const liveMessages = session.messages;
+			const alignsWithLiveContext =
+				persistedContext.messages.length === liveMessages.length &&
+				persistedContext.messages.every(
+					(message, index) =>
+						message.role === liveMessages[index]?.role && message.timestamp === liveMessages[index]?.timestamp,
+				);
+			if (alignsWithLiveContext) {
+				// Keep the exact public messages (including in-memory detail augmentation), while
+				// using persisted entry ids to present the same context chronologically.
+				history = {
+					...orderSessionContextForTranscript({ ...persistedContext, messages: liveMessages }),
+					tipEntryId: session.sessionManager.getLeafId(),
+				};
+			}
+			// Unpersisted outcome insertion can temporarily break index alignment. In that
+			// case retain the full legacy snapshot rather than dropping or misidentifying it.
+		}
+		const initialHistory = history
+			? slicePinnedSessionHistory(history, {
+					generation: state.eventGeneration,
+					representation: sessionHistoryRepresentation(session.model),
+					limit: INITIAL_HISTORY_WINDOW_MESSAGES,
+				})
+			: undefined;
 		return {
 			activeSessionId: state.activeSessionId,
 			summary: summaryForActiveSession(state),
 			state: connectionState,
-			messages: session.messages,
+			messages: initialHistory?.messages ?? session.messages,
+			...(initialHistory
+				? {
+						history: {
+							version: initialHistory.version,
+							generation: initialHistory.generation,
+							representation: initialHistory.representation,
+							tipEntryId: initialHistory.tipEntryId,
+							totalMessageCount: initialHistory.totalMessageCount,
+							startIndex: initialHistory.startIndex,
+							entryIds: initialHistory.entryIds,
+							hasOlder: initialHistory.hasOlder,
+							order: initialHistory.order,
+						},
+					}
+				: {}),
 			// Omit duplicate heavy payloads from attach. The client can derive render
 			// context from messages + state, and fetch the full session tree lazily
 			// when the tree/branch selector opens.
@@ -7658,7 +7781,10 @@ const ROSTER_SESSION_EVENT_TRIGGERS = new Set([
 function snapshotTransferId(snapshot: DaemonSessionSnapshot): string {
 	// createSessionSnapshot always sets lastEventCursor; it is optional only on the wire.
 	const cursor = snapshot.lastEventCursor!;
-	return `${snapshot.activeSessionId}-${cursor.generation}-${cursor.sequence}`;
+	const historyFlavor = snapshot.history
+		? `history-${snapshot.history.representation}-${snapshot.history.tipEntryId ?? "empty"}-${snapshot.history.startIndex}`
+		: "full";
+	return `${snapshot.activeSessionId}-${cursor.generation}-${cursor.sequence}-${historyFlavor}`;
 }
 
 function hasDaemonOutboundActiveSessionId(

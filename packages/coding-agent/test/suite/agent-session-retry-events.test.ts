@@ -1,4 +1,10 @@
-import { AgentContinueError, type AgentEvent, type AgentTool } from "@earendil-works/pi-agent-core";
+import {
+	AgentContinueError,
+	type AgentEvent,
+	type AgentTool,
+	type PerformanceMetricEvent,
+	type PerformanceMetricRecorder,
+} from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, fauxAssistantMessage, fauxThinking, fauxToolCall } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -61,6 +67,28 @@ type SessionRetryCompactionInternals = {
 	_schedulePostCompactionContinue: () => void;
 	_cancelPostCompactionContinue: () => void;
 };
+
+class RetryMetricRecorder implements PerformanceMetricRecorder {
+	readonly sessionId = "retry-metric-session";
+	readonly events: PerformanceMetricEvent[] = [];
+	private sequence = 0;
+	private clock = 0;
+
+	monotonicNow(): number {
+		return ++this.clock;
+	}
+
+	nextId(scope: "logical_request" | "provider_attempt"): string {
+		return `${scope}-${++this.sequence}`;
+	}
+
+	record(event: PerformanceMetricEvent): void {
+		this.events.push(event);
+	}
+
+	async flush(): Promise<void> {}
+	async close(): Promise<void> {}
+}
 
 describe("AgentSession retry and event characterization", () => {
 	const harnesses: Harness[] = [];
@@ -173,9 +201,55 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.faux.state.callCount).toBe(3);
 	});
 
-	it("exhausts max retries and emits a failure event", async () => {
+	it("records one whole logical request across retries without leaking state to the next prompt", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		const recorder = new RetryMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder, hostOwnsLogicalRequestTerminal: true };
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("recovered"),
+		]);
+
+		await harness.session.prompt("metric retry");
+
+		const attempts = recorder.events.filter((event) => event.operation === "provider_attempt");
+		const logicalRequests = recorder.events.filter((event) => event.operation === "logical_request");
+		expect(attempts).toHaveLength(3);
+		expect(logicalRequests).toHaveLength(1);
+		expect(logicalRequests[0]?.outcome).toBe("success");
+		expect(logicalRequests[0]?.usage).toBeUndefined();
+		expect(attempts[0]?.correlation?.logicalRequestId).toMatch(/^logical_request-/);
+		expect(new Set(attempts.map((event) => event.correlation?.logicalRequestId)).size).toBe(1);
+		expect(attempts.map((event) => event.measurements?.attempt_ordinal)).toEqual([1, 2, 3]);
+		expect(attempts.every((event) => event.measurements?.attempt_count === null)).toBe(true);
+		expect(logicalRequests[0]?.measurements?.total_ms).toBeGreaterThan(
+			Math.max(...attempts.map((event) => event.measurements?.total_ms ?? 0)),
+		);
+		// Prior failed-attempt duration is inside the group total, not mislabeled as wait.
+		expect(logicalRequests[0]?.measurements?.wait_ms).toBeNull();
+		expect(harness.session.agent.performanceMetrics).toEqual({
+			recorder,
+			hostOwnsLogicalRequestTerminal: true,
+		});
+
+		harness.appendResponses([fauxAssistantMessage("next turn")]);
+		await harness.session.prompt("next prompt");
+		const allAttempts = recorder.events.filter((event) => event.operation === "provider_attempt");
+		const allLogicalRequests = recorder.events.filter((event) => event.operation === "logical_request");
+		expect(allAttempts.map((event) => event.measurements?.attempt_ordinal)).toEqual([1, 2, 3, 1]);
+		expect(allLogicalRequests).toHaveLength(2);
+		expect(allLogicalRequests[1]?.correlation?.logicalRequestId).not.toBe(
+			allLogicalRequests[0]?.correlation?.logicalRequestId,
+		);
+	});
+
+	it("exhausts max retries and emits one failed logical terminal", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } } });
 		harnesses.push(harness);
+		const recorder = new RetryMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder, hostOwnsLogicalRequestTerminal: true };
 		const retryEvents: string[] = [];
 		harness.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") retryEvents.push(`start:${event.attempt}`);
@@ -193,6 +267,11 @@ describe("AgentSession retry and event characterization", () => {
 		expect(retryEvents).toEqual(["start:1", "start:2", "end:false"]);
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(harness.session.isRetrying).toBe(false);
+		expect(recorder.events.filter((event) => event.operation === "provider_attempt")).toHaveLength(3);
+		const logicalRequests = recorder.events.filter((event) => event.operation === "logical_request");
+		expect(logicalRequests).toHaveLength(1);
+		expect(logicalRequests[0]?.outcome).toBe("failure");
+		expect(logicalRequests[0]?.usage).toBeUndefined();
 	});
 
 	it("prompt waits for retry completion even when assistant message_end handling is delayed", async () => {
@@ -459,9 +538,46 @@ describe("AgentSession retry and event characterization", () => {
 		}
 	});
 
-	it("cancels retry sleep when abortRetry is called", async () => {
+	it("settles one logical terminal when cancellation races an active retry stream", async () => {
+		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } } });
+		harnesses.push(harness);
+		const recorder = new RetryMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder, hostOwnsLogicalRequestTerminal: true };
+		let notifyRetryStarted!: () => void;
+		const retryStarted = new Promise<void>((resolve) => {
+			notifyRetryStarted = resolve;
+		});
+		let finishRetry!: (message: AssistantMessage) => void;
+		const retryResponse = new Promise<AssistantMessage>((resolve) => {
+			finishRetry = resolve;
+		});
+		harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			async () => {
+				notifyRetryStarted();
+				return retryResponse;
+			},
+		]);
+
+		const promptPromise = harness.session.prompt("cancel active retry");
+		await retryStarted;
+		harness.session.abortRetry();
+		finishRetry(fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "cancelled" }));
+		await promptPromise;
+
+		const attempts = recorder.events.filter((event) => event.operation === "provider_attempt");
+		const logicalRequests = recorder.events.filter((event) => event.operation === "logical_request");
+		expect(attempts).toHaveLength(2);
+		expect(new Set(attempts.map((event) => event.correlation?.logicalRequestId)).size).toBe(1);
+		expect(logicalRequests).toHaveLength(1);
+		expect(logicalRequests[0]?.outcome).toBe("cancelled");
+	});
+
+	it("cancels retry sleep with one cancelled logical terminal", async () => {
 		const harness = await createHarness({ settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 100 } } });
 		harnesses.push(harness);
+		const recorder = new RetryMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder, hostOwnsLogicalRequestTerminal: true };
 		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
 
 		const sawRetryStart = new Promise<void>((resolve) => {
@@ -481,6 +597,10 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.session.isRetrying).toBe(false);
 		expect(harness.eventsOfType("auto_retry_end").map((event) => event.finalError)).toContain("Retry cancelled");
 		expect(harness.faux.state.callCount).toBe(1);
+		expect(recorder.events.filter((event) => event.operation === "provider_attempt")).toHaveLength(1);
+		const logicalRequests = recorder.events.filter((event) => event.operation === "logical_request");
+		expect(logicalRequests).toHaveLength(1);
+		expect(logicalRequests[0]?.outcome).toBe("cancelled");
 	});
 
 	it("waits for the full loop when retry recovery produces tool calls", async () => {
@@ -501,6 +621,8 @@ describe("AgentSession retry and event characterization", () => {
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
+		const recorder = new RetryMetricRecorder();
+		harness.session.agent.performanceMetrics = { recorder, hostOwnsLogicalRequestTerminal: true };
 		harness.setResponses([
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
 			fauxAssistantMessage([fauxToolCall("echo", { text: "hello" })], { stopReason: "toolUse" }),
@@ -512,6 +634,16 @@ describe("AgentSession retry and event characterization", () => {
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(toolRuns).toEqual(["hello"]);
 		expect(harness.session.isStreaming).toBe(false);
+		const attempts = recorder.events.filter((event) => event.operation === "provider_attempt");
+		const logicalRequests = recorder.events.filter((event) => event.operation === "logical_request");
+		expect(attempts).toHaveLength(3);
+		expect(logicalRequests).toHaveLength(2);
+		expect(attempts.slice(0, 2).map((event) => event.correlation?.logicalRequestId)).toEqual([
+			logicalRequests[0]?.correlation?.logicalRequestId,
+			logicalRequests[0]?.correlation?.logicalRequestId,
+		]);
+		expect(attempts[2]?.correlation?.logicalRequestId).toBe(logicalRequests[1]?.correlation?.logicalRequestId);
+		expect(logicalRequests.every((event) => event.usage === undefined)).toBe(true);
 		harness.appendResponses([fauxAssistantMessage("follow-up answer")]);
 		await harness.session.prompt("follow-up");
 		expect(harness.faux.state.callCount).toBe(4);

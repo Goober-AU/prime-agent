@@ -9,6 +9,7 @@ Add custom providers and models (Ollama, vLLM, LM Studio, proxies) via `~/.prime
 - [Supported APIs](#supported-apis)
 - [Provider Configuration](#provider-configuration)
 - [Model Configuration](#model-configuration)
+- [Staged Azure Astra native compaction](#staged-azure-astra-native-compaction)
 - [Overriding Built-in Providers](#overriding-built-in-providers)
 - [Per-model Overrides](#per-model-overrides)
 - [Anthropic Messages Compatibility](#anthropic-messages-compatibility)
@@ -198,6 +199,13 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 | `maxTokens` | No | `16384` | Maximum output tokens |
 | `cost` | No | all zeros | `{"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}` (per million tokens) |
 | `compat` | No | provider `compat` | Provider compatibility overrides. Merged with provider-level `compat` when both are set. |
+| `nativeCompaction` | No | omitted | Exact model-scoped native compaction capability; currently staged only for `azure-openai-managed/gpt-6-astra` |
+
+### Staged Azure Astra native compaction
+
+`nativeCompaction` is not a provider-wide compatibility flag. Prime accepts it only on a full model definition for exact `azure-openai-managed/gpt-6-astra` with `api: "openai-responses"`, a safe `/azure-openai/v1` base URL, and an endpoint equal to that base URL plus `/responses/compact`. It cannot be supplied through `modelOverrides`. GitHub Copilot, Foundry `/models`, Ollama, aliases, and other providers remain unsupported.
+
+The metadata has this versioned shape: `protocol: "openai-responses-compact-v1"`, exact `provider`, exact `model`, exact `endpoint`, `apiVersion: "v1"`, `enabled`, and `validation`. `enabled: true` is rejected unless `validation` is exactly `"live-verified"`. Documentation evidence alone uses `"documentation-verified"` and remains disabled. The default is no capability. Do not mark a deployment live-verified until its exact auth, deployment, endpoint, quota, cancellation, and response schema pass an authorized bounded probe.
 
 Current behavior:
 - `/model` and `prime-agent model list` list entries by model `id`.

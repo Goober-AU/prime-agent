@@ -30,8 +30,9 @@ event.
 | `execute` | `{"type":"execute","id":str,"code":str}` |
 | `interrupt` | `{"type":"interrupt","id"?:str}` — no reply |
 | `host_reply` | `{"type":"host_reply","id":str,"data":{"status":"ok","result":{...}}}` or an error envelope — no reply |
-| `snapshot` | `{"type":"snapshot","id":str,"path":str,"manifest_path":str,"max_bytes"?:int,"max_variable_bytes"?:int,"prune_oversized"?:bool}` |
-| `restore` | `{"type":"restore","id":str,"path":str}` |
+| `snapshot` | `{"type":"snapshot","id":str,"path":str,"manifest_path":str,"cas_root"?:str,"snapshot_format"?:"auto"|"legacy"|"cas-v2","max_bytes"?:int,"max_variable_bytes"?:int,"prune_oversized"?:bool}` |
+| `restore` | `{"type":"restore","id":str,"path":str,"cas_root"?:str,"source"?:"auto"|"current"|"previous"|"legacy","max_bytes"?:int,"max_variable_bytes"?:int}` |
+| `snapshot_export_legacy` | `{"type":"snapshot_export_legacy","id":str,"path":str,"manifest_path":str,"cas_root":str,"source"?:"current"|"previous","max_bytes"?:int,"max_variable_bytes"?:int}` |
 | `list_names` | `{"type":"list_names","id":str}` |
 | `shutdown` | `{"type":"shutdown","id"?:str}` |
 
@@ -42,8 +43,10 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
 
 ## Events
 
-- `{"event":"ready","protocol":3,"python":"3.13.11"}` — sent once at startup;
-  the handshake. No banner precedes it.
+- `{"event":"ready","protocol":3,"python":"3.13.11","snapshotFormats":["legacy","cas-v2"]}` — sent once at startup;
+  the handshake. `snapshotFormats` is an additive capability gate: a host must
+  not ask a protocol-3 runtime without `cas-v2` support to read or write a v2
+  root. No banner precedes it.
 - `{"event":"stdout"|"stderr","id":str|null,"text":str}` — captured output.
   `id` is the cell whose Python execution context performed the write; asyncio
   tasks inherit the spawning cell's id (even after that cell finished). `null`
@@ -63,9 +66,12 @@ runtime keeps serving. Closing stdin is equivalent to `shutdown`.
 - `{"event":"error","id":str|null,"ename":str,"evalue":str,"traceback":[str,...]}`
 - `{"event":"done","id":str,"status":"ok"|"error"}` — exactly one per id'd
   request, always after all of that request's other events. A snapshot `done`
-  adds `saved`, `skipped`, `pruned`, `bytes`; a restore `done` adds `restored`,
-  `failed`; a `list_names` `done` adds `names`; a failed snapshot/restore adds
-  `reason`. Restoring a missing file reports `status:"ok"` with empty
+  adds `saved`, `skipped`, `pruned`, `bytes`, format/byte metadata, and a
+  numeric-only `metrics` object; a restore `done` adds `restored`, `failed`,
+  format/generation and explicit-recovery flags; an export adds `exported` and
+  its source generation; a `list_names` `done` adds `names`; a failed state
+  request adds `reason` and may add numeric-only timing metadata. Restoring a
+  missing legacy file reports `status:"ok"` with empty
   `restored`/`failed` lists and `reason:"snapshot not found"`.
 
 Before a cell's `done`, the runtime drains both channels: tagged Python-level
@@ -140,24 +146,85 @@ process is serving the protocol (importing the module does not count).
 
 ## Snapshot / restore
 
-`snapshot` serializes the user namespace with `dill` (recurse mode), one name
-at a time: `_`-prefixed names and
+`snapshot` always serializes the user namespace with `dill` (recurse mode), one
+name at a time, on the authoritative kernel thread. It has no object-id,
+weak-reference, name, AST, size, or mutation shortcut. `_`-prefixed names and
 `{rlm, mcp, bash, asyncio, In, Out, get_ipython, exit, quit, open}` are always
-skipped; a name whose pickle exceeds `max_variable_bytes` or would push the
-total over `max_bytes` is skipped and reported. With `prune_oversized`, only
-names exceeding the per-variable cap (`max_variable_bytes`) are also deleted
-from the namespace and listed in `pruned`; names skipped for the aggregate
-`max_bytes` cap are reported in `skipped` but kept in the namespace. The
-payload is written atomically (tmp file + `os.replace`) and a JSON manifest
-(`version`, `savedNames`, `skipped`, `pruned`, `bytes`, `pythonVersion`,
-`timestamp`) is written to `manifest_path`. A manifest write failure fails the
-snapshot (and nothing is pruned).
+skipped. Live `BashHandle` values are excluded before traversal; a completed
+`BashResult` remains ordinary serializable state.
 
-`restore` loads the payload and revives each name independently; a missing
-file yields an ok empty restore with `reason:"snapshot not found"`, a corrupt
-file fails with a `reason`, and per-name failures are listed in `failed`.
-Names `In`, `Out`, and `get_ipython` in a payload are never restored. `dill` is imported lazily; when unavailable, snapshot and restore
-fail with `status:"error"` and a `reason`.
+A name whose pickle exceeds `max_variable_bytes` or whose inclusion would make
+the legacy outer dict pickle exceed `max_bytes` is skipped and reported.
+Aggregate selection preserves insertion-order prefix trimming and includes the
+legacy outer-container overhead, including in CAS mode. With
+`prune_oversized`, only names exceeding the per-variable cap are deleted from
+the namespace and listed in `pruned`; aggregate-cap skips stay live. Pruning
+happens only after the authoritative format commit.
+
+The default writer is legacy for a session with no v2 root. Legacy uses
+`path` plus the version-1 side manifest at `manifest_path`. Supplying
+`snapshot_format:"cas-v2"` explicitly initializes the session-local
+`cas_root`; when an older host omits `cas_root`, the runtime derives the sibling
+`.v2` root from `path`. `auto` continues v2 whenever any entry exists at that
+root. An explicit legacy write is refused once a v2 root exists, so newer work
+cannot fork into a stale legacy file.
+
+CAS v2 contains:
+
+- `FORMAT`, written durably before first-format work;
+- `blobs/<sha256>.blob`, where complete per-name dill bytes are shared only
+  after full byte/hash/size validation;
+- immutable `generations/<uuid>.json`, which authoritatively owns entries,
+  saved/skipped/pruned metadata, logical bytes, the legacy-equivalent envelope
+  size, the save-time aggregate/per-name caps, Python version, and timestamp;
+- `CURRENT.json`, whose `current` and `previous` references each pin generation
+  identity, full SHA-256, and exact size.
+
+Blob files are fsynced and published before the generation file. The generation
+is fsynced and validated before the atomically replaced `CURRENT.json`. That
+pointer replacement is the commit point. A failed or interrupted precommit
+write leaves the prior pointer unchanged and never prunes. The known-good
+previous generation is retained. Bounded postcommit GC recognizes only exact
+owned filenames and retains current, previous, and process-tracked active
+restore blobs; ambiguity stops GC. The session lease is the external
+serialization contract: simultaneous kernel processes must not share one
+snapshot root. Within a process, restore registration covers pointer/manifest
+validation through blob use, so GC cannot race that window. The trusted session
+root and its parent must not be concurrently replaced with a reparse point.
+
+Reader precedence is conservative. Any v2 root makes v2 authoritative, even
+when `FORMAT`, `CURRENT.json`, a generation, or a blob is missing or corrupt;
+that failure is visible and never falls back to legacy. `source:"previous"`
+and `source:"legacy"` are explicit recovery actions and report that newer or
+unsaved work may be omitted. Cross-name values are still independently
+`dill.loads`-ed, preserving baseline non-sharing; aliases and cycles within one
+name retain dill behavior.
+
+`snapshot_export_legacy` validates a selected committed CAS generation and
+writes its independent per-name blobs into the old payload representation. It
+does not remove or demote v2 state. Launching an older runtime remains gated on
+a successful explicit export; launcher rollback alone is not a data rollback.
+
+Snapshot metrics contain numbers/null only. `serialization_wall_ms` measures
+all per-name dill work and CAS legacy-envelope counting;
+`serialization_cpu_ms` uses the authoritative serializer thread CPU clock when
+available. `serialized_bytes` is retained logical per-name bytes.
+`written_bytes` is actual attempted file bytes for the successful operation;
+CAS hash equality can reduce it without reducing serialization CPU. Node owns
+queue, following-cell, and end-to-end clocks; clocks are never subtracted
+across processes.
+
+`restore` revives each name independently; a missing legacy file yields an ok
+empty restore with `reason:"snapshot not found"`, a corrupt authoritative
+source fails with a `reason`, and per-name dill failures are listed in
+`failed`. CAS restore validates each declared blob size and the logical/envelope
+aggregate against both the generation's saved caps and the current host's
+configured caps before reading blob data. A snapshot whose retained envelope
+or one-name blob exceeds the defaults must resume with sufficiently large
+explicit limits. Lowering a limit remains valid when the committed data fits;
+otherwise it is a visible recovery gate, never an unbounded read. Names `In`,
+`Out`, and `get_ipython` are never restored. `dill` is
+imported lazily; when unavailable, snapshot and restore fail visibly.
 
 `list_names` replies with `done` carrying `names`: the sorted user-defined
 top-level names under the same filter the snapshot applies.

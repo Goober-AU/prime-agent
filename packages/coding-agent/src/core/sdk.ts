@@ -1,5 +1,11 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type PerformanceMetricRecorder,
+	safeRecordPerformanceMetric,
+	type ThinkingLevel,
+} from "@earendil-works/pi-agent-core";
 import { clampThinkingLevel, type Message, type Model, streamSimple, supportsFastMode } from "@earendil-works/pi-ai";
 import { getAgentDir } from "../config.js";
 import { AgentSession } from "./agent-session.js";
@@ -13,6 +19,8 @@ import { McpManager } from "./mcp/mcp-manager.js";
 import { convertToLlm } from "./messages.js";
 import { ModelRegistry } from "./model-registry.js";
 import { findInitialModel } from "./model-resolver.js";
+import { resolveModelToolOutputPolicy } from "./model-tool-output-policy.js";
+import { createLocalPerformanceMetricRecorderFromEnvironment } from "./performance-metrics.js";
 import type { ResourceLoader } from "./resource-loader.js";
 import { DefaultResourceLoader } from "./resource-loader.js";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.js";
@@ -105,6 +113,27 @@ export { createBashTool, createEditTool, createIpythonTool, withFileMutationQueu
 
 function getDefaultAgentDir(): string {
 	return getAgentDir();
+}
+
+async function closePerformanceMetricRecorderBestEffort(recorder: PerformanceMetricRecorder): Promise<void> {
+	let close: Promise<void>;
+	try {
+		close = recorder.close();
+	} catch {
+		return;
+	}
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await Promise.race([
+			close.catch(() => undefined),
+			new Promise<void>((resolve) => {
+				timer = setTimeout(resolve, 1_000);
+				timer.unref?.();
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 
 /**
@@ -239,8 +268,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	let agent: Agent;
 
+	let getActiveSessionManager = (): SessionManager => sessionManager;
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
-		const converted = convertToLlm(messages);
+		const activeSessionManager = getActiveSessionManager();
+		const modelToolOutputArtifactDir = activeSessionManager.getSessionArtifactDir();
+		const converted = convertToLlm(messages, {
+			policy: resolveModelToolOutputPolicy(settingsManager.getModelToolOutputPolicy()),
+			...(modelToolOutputArtifactDir
+				? {
+						scope: {
+							sessionId: activeSessionManager.getSessionId(),
+							sessionArtifactDir: modelToolOutputArtifactDir,
+						},
+					}
+				: {}),
+		});
 		if (!settingsManager.getBlockImages()) {
 			return converted;
 		}
@@ -341,41 +383,78 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendServiceTierChange(serviceTierPreference);
 	}
 
-	const session = new AgentSession({
-		agent,
-		sessionManager,
-		settingsManager,
-		serviceTierPreference,
-		cwd,
-		// Only the explicit dir — the default may not match injected custom storage.
-		agentDir: options.agentDir,
-		scopedModels: options.scopedModels,
-		resourceLoader,
-		customTools: options.customTools,
-		modelRegistry,
-		mcpManager,
-		initialActiveToolNames,
-		allowedToolNames,
-		includeGoals,
-		includeCompactSkill: options.includeCompactSkill,
-		rlmHeartbeatController: options.rlmHeartbeatController,
-		agentMessageController: options.agentMessageController,
-		agentObserveController: options.agentObserveController,
-		extensionRunnerRef,
-		rlmDepth: options.rlmDepth,
-		rlmMaxDepth: options.rlmMaxDepth,
-		rlmSessionDir: options.rlmSessionDir,
-		rlmParentNodeId: options.rlmParentNodeId,
-		rlmParentAgent: options.rlmParentAgent,
-		semanticParentSessionId: options.semanticParentSessionId,
-		semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
-		subagentRuntimeHost: options.subagentRuntimeHost,
-		sessionStartEvent: options.sessionStartEvent,
-		prewarmIpythonKernel: options.prewarmIpythonKernel,
-		autonomous: options.autonomous,
-		serializedRefine: options.serializedRefine,
-		initialGoal: options.initialGoal,
+	const performanceMetricRecorder = createLocalPerformanceMetricRecorderFromEnvironment({
+		agentDir,
+		sessionId: sessionManager.getSessionId(),
 	});
+	if (performanceMetricRecorder) {
+		agent.performanceMetrics = { recorder: performanceMetricRecorder };
+		try {
+			const loadObservation = sessionManager.getLoadObservation();
+			if (loadObservation) {
+				safeRecordPerformanceMetric(performanceMetricRecorder, {
+					operation: "session_reopen",
+					identity: { component: "session" },
+					outcome: "success",
+					measurements: {
+						read_bytes: loadObservation.readBytes,
+						total_ms: null,
+						reopen_ms: null,
+					},
+				});
+			}
+		} catch {
+			// Session load telemetry is disposable and must not affect reopen.
+		}
+	}
+
+	let session: AgentSession;
+	try {
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settingsManager,
+			serviceTierPreference,
+			cwd,
+			// Only the explicit dir — the default may not match injected custom storage.
+			agentDir: options.agentDir,
+			scopedModels: options.scopedModels,
+			resourceLoader,
+			customTools: options.customTools,
+			modelRegistry,
+			mcpManager,
+			initialActiveToolNames,
+			allowedToolNames,
+			includeGoals,
+			includeCompactSkill: options.includeCompactSkill,
+			rlmHeartbeatController: options.rlmHeartbeatController,
+			agentMessageController: options.agentMessageController,
+			agentObserveController: options.agentObserveController,
+			extensionRunnerRef,
+			rlmDepth: options.rlmDepth,
+			rlmMaxDepth: options.rlmMaxDepth,
+			rlmSessionDir: options.rlmSessionDir,
+			rlmParentNodeId: options.rlmParentNodeId,
+			rlmParentAgent: options.rlmParentAgent,
+			semanticParentSessionId: options.semanticParentSessionId,
+			semanticSpawnedByRequestId: options.semanticSpawnedByRequestId,
+			subagentRuntimeHost: options.subagentRuntimeHost,
+			sessionStartEvent: options.sessionStartEvent,
+			prewarmIpythonKernel: options.prewarmIpythonKernel,
+			autonomous: options.autonomous,
+			serializedRefine: options.serializedRefine,
+			initialGoal: options.initialGoal,
+		});
+	} catch (error) {
+		if (performanceMetricRecorder) {
+			void closePerformanceMetricRecorderBestEffort(performanceMetricRecorder);
+		}
+		throw error;
+	}
+	getActiveSessionManager = () => session.sessionManager;
+	if (performanceMetricRecorder) {
+		session.registerDisposeCallback(() => closePerformanceMetricRecorderBestEffort(performanceMetricRecorder));
+	}
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

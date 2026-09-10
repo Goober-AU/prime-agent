@@ -23,6 +23,7 @@ describe("agent observe helpers", () => {
 			role: "user",
 			timestamp: 123,
 			text: "abcdefgh",
+			content: "abcdefgh",
 			truncated: true,
 		});
 	});
@@ -35,6 +36,7 @@ describe("agent observe helpers", () => {
 		);
 
 		expect(preview.text).toBe("[tool_call:bash]");
+		expect(preview.content).toBe(preview.text);
 		expect(preview.toolCalls).toEqual(["bash"]);
 		expect(preview.text).not.toContain("secret");
 	});
@@ -47,6 +49,7 @@ describe("agent observe helpers", () => {
 		);
 
 		expect(preview.text).toBe("working through the plan");
+		expect(preview.content).toBe(preview.text);
 		expect(preview.truncated).toBe(false);
 	});
 

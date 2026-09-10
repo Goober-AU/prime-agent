@@ -75,8 +75,9 @@ export const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION = 7;
 // Revision 27 adds structured session_recovering failure info for known-but-unaddressable sessions.
 // Revision 28 adds optional providerContext to compaction summary messages and maxInputTokens to models.
 // Both are backward-compatible response metadata; older clients render the existing summary text.
-export const DAEMON_SCHEMA_REVISION = 28;
-export const DAEMON_SCHEMA_ID = "protocol-7-schema-28-962b8b4c5e35";
+// Revision 29 adds capability-gated, pinned recent-first history windows and older range reads.
+export const DAEMON_SCHEMA_REVISION = 29;
+export const DAEMON_SCHEMA_ID = "protocol-7-schema-29-c16da0e12d5a";
 
 export type DaemonProtocolName = typeof DAEMON_PROTOCOL_NAME;
 export type DaemonProtocolVersion = number;
@@ -94,6 +95,7 @@ export type DaemonClientCapability =
 	| "extension_ui"
 	| "slim_attach"
 	| "chunked_snapshot"
+	| "history_ranges"
 	| "client_owned_sessions";
 export type DaemonPromptAdmissionCancellationStatus = "cancelled" | "owned" | "unknown";
 export interface DaemonPromptAdmissionCancellationResult {
@@ -148,6 +150,7 @@ export const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: readonly DaemonClientCapabili
 	"extension_ui",
 	"slim_attach",
 	"chunked_snapshot",
+	"history_ranges",
 	"client_owned_sessions",
 ];
 
@@ -307,11 +310,39 @@ export interface DaemonArtifactReference {
 	metadata?: Record<string, string | number | boolean | null>;
 }
 
+export interface DaemonHistoryWindow {
+	version: 1;
+	generation: string;
+	/** Opaque identity of the target-model representation used to build this window. */
+	representation: string;
+	tipEntryId: string | null;
+	totalMessageCount: number;
+	startIndex: number;
+	entryIds: string[];
+	hasOlder: boolean;
+	order: "chronological";
+}
+
+export interface DaemonHistoryRange {
+	version: 1;
+	generation: string;
+	representation: string;
+	tipEntryId: string | null;
+	totalMessageCount: number;
+	startIndex: number;
+	messages: AgentMessage[];
+	entryIds: string[];
+	hasOlder: boolean;
+	order: "chronological";
+}
+
 export interface DaemonSessionSnapshot {
 	activeSessionId: string;
 	summary: SessionSummary;
 	state: AgentConnectionState;
 	messages: AgentMessage[];
+	/** Present only when the attaching client negotiated history_ranges. */
+	history?: DaemonHistoryWindow;
 	sessionContext?: AgentConnectionSessionContext;
 	sessionTree?: { tree: AgentConnectionSessionTreeNode[]; leafId: string | null };
 	lastEventSequence: DaemonEventSequence;
@@ -561,6 +592,16 @@ export type DaemonCommand =
 	| { id?: string; type: "get_state"; activeSessionId: string }
 	| { id?: string; type: "get_connection_state"; activeSessionId: string }
 	| { id?: string; type: "get_messages"; activeSessionId: string }
+	| {
+			id?: string;
+			type: "get_history_range";
+			activeSessionId: string;
+			generation: string;
+			representation: string;
+			tipEntryId: string | null;
+			beforeEntryId?: string;
+			limit?: number;
+	  }
 	| { id?: string; type: "get_rlm_children"; activeSessionId: string }
 	| { id?: string; type: "get_session_stats"; activeSessionId: string }
 	| { id?: string; type: "get_context_tree"; activeSessionId: string }
@@ -745,6 +786,11 @@ const DIRECT_PEER_TRANSPORT_COMMAND = {
 	minSchemaRevision: 25,
 	capability: "direct_peer_transport",
 } as const;
+const HISTORY_RANGE_COMMAND = {
+	minProtocol: 7,
+	minSchemaRevision: 29,
+	capability: "history_ranges",
+} as const;
 
 export const DAEMON_COMMAND_COMPATIBILITY = {
 	ack_result: LEGACY_DAEMON_COMMAND,
@@ -787,6 +833,7 @@ export const DAEMON_COMMAND_COMPATIBILITY = {
 	get_state: LEGACY_DAEMON_COMMAND,
 	get_connection_state: LEGACY_DAEMON_COMMAND,
 	get_messages: LEGACY_DAEMON_COMMAND,
+	get_history_range: HISTORY_RANGE_COMMAND,
 	get_rlm_children: AUTHORITATIVE_CHILD_ROSTER_COMMAND,
 	get_session_stats: LEGACY_DAEMON_COMMAND,
 	get_context_tree: LEGACY_DAEMON_COMMAND,
@@ -905,6 +952,7 @@ export const DAEMON_COMMAND_PLANE = {
 	get_state: "session",
 	get_connection_state: "session",
 	get_messages: "session",
+	get_history_range: "session",
 	get_rlm_children: "session",
 	get_session_stats: "session",
 	get_context_tree: "session",
@@ -1299,6 +1347,7 @@ const READ_ONLY_DAEMON_COMMANDS: ReadonlySet<DaemonCommand["type"]> = new Set([
 	"get_state",
 	"get_connection_state",
 	"get_messages",
+	"get_history_range",
 	"get_rlm_children",
 	"get_session_stats",
 	"get_context_tree",

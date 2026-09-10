@@ -35,6 +35,7 @@ export type DaemonClientProgressListener = (message: DaemonRequestProgress) => v
 
 export interface DaemonClientRequestOptions {
 	onProgress?: DaemonClientProgressListener;
+	signal?: AbortSignal;
 	/**
 	 * False opts out of reconnect parking: a close rejects so the caller's own retry loop stays live.
 	 * Any caller that owns its own bounded retry MUST pass false; a parked request waits for a hello
@@ -54,12 +55,19 @@ interface PendingDaemonRequest {
 	awaitingReconnect: boolean;
 	acknowledgeResult: boolean;
 	recoverable: boolean;
+	abortCleanup?: () => void;
 	/** Re-checked against the new hello before a reconnect replay. */
 	compatibilities: readonly DaemonCommandCompatibility[];
 }
 
 function daemonEndpointDetails(socketPath: string): string {
 	return `Socket: ${socketPath}. Daemon log: ${getDaemonLogPath(socketPath)}.`;
+}
+
+function daemonRequestAbortError(commandType: string): Error {
+	const error = new Error(`Daemon request "${commandType}" was cancelled`);
+	error.name = "AbortError";
+	return error;
 }
 
 export class DaemonSocketClosedError extends Error {
@@ -333,12 +341,14 @@ export class DaemonClient {
 		timeoutMs = defaultDaemonRequestTimeout(command),
 		options: DaemonClientRequestOptions = {},
 	): Promise<DaemonResponse> {
+		if (options.signal?.aborted) throw daemonRequestAbortError(command.type);
 		if (!this.socket || this.socket.destroyed) {
 			throw new Error(
 				`Cannot send daemon command "${command.type}" because the Prime Agent daemon is not connected. ${daemonEndpointDetails(this.socketPath)}`,
 			);
 		}
 		const hello = this.helloMessage ?? (await this.waitForHello());
+		if (options.signal?.aborted) throw daemonRequestAbortError(command.type);
 		const compatibilities = getDaemonCommandCompatibilities(command);
 		const missingCompatibility = compatibilities.find(
 			(compatibility) => !meetsDaemonCommandCompatibility(hello, compatibility),
@@ -409,6 +419,21 @@ export class DaemonClient {
 				compatibilities,
 			};
 			this.pendingRequests.set(id, pending);
+			if (options.signal) {
+				const abort = () => {
+					if (this.pendingRequests.get(id) !== pending) return;
+					if (pending.timeout) clearTimeout(pending.timeout);
+					this.pendingRequests.delete(id);
+					pending.abortCleanup?.();
+					pending.reject(daemonRequestAbortError(command.type));
+				};
+				options.signal.addEventListener("abort", abort, { once: true });
+				pending.abortCleanup = () => options.signal?.removeEventListener("abort", abort);
+				if (options.signal.aborted) {
+					abort();
+					return;
+				}
+			}
 			this.armPendingRequestTimeout(id, pending);
 			this.socket!.write(wireData);
 		});
@@ -417,6 +442,7 @@ export class DaemonClient {
 	private armPendingRequestTimeout(id: string, pending: PendingDaemonRequest): void {
 		pending.timeout = setTimeout(() => {
 			this.pendingRequests.delete(id);
+			pending.abortCleanup?.();
 			pending.reject(
 				new Error(
 					`Timed out after ${pending.timeoutMs}ms waiting for the Prime Agent daemon response to "${pending.commandType}". ${daemonEndpointDetails(this.socketPath)}`,
@@ -475,6 +501,7 @@ export class DaemonClient {
 					);
 					if (missingCompatibility) {
 						this.pendingRequests.delete(id);
+						pending.abortCleanup?.();
 						pending.reject(
 							new DaemonCapabilityUnavailableError(
 								pending.commandType as DaemonCommand["type"],
@@ -500,6 +527,7 @@ export class DaemonClient {
 					clearTimeout(pending.timeout);
 				}
 				this.pendingRequests.delete(message.id);
+				pending.abortCleanup?.();
 				pending.resolve(message);
 				if (pending.acknowledgeResult) {
 					this.acknowledgeCommandResult(message.id);
@@ -555,6 +583,7 @@ export class DaemonClient {
 			if (pending.timeout) {
 				clearTimeout(pending.timeout);
 			}
+			pending.abortCleanup?.();
 			pending.reject(error);
 			this.pendingRequests.delete(id);
 		}

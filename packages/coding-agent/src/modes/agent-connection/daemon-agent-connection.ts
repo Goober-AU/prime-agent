@@ -62,6 +62,8 @@ import type {
 	AgentConnectionForkOptions,
 	AgentConnectionHeadlessCompletionOptions,
 	AgentConnectionHeartbeat,
+	AgentConnectionHistoryRange,
+	AgentConnectionHistoryRangeRequest,
 	AgentConnectionModel,
 	AgentConnectionModelCatalog,
 	AgentConnectionModelCycleResult,
@@ -223,6 +225,7 @@ export function buildSessionTreeFromFlatNodes(
 
 export class DaemonAgentConnection implements AgentConnection {
 	private readonly listeners = new Set<AgentConnectionEventListener>();
+	private readonly beforeSessionInvalidateListeners = new Set<AgentConnectionBeforeSessionInvalidateListener>();
 	private readonly unsubscribeDaemonMessages: () => void;
 	private readonly unsubscribeDaemonClose: () => void;
 	private readonly clientId = `daemon-agent-connection:${randomUUID()}`;
@@ -387,6 +390,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
 					"slim_attach",
 					"chunked_snapshot",
+					"history_ranges",
 					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
 				],
 				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
@@ -466,8 +470,19 @@ export class DaemonAgentConnection implements AgentConnection {
 		};
 	}
 
-	onBeforeSessionInvalidate(_listener: AgentConnectionBeforeSessionInvalidateListener): () => void {
-		return () => {};
+	onBeforeSessionInvalidate(listener: AgentConnectionBeforeSessionInvalidateListener): () => void {
+		this.beforeSessionInvalidateListeners.add(listener);
+		return () => this.beforeSessionInvalidateListeners.delete(listener);
+	}
+
+	private notifyBeforeSessionInvalidate(): void {
+		for (const listener of [...this.beforeSessionInvalidateListeners]) {
+			try {
+				listener();
+			} catch {
+				// One UI cleanup failure must not block session invalidation.
+			}
+		}
 	}
 
 	async getState(): Promise<AgentConnectionState> {
@@ -550,7 +565,7 @@ export class DaemonAgentConnection implements AgentConnection {
 	}
 
 	async getMessages(): Promise<AgentMessage[]> {
-		if (this.latestSnapshotIsFresh && this.latestSnapshot) {
+		if (this.latestSnapshotIsFresh && this.latestSnapshot && !this.latestSnapshot.history) {
 			return this.latestSnapshot.messages;
 		}
 		const data = await this.requestData<{ messages: AgentMessage[] }>({
@@ -558,6 +573,50 @@ export class DaemonAgentConnection implements AgentConnection {
 			activeSessionId: this.activeSessionId,
 		});
 		return data.messages;
+	}
+
+	async getHistoryRange(
+		request: AgentConnectionHistoryRangeRequest,
+		options?: { signal?: AbortSignal },
+	): Promise<AgentConnectionHistoryRange> {
+		if (!this.client.supportsServerCapability("history_ranges")) {
+			throw new DaemonCapabilityUnavailableError("get_history_range", "history_ranges");
+		}
+		const range = await this.requestData<AgentConnectionHistoryRange>(
+			{
+				type: "get_history_range",
+				activeSessionId: this.activeSessionId,
+				generation: request.generation,
+				representation: request.representation,
+				tipEntryId: request.tipEntryId,
+				...(request.beforeEntryId !== undefined ? { beforeEntryId: request.beforeEntryId } : {}),
+				...(request.limit !== undefined ? { limit: request.limit } : {}),
+			},
+			undefined,
+			{ recoverable: false, ...(options?.signal ? { signal: options.signal } : {}) },
+		);
+		if (
+			range.version !== 1 ||
+			range.generation !== request.generation ||
+			range.representation !== request.representation ||
+			range.tipEntryId !== request.tipEntryId ||
+			range.order !== "chronological" ||
+			!Array.isArray(range.messages) ||
+			!Array.isArray(range.entryIds) ||
+			range.messages.length !== range.entryIds.length ||
+			range.entryIds.some((entryId) => typeof entryId !== "string") ||
+			new Set(range.entryIds).size !== range.entryIds.length ||
+			!Number.isSafeInteger(range.startIndex) ||
+			range.startIndex < 0 ||
+			!Number.isSafeInteger(range.totalMessageCount) ||
+			range.totalMessageCount < 0 ||
+			range.startIndex + range.messages.length > range.totalMessageCount ||
+			typeof range.hasOlder !== "boolean" ||
+			range.hasOlder !== range.startIndex > 0
+		) {
+			throw new Error("Daemon returned an invalid session history range");
+		}
+		return range;
 	}
 
 	async getSessionHeader(): Promise<AgentConnectionSessionHeader | undefined> {
@@ -1338,6 +1397,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		sourceActiveSessionId: string,
 		targetActiveSessionId: string,
 	): Promise<{ cancelled: false }> {
+		this.notifyBeforeSessionInvalidate();
 		const previousState = {
 			lastEventCursor: this.lastEventCursor,
 			lastEventSequence: this.lastEventSequence,
@@ -1367,6 +1427,7 @@ export class DaemonAgentConnection implements AgentConnection {
 					...(supportsExtensionUi ? (["extension_ui"] as const) : []),
 					"slim_attach",
 					"chunked_snapshot",
+					"history_ranges",
 					...(this.options.ownedSession ? (["client_owned_sessions"] as const) : []),
 				],
 				env: this.options.sendClientEnv ? collectDaemonClientEnv() : undefined,
@@ -1771,6 +1832,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			return;
 		}
 		if (message.type === "session_resynced") {
+			this.notifyBeforeSessionInvalidate();
 			this.attachedSessionId = message.snapshot.state.sessionId;
 			this.attachedSessionFile = message.snapshot.state.sessionFile;
 			this.latestSnapshot = mapDaemonSessionSnapshot(message.snapshot);
@@ -1788,6 +1850,7 @@ export class DaemonAgentConnection implements AgentConnection {
 			return;
 		}
 		if (message.type === "session_replaced") {
+			this.notifyBeforeSessionInvalidate();
 			this.attachedSessionId = message.state.sessionId;
 			this.attachedSessionFile = message.state.sessionFile;
 			if (message.snapshotFollows) {
@@ -2178,6 +2241,7 @@ export class DaemonAgentConnection implements AgentConnection {
 		if (purpose === "replacement") {
 			await this.emit({ type: "session_replaced", state: snapshot.state, messages });
 		} else if (purpose === "resync") {
+			this.notifyBeforeSessionInvalidate();
 			await this.emit({ type: "session_resynced", snapshot: this.latestSnapshot });
 		}
 	}
@@ -2319,9 +2383,33 @@ function maxEventSequence(current: number | undefined, observed: number | undefi
 }
 
 function mapDaemonSessionSnapshot(snapshot: DaemonSessionSnapshot, replay?: DaemonReplayInfo): AgentConnectionSnapshot {
+	if (
+		snapshot.history &&
+		(snapshot.history.version !== 1 ||
+			snapshot.history.order !== "chronological" ||
+			typeof snapshot.history.generation !== "string" ||
+			typeof snapshot.history.representation !== "string" ||
+			snapshot.history.representation.length === 0 ||
+			(snapshot.lastEventCursor !== undefined &&
+				snapshot.history.generation !== snapshot.lastEventCursor.generation) ||
+			(snapshot.history.tipEntryId !== null && typeof snapshot.history.tipEntryId !== "string") ||
+			snapshot.history.entryIds.length !== snapshot.messages.length ||
+			snapshot.history.entryIds.some((entryId) => typeof entryId !== "string") ||
+			new Set(snapshot.history.entryIds).size !== snapshot.history.entryIds.length ||
+			!Number.isSafeInteger(snapshot.history.startIndex) ||
+			snapshot.history.startIndex < 0 ||
+			!Number.isSafeInteger(snapshot.history.totalMessageCount) ||
+			snapshot.history.totalMessageCount < 0 ||
+			snapshot.history.startIndex + snapshot.messages.length !== snapshot.history.totalMessageCount ||
+			typeof snapshot.history.hasOlder !== "boolean" ||
+			snapshot.history.hasOlder !== snapshot.history.startIndex > 0)
+	) {
+		throw new Error("Daemon returned an invalid recent-first history snapshot");
+	}
 	const connectionSnapshot: AgentConnectionSnapshot = {
 		state: snapshot.state,
 		messages: snapshot.messages,
+		...(snapshot.history ? { history: snapshot.history } : {}),
 		...(snapshot.summary.streamingMessage ? { streamingMessage: snapshot.summary.streamingMessage } : {}),
 		lastEventSequence: snapshot.lastEventSequence,
 		lastEventCursor: snapshot.lastEventCursor,
@@ -2369,6 +2457,7 @@ function invalidatesCachedSnapshot(commandType: DaemonCommandBody["type"]): bool
 		case "get_state":
 		case "get_connection_state":
 		case "get_messages":
+		case "get_history_range":
 		case "get_session_stats":
 		case "get_commands":
 		case "get_resource_snapshot":

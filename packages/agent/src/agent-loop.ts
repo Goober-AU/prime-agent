@@ -8,10 +8,21 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	EventStream,
+	type ProviderUsageObservation,
 	streamSimple,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
+import {
+	type AgentLoopLogicalRequestSettlement,
+	elapsedMetricMs,
+	type PerformanceMetricIdentity,
+	type PerformanceMetricOutcome,
+	type PerformanceMetricRecorder,
+	type PerformanceMetricUsageV1,
+	performanceMetricUsageFromAssistant,
+	safeRecordPerformanceMetric,
+} from "./performance-metrics.js";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -34,6 +45,139 @@ const EMPTY_USAGE: AssistantMessage["usage"] = {
 	totalTokens: 0,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
+
+interface AgentLoopMetricState {
+	configuredLogicalRequestConsumed: boolean;
+}
+
+interface RequestMetricState {
+	logicalRequestId?: string;
+	providerAttemptId?: string;
+	providerAttemptNumber: number;
+	startedAt?: number;
+	dispatchEdgeAt?: number;
+	responseHeadersAt?: number;
+	firstEventAt?: number;
+	firstVisibleAt?: number;
+	providerUsage?: PerformanceMetricUsageV1;
+	finished: boolean;
+}
+
+export interface PerformanceMetricRequestCorrelation {
+	logicalRequestId?: string;
+	logicalRequestStartedAt?: number;
+	providerAttemptNumber: number;
+	logicalRequestSettlement: AgentLoopLogicalRequestSettlement;
+}
+
+interface LogicalRequestMetricFinalizer {
+	recorder: PerformanceMetricRecorder;
+	logicalRequestId?: string;
+	identity: PerformanceMetricIdentity;
+	providerAttemptNumber: number;
+	settlement: AgentLoopLogicalRequestSettlement;
+	startedAt?: number;
+	dispatchEdgeAt?: number;
+	responseHeadersAt?: number;
+	firstEventAt?: number;
+	firstVisibleAt?: number;
+}
+
+const requestCorrelations = new WeakMap<AssistantMessage, PerformanceMetricRequestCorrelation>();
+const logicalRequestFinalizers = new WeakMap<AssistantMessage, LogicalRequestMetricFinalizer>();
+
+/** Process-local correlation for a host-owned retry of this exact terminal message. */
+export function getPerformanceMetricRequestCorrelation(
+	message: AssistantMessage,
+): PerformanceMetricRequestCorrelation | undefined {
+	const correlation = requestCorrelations.get(message);
+	return correlation ? { ...correlation } : undefined;
+}
+
+function recorderNow(recorder: PerformanceMetricRecorder | undefined): number | undefined {
+	try {
+		const value = recorder?.monotonicNow();
+		return value !== undefined && Number.isFinite(value) ? value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function metricNow(config: AgentLoopConfig): number | undefined {
+	return recorderNow(config.performanceMetrics?.recorder);
+}
+
+function settleLogicalRequestMetric(state: LogicalRequestMetricFinalizer, outcome: PerformanceMetricOutcome): void {
+	if (state.settlement.settled) return;
+	state.settlement.settled = true;
+	const finishedAt = recorderNow(state.recorder);
+	safeRecordPerformanceMetric(state.recorder, {
+		operation: "logical_request",
+		correlation: { logicalRequestId: state.logicalRequestId },
+		identity: { ...state.identity, component: "agent" },
+		outcome,
+		measurements: {
+			total_ms: elapsedMetricMs(state.startedAt, finishedAt),
+			wait_ms:
+				state.settlement.maxProviderAttemptNumber === 1
+					? elapsedMetricMs(state.startedAt, state.dispatchEdgeAt)
+					: null,
+			dispatch_to_response_headers_ms: elapsedMetricMs(state.dispatchEdgeAt, state.responseHeadersAt),
+			dispatch_to_first_event_ms: elapsedMetricMs(state.dispatchEdgeAt, state.firstEventAt),
+			dispatch_to_first_visible_ms: elapsedMetricMs(state.dispatchEdgeAt, state.firstVisibleAt),
+			local_gateway_wait_ms: null,
+			upstream_wait_ms: null,
+			attempt_count: null,
+		},
+	});
+}
+
+/**
+ * Settles a host-owned logical request exactly once. This is process-local and
+ * content-free; durable transcript messages remain the source of truth.
+ */
+export function finalizePerformanceMetricLogicalRequest(
+	message: AssistantMessage,
+	outcome: PerformanceMetricOutcome = requestMetricOutcome(message),
+): void {
+	try {
+		const state = logicalRequestFinalizers.get(message);
+		if (state) settleLogicalRequestMetric(state, outcome);
+	} catch {
+		// Disposable telemetry must not affect host retry or cancellation behavior.
+	}
+}
+
+function nextMetricId(config: AgentLoopConfig, scope: "logical_request" | "provider_attempt"): string | undefined {
+	try {
+		return config.performanceMetrics?.recorder.nextId(scope);
+	} catch {
+		return undefined;
+	}
+}
+
+function requestMetricOutcome(message: AssistantMessage): PerformanceMetricOutcome {
+	if (message.stopReason === "aborted") return "cancelled";
+	if (message.stopReason === "error") return "failure";
+	return "success";
+}
+
+function providerMetricUsage(observation: ProviderUsageObservation): PerformanceMetricUsageV1 {
+	const token = (value: number | null): number | null =>
+		typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+	return {
+		source: "provider",
+		inputTokens: token(observation.inputTokens),
+		cachedInputTokens: token(observation.cachedInputTokens),
+		outputTokens: token(observation.outputTokens),
+		reasoningTokens: token(observation.reasoningTokens),
+		totalTokens: token(observation.totalTokens),
+		cachedInputIncludedInInput:
+			typeof observation.cachedInputIncludedInInput === "boolean" ? observation.cachedInputIncludedInInput : null,
+		reasoningIncludedInOutput:
+			typeof observation.reasoningIncludedInOutput === "boolean" ? observation.reasoningIncludedInOutput : null,
+	};
+}
 
 function createAbortError(): Error {
 	return new Error(ABORT_ERROR_MESSAGE);
@@ -310,6 +454,7 @@ async function runLoop(
 	streamFn?: StreamFn,
 ): Promise<void> {
 	let firstTurn = true;
+	const metricState: AgentLoopMetricState = { configuredLogicalRequestConsumed: false };
 	let lastTurn: Parameters<NonNullable<AgentLoopConfig["getContinuationMessages"]>>[0] | undefined;
 	let pendingMessages: AgentMessage[] = await pollMessagesUnlessAborted(config.getSteeringMessages, signal);
 
@@ -337,7 +482,7 @@ async function runLoop(
 				pendingMessages = [];
 			}
 
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFn);
+			const message = await streamAssistantResponse(currentContext, config, signal, emit, metricState, streamFn);
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -453,12 +598,117 @@ async function streamAssistantResponse(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
+	metricLoopState: AgentLoopMetricState,
 	streamFn?: StreamFn,
 ): Promise<AssistantMessage> {
+	const metrics = config.performanceMetrics;
+	const useConfiguredCorrelation = !metricLoopState.configuredLogicalRequestConsumed;
+	metricLoopState.configuredLogicalRequestConsumed = true;
+	const configuredStartedAt = metrics?.logicalRequestStartedAt;
+	const startedAt =
+		useConfiguredCorrelation && configuredStartedAt !== undefined && Number.isFinite(configuredStartedAt)
+			? configuredStartedAt
+			: metricNow(config);
+	const configuredAttemptNumber = metrics?.providerAttemptNumber;
+	const logicalRequestSettlement = (useConfiguredCorrelation ? metrics?.logicalRequestSettlement : undefined) ?? {
+		settled: false,
+		maxProviderAttemptNumber: 0,
+	};
+	const requestMetrics: RequestMetricState = {
+		logicalRequestId:
+			(useConfiguredCorrelation ? metrics?.logicalRequestId : undefined) ??
+			(metrics ? nextMetricId(config, "logical_request") : undefined),
+		providerAttemptId: metrics ? nextMetricId(config, "provider_attempt") : undefined,
+		providerAttemptNumber:
+			useConfiguredCorrelation &&
+			configuredAttemptNumber !== undefined &&
+			Number.isInteger(configuredAttemptNumber) &&
+			configuredAttemptNumber > 0
+				? configuredAttemptNumber
+				: 1,
+		startedAt,
+		finished: false,
+	};
+	logicalRequestSettlement.maxProviderAttemptNumber = Math.max(
+		logicalRequestSettlement.maxProviderAttemptNumber,
+		requestMetrics.providerAttemptNumber,
+	);
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
+
+	const finishRequestMetrics = (message: AssistantMessage | undefined, outcome: PerformanceMetricOutcome): void => {
+		if (!metrics || requestMetrics.finished) return;
+		requestMetrics.finished = true;
+		const finishedAt = metricNow(config);
+		const correlation = {
+			logicalRequestId: requestMetrics.logicalRequestId,
+			providerAttemptId: requestMetrics.providerAttemptId,
+		};
+		const identity = {
+			provider: message?.provider ?? config.model.provider,
+			model: message?.model ?? config.model.id,
+			api: message?.api ?? config.model.api,
+		} as const;
+		const attemptMeasurements = {
+			total_ms: elapsedMetricMs(requestMetrics.dispatchEdgeAt, finishedAt),
+			wait_ms: null,
+			dispatch_to_response_headers_ms: elapsedMetricMs(
+				requestMetrics.dispatchEdgeAt,
+				requestMetrics.responseHeadersAt,
+			),
+			dispatch_to_first_event_ms: elapsedMetricMs(requestMetrics.dispatchEdgeAt, requestMetrics.firstEventAt),
+			dispatch_to_first_visible_ms: elapsedMetricMs(requestMetrics.dispatchEdgeAt, requestMetrics.firstVisibleAt),
+			local_gateway_wait_ms: null,
+			upstream_wait_ms: null,
+			attempt_count: null,
+			attempt_ordinal: requestMetrics.providerAttemptNumber,
+		};
+		const logicalFinalizer: LogicalRequestMetricFinalizer = {
+			recorder: metrics.recorder,
+			logicalRequestId: requestMetrics.logicalRequestId,
+			identity,
+			providerAttemptNumber: requestMetrics.providerAttemptNumber,
+			settlement: logicalRequestSettlement,
+			startedAt: requestMetrics.startedAt,
+			dispatchEdgeAt: requestMetrics.dispatchEdgeAt,
+			responseHeadersAt: requestMetrics.responseHeadersAt,
+			firstEventAt: requestMetrics.firstEventAt,
+			firstVisibleAt: requestMetrics.firstVisibleAt,
+		};
+
+		if (message) {
+			requestCorrelations.set(message, {
+				logicalRequestId: requestMetrics.logicalRequestId,
+				logicalRequestStartedAt: requestMetrics.startedAt,
+				providerAttemptNumber: requestMetrics.providerAttemptNumber,
+				logicalRequestSettlement,
+			});
+			logicalRequestFinalizers.set(message, logicalFinalizer);
+		}
+		let usage = requestMetrics.providerUsage;
+		if (!usage) {
+			try {
+				usage = message ? performanceMetricUsageFromAssistant(message) : undefined;
+			} catch {
+				usage = undefined;
+			}
+		}
+		safeRecordPerformanceMetric(metrics.recorder, {
+			operation: "provider_attempt",
+			correlation,
+			identity: { ...identity, component: "provider" },
+			outcome,
+			measurements: attemptMeasurements,
+			usage,
+		});
+		if (!message || !metrics.hostOwnsLogicalRequestTerminal) {
+			settleLogicalRequestMetric(logicalFinalizer, outcome);
+		}
+	};
+
 	const finishAbortedMessage = async () => {
 		const finalMessage = createAbortedAssistantMessage(config, partialMessage);
+		finishRequestMetrics(finalMessage, "cancelled");
 		if (addedPartial) {
 			context.messages[context.messages.length - 1] = finalMessage;
 		} else {
@@ -490,12 +740,48 @@ async function streamAssistantResponse(
 			messages: llmMessages,
 			tools: context.tools,
 		};
+		const providerConfig = { ...config };
+		delete providerConfig.performanceMetrics;
+		const observedOnPayload: AgentLoopConfig["onPayload"] = metrics
+			? async (payload, model) => {
+					const nextPayload = await config.onPayload?.(payload, model);
+					requestMetrics.dispatchEdgeAt ??= metricNow(config);
+					return nextPayload;
+				}
+			: config.onPayload;
+		const observedOnResponse: AgentLoopConfig["onResponse"] = metrics
+			? async (providerResponse, model) => {
+					requestMetrics.responseHeadersAt ??= metricNow(config);
+					await config.onResponse?.(providerResponse, model);
+				}
+			: config.onResponse;
+		const observedOnUsage: AgentLoopConfig["onUsageObservation"] =
+			metrics || config.onUsageObservation
+				? (observation, model) => {
+						if (metrics) {
+							try {
+								requestMetrics.providerUsage = providerMetricUsage(observation);
+							} catch {
+								// Disposable usage observation cannot change the provider result.
+							}
+						}
+						try {
+							const observed = config.onUsageObservation?.(observation, model);
+							if (observed) void Promise.resolve(observed).catch(() => undefined);
+						} catch {
+							// A caller observer is disposable even when metric recording is off.
+						}
+					}
+				: undefined;
 
 		const response = await maybePromiseWithAbort(
 			streamFunction(config.model, llmContext, {
-				...config,
+				...providerConfig,
 				apiKey: resolvedApiKey,
 				signal,
+				onPayload: observedOnPayload,
+				onResponse: observedOnResponse,
+				onUsageObservation: observedOnUsage,
 			}),
 			signal,
 		);
@@ -513,6 +799,10 @@ async function streamAssistantResponse(
 				break;
 			}
 			const event = next.value;
+			requestMetrics.firstEventAt ??= metricNow(config);
+			if (event.type === "text_delta" && event.delta.length > 0) {
+				requestMetrics.firstVisibleAt ??= metricNow(config);
+			}
 			switch (event.type) {
 				case "start":
 					partialMessage = event.partial;
@@ -551,6 +841,7 @@ async function streamAssistantResponse(
 							throw error;
 						}
 					}
+					finishRequestMetrics(finalMessage, requestMetricOutcome(finalMessage));
 					if (addedPartial) {
 						context.messages[context.messages.length - 1] = finalMessage;
 					} else {
@@ -566,6 +857,7 @@ async function streamAssistantResponse(
 		}
 
 		const finalMessage = await maybePromiseWithAbort(response.result(), signal);
+		finishRequestMetrics(finalMessage, requestMetricOutcome(finalMessage));
 		if (addedPartial) {
 			context.messages[context.messages.length - 1] = finalMessage;
 		} else {
@@ -577,6 +869,11 @@ async function streamAssistantResponse(
 	} catch (error) {
 		if (signal?.aborted && isAbortError(error)) {
 			return finishAbortedMessage();
+		}
+		finishRequestMetrics(partialMessage ?? undefined, "failure");
+		if (partialMessage) {
+			// This partial will not receive a terminal message_end for the host to settle.
+			finalizePerformanceMetricLogicalRequest(partialMessage, "failure");
 		}
 		throw error;
 	}
@@ -626,6 +923,7 @@ async function executeToolCallsSequential(
 			toolName: toolCall.name,
 			args: toolCall.arguments,
 		});
+		const metricStartedAt = metricNow(config);
 
 		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 		let finalized: FinalizedToolCallOutcome;
@@ -647,6 +945,7 @@ async function executeToolCallsSequential(
 			);
 		}
 
+		recordToolPerformanceMetric(config, assistantMessage, finalized, metricStartedAt, signal);
 		await emitToolExecutionEnd(finalized, emit);
 		const toolResultMessage = createToolResultMessage(finalized);
 		await emitToolResultMessage(toolResultMessage, emit);
@@ -681,6 +980,7 @@ async function executeToolCallsParallel(
 			toolName: toolCall.name,
 			args: toolCall.arguments,
 		});
+		const metricStartedAt = metricNow(config);
 
 		const preparation = await prepareToolCall(currentContext, assistantMessage, toolCall, config, signal);
 		if (preparation.kind === "immediate") {
@@ -689,6 +989,7 @@ async function executeToolCallsParallel(
 				result: preparation.result,
 				isError: preparation.isError,
 			} satisfies FinalizedToolCallOutcome;
+			recordToolPerformanceMetric(config, assistantMessage, finalized, metricStartedAt, signal);
 			await emitToolExecutionEnd(finalized, emit);
 			finalizedCalls.push(finalized);
 			continue;
@@ -704,6 +1005,7 @@ async function executeToolCallsParallel(
 				config,
 				signal,
 			);
+			recordToolPerformanceMetric(config, assistantMessage, finalized, metricStartedAt, signal);
 			await emitToolExecutionEnd(finalized, emit);
 			return finalized;
 		});
@@ -750,6 +1052,28 @@ type FinalizedToolCallOutcome = {
 };
 
 type FinalizedToolCallEntry = FinalizedToolCallOutcome | (() => Promise<FinalizedToolCallOutcome>);
+
+function recordToolPerformanceMetric(
+	config: AgentLoopConfig,
+	assistantMessage: AssistantMessage,
+	finalized: FinalizedToolCallOutcome,
+	startedAt: number | undefined,
+	signal: AbortSignal | undefined,
+): void {
+	const recorder = config.performanceMetrics?.recorder;
+	if (!recorder) return;
+	const outcome: PerformanceMetricOutcome = signal?.aborted ? "cancelled" : finalized.isError ? "failure" : "success";
+	safeRecordPerformanceMetric(recorder, {
+		operation: "tool",
+		correlation: {
+			logicalRequestId: requestCorrelations.get(assistantMessage)?.logicalRequestId,
+			toolCallId: finalized.toolCall.id,
+		},
+		identity: { component: "tool" },
+		outcome,
+		measurements: { total_ms: elapsedMetricMs(startedAt, metricNow(config)) },
+	});
+}
 
 function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
 	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);

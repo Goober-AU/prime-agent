@@ -56,13 +56,21 @@ export interface ReadLinesRange {
 	start?: number;
 	/** Inclusive, as in createReadStream: bounds the read to a stat() snapshot so a growing file cannot extend the scan. */
 	end?: number;
+	/** Best-effort numeric observation of bytes returned by the underlying read stream. */
+	onBytesRead?: (bytes: number) => void;
 }
 
 export async function* readLinesAsBuffers(filePath: string, range?: ReadLinesRange): AsyncGenerator<Buffer> {
 	const pendingParts: Buffer[] = [];
 	let pendingBytes = 0;
-	for await (const chunk of createReadStream(filePath, range)) {
+	const { onBytesRead, ...streamRange } = range ?? {};
+	for await (const chunk of createReadStream(filePath, streamRange)) {
 		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		try {
+			onBytesRead?.(buffer.length);
+		} catch {
+			// Read observation is disposable and must not change the stream.
+		}
 		let start = 0;
 		while (start < buffer.length) {
 			const end = buffer.indexOf(0x0a, start);

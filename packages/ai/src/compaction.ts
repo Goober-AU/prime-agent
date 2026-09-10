@@ -7,6 +7,8 @@ export interface ProviderCompactionCheckpoint {
 	api: Api;
 	model: string;
 	baseUrl: string;
+	/** Exact request endpoint when recorded by a newer adapter. Legacy checkpoints omit it. */
+	endpoint?: string;
 	items: Record<string, unknown>[];
 	estimatedTokens: number;
 }
@@ -36,6 +38,8 @@ export function isCompactionCheckpoint(value: unknown): value is ProviderCompact
 		typeof checkpoint.api === "string" &&
 		typeof checkpoint.model === "string" &&
 		typeof checkpoint.baseUrl === "string" &&
+		(checkpoint.endpoint === undefined ||
+			(typeof checkpoint.endpoint === "string" && checkpoint.endpoint.length > 0)) &&
 		typeof checkpoint.estimatedTokens === "number" &&
 		Number.isFinite(checkpoint.estimatedTokens) &&
 		checkpoint.estimatedTokens >= 0 &&
@@ -47,12 +51,16 @@ export function isCompactionCheckpoint(value: unknown): value is ProviderCompact
 
 export function compactionMatchesModel(
 	checkpoint: ProviderCompactionCheckpoint,
-	model: Pick<Model<Api>, "provider" | "id"> & Partial<Pick<Model<Api>, "api" | "baseUrl">>,
+	model: Pick<Model<Api>, "provider" | "id"> & Partial<Pick<Model<Api>, "api" | "baseUrl" | "nativeCompaction">>,
 ): boolean {
 	return (
 		checkpoint.provider === model.provider &&
 		checkpoint.model === model.id &&
 		(model.api === undefined || checkpoint.api === model.api) &&
-		(model.baseUrl === undefined || checkpoint.baseUrl.replace(/\/+$/, "") === model.baseUrl.replace(/\/+$/, ""))
+		(model.baseUrl === undefined || checkpoint.baseUrl.replace(/\/+$/, "") === model.baseUrl.replace(/\/+$/, "")) &&
+		((checkpoint.endpoint === undefined && model.nativeCompaction === undefined) ||
+			(checkpoint.endpoint !== undefined &&
+				model.nativeCompaction !== undefined &&
+				checkpoint.endpoint.replace(/\/+$/, "") === model.nativeCompaction.endpoint.replace(/\/+$/, "")))
 	);
 }

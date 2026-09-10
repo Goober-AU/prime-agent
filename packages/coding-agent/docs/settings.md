@@ -115,16 +115,28 @@ prime-agent --offline
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.summaryUpdatePolicy` | string | `"off"` | Optional `"consolidate-repeated-v1"` update prompt; disabled until semantic retention is proven |
 
 ```json
 {
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
-    "keepRecentTokens": 20000
+    "keepRecentTokens": 20000,
+    "summaryUpdatePolicy": "off"
   }
 }
 ```
+
+The optional `consolidate-repeated-v1` policy changes only the existing iterative update prompt. It does not add a model pass or a segment ledger, and it keeps the selected model and reasoning level. It tells the summarizer to consolidate demonstrable repeats and superseded status while retaining constraints, reasons, blockers, artifact anchors, errors, kernel state, and harness facts. There is no arbitrary summary-size cap. Its semantic-quality evaluation is a live gate, so the default is `"off"`. The equivalent process-local opt-in is `PRIME_AGENT_SUMMARY_UPDATE_POLICY=consolidate-repeated-v1`.
+
+### Model-facing repeated tool output
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `modelToolOutputPolicy` | string | `"off"` | Optional `"repeated-large-text-v1"` provider-context policy |
+
+`repeated-large-text-v1` affects only later byte-identical successful IPython text results of at least 16 KiB. The cell still executes and every tool-call/result ID stays in order. The first copy, errors, images, stderr, background output, kernel notices, file diffs, and agent-message notices stay inline. A later copy is replaced only in model-facing serialization by a session-scoped path plus SHA-256 and byte size; the durable transcript is not rewritten. Missing, corrupt, cross-session, or unsafe-path artifacts fail open to the full result. The equivalent process-local opt-in is `PRIME_AGENT_MODEL_TOOL_OUTPUT_POLICY=repeated-large-text-v1`. Quality and built-provider serialization remain acceptance gates, so the default is `"off"`.
 
 ### Branch Summary
 
@@ -298,7 +310,8 @@ See [packages.md](packages.md) for package management details.
   "compaction": {
     "enabled": true,
     "reserveTokens": 16384,
-    "keepRecentTokens": 20000
+    "keepRecentTokens": 20000,
+    "summaryUpdatePolicy": "off"
   },
   "retry": {
     "enabled": true,

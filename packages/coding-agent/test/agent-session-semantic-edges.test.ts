@@ -603,7 +603,9 @@ describe("AgentSession semantic edges", () => {
 		const session = new AgentSession({
 			agent,
 			sessionManager,
-			settingsManager: SettingsManager.inMemory({ compaction: { keepRecentTokens: 1 } }),
+			settingsManager: SettingsManager.inMemory({
+				compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" },
+			}),
 			cwd: tempDir,
 			modelRegistry: ModelRegistry.create(authStorage, join(tempDir, "models.json")),
 			resourceLoader: createTestResourceLoader({ extensionsResult }),
@@ -744,7 +746,7 @@ describe("AgentSession semantic edges", () => {
 	it("fails the summary requests when compaction is aborted mid-summary", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" } },
 		});
 		harnesses.push(harness);
 		const ledgerPath = join(harness.sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
@@ -791,7 +793,7 @@ describe("AgentSession semantic edges", () => {
 	it("commits no summary slice when a racing split-turn sibling fails", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" } },
 		});
 		harnesses.push(harness);
 		const ledgerPath = join(harness.sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
@@ -837,7 +839,7 @@ describe("AgentSession semantic edges", () => {
 	it("settles a slice that resolves after a sibling already failed the compaction", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" } },
 		});
 		harnesses.push(harness);
 		const ledgerPath = join(harness.sessionManager.getSessionArtifactDir() ?? "", SEMANTIC_EDGES_LEDGER_FILENAME);
@@ -883,7 +885,7 @@ describe("AgentSession semantic edges", () => {
 	it("mints a distinct request identity for each split-turn summary call", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: { compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" } },
 		});
 		harnesses.push(harness);
 		const fauxModel = harness.getModel();

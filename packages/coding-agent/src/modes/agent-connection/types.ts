@@ -298,9 +298,37 @@ export interface AgentConnectionParentMetadata {
 	childId?: string;
 }
 
+export interface AgentConnectionHistoryWindow {
+	version: 1;
+	generation: string;
+	/** Opaque identity of the target-model representation used to build this window. */
+	representation: string;
+	tipEntryId: string | null;
+	totalMessageCount: number;
+	startIndex: number;
+	/** Stable entry ids aligned by index with AgentConnectionSnapshot.messages. */
+	entryIds: string[];
+	hasOlder: boolean;
+	order: "chronological";
+}
+
+export interface AgentConnectionHistoryRange extends AgentConnectionHistoryWindow {
+	messages: AgentMessage[];
+}
+
+export interface AgentConnectionHistoryRangeRequest {
+	generation: string;
+	representation: string;
+	tipEntryId: string | null;
+	beforeEntryId?: string;
+	limit?: number;
+}
+
 export interface AgentConnectionSnapshot {
 	state: AgentConnectionState;
 	messages: AgentMessage[];
+	/** Present only when recent-first history was capability-negotiated. */
+	history?: AgentConnectionHistoryWindow;
 	/** In-flight assistant message, separate from finalized transcript messages. */
 	streamingMessage?: AgentMessage;
 	sessionContext?: AgentConnectionSessionContext;
@@ -645,6 +673,11 @@ export interface AgentConnection {
 	getInitialSnapshot(): Promise<AgentConnectionSnapshot>;
 	getRlmChildSnapshots(): Promise<AgentConnectionRlmChildAgentSnapshot[]>;
 	getMessages(): Promise<AgentMessage[]>;
+	/** Optional capability: read an older page pinned to the snapshot generation/tip. */
+	getHistoryRange?(
+		request: AgentConnectionHistoryRangeRequest,
+		options?: { signal?: AbortSignal },
+	): Promise<AgentConnectionHistoryRange>;
 	getSessionHeader(): Promise<AgentConnectionSessionHeader | undefined>;
 	getCommands(): Promise<AgentConnectionSlashCommand[]>;
 	getResourceSnapshot(): Promise<AgentConnectionResourceSnapshot>;

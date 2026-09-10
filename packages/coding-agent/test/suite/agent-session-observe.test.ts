@@ -49,7 +49,7 @@ function createController(): AgentObserveController {
 				queuedCount: 0,
 				isSessionActive: false,
 			},
-			messages: [{ index: 2, role: "assistant", text: "working", truncated: false }],
+			messages: [{ index: 2, role: "assistant", text: "working", content: "working", truncated: false }],
 			limit: input.limit ?? 8,
 			maxChars: input.maxChars ?? 800,
 			truncated: false,

@@ -1,6 +1,5 @@
-import { existsSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, PerformanceMetricRecorder } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { type Static, Type } from "typebox";
 import { IMAGE_MIME_TYPES } from "../../utils/mime.js";
@@ -18,7 +17,21 @@ import {
 	type KernelSentAgentMessage,
 	ReplKernelManager,
 } from "../kernel/index.js";
-import { manifestPathIn, type RestoreResult, snapshotPathIn } from "../kernel/state-snapshot.js";
+import {
+	casSnapshotRootIn,
+	type KernelSnapshotFormat,
+	manifestPathIn,
+	type RestoreResult,
+	snapshotPathIn,
+	snapshotStateExistsIn,
+} from "../kernel/state-snapshot.js";
+import {
+	MODEL_TOOL_OUTPUT_MIN_BYTES,
+	type ModelToolOutputArtifactV1,
+	persistModelToolOutputArtifact,
+	REPEATED_LARGE_TEXT_POLICY,
+	resolveModelToolOutputPolicy,
+} from "../model-tool-output-policy.js";
 import type { PythonSkillRuntimeInfo } from "../skills.js";
 import { wrapToolDefinition } from "./tool-definition-wrapper.js";
 
@@ -280,6 +293,8 @@ export interface IpythonToolDetails {
 	attachments?: KernelAttachment[];
 	/** Agent messages sent from this cell. */
 	sentAgentMessages?: KernelSentAgentMessage[];
+	/** Durable, session-scoped source for an opt-in model-facing repeated-output reference. */
+	modelOutputArtifact?: ModelToolOutputArtifactV1;
 	/** True when this result came after killing and restarting a busy kernel. */
 	kernelRestarted?: boolean;
 	error?: {
@@ -303,6 +318,12 @@ export interface IpythonToolOptions {
 	pythonSkills?: readonly PythonSkillRuntimeInfo[];
 	/** Per-session artifact dir where the kernel namespace snapshot is stored. Omit to disable snapshots. */
 	snapshotDir?: string;
+	/** Explicit snapshot writer opt-in. Omitted preserves legacy/default continuation behavior. */
+	snapshotFormat?: KernelSnapshotFormat;
+	/** Per-session recorder. Metrics are disposable and cannot affect kernel behavior. */
+	performanceMetrics?: PerformanceMetricRecorder;
+	/** Opt-in model-facing output policy. Execution itself is never cached. */
+	modelToolOutputPolicy?: "off" | "repeated-large-text-v1";
 	/** Resolves before this kernel starts — e.g. the previous provisioner's dispose, so a
 	 * /reload's old-kernel snapshot flush can't race the new kernel's restore. */
 	readyGate?: Promise<unknown>;
@@ -346,6 +367,18 @@ export class IpythonKernelProvisioner {
 	/** Result of reviving a prior session's namespace on the last kernel start, if any. */
 	get lastRestore(): RestoreResult | undefined {
 		return this._lastRestore;
+	}
+
+	/** Session scope used only for opt-in durable model-output artifacts. */
+	get modelToolOutputScope(): { sessionId: string; sessionArtifactDir: string } | undefined {
+		const sessionId = this.options?.sessionId;
+		const sessionArtifactDir = this.options?.snapshotDir;
+		return sessionId && sessionArtifactDir ? { sessionId, sessionArtifactDir } : undefined;
+	}
+
+	/** Resolved once from the owner provisioner so wrapper options cannot silently disable it. */
+	get modelToolOutputPolicy(): "off" | "repeated-large-text-v1" {
+		return resolveModelToolOutputPolicy(this.options?.modelToolOutputPolicy);
 	}
 
 	/** Start the kernel in the background. Failures are swallowed here and surface on the next ensure(). */
@@ -494,9 +527,15 @@ export class IpythonKernelProvisioner {
 				sessionId: this.options?.sessionId,
 				hostHandlers: this.options?.hostHandlers,
 				pythonSkills: this.options?.pythonSkills,
+				performanceMetrics: this.options?.performanceMetrics,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
 				snapshot: snapshotDir
-					? { path: snapshotPathIn(snapshotDir), manifestPath: manifestPathIn(snapshotDir) }
+					? {
+							path: snapshotPathIn(snapshotDir),
+							manifestPath: manifestPathIn(snapshotDir),
+							casRootPath: casSnapshotRootIn(snapshotDir),
+							format: this.options?.snapshotFormat,
+						}
 					: undefined,
 				stderrLogPath: snapshotDir ? join(snapshotDir, "kernel-stderr.log") : undefined,
 				bootstrapCode,
@@ -522,7 +561,7 @@ export class IpythonKernelProvisioner {
 				// Revive a prior session's namespace before the bootstrap, so the bootstrap
 				// then overwrites live handles (rlm, skills) on top of anything restored.
 				if (snapshotDir) {
-					const snapshotExisted = existsSync(snapshotPathIn(snapshotDir));
+					const snapshotExisted = snapshotStateExistsIn(snapshotDir);
 					this.emitStartupProgress("Restoring Python state...");
 					const restore = await raceWithAbort(m.restoreState(), startupSignal);
 					if (snapshotExisted) {
@@ -635,6 +674,8 @@ export function createIpythonToolDefinition(
 	options?: IpythonToolOptions,
 ): ToolDefinition<typeof ipythonSchema, IpythonToolDetails> {
 	const provisioner = options?.provisioner ?? new IpythonKernelProvisioner(cwd, options);
+	const modelToolOutputScope = provisioner.modelToolOutputScope;
+	const modelToolOutputPolicy = provisioner.modelToolOutputPolicy;
 
 	return {
 		name: "ipython",
@@ -705,6 +746,27 @@ export function createIpythonToolDefinition(
 
 				const imageBlocks = imageBlocksFromAttachments(r.attachments);
 				const content: (TextContent | ImageContent)[] = [{ type: "text", text: text || "" }, ...imageBlocks];
+				const isError = r.status === "error" || r.status === "aborted";
+				let modelOutputArtifact: ModelToolOutputArtifactV1 | undefined;
+				if (
+					modelToolOutputPolicy === REPEATED_LARGE_TEXT_POLICY &&
+					modelToolOutputScope &&
+					r.status === "ok" &&
+					!isError &&
+					imageBlocks.length === 0 &&
+					!r.stderr &&
+					!r.backgroundOutput &&
+					!kernelRestarted &&
+					!r.diffs?.length &&
+					!r.sentAgentMessages?.length &&
+					Buffer.byteLength(text, "utf8") >= MODEL_TOOL_OUTPUT_MIN_BYTES
+				) {
+					try {
+						modelOutputArtifact = persistModelToolOutputArtifact(text, modelToolOutputScope);
+					} catch {
+						// Artifact persistence is optional. Keep the complete inline result on any failure.
+					}
+				}
 
 				return {
 					content,
@@ -719,10 +781,11 @@ export function createIpythonToolDefinition(
 						diffs: r.diffs,
 						attachments: r.attachments,
 						sentAgentMessages: r.sentAgentMessages,
+						...(modelOutputArtifact ? { modelOutputArtifact } : {}),
 						kernelRestarted,
 						error: r.error,
 					},
-					isError: r.status === "error" || r.status === "aborted",
+					isError,
 				};
 			} finally {
 				if (hasWorkingMessage) {

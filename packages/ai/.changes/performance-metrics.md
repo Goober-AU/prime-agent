@@ -1,0 +1,1 @@
+- Added optional provider usage observations and explicitly validated native-compaction capability metadata without enabling unverified routes.

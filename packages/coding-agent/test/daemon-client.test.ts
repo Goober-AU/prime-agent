@@ -884,6 +884,70 @@ describe("DaemonClient", () => {
 		client.close();
 	});
 
+	it("cancels an in-flight history range and ignores a late response", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		const connected = client.connect();
+		const socket = netMock.sockets[0]!;
+		socket.emit("connect");
+		await connected;
+		emitHello(socket, DAEMON_PROTOCOL_VERSION, ["history_ranges"], DAEMON_SCHEMA_REVISION);
+		const controller = new AbortController();
+		const response = client.request(
+			{
+				type: "get_history_range",
+				activeSessionId: "active-1",
+				generation: "generation-1",
+				representation: "representation-1",
+				tipEntryId: "tip-1",
+			},
+			undefined,
+			{ signal: controller.signal, recoverable: false },
+		);
+		expect(socket.writes).toHaveLength(1);
+		const command = JSON.parse(socket.writes[0]!) as { id: string };
+		controller.abort();
+		await expect(response).rejects.toMatchObject({ name: "AbortError" });
+		socket.emit(
+			"data",
+			`${JSON.stringify({ id: command.id, type: "response", command: "get_history_range", success: true, data: {} })}\n`,
+		);
+		client.close();
+	});
+
+	it("never replays a cancelled history range after reconnect", async () => {
+		const client = new DaemonClient("/tmp/prime-agent.sock");
+		client.enableRequestRecovery();
+		const firstConnect = client.connect();
+		const firstSocket = netMock.sockets[0]!;
+		firstSocket.emit("connect");
+		await firstConnect;
+		emitHello(firstSocket, DAEMON_PROTOCOL_VERSION, ["history_ranges"], DAEMON_SCHEMA_REVISION);
+		const controller = new AbortController();
+		const response = client.request(
+			{
+				type: "get_history_range",
+				activeSessionId: "active-1",
+				generation: "generation-1",
+				representation: "representation-1",
+				tipEntryId: "tip-1",
+			},
+			undefined,
+			{ signal: controller.signal },
+		);
+		expect(firstSocket.writes).toHaveLength(1);
+		firstSocket.emit("close");
+		controller.abort();
+		await expect(response).rejects.toMatchObject({ name: "AbortError" });
+
+		const secondConnect = client.connect();
+		const secondSocket = netMock.sockets[1]!;
+		secondSocket.emit("connect");
+		await secondConnect;
+		emitHello(secondSocket, DAEMON_PROTOCOL_VERSION, ["history_ranges"], DAEMON_SCHEMA_REVISION);
+		expect(secondSocket.writes).toEqual([]);
+		client.close();
+	});
+
 	it("reconnects raw clients and replays pending commands after supervisor replacement", async () => {
 		const client = new DaemonClient("/tmp/prime-agent.sock");
 		const firstConnect = client.connect();

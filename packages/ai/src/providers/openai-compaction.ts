@@ -15,10 +15,57 @@ export class CompactionRequestError extends Error {
 	}
 }
 
+const AZURE_MANAGED_PROVIDER = "azure-openai-managed";
+const AZURE_ASTRA_MODEL = "gpt-6-astra";
+const AZURE_GATEWAY_BASE_PATH = "/azure-openai/v1";
+const RESPONSES_COMPACT_PROTOCOL = "openai-responses-compact-v1";
+
+function normalizeEndpoint(value: string): string | undefined {
+	try {
+		const url = new URL(value);
+		if (!(["http:", "https:"] as string[]).includes(url.protocol)) return undefined;
+		if (url.username || url.password || url.search || url.hash) return undefined;
+		url.pathname = url.pathname.replace(/\/+$/, "");
+		return url.toString().replace(/\/$/, "");
+	} catch {
+		return undefined;
+	}
+}
+
+/** Return the exact endpoint only for the staged, live-validated Azure Astra route. */
+export function validatedNativeCompactionEndpoint(model: Model<Api>): string | undefined {
+	if (
+		model.provider !== AZURE_MANAGED_PROVIDER ||
+		model.id !== AZURE_ASTRA_MODEL ||
+		model.api !== "openai-responses"
+	) {
+		return undefined;
+	}
+	const capability = model.nativeCompaction;
+	if (
+		!capability?.enabled ||
+		capability.validation !== "live-verified" ||
+		capability.protocol !== RESPONSES_COMPACT_PROTOCOL ||
+		capability.apiVersion !== "v1" ||
+		capability.provider !== model.provider ||
+		capability.model !== model.id
+	) {
+		return undefined;
+	}
+	const baseUrl = normalizeEndpoint(model.baseUrl);
+	const endpoint = normalizeEndpoint(capability.endpoint);
+	if (!baseUrl || !endpoint) return undefined;
+	const parsedBase = new URL(baseUrl);
+	if (parsedBase.pathname !== AZURE_GATEWAY_BASE_PATH) return undefined;
+	const expected = normalizeEndpoint(`${baseUrl}/responses/compact`);
+	return endpoint === expected ? endpoint : undefined;
+}
+
 export function supportsOpenAICompaction(model: Model<Api>): boolean {
 	return (
 		(model.provider === "openai-codex" && model.api === "openai-codex-responses") ||
-		(model.id === "gpt-6-astra" && model.provider === "openai" && model.api === "openai-responses")
+		(model.id === "gpt-6-astra" && model.provider === "openai" && model.api === "openai-responses") ||
+		validatedNativeCompactionEndpoint(model) !== undefined
 	);
 }
 
@@ -71,11 +118,16 @@ export async function requestOpenAICompaction(
 		if (response.status === 400 || response.status === 413) {
 			const failure: unknown = await response.json().catch(() => undefined);
 			signal.throwIfAborted();
+			// Preserve the direct OpenAI/Codex fallback contract. A validated gateway
+			// route may fall back only for an explicitly unsupported endpoint above;
+			// size and validation failures remain visible failures.
 			if (
-				response.status === 413 ||
-				(record(failure) && record(failure.error) && failure.error.code === "context_length_exceeded")
-			)
+				validatedNativeCompactionEndpoint(model) === undefined &&
+				(response.status === 413 ||
+					(record(failure) && record(failure.error) && failure.error.code === "context_length_exceeded"))
+			) {
 				return undefined;
+			}
 		} else {
 			await response.body?.cancel();
 		}
@@ -87,7 +139,7 @@ export async function requestOpenAICompaction(
 	}
 	const payload: unknown = await decode(response);
 	signal.throwIfAborted();
-	if (payload === undefined) return undefined;
+	if (payload === undefined && validatedNativeCompactionEndpoint(model) === undefined) return undefined;
 	if (
 		!record(payload) ||
 		!Array.isArray(payload.output) ||
@@ -124,6 +176,7 @@ export async function requestOpenAICompaction(
 			api: model.api,
 			model: model.id,
 			baseUrl: model.baseUrl,
+			...(validatedNativeCompactionEndpoint(model) ? { endpoint: url } : {}),
 			items: payload.output,
 			estimatedTokens: Math.max(usage?.output ?? 0, Math.ceil(estimatedWindowChars(payload.output) / 4)),
 		},

@@ -129,7 +129,12 @@ describe("durable RLM continuation and terminal delivery", () => {
 		async (stopReason) => {
 			const harness = await child({
 				settings: {
-					compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 },
+					compaction: {
+						enabled: true,
+						reserveTokens: 1000,
+						keepRecentTokens: 1,
+						summaryUpdatePolicy: "consolidate-repeated-v1",
+					},
 					retry: { enabled: false },
 				},
 				extensionFactories: compactLocally(),
@@ -180,7 +185,14 @@ describe("durable RLM continuation and terminal delivery", () => {
 
 	it("does not continue a valid terminal marker at the threshold", async () => {
 		const harness = await child({
-			settings: { compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 } },
+			settings: {
+				compaction: {
+					enabled: true,
+					reserveTokens: 1000,
+					keepRecentTokens: 1,
+					summaryUpdatePolicy: "consolidate-repeated-v1",
+				},
+			},
 			extensionFactories: compactLocally(),
 		});
 		seedHistory(harness);
@@ -199,7 +211,12 @@ describe("durable RLM continuation and terminal delivery", () => {
 		async (failure) => {
 			const harness = await child({
 				settings: {
-					compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 },
+					compaction: {
+						enabled: true,
+						reserveTokens: 1000,
+						keepRecentTokens: 1,
+						summaryUpdatePolicy: "consolidate-repeated-v1",
+					},
 					retry: { enabled: false },
 				},
 				extensionFactories: compactLocally(),
@@ -232,7 +249,12 @@ describe("durable RLM continuation and terminal delivery", () => {
 		const later = parentMessage("later");
 		const harness = await child({
 			settings: {
-				compaction: { enabled: true, reserveTokens: 1000, keepRecentTokens: 1 },
+				compaction: {
+					enabled: true,
+					reserveTokens: 1000,
+					keepRecentTokens: 1,
+					summaryUpdatePolicy: "consolidate-repeated-v1",
+				},
 				retry: { enabled: false },
 			},
 			extensionFactories: [

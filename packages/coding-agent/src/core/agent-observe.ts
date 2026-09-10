@@ -8,6 +8,8 @@ export interface AgentObserveAgentSummary {
 	activeSessionId: string;
 	sessionId: string;
 	sessionName?: string;
+	/** Compatibility alias for observation clients that predate sessionName. */
+	name?: string;
 	runtimeKind?: "top-level" | "subagent";
 	cwd: string;
 	status: string;
@@ -15,7 +17,18 @@ export interface AgentObserveAgentSummary {
 	isStreaming: boolean;
 	isCompacting: boolean;
 	attachedClients: number;
+	/** Active model-context message count. */
 	messageCount: number;
+	/** Lifetime JSONL entry count, kept distinct from active model context. */
+	transcriptEntryCount?: number;
+	model?: string | null;
+	lastActivityAt?: number | null;
+	lastStopReason?: string;
+	terminalStatus?: string;
+	continuationQueued?: boolean;
+	compactionReason?: string;
+	currentTaskId?: string;
+	diagnosticState?: string;
 	queuedCount: number;
 	isSessionActive: boolean;
 	parentActiveSessionId?: string;
@@ -54,6 +67,8 @@ export interface AgentObserveMessagePreview {
 	role: string;
 	timestamp?: number;
 	text: string;
+	/** Compatibility alias; always byte-identical to text. */
+	content: string;
 	truncated: boolean;
 	toolCalls?: string[];
 	customType?: string;
@@ -110,6 +125,7 @@ export function createAgentObserveMessagePreview(
 		role: message.role,
 		...(message.timestamp ? { timestamp: message.timestamp } : {}),
 		text: clipped.text,
+		content: clipped.text,
 		truncated: clipped.truncated,
 		...(toolCalls && toolCalls.length > 0 ? { toolCalls } : {}),
 		...(message.role === "custom" ? { customType: message.customType } : {}),

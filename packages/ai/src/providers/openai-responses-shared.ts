@@ -19,6 +19,7 @@ import type {
 	Context,
 	ImageContent,
 	Model,
+	ProviderUsageObservation,
 	StopReason,
 	TextContent,
 	TextSignatureV1,
@@ -73,6 +74,11 @@ export interface OpenAIResponsesStreamOptions {
 		usage: Usage,
 		serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	) => void;
+	onUsageObservation?: (observation: ProviderUsageObservation, model: Model<Api>) => void | Promise<void>;
+}
+
+function finiteToken(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 export interface ConvertResponsesMessagesOptions {
@@ -484,6 +490,24 @@ export async function processResponsesStream<TApi extends Api>(
 				output.responseId = response.id;
 			}
 			if (response?.usage) {
+				const rawUsage = response.usage as typeof response.usage & {
+					output_tokens_details?: { reasoning_tokens?: unknown };
+				};
+				const observation: ProviderUsageObservation = {
+					inputTokens: finiteToken(rawUsage.input_tokens),
+					cachedInputTokens: finiteToken(rawUsage.input_tokens_details?.cached_tokens),
+					outputTokens: finiteToken(rawUsage.output_tokens),
+					reasoningTokens: finiteToken(rawUsage.output_tokens_details?.reasoning_tokens),
+					totalTokens: finiteToken(rawUsage.total_tokens),
+					cachedInputIncludedInInput: true,
+					reasoningIncludedInOutput: true,
+				};
+				try {
+					const observed = options?.onUsageObservation?.(observation, model as Model<Api>);
+					if (observed) void Promise.resolve(observed).catch(() => undefined);
+				} catch {
+					// A disposable local observer cannot change provider behavior.
+				}
 				const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
 				output.usage = {
 					// OpenAI includes cached tokens in input_tokens, so subtract to get non-cached input

@@ -12,6 +12,7 @@ import type {
 	ToolResultMessage,
 } from "@earendil-works/pi-ai";
 import type { Static, TSchema } from "typebox";
+import type { AgentLoopPerformanceMetrics } from "./performance-metrics.js";
 
 /**
  * Stream function used by the agent loop.
@@ -117,6 +118,9 @@ export type GetContinuationMessagesContext = ShouldStopAfterTurnContext;
 
 export interface AgentLoopConfig extends SimpleStreamOptions {
 	model: Model<any>;
+
+	/** Optional disposable local measurements. Omit to preserve the zero-overhead default. */
+	performanceMetrics?: AgentLoopPerformanceMetrics;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.

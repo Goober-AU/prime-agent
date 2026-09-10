@@ -35,6 +35,7 @@ import {
 import { MutationDrainLatch } from "../src/modes/daemon/mutation-drain-latch.js";
 import { WorkerRecoveryJournal } from "../src/modes/daemon/worker-recovery-journal.js";
 import type { PrivateFrame } from "../src/modes/session-worker/private-framing.js";
+import { AtomicFileWriteCoordinator } from "../src/utils/atomic-file.js";
 import * as childProcessModule from "../src/utils/child-process.js";
 import { seedSupervisorRoster } from "./fixtures/roster-seed.js";
 import { createDeferred } from "./suite/scheduling.js";
@@ -245,6 +246,9 @@ function createExistingLaunchWorker(root: string, descriptorDir: string) {
 
 function createSupervisorSnapshotState() {
 	return {
+		descriptorWrites: new AtomicFileWriteCoordinator(),
+		performanceMetricRecorders: new Map(),
+		performanceMetricRecorderFactory: () => undefined,
 		clients: new Set<object>(),
 		sessionInputPauses: new Map(),
 		pendingReplacementSnapshots: new WeakMap<object, Map<string, unknown>>(),
@@ -809,7 +813,7 @@ describe("daemon worker supervisor monitoring", () => {
 				if (persistenceCalls === 2) {
 					throw rollbackPersistenceError;
 				}
-				Reflect.apply(persistWorker, this, [worker]);
+				return Reflect.apply(persistWorker, this, [worker]);
 			}),
 			log: vi.fn(),
 		}) as {
@@ -829,7 +833,7 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(child?.exitCode !== null || child?.signalCode !== null).toBe(true);
 	});
 
-	it("defers an eligible existing recovery when descriptor restoration fails", async () => {
+	it.each([false, true])("defers an eligible existing recovery after durable restore (%s)", async (restoreFails) => {
 		const root = mkdtempSync(join(tmpdir(), "prime-supervisor-existing-restore-test-"));
 		const descriptorDir = join(root, "descriptors");
 		const markerPath = join(root, "startup-marker");
@@ -865,14 +869,15 @@ describe("daemon worker supervisor monitoring", () => {
 			connectWorker,
 			persistWorker: vi.fn(function (this: object, worker: object) {
 				persistenceCalls++;
-				if (persistenceCalls === 3) {
+				if (restoreFails && persistenceCalls === 3) {
 					throw restorationError;
 				}
-				Reflect.apply(persistWorker, this, [worker]);
+				return Reflect.apply(persistWorker, this, [worker]);
 			}),
 			deferWorkerRecovery,
 			log: vi.fn(),
 		}) as {
+			log: ReturnType<typeof vi.fn>;
 			launchWorker(
 				command: { type: "create"; config: { cwd: string; agentDir: string } },
 				existing: object,
@@ -886,8 +891,18 @@ describe("daemon worker supervisor monitoring", () => {
 		expect(persistenceCalls).toBe(3);
 		expect(existing.descriptor).toBe(previousDescriptor);
 		expect(workers.get(existing.descriptor.workerId)).toBe(existing);
-		expect(deferWorkerRecovery).toHaveBeenCalledOnce();
-		expect(deferWorkerRecovery).toHaveBeenCalledWith(existing, cancellation);
+		if (restoreFails) {
+			expect(deferWorkerRecovery).not.toHaveBeenCalled();
+			expect(supervisor.log).toHaveBeenCalledWith(expect.stringContaining(restorationError.message));
+		} else {
+			expect(deferWorkerRecovery).toHaveBeenCalledOnce();
+			expect(deferWorkerRecovery).toHaveBeenCalledWith(existing, cancellation);
+			expect(JSON.parse(readFileSync(existing.descriptorPath, "utf8"))).toMatchObject({
+				workerId: previousDescriptor.workerId,
+				pid: previousDescriptor.pid,
+				lifecycle: "recovering",
+			});
+		}
 		const child = workerLaunchTestState.spawned.at(-1)?.child;
 		expect(child?.exitCode !== null || child?.signalCode !== null).toBe(true);
 	});
@@ -998,6 +1013,8 @@ describe("daemon worker supervisor monitoring", () => {
 			throw new Error("lease cleanup failed");
 		});
 		const ownershipRelease = vi.fn(async () => undefined);
+		const descriptorDrain = vi.fn(async () => Promise.reject(new Error("descriptor drain timed out")));
+		const disposePerformanceMetricRecorders = vi.fn();
 		const log = vi.fn();
 		const exit = vi.spyOn(process, "exit").mockImplementation(((code?: string | number | null) => {
 			throw new Error(`exit ${code}`);
@@ -1012,6 +1029,8 @@ describe("daemon worker supervisor monitoring", () => {
 			signalCleanupHandlers: [],
 			workers: new Map(),
 			clients: new Set(),
+			descriptorWrites: { drain: descriptorDrain },
+			disposePerformanceMetricRecorders,
 			catalog: { stop: vi.fn(async () => undefined) },
 			cleanupSocket,
 			snapshotCacheRoot: "\0",
@@ -1025,6 +1044,9 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(cleanupSocket).toHaveBeenCalledOnce();
 			expect(leaseRelease).toHaveBeenCalledOnce();
 			expect(ownershipRelease).toHaveBeenCalledOnce();
+			expect(descriptorDrain).toHaveBeenCalledOnce();
+			expect(disposePerformanceMetricRecorders).toHaveBeenCalledOnce();
+			expect(log).toHaveBeenCalledWith(expect.stringContaining("worker descriptor writes"));
 			expect(log).toHaveBeenCalledWith(expect.stringContaining("daemon socket"));
 			expect(log).toHaveBeenCalledWith(expect.stringContaining("supervisor cache"));
 			expect(log).toHaveBeenCalledWith(expect.stringContaining("daemon socket lock"));
@@ -1066,12 +1088,16 @@ describe("daemon worker supervisor monitoring", () => {
 		const existsSpy = vi.spyOn(childProcessModule, "processIdExists").mockReturnValue(true);
 		const aliveSpy = vi.spyOn(childProcessModule, "isProcessAlive").mockReturnValue(true);
 		const catalogStop = vi.fn(async () => undefined);
+		const descriptorDrain = vi.fn(async () => undefined);
+		const disposePerformanceMetricRecorders = vi.fn();
 		const log = vi.fn();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
 			shuttingDown: false,
 			signalCleanupHandlers: [],
 			workers,
 			clients: new Set(),
+			descriptorWrites: { drain: descriptorDrain },
+			disposePerformanceMetricRecorders,
 			persistWorkerStopTombstone: vi.fn(),
 			hasPersistedWorkerDescriptors: vi.fn(() => true),
 			catalog: { stop: catalogStop },
@@ -1093,6 +1119,8 @@ describe("daemon worker supervisor monitoring", () => {
 			expect(workers.has(worker.descriptor.workerId)).toBe(true);
 			expect(killSpy).not.toHaveBeenCalled();
 			expect(catalogStop).toHaveBeenCalledOnce();
+			expect(descriptorDrain).toHaveBeenCalledOnce();
+			expect(disposePerformanceMetricRecorders).toHaveBeenCalledOnce();
 			expect(log).toHaveBeenCalledWith(expect.stringContaining("remains tombstoned for recovery"));
 			expect(exit).toHaveBeenCalledWith(0);
 		} finally {
@@ -2257,9 +2285,11 @@ describe("daemon worker supervisor monitoring", () => {
 			},
 		}));
 		const pendingRecovery = new Promise<void>(() => {});
-		const recoverWorker = vi.fn(() => pendingRecovery);
+		const recoverWorker = vi.fn((_worker: AdoptionWorker) => pendingRecovery);
 		const persistWorker = vi.fn();
 		const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+			workers: new Map(workers.map((worker) => [worker.descriptor.workerId, worker])),
+			shuttingDown: false,
 			assertRecoveryAllowed: vi.fn(async () => {}),
 			connectWorker: vi.fn(async () => {}),
 			subscribeWorker: vi.fn(async () => {}),
@@ -2281,6 +2311,10 @@ describe("daemon worker supervisor monitoring", () => {
 		).resolves.toBeDefined();
 
 		expect(recoverWorker).toHaveBeenCalledTimes(2);
+		expect(recoverWorker.mock.calls.map(([worker]) => worker.descriptor.workerId)).toEqual([
+			"slow-verified",
+			"slow-unverified",
+		]);
 		expect(workers.map((worker) => worker.descriptor.lifecycle)).toEqual(["recovering", "recovering", "ready"]);
 		expect(persistWorker).toHaveBeenCalledTimes(3);
 	});
@@ -3620,7 +3654,7 @@ describe("daemon worker supervisor monitoring", () => {
 		}
 	});
 
-	it("migrates v1 descriptors by lifting only safe host policy fields", () => {
+	it("migrates v1 descriptors by lifting only safe host policy fields", async () => {
 		const descriptorDir = mkdtempSync(join(tmpdir(), "prime-supervisor-v1-migration-"));
 		const descriptorPath = join(descriptorDir, "worker-v1.json");
 		try {
@@ -3654,16 +3688,17 @@ describe("daemon worker supervisor monitoring", () => {
 			);
 			const workers = new Map<string, { descriptor: Record<string, unknown> }>();
 			const supervisor = Object.assign(Object.create(DaemonSupervisor.prototype), {
+				...createSupervisorSnapshotState(),
 				descriptorDir,
 				socketPath: "/tmp/supervisor.sock",
 				workers,
 				log: vi.fn(),
 			}) as {
-				loadWorkerDescriptors(): void;
-				persistWorker(target: unknown): void;
+				loadWorkerDescriptors(): Promise<void>;
+				persistWorker(target: unknown): Promise<void>;
 			};
 
-			supervisor.loadWorkerDescriptors();
+			await supervisor.loadWorkerDescriptors();
 
 			const migrated = JSON.parse(readFileSync(descriptorPath, "utf8"));
 			expect(migrated).toMatchObject({
@@ -3681,7 +3716,7 @@ describe("daemon worker supervisor monitoring", () => {
 			if (!runtimeWorker) throw new Error("missing migrated worker");
 			runtimeWorker.descriptor.lifecycle = "failed";
 			runtimeWorker.descriptor.lastError = "secret-runtime-diagnostic";
-			supervisor.persistWorker(runtimeWorker);
+			await supervisor.persistWorker(runtimeWorker);
 			expect(runtimeWorker.descriptor.lastError).toBe("secret-runtime-diagnostic");
 			expect(JSON.parse(readFileSync(descriptorPath, "utf8"))).toMatchObject({
 				lastError: "Waiting for a client with fresh runtime context",

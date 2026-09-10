@@ -5,6 +5,12 @@ import type { ChildProcess } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, renameSync, rmSync, statSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import {
+	elapsedMetricMs,
+	type PerformanceMetricOutcome,
+	type PerformanceMetricRecorder,
+	safeRecordPerformanceMetric,
+} from "@earendil-works/pi-agent-core";
 import { v4 as uuid } from "uuid";
 import { spawnHidden, spawnSyncHidden } from "../../utils/child-process.js";
 import { reapKernelOrphanProcesses, recordOrphanProcessState } from "../orphan-process-journal.js";
@@ -31,6 +37,7 @@ import {
 	KernelBusyAfterInterruptError,
 	type KernelDiffDisplay,
 	type KernelManagerOptions,
+	type KernelRestoreOptions,
 	type KernelSentAgentMessage,
 	type KernelShutdownOptions,
 	type KernelStartOptions,
@@ -44,9 +51,13 @@ import {
 	SNAPSHOT_EXECUTION_TIMEOUT_MS,
 } from "./shared.js";
 import {
+	casSnapshotRootForLegacyPath,
+	casSnapshotStateExists,
 	DEFAULT_SNAPSHOT_MAX_BYTES,
 	DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
 	type RestoreResult,
+	type SnapshotLegacyExportResult,
+	type SnapshotPerformanceMetadata,
 	type SnapshotResult,
 } from "./state-snapshot.js";
 
@@ -149,6 +160,39 @@ function asReasonArray(value: unknown): { name: string; reason: string }[] {
 	});
 }
 
+interface SnapshotMetricState {
+	recorder: PerformanceMetricRecorder;
+	startedAt: number | undefined;
+	dequeuedAt?: number;
+	followingCellQueuedAt?: number;
+}
+
+function safeMetricNow(recorder: PerformanceMetricRecorder | undefined): number | undefined {
+	if (!recorder) return undefined;
+	try {
+		const value = recorder.monotonicNow();
+		return Number.isFinite(value) ? value : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function asMetricNumber(value: unknown): number | null {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function asSnapshotPerformanceMetadata(value: unknown): SnapshotPerformanceMetadata | undefined {
+	if (!isRecord(value)) return undefined;
+	return {
+		serialization_wall_ms: asMetricNumber(value.serialization_wall_ms),
+		serialization_cpu_ms: asMetricNumber(value.serialization_cpu_ms),
+		serialized_bytes: asMetricNumber(value.serialized_bytes),
+		write_ms: asMetricNumber(value.write_ms),
+		written_bytes: asMetricNumber(value.written_bytes),
+		total_wall_ms: asMetricNumber(value.total_wall_ms),
+	};
+}
+
 export class ReplKernelManager {
 	private readonly options: Pick<
 		KernelManagerOptions,
@@ -159,6 +203,7 @@ export class ReplKernelManager {
 		| "hostHandlers"
 		| "pythonSkills"
 		| "snapshot"
+		| "performanceMetrics"
 		| "bootstrapCode"
 		| "stderrLogPath"
 	>;
@@ -168,6 +213,9 @@ export class ReplKernelManager {
 	private kernelStderr = "";
 	/** Serializes execute() calls — the runtime runs one request at a time. */
 	private executionQueue: Promise<unknown> = Promise.resolve();
+	/** Snapshot at the queue tail, used only to measure an observed following-cell block. */
+	private executionQueueTailSnapshotMetric?: SnapshotMetricState;
+	private readonly runtimeSnapshotFormats = new Set<string>();
 	private activeExecution?: ActiveExecution;
 	private readonly activeExecutionIdleWaiters = new Set<() => void>();
 	private activeExecutionReconciliation?: Promise<boolean>;
@@ -218,6 +266,7 @@ export class ReplKernelManager {
 			hostHandlers: options.hostHandlers,
 			pythonSkills: options.pythonSkills,
 			snapshot: options.snapshot,
+			performanceMetrics: options.performanceMetrics,
 			bootstrapCode: options.bootstrapCode,
 			stderrLogPath: options.stderrLogPath,
 		};
@@ -767,6 +816,10 @@ export class ReplKernelManager {
 			return;
 		}
 		if (type === "ready") {
+			this.runtimeSnapshotFormats.clear();
+			for (const format of asStringArray(event.snapshotFormats)) {
+				this.runtimeSnapshotFormats.add(format);
+			}
 			this.readyDeferred?.resolve(typeof event.protocol === "number" ? event.protocol : -1);
 			return;
 		}
@@ -880,6 +933,7 @@ export class ReplKernelManager {
 		code: string,
 		opts: ExecuteOptions,
 		executionTimeoutMs?: number,
+		snapshotMetric?: SnapshotMetricState,
 	): Promise<InternalExecuteResult> {
 		if (opts.signal?.aborted) {
 			return { stdout: "", stderr: "", status: "aborted", durationMs: 0 };
@@ -905,11 +959,21 @@ export class ReplKernelManager {
 		}
 
 		const prev = this.executionQueue;
+		const predecessorSnapshotMetric = this.executionQueueTailSnapshotMetric;
+		if (
+			!opts.internal &&
+			predecessorSnapshotMetric !== undefined &&
+			predecessorSnapshotMetric.followingCellQueuedAt === undefined
+		) {
+			predecessorSnapshotMetric.followingCellQueuedAt = safeMetricNow(predecessorSnapshotMetric.recorder);
+		}
 		let resolveNext: () => void = () => {};
 		this.executionQueue = new Promise<void>((r) => {
 			resolveNext = r;
 		});
+		this.executionQueueTailSnapshotMetric = snapshotMetric;
 		await prev;
+		if (snapshotMetric) snapshotMetric.dequeuedAt = safeMetricNow(snapshotMetric.recorder);
 
 		const started = Date.now();
 		let executionTimeout: ReturnType<typeof globalThis.setTimeout> | undefined;
@@ -924,9 +988,14 @@ export class ReplKernelManager {
 			// A repair started while this request was queued or busy-waiting: release
 			// the slot so the repair's own restore can run, then requeue behind it.
 			if (this.protocolRepairPromise && !opts.protocolRepair) {
+				const retriedSnapshotMetric = snapshotMetric;
+				if (this.executionQueueTailSnapshotMetric === snapshotMetric) {
+					this.executionQueueTailSnapshotMetric = undefined;
+				}
+				snapshotMetric = undefined;
 				resolveNext();
 				await this.waitForProtocolRepair(opts.signal);
-				return this.enqueueRequest(requestFields, code, opts, executionTimeoutMs);
+				return this.enqueueRequest(requestFields, code, opts, executionTimeoutMs, retriedSnapshotMetric);
 			}
 			if (executionTimeoutMs === undefined) {
 				return await this.executeInner(requestFields, code, opts, started);
@@ -939,6 +1008,9 @@ export class ReplKernelManager {
 			return await this.executeInner(requestFields, code, { ...opts, signal }, started);
 		} finally {
 			if (executionTimeout) globalThis.clearTimeout(executionTimeout);
+			if (this.executionQueueTailSnapshotMetric === snapshotMetric) {
+				this.executionQueueTailSnapshotMetric = undefined;
+			}
 			resolveNext();
 		}
 	}
@@ -1309,6 +1381,8 @@ export class ReplKernelManager {
 	private cleanupResources(killSignal: NodeJS.Signals = "SIGTERM"): void {
 		this.startGeneration++; // any teardown invalidates in-flight starts
 		this.clearSnapshotTimer();
+		this.executionQueueTailSnapshotMetric = undefined;
+		this.runtimeSnapshotFormats.clear();
 		this.lateSentAgentMessageHandlers.clear();
 		this.pendingDoneWaiters.clear();
 		this.backgroundBashHandles.clear();
@@ -1535,17 +1609,69 @@ export class ReplKernelManager {
 		return this.captureSnapshot({ executionTimeoutMs: SNAPSHOT_EXECUTION_TIMEOUT_MS, pruneOversized: true });
 	}
 
+	private casRootPath(): string | undefined {
+		const cfg = this.options.snapshot;
+		return cfg ? (cfg.casRootPath ?? casSnapshotRootForLegacyPath(cfg.path)) : undefined;
+	}
+
+	private requiresCasCapability(source: KernelRestoreOptions["source"] = "auto"): boolean {
+		const cfg = this.options.snapshot;
+		const root = this.casRootPath();
+		if (!cfg || !root || source === "legacy") return false;
+		return source === "current" || source === "previous" || cfg.format === "cas-v2" || casSnapshotStateExists(root);
+	}
+
+	private recordSnapshotMetric(
+		state: SnapshotMetricState | undefined,
+		outcome: PerformanceMetricOutcome,
+		metadata: SnapshotPerformanceMetadata | undefined,
+	): void {
+		if (!state) return;
+		const endedAt = safeMetricNow(state.recorder);
+		const nextCellStart =
+			state.followingCellQueuedAt !== undefined && state.dequeuedAt !== undefined
+				? Math.max(state.followingCellQueuedAt, state.dequeuedAt)
+				: undefined;
+		const measurements = {
+			total_ms: elapsedMetricMs(state.startedAt, endedAt),
+			queue_ms: elapsedMetricMs(state.startedAt, state.dequeuedAt),
+			serialization_ms: metadata?.serialization_wall_ms ?? null,
+			serialization_cpu_ms: metadata?.serialization_cpu_ms ?? null,
+			write_ms: metadata?.write_ms ?? null,
+			serialized_bytes: metadata?.serialized_bytes ?? null,
+			written_bytes: metadata?.written_bytes ?? null,
+			next_cell_delay_ms: elapsedMetricMs(nextCellStart, endedAt),
+		};
+		safeRecordPerformanceMetric(state.recorder, {
+			operation: "snapshot",
+			identity: { component: "snapshot" },
+			outcome,
+			measurements,
+		});
+	}
+
 	private async captureSnapshot(
 		options: { executionTimeoutMs?: number; pruneOversized?: boolean } = {},
 	): Promise<SnapshotResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg || !this.isRunning) return null;
+		const recorder = this.options.performanceMetrics;
+		const metricState = recorder ? { recorder, startedAt: safeMetricNow(recorder) } : undefined;
+		let metricMetadata: SnapshotPerformanceMetadata | undefined;
+		let metricOutcome: PerformanceMetricOutcome = "failure";
 		try {
+			if (this.requiresCasCapability() && !this.runtimeSnapshotFormats.has("cas-v2")) {
+				this.appendKernelDiagnostic("state snapshot requires a CAS v2-capable Python runtime");
+				return null;
+			}
+			const casRoot = this.casRootPath();
 			const r = await this.enqueueRequest(
 				{
 					type: "snapshot",
 					path: cfg.path,
 					manifest_path: cfg.manifestPath,
+					cas_root: casRoot,
+					snapshot_format: cfg.format ?? "auto",
 					max_bytes: cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
 					max_variable_bytes: cfg.maxVariableBytes ?? DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
 					prune_oversized: options.pruneOversized ?? false,
@@ -1553,24 +1679,40 @@ export class ReplKernelManager {
 				"",
 				{ internal: true },
 				options.executionTimeoutMs,
+				metricState,
 			);
+			metricMetadata = asSnapshotPerformanceMetadata(r.doneFields?.metrics);
 			if (r.status !== "ok" || !r.doneFields) {
+				metricOutcome = r.status === "aborted" ? "cancelled" : "failure";
 				this.appendKernelDiagnostic(
 					`state snapshot ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
 				);
 				return null;
 			}
 			const pruned = asStringArray(r.doneFields.pruned);
+			const format = r.doneFields.format === "cas-v2" ? "cas-v2" : "legacy";
+			metricOutcome = "success";
 			return {
 				saved: asStringArray(r.doneFields.saved),
 				skipped: asReasonArray(r.doneFields.skipped),
 				pruned: pruned.length > 0 ? pruned : undefined,
-				bytes: typeof r.doneFields.bytes === "number" ? r.doneFields.bytes : 0,
+				bytes: asMetricNumber(r.doneFields.bytes) ?? 0,
+				logicalBytes: asMetricNumber(r.doneFields.logical_bytes) ?? metricMetadata?.serialized_bytes ?? 0,
+				writtenBytes: asMetricNumber(r.doneFields.written_bytes) ?? metricMetadata?.written_bytes ?? 0,
+				format,
+				...(typeof r.doneFields.generation === "string" ? { generation: r.doneFields.generation } : {}),
+				backwardReadable:
+					typeof r.doneFields.backward_readable === "boolean"
+						? r.doneFields.backward_readable
+						: format === "legacy",
+				metrics: metricMetadata,
 				path: cfg.path,
 			};
 		} catch (error) {
 			this.appendKernelDiagnostic(`state snapshot error: ${errorMessage(error)}`);
 			return null;
+		} finally {
+			this.recordSnapshotMetric(metricState, metricOutcome, metricMetadata);
 		}
 	}
 
@@ -1579,35 +1721,103 @@ export class ReplKernelManager {
 	 * start() and before the runtime bootstrap, which then refreshes live handles
 	 * (rlm, skills) over anything restored. Never throws.
 	 */
-	async restoreState(): Promise<RestoreResult | null> {
-		return this.performRestore(false);
+	async restoreState(options: KernelRestoreOptions = {}): Promise<RestoreResult | null> {
+		return this.performRestore(false, options.source ?? "auto");
 	}
 
 	/** Repair restores bypass the repair gate and are bounded so a stalled kernel cannot wedge it. */
-	private async performRestore(protocolRepair: boolean): Promise<RestoreResult | null> {
+	private async performRestore(
+		protocolRepair: boolean,
+		source: KernelRestoreOptions["source"] = "auto",
+	): Promise<RestoreResult | null> {
 		const cfg = this.options.snapshot;
 		if (!cfg) return null;
 		try {
+			await this.start();
+			if (this.requiresCasCapability(source) && !this.runtimeSnapshotFormats.has("cas-v2")) {
+				const reason = "state restore requires a CAS v2-capable Python runtime";
+				this.appendKernelDiagnostic(reason);
+				return protocolRepair ? null : { restored: [], failed: [{ name: "<snapshot>", reason }], path: cfg.path };
+			}
 			const r = await this.enqueueRequest(
-				{ type: "restore", path: cfg.path },
+				{
+					type: "restore",
+					path: cfg.path,
+					cas_root: this.casRootPath(),
+					source,
+					max_bytes: cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
+					max_variable_bytes: cfg.maxVariableBytes ?? DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+				},
 				"",
 				{ internal: true, protocolRepair },
 				protocolRepair ? REPAIR_STEP_TIMEOUT_MS : undefined,
 			);
 			if (r.status !== "ok" || !r.doneFields) {
-				this.appendKernelDiagnostic(
-					`state restore ${r.status === "aborted" ? "timed out" : "failed"}: ${r.error?.evalue ?? r.stderr}`,
-				);
-				return null;
+				const reason =
+					r.status === "aborted" ? "restore timed out" : (r.error?.evalue ?? r.stderr) || "restore failed";
+				this.appendKernelDiagnostic(`state restore ${reason}`);
+				return protocolRepair ? null : { restored: [], failed: [{ name: "<snapshot>", reason }], path: cfg.path };
 			}
 			this.pendingRestore = false;
 			return {
 				restored: asStringArray(r.doneFields.restored),
 				failed: asReasonArray(r.doneFields.failed),
+				...(r.doneFields.format === "cas-v2" || r.doneFields.format === "legacy"
+					? { format: r.doneFields.format }
+					: {}),
+				...(typeof r.doneFields.generation === "string" ? { generation: r.doneFields.generation } : {}),
+				...(r.doneFields.rolled_back === true ? { rolledBack: true } : {}),
+				...(r.doneFields.unsaved_work_possible === true ? { unsavedWorkPossible: true } : {}),
+				...(r.doneFields.legacy_recovery === true ? { legacyRecovery: true } : {}),
 				path: cfg.path,
 			};
 		} catch (error) {
 			this.appendKernelDiagnostic(`state restore error: ${errorMessage(error)}`);
+			return null;
+		}
+	}
+
+	/** Export the selected committed CAS generation for an explicitly gated older runtime. */
+	async exportStateForLegacyRuntime(
+		source: "current" | "previous" = "current",
+	): Promise<SnapshotLegacyExportResult | null> {
+		const cfg = this.options.snapshot;
+		const casRoot = this.casRootPath();
+		if (!cfg || !casRoot || !casSnapshotStateExists(casRoot)) return null;
+		try {
+			await this.start();
+			if (!this.runtimeSnapshotFormats.has("cas-v2")) {
+				this.appendKernelDiagnostic("legacy export requires a CAS v2-capable Python runtime");
+				return null;
+			}
+			const r = await this.enqueueRequest(
+				{
+					type: "snapshot_export_legacy",
+					path: cfg.path,
+					manifest_path: cfg.manifestPath,
+					cas_root: casRoot,
+					source,
+					max_bytes: cfg.maxBytes ?? DEFAULT_SNAPSHOT_MAX_BYTES,
+					max_variable_bytes: cfg.maxVariableBytes ?? DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+				},
+				"",
+				{ internal: true },
+				SNAPSHOT_EXECUTION_TIMEOUT_MS,
+			);
+			if (r.status !== "ok" || !r.doneFields || typeof r.doneFields.source_generation !== "string") {
+				this.appendKernelDiagnostic(`legacy export failed: ${r.error?.evalue ?? r.stderr}`);
+				return null;
+			}
+			return {
+				exported: asStringArray(r.doneFields.exported),
+				bytes: asMetricNumber(r.doneFields.bytes) ?? 0,
+				sourceGeneration: r.doneFields.source_generation,
+				source,
+				backwardReadable: true,
+				path: cfg.path,
+			};
+		} catch (error) {
+			this.appendKernelDiagnostic(`legacy export error: ${errorMessage(error)}`);
 			return null;
 		}
 	}

@@ -5330,6 +5330,209 @@ describe("daemon mode helpers", () => {
 		}
 	});
 
+	it("negotiates a recent-first snapshot while preserving the legacy full snapshot", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-recent-history-"));
+		try {
+			const manager = SessionManager.inMemory(tempDir);
+			for (let index = 0; index < 450; index++) {
+				manager.appendMessage({ role: "user", content: `message-${index}`, timestamp: index });
+			}
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const { state } = makeAgentFamilyState("active", "active");
+			state.eventGeneration = "generation-1";
+			Object.assign(state.runtime.session, {
+				sessionManager: manager,
+				messages: manager.buildSessionContext().messages,
+			});
+			const internals = daemon as unknown as {
+				createSessionSnapshot(
+					state: ActiveSessionState,
+					recentFirstHistory?: boolean,
+				): Promise<DaemonAttachResult["snapshot"]>;
+				createConnectionState: ReturnType<typeof vi.fn>;
+				buildRlmChildSnapshotsWithPassiveRlmSubagents: ReturnType<typeof vi.fn>;
+			};
+			internals.createConnectionState = vi.fn(() => ({}));
+			internals.buildRlmChildSnapshotsWithPassiveRlmSubagents = vi.fn(async () => []);
+
+			const legacy = await internals.createSessionSnapshot(state, false);
+			const recent = await internals.createSessionSnapshot(state, true);
+			expect(legacy.history).toBeUndefined();
+			expect(legacy.messages).toBe(state.runtime.session.messages);
+			expect(recent.messages).toHaveLength(400);
+			expect(recent.history).toMatchObject({
+				version: 1,
+				generation: "generation-1",
+				totalMessageCount: 450,
+				startIndex: 50,
+				hasOlder: true,
+				order: "chronological",
+			});
+			expect(recent.history?.entryIds).toHaveLength(recent.messages.length);
+
+			const liveOnlyMessage = { role: "user" as const, content: "unpersisted outcome", timestamp: 999 };
+			const liveMessages = [...state.runtime.session.messages, liveOnlyMessage];
+			Object.assign(state.runtime.session, { messages: liveMessages });
+			const safeFallback = await internals.createSessionSnapshot(state, true);
+			expect(safeFallback.history).toBeUndefined();
+			expect(safeFallback.messages).toBe(liveMessages);
+			expect(safeFallback.messages.at(-1)).toBe(liveOnlyMessage);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("serves older ranges from a pinned tip across concurrent appends", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-history-range-"));
+		try {
+			const manager = SessionManager.inMemory(tempDir);
+			for (let index = 0; index < 5; index++) {
+				manager.appendMessage({ role: "user", content: `message-${index}`, timestamp: index });
+			}
+			const pinned = manager.buildSessionHistory();
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const { state } = makeAgentFamilyState("active", "active");
+			state.eventGeneration = "generation-1";
+			Object.assign(state.runtime.session, {
+				sessionManager: manager,
+				messages: manager.buildSessionContext().messages,
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				handleCommand(
+					client: DaemonSocketClient,
+					command: DaemonCommand,
+				): Promise<{
+					success: true;
+					data: { entryIds: string[]; messages: unknown[]; startIndex: number };
+				}>;
+			};
+			internals.sessions.set(state.activeSessionId, state);
+			manager.appendMessage({ role: "user", content: "concurrent", timestamp: 6 });
+			const representation = createHash("sha256")
+				.update(JSON.stringify([null, null, null, null]))
+				.digest("base64url")
+				.slice(0, 22);
+			const response = await internals.handleCommand(makeClient("client-1", state.activeSessionId), {
+				type: "get_history_range",
+				activeSessionId: state.activeSessionId,
+				generation: "generation-1",
+				representation,
+				tipEntryId: pinned.tipEntryId,
+				beforeEntryId: pinned.entryIds[3],
+				limit: 2,
+			});
+			expect(response.data.entryIds).toEqual(pinned.entryIds.slice(1, 3));
+			expect(response.data.startIndex).toBe(1);
+			await expect(
+				internals.handleCommand(makeClient("client-2", state.activeSessionId), {
+					type: "get_history_range",
+					activeSessionId: state.activeSessionId,
+					generation: "stale",
+					representation,
+					tipEntryId: pinned.tipEntryId,
+				}),
+			).rejects.toThrow("generation is stale");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("uses the same endpoint-bound compacted representation for the initial window and ranges", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-model-history-"));
+		try {
+			const model = {
+				provider: "openai-codex",
+				id: "gpt-test",
+				api: "openai-responses",
+				baseUrl: "https://endpoint-one.example.invalid/v1",
+			} as Model<Api>;
+			const manager = SessionManager.inMemory(tempDir);
+			const first = manager.appendMessage({ role: "user", content: "original fallback", timestamp: 1 });
+			manager.appendCompaction("native checkpoint", first, 250_000, {
+				strategy: "openai-responses-compaction-v2",
+				provider: model.provider,
+				api: model.api,
+				model: model.id,
+				baseUrl: model.baseUrl,
+				compactedWindow: [
+					{ type: "message", role: "user", content: [{ type: "input_text", text: "opaque retained" }] },
+					{ type: "compaction", encrypted_content: "synthetic-checkpoint" },
+				],
+			});
+			manager.appendMessage({ role: "user", content: "continue", timestamp: 2 });
+			const daemon = new AgentDaemon(join(tempDir, "daemon.sock"), {
+				defaultSessionConfig: { agentDir: tempDir, cwd: tempDir },
+				createRuntime: async () => {
+					throw new Error("unexpected runtime creation");
+				},
+			});
+			const { state } = makeAgentFamilyState("active", "active");
+			state.eventGeneration = "generation-model";
+			Object.assign(state.runtime.session, {
+				sessionManager: manager,
+				model,
+				messages: manager.buildSessionContext(model).messages,
+			});
+			const internals = daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
+				createSessionSnapshot(
+					state: ActiveSessionState,
+					recentFirstHistory?: boolean,
+				): Promise<DaemonAttachResult["snapshot"]>;
+				createConnectionState: ReturnType<typeof vi.fn>;
+				buildRlmChildSnapshotsWithPassiveRlmSubagents: ReturnType<typeof vi.fn>;
+				handleCommand(
+					client: DaemonSocketClient,
+					command: DaemonCommand,
+				): Promise<{ success: true; data: { messages: unknown[]; entryIds: string[] } }>;
+			};
+			internals.sessions.set(state.activeSessionId, state);
+			internals.createConnectionState = vi.fn(() => ({}));
+			internals.buildRlmChildSnapshotsWithPassiveRlmSubagents = vi.fn(async () => []);
+			const snapshot = await internals.createSessionSnapshot(state, true);
+			expect(snapshot.history).toBeDefined();
+			expect(JSON.stringify(snapshot.messages)).toContain("synthetic-checkpoint");
+			expect(JSON.stringify(snapshot.messages)).not.toContain("original fallback");
+
+			const range = await internals.handleCommand(makeClient("client-model", state.activeSessionId), {
+				type: "get_history_range",
+				activeSessionId: state.activeSessionId,
+				generation: snapshot.history!.generation,
+				representation: snapshot.history!.representation,
+				tipEntryId: snapshot.history!.tipEntryId,
+				limit: 400,
+			});
+			expect(range.data.messages).toEqual(snapshot.messages);
+			expect(range.data.entryIds).toEqual(snapshot.history!.entryIds);
+
+			Object.assign(state.runtime.session, {
+				model: { ...model, baseUrl: "https://endpoint-two.example.invalid/v1" },
+			});
+			await expect(
+				internals.handleCommand(makeClient("client-stale-model", state.activeSessionId), {
+					type: "get_history_range",
+					activeSessionId: state.activeSessionId,
+					generation: snapshot.history!.generation,
+					representation: snapshot.history!.representation,
+					tipEntryId: snapshot.history!.tipEntryId,
+				}),
+			).rejects.toThrow("target-model representation is stale");
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("recomputes snapshot children when the runtime session changes during the passive walk", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "prime-agent-daemon-snapshot-replacement-"));
 		try {
@@ -5709,6 +5912,7 @@ describe("daemon mode helpers", () => {
 		try {
 			const fixture = makePersistedRlmDaemonFixture(tempDir);
 			const internals = fixture.daemon as unknown as {
+				sessions: Map<string, ActiveSessionState>;
 				createRuntime(command: Extract<DaemonCommand, { type: "create" }>): Promise<ActiveSessionState>;
 				createAgentObserveController(getCurrentState: () => ActiveSessionState | undefined): AgentObserveController;
 			};
@@ -5719,11 +5923,31 @@ describe("daemon mode helpers", () => {
 			const controller = internals.createAgentObserveController(() => parentState);
 
 			await expect(controller.getAgent("renamed-worker")).resolves.toMatchObject({
-				agent: { runtimeKind: "subagent", sessionName: "renamed-worker" },
+				agent: {
+					runtimeKind: "subagent",
+					sessionName: "renamed-worker",
+					name: "renamed-worker",
+					status: "idle",
+					messageCount: 0,
+					transcriptEntryCount: 3,
+					lastActivityAt: null,
+				},
 			});
+			const childState = [...internals.sessions.values()].find(
+				(state) => state.runtime.session.sessionManager.getSessionFile() === fixture.childSessionFile,
+			)!;
+			childState.runtime.session.messages.push(
+				...childState.runtime.session.sessionManager.buildSessionContext().messages,
+			);
+			childState.clients.add({} as never);
 			await expect(controller.recentMessages({ target: "renamed-worker" })).resolves.toMatchObject({
-				agent: { runtimeKind: "subagent" },
-				messages: [],
+				agent: { runtimeKind: "subagent", status: "attached_idle", model: null },
+				messages: [
+					{
+						text: "complete this task",
+						content: "complete this task",
+					},
+				],
 			});
 			expect(fixture.createRuntime).toHaveBeenCalledTimes(2);
 		} finally {

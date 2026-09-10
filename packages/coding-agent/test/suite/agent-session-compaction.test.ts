@@ -139,7 +139,9 @@ describe("AgentSession compaction characterization", () => {
 
 	it("compacts through the model summarizer, persists metadata, emits events, and remains usable", async () => {
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: {
+				compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" },
+			},
 			persistSession: true,
 		});
 		harnesses.push(harness);
@@ -200,7 +202,9 @@ describe("AgentSession compaction characterization", () => {
 
 	it("prepends the harness digest to the compaction head message on initial and update-merge compactions", async () => {
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: {
+				compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" },
+			},
 			persistSession: true,
 		});
 		harnesses.push(harness);
@@ -460,7 +464,9 @@ describe("AgentSession compaction characterization", () => {
 
 	it("treats session-owned queued inputs as queued work after compaction", async () => {
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: {
+				compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" },
+			},
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => ({
@@ -612,7 +618,9 @@ describe("AgentSession compaction characterization", () => {
 
 	it("cancels in-progress manual compaction when abortCompaction is called", async () => {
 		const harness = await createHarness({
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: {
+				compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" },
+			},
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => {
@@ -1621,7 +1629,9 @@ describe("AgentSession compaction characterization", () => {
 	it("keeps an unpersisted outcome in agent state after a successful compaction", async () => {
 		const harness = await createHarness({
 			persistSession: true,
-			settings: { compaction: { keepRecentTokens: 1 } },
+			settings: {
+				compaction: { keepRecentTokens: 1, summaryUpdatePolicy: "consolidate-repeated-v1" },
+			},
 			extensionFactories: [
 				(pi) => {
 					pi.on("session_before_compact", async (event) => ({

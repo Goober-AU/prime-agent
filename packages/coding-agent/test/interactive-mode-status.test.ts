@@ -221,7 +221,7 @@ type RenderSessionContextHarness = {
 	getCurrentCwd: () => string;
 	getRetryAttempt: () => number;
 	ui: { requestRender: () => void };
-	addMessageToChat: (message: AgentMessage, options?: { populateHistory?: boolean }) => void;
+	addMessageToChat: (message: AgentMessage, options?: { populateHistory?: boolean; container?: Container }) => void;
 	connectionState?: AgentConnectionState;
 };
 
@@ -230,6 +230,10 @@ type RenderSessionContextOptions = {
 	populateHistory?: boolean;
 	clearChat?: boolean;
 	limitTranscript?: boolean;
+	targetContainer?: Container;
+	messagesAlreadyChronological?: boolean;
+	totalMessageCount?: number;
+	shouldContinue?: () => boolean;
 };
 
 const renderSessionContext = (
@@ -249,9 +253,11 @@ function createRenderSessionContextHarness(overrides: Partial<RenderSessionConte
 	addToHistory: ReturnType<typeof vi.fn>;
 } {
 	const chatContainer = overrides.chatContainer ?? new Container();
-	const addMessageToChat = vi.fn(() => {
-		chatContainer.addChild({ render: () => ["assistant"], invalidate: () => {} });
-	});
+	const addMessageToChat = vi.fn(
+		(_message: AgentMessage, options?: { populateHistory?: boolean; container?: Container }) => {
+			(options?.container ?? chatContainer).addChild({ render: () => ["assistant"], invalidate: () => {} });
+		},
+	);
 	const addToHistory = vi.fn();
 	const harness: RenderSessionContextHarness = {
 		pendingTools: new Map<string, ToolExecutionComponent>(),
@@ -316,6 +322,29 @@ async function renderMessages(
 describe("InteractiveMode.renderSessionContext", () => {
 	beforeAll(() => {
 		initTheme("dark");
+	});
+
+	test("does not let a stale history page repaint after ownership changes during tool preload", async () => {
+		const preload = createDeferred<void>();
+		const targetContainer = new Container();
+		targetContainer.addChild({ render: () => ["new session"], invalidate: () => {} });
+		let ownsRender = true;
+		const preloadToolDefinitions = vi.fn(() => preload.promise);
+		const { harness, addMessageToChat } = createRenderSessionContextHarness({ preloadToolDefinitions });
+		const rendering = renderMessages(harness, [userMessage("stale history", 1)], {
+			clearChat: true,
+			targetContainer,
+			messagesAlreadyChronological: true,
+			shouldContinue: () => ownsRender,
+		});
+		await vi.waitFor(() => expect(preloadToolDefinitions).toHaveBeenCalledOnce());
+		ownsRender = false;
+		preload.resolve(undefined);
+		await rendering;
+
+		expect(normalizeRenderedOutput(targetContainer)).toBe("new session");
+		expect(addMessageToChat).not.toHaveBeenCalled();
+		expect(harness.ui.requestRender).not.toHaveBeenCalled();
 	});
 
 	test("does not replay historical tool result image payloads", async () => {
@@ -703,6 +732,8 @@ describe("InteractiveMode working timer", () => {
 		return Object.assign(Object.create(InteractiveMode.prototype), {
 			turnStartedAt,
 			workingStartedAt: turnStartedAt,
+			historyContainer: new Container(),
+			historyLoadGeneration: 0,
 			agentConnection: { getInitialSnapshot: vi.fn(async () => snapshot) },
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: snapshot.messages,
@@ -1394,6 +1425,8 @@ describe("InteractiveMode pending bash components", () => {
 			endFeatureHintRun,
 			queueSelection,
 			chatContainer: new Container(),
+			historyContainer: new Container(),
+			historyLoadGeneration: 0,
 			shortcutGuideContainer: new Container(),
 			pendingMessagesContainer: new Container(),
 			queuedMessagesContainer: new Container(),
@@ -1418,6 +1451,7 @@ describe("InteractiveMode pending bash components", () => {
 			syncGoalTray: vi.fn(),
 			getGoalState: () => emptyGoalState(),
 		} as unknown as InteractiveMode;
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 
 		(
 			InteractiveMode.prototype as unknown as { resetCurrentSessionRenderState(this: unknown): void }
@@ -1505,6 +1539,8 @@ describe("InteractiveMode connection events", () => {
 		const restoreStreamingMessageFromSnapshot = vi.fn(async () => {});
 		const fakeThis = {
 			agentConnection: { getInitialSnapshot: vi.fn(async () => snapshots.shift()!) },
+			historyContainer: new Container(),
+			historyLoadGeneration: 0,
 			getSessionContextFromConnectionSnapshot: vi.fn(() => ({
 				messages: [],
 				thinkingLevel: "medium",
@@ -1517,6 +1553,7 @@ describe("InteractiveMode connection events", () => {
 			restoreTurnStartFromMessages: vi.fn(),
 			showStatus: vi.fn(),
 		} as unknown as InteractiveMode;
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 
 		const renderInitialMessages = (
 			InteractiveMode.prototype as unknown as { renderInitialMessages(this: InteractiveMode): Promise<void> }
@@ -1530,11 +1567,13 @@ describe("InteractiveMode connection events", () => {
 		).toHaveBeenCalledTimes(2);
 		expect(renderSessionContextMock).toHaveBeenCalledTimes(2);
 		expect(renderSessionContextMock).toHaveBeenNthCalledWith(1, expect.anything(), {
+			clearChat: true,
 			updateFooter: true,
 			populateHistory: true,
 			limitTranscript: true,
 		});
 		expect(renderSessionContextMock).toHaveBeenNthCalledWith(2, expect.anything(), {
+			clearChat: true,
 			updateFooter: true,
 			populateHistory: true,
 			limitTranscript: true,
@@ -1697,6 +1736,8 @@ describe("InteractiveMode connection events", () => {
 			connectionState: createConnectionState({
 				sessionActions: { queuedCount: 1, steering: [], followUps: ["queued"] },
 			}),
+			historyContainer: new Container(),
+			historyLoadGeneration: 0,
 			queueSelection,
 			pendingQueueEdit: undefined,
 			pendingQueueMove: false,
@@ -1763,6 +1804,8 @@ describe("InteractiveMode connection events", () => {
 		const fakeThis = {
 			turnStartedAt: 1,
 			workingStartedAt: 1,
+			historyContainer: new Container(),
+			historyLoadGeneration: 0,
 			sideQuestionEvent: sideQuestion,
 			activeConnectionExtensionUiRequests: extensionRequests,
 			activeBashComponent,
@@ -1825,6 +1868,8 @@ describe("InteractiveMode connection events", () => {
 		};
 		const fakeThis = {
 			activeBashComponent: bashComponent,
+			historyContainer: new Container(),
+			historyLoadGeneration: 0,
 			streamingComponent: {},
 			streamingMessage: {},
 			isAgentCompacting: () => true,
@@ -1848,6 +1893,7 @@ describe("InteractiveMode connection events", () => {
 			syncWorkingLoader: vi.fn(),
 			getGoalState: () => emptyGoalState(),
 		} as unknown as InteractiveMode;
+		Object.setPrototypeOf(fakeThis, InteractiveMode.prototype);
 
 		await (
 			InteractiveMode.prototype as unknown as {
@@ -2124,6 +2170,8 @@ describe("InteractiveMode tool event rendering", () => {
 describe("InteractiveMode transcript rebuild", () => {
 	type RebuildHarness = {
 		chatContainer: Container;
+		historyContainer: Container;
+		historyLoadGeneration: number;
 		agentConnection: { getSessionContext(): Promise<AgentConnectionSessionContext> };
 		renderSessionContext(context: AgentConnectionSessionContext, options: RenderSessionContextOptions): Promise<void>;
 		rebuildChatFromMessages(): Promise<void>;
@@ -2132,6 +2180,8 @@ describe("InteractiveMode transcript rebuild", () => {
 	function createRebuildHarness(): RebuildHarness {
 		const fakeThis = Object.create(InteractiveMode.prototype) as RebuildHarness;
 		fakeThis.chatContainer = new Container();
+		fakeThis.historyContainer = new Container();
+		fakeThis.historyLoadGeneration = 0;
 		fakeThis.chatContainer.addChild(new Container());
 		return fakeThis;
 	}

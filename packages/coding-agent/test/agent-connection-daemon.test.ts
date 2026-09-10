@@ -61,6 +61,7 @@ class FakeDaemonClient {
 	promptResponseError: string | undefined;
 	cancelPromptAdmissionStatus: "cancelled" | "owned" | "unknown" = "owned";
 	serverCapabilities = new Set<string>();
+	historyRangeResult: unknown;
 	updateRestartSessions: Array<Record<string, unknown>> = [];
 	hello: DaemonHello | undefined = {
 		type: "daemon_hello",
@@ -154,6 +155,13 @@ class FakeDaemonClient {
 					command: command.type,
 					success: true,
 					data: { messages: [{ role: "user", content: "current prompt", timestamp: 4 }] },
+				};
+			case "get_history_range":
+				return {
+					type: "response",
+					command: command.type,
+					success: true,
+					data: this.historyRangeResult,
 				};
 			case "get_rlm_children":
 				await this.rlmChildrenGate;
@@ -644,6 +652,7 @@ interface CreateAttachResultOptions {
 	streamingMessage?: AgentMessage;
 	sessionContext?: DaemonAttachResult["snapshot"]["sessionContext"];
 	omitSessionContext?: boolean;
+	history?: DaemonAttachResult["snapshot"]["history"];
 	sessionTree?: DaemonAttachResult["snapshot"]["sessionTree"];
 	parent?: DaemonAttachResult["snapshot"]["parent"];
 	children?: DaemonAttachResult["snapshot"]["children"];
@@ -685,6 +694,7 @@ function createAttachResult(
 			summary,
 			state,
 			messages,
+			...(options.history ? { history: options.history } : {}),
 			...(options.omitSessionContext
 				? {}
 				: {
@@ -718,7 +728,8 @@ function createAttachResult(
 					capability === "event_sequence" ||
 					capability === "extension_ui" ||
 					capability === "slim_attach" ||
-					capability === "chunked_snapshot",
+					capability === "chunked_snapshot" ||
+					capability === "history_ranges",
 			),
 		},
 	};
@@ -2359,6 +2370,90 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.requests.map((request) => request.type)).toEqual(["attach"]);
 	});
 
+	it("fetches full messages and model context instead of treating a history window as complete", async () => {
+		const fakeClient = new FakeDaemonClient();
+		fakeClient.serverCapabilities.add("history_ranges");
+		const recentMessages: AgentMessage[] = [{ role: "user", content: "recent only", timestamp: 2 }];
+		fakeClient.attachResultFactory = (command) =>
+			createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12, {
+				messages: recentMessages,
+				omitSessionContext: true,
+				history: {
+					version: 1,
+					generation: "generation-active-1",
+					representation: "representation-1",
+					tipEntryId: "entry-2",
+					totalMessageCount: 2,
+					startIndex: 1,
+					entryIds: ["entry-2"],
+					hasOlder: true,
+					order: "chronological",
+				},
+			});
+		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
+		await connection.attach();
+
+		await expect(connection.getInitialSnapshot()).resolves.toMatchObject({ messages: recentMessages });
+		await expect(connection.getMessages()).resolves.toEqual([
+			{ role: "user", content: "current prompt", timestamp: 4 },
+		]);
+		await expect(connection.getSessionContext()).resolves.toMatchObject({
+			messages: [{ role: "user", content: "context prompt", timestamp: 3 }],
+		});
+		expect(fakeClient.requests.map((request) => request.type)).toEqual([
+			"attach",
+			"get_messages",
+			"get_session_context",
+		]);
+	});
+
+	it("rejects inconsistent recent windows and malformed older ranges", async () => {
+		const malformedAttachClient = new FakeDaemonClient();
+		malformedAttachClient.serverCapabilities.add("history_ranges");
+		malformedAttachClient.attachResultFactory = (command) =>
+			createAttachResult(command.activeSessionId, command.clientId, command.capabilities, 12, {
+				messages: [{ role: "user", content: "recent", timestamp: 2 }],
+				history: {
+					version: 1,
+					generation: "generation-active-1",
+					representation: "representation-1",
+					tipEntryId: "entry-2",
+					totalMessageCount: 3,
+					startIndex: 1,
+					entryIds: ["entry-2"],
+					hasOlder: true,
+					order: "chronological",
+				},
+			});
+		await expect(
+			new DaemonAgentConnection(asDaemonClient(malformedAttachClient), "active-1").attach(),
+		).rejects.toThrow("invalid recent-first history snapshot");
+
+		const rangeClient = new FakeDaemonClient();
+		rangeClient.serverCapabilities.add("history_ranges");
+		rangeClient.historyRangeResult = {
+			version: 1,
+			generation: "generation-active-1",
+			representation: "representation-1",
+			tipEntryId: "entry-2",
+			totalMessageCount: 2,
+			startIndex: 0,
+			messages: [{ role: "user", content: "old", timestamp: 1 }],
+			entryIds: ["duplicate", "duplicate"],
+			hasOlder: false,
+			order: "chronological",
+		};
+		const connection = new DaemonAgentConnection(asDaemonClient(rangeClient), "active-1");
+		await connection.attach();
+		await expect(
+			connection.getHistoryRange!({
+				generation: "generation-active-1",
+				representation: "representation-1",
+				tipEntryId: "entry-2",
+			}),
+		).rejects.toThrow("invalid session history range");
+	});
+
 	it("preserves the in-flight assistant message when refreshing a stale snapshot", async () => {
 		const fakeClient = new FakeDaemonClient();
 		const connection = new DaemonAgentConnection(asDaemonClient(fakeClient), "active-1");
@@ -2800,7 +2895,14 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "attach",
 			activeSessionId: "active-1",
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"extension_ui",
+				"slim_attach",
+				"chunked_snapshot",
+				"history_ranges",
+			],
 			resumeCursor: {
 				activeSessionId: "active-1",
 				generation: "generation-active-1",
@@ -3475,7 +3577,14 @@ describe("DaemonAgentConnection", () => {
 			type: "attach",
 			activeSessionId: "active-1",
 			clientId: expect.any(String),
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"extension_ui",
+				"slim_attach",
+				"chunked_snapshot",
+				"history_ranges",
+			],
 			resumeCursor: {
 				activeSessionId: "active-1",
 				generation: "generation-active-1",
@@ -3487,7 +3596,14 @@ describe("DaemonAgentConnection", () => {
 		expect(fakeClient.requests.at(-1)).toMatchObject({
 			type: "attach",
 			activeSessionId: "active-1",
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"extension_ui",
+				"slim_attach",
+				"chunked_snapshot",
+				"history_ranges",
+			],
 			resumeCursor: {
 				activeSessionId: "active-1",
 				generation: "generation-active-1",
@@ -3546,7 +3662,14 @@ describe("DaemonAgentConnection", () => {
 			activeSessionId: "active-1",
 			supportsExtensionUi: true,
 			clientId: expect.any(String),
-			capabilities: ["attach_snapshot", "event_sequence", "extension_ui", "slim_attach", "chunked_snapshot"],
+			capabilities: [
+				"attach_snapshot",
+				"event_sequence",
+				"extension_ui",
+				"slim_attach",
+				"chunked_snapshot",
+				"history_ranges",
+			],
 		});
 
 		fakeClient.emitMessage({
