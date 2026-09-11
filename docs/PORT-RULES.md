@@ -54,6 +54,17 @@ run ONE `cargo check -p <crate>` (and one `cargo test -p <crate>`) at the end of
 the slice. Do not loop file-by-file through compile/fix cycles. Do not stop after
 one file. Finish the slice, then check once, fix the real errors, and report.
 
+## File ownership (after a real collision)
+
+Write ONLY the files listed in your own `evidence/slices/<slice>.json`. Never append
+helpers to a file that another slice maps, even when you need the functionality. If you
+need something from another slice's file: define a PRIVATE helper inside your own file,
+or record the need in `blocked_on` and continue.
+
+Never invent functions that do not exist in the TypeScript you are porting. Internal
+plumbing must be private to your module; a public function must correspond to a real
+TypeScript export.
+
 ## 1:1 mapping rules
 
 - File mapping: `packages/<pkg>/src/<a>/<b>.ts` maps to
