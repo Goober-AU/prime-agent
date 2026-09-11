@@ -408,14 +408,13 @@ mod tests {
 
     #[test]
     fn custom_messages_report_the_custom_type() {
-        let message: AgentMessage = CustomAgentMessage::Custom {
+        let message = AgentMessage::Custom(CustomAgentMessage::Custom {
             custom_type: "note".to_string(),
             content: CustomMessageContent::Text("body".to_string()),
             display: true,
             details: None,
             timestamp: 7,
-        }
-        .into();
+        });
         let preview = create_agent_observe_message_preview(&message, 2.0, 100);
         assert_eq!(preview.role, "custom");
         assert_eq!(preview.custom_type.as_deref(), Some("note"));
@@ -425,7 +424,7 @@ mod tests {
 
     #[test]
     fn bash_execution_text_joins_command_and_output() {
-        let message: AgentMessage = CustomAgentMessage::BashExecution {
+        let message = AgentMessage::Custom(CustomAgentMessage::BashExecution {
             command: "ls".to_string(),
             output: "file".to_string(),
             exit_code: Some(0),
@@ -434,8 +433,7 @@ mod tests {
             full_output_path: None,
             timestamp: 1,
             exclude_from_context: None,
-        }
-        .into();
+        });
         assert_eq!(message_text(&message), "ls\nfile");
     }
 

@@ -173,7 +173,7 @@ fn compact_openai_responses_guarded() -> CompactFunction {
 		if model.api != "openai-responses" {
 			panic!("Mismatched compaction api: {}", model.api);
 		}
-		compact_openai_responses(model, context, options)
+		Box::pin(compact_openai_responses(model, context, options))
 	})
 }
 
@@ -182,7 +182,7 @@ fn compact_openai_codex_responses_guarded() -> CompactFunction {
 		if model.api != "openai-codex-responses" {
 			panic!("Mismatched compaction api: {}", model.api);
 		}
-		compact_openai_codex_responses(model, context, options)
+		Box::pin(compact_openai_codex_responses(model, context, options))
 	})
 }
 

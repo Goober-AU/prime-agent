@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
-use pi_ai::types::ContentBlock;
+use pi_agent_core::types::ContentBlock as AgentContentBlock;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -354,9 +354,30 @@ pub fn format_bash_call(args: Option<&BashToolInput>, theme: &dyn ToolTheme) -> 
     format!("{}{}", theme.fg("toolTitle", &theme.bold(&format!("$ {command_display}"))), timeout_suffix)
 }
 
+/// TypeScript `type BashResultRenderComponent`.
+///
+/// The TypeScript component is a `Container` of child rows; the port keeps the
+/// same children as a `Vec<String>` plus the cached preview state the renderer
+/// reuses between frames.
+#[derive(Default)]
+pub struct BashResultRenderComponent {
+    pub state: BashResultRenderState,
+    pub children: Vec<String>,
+}
+
+impl BashResultRenderComponent {
+    pub fn clear(&mut self) {
+        self.children.clear();
+    }
+
+    pub fn add_child(&mut self, text: String) {
+        self.children.push(text);
+    }
+}
+
 /// Port of `rebuildBashResultRenderComponent`.
 pub fn rebuild_bash_result_render_component(
-    state: &mut BashResultRenderState,
+    component: &mut BashResultRenderComponent,
     result: Option<&RenderResultLike>,
     details: Option<&BashToolDetails>,
     options: super::ToolRenderResultOptions,
@@ -366,12 +387,8 @@ pub fn rebuild_bash_result_render_component(
     started_at: Option<f64>,
     ended_at: Option<f64>,
     theme: &dyn ToolTheme,
-) -> Vec<String> {
-    state.cached_width = None;
-    state.cached_lines = None;
-    state.cached_skipped = None;
-
-    let mut component: Vec<String> = Vec::new();
+) {
+    component.clear();
 
     let output = get_text_output(
         result,
@@ -391,24 +408,32 @@ pub fn rebuild_bash_result_render_component(
             .join("\n");
 
         if options.expanded {
-            component.push(format!("\n{styled_output}"));
+            component.add_child(format!("\n{styled_output}"));
         } else {
+            let state = &mut component.state;
             let lines: Vec<String> = styled_output.split('\n').map(str::to_string).collect();
-            let skipped = lines.len().saturating_sub(BASH_PREVIEW_LINES);
+            let width = BASH_PREVIEW_LINES;
+            let skipped = lines.len().saturating_sub(width);
             let visual_lines = lines[skipped.min(lines.len())..].to_vec();
+            state.cached_width = Some(width);
             state.cached_lines = Some(visual_lines.clone());
             state.cached_skipped = Some(skipped);
-            let hint = if show_expand_hint {
-                format!("{} ... {skipped} earlier lines", theme.fg("muted", ""))
-            } else {
-                theme.fg("muted", &format!("... ({skipped} earlier lines)"))
-            };
-            let mut rendered: Vec<String> = vec![String::new()];
             if skipped > 0 {
-                rendered.push(hint);
+                // `expandCollapseHint("app.tools.expand", false)` renders the
+                // shortcut suffix; without the keybinding manager it stays empty.
+                let hint = if show_expand_hint {
+                    theme.fg("muted", &format!("... {skipped} earlier lines"))
+                } else {
+                    theme.fg("muted", &format!("... ({skipped} earlier lines)"))
+                };
+                component.add_child(String::new());
+                component.add_child(hint);
+            } else {
+                component.add_child(String::new());
             }
-            rendered.extend(visual_lines);
-            component.extend(rendered);
+            for line in visual_lines {
+                component.add_child(line);
+            }
         }
     }
 
@@ -435,7 +460,7 @@ pub fn rebuild_bash_result_render_component(
                 ));
             }
         }
-        component.push(format!(
+        component.add_child(format!(
             "\n{}",
             theme.fg("warning", &format!("[{}]", warnings.join(". ")))
         ));
@@ -444,13 +469,11 @@ pub fn rebuild_bash_result_render_component(
     if let Some(started_at) = started_at {
         let label = if options.is_partial { "Elapsed" } else { "Took" };
         let end_time = ended_at.unwrap_or_else(now_ms);
-        component.push(format!(
+        component.add_child(format!(
             "\n{}",
             theme.fg("muted", &format!("{label} {}", format_duration(end_time - started_at)))
         ));
     }
-
-    component
 }
 
 fn now_ms() -> f64 {
@@ -561,7 +584,7 @@ pub async fn execute_bash(
 
 fn update_result(snapshot: &OutputSnapshot) -> AgentToolResult {
     AgentToolResult::new(
-        vec![ContentBlock::text(snapshot.content.clone())],
+        vec![AgentContentBlock::text(snapshot.content.clone())],
         serde_json::json!({
             "truncation": if snapshot.truncation.truncated {
                 serde_json::to_value(&snapshot.truncation).unwrap_or(Value::Null)
@@ -678,7 +701,7 @@ pub fn create_bash_tool_definition(cwd: &str, options: Option<&BashToolOptions>)
                         .await
                         .map_err(anyhow::Error::msg)?;
                 Ok(AgentToolResult::new(
-                    vec![ContentBlock::text(text)],
+                    vec![AgentContentBlock::text(text)],
                     serde_json::to_value(details).unwrap_or(Value::Null),
                 ))
             })
@@ -876,5 +899,241 @@ mod tests {
         let (shell, args) = get_shell_config(Some("/bin/zsh"));
         assert_eq!(shell, "/bin/zsh");
         assert_eq!(args, vec!["-c".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tools::render_utils::PlainTheme;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingOperations {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl BashOperations for RecordingOperations {
+        fn exec(
+            &self,
+            command: &str,
+            _cwd: &str,
+            options: BashExecOptions,
+        ) -> futures::future::BoxFuture<'static, Result<BashExecResult, String>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let command = command.to_string();
+            let on_data = options.on_data.clone();
+            let signal = options.signal.clone();
+            Box::pin(async move {
+                if command.contains("fail") {
+                    on_data(b"boom");
+                    return Ok(BashExecResult { exit_code: Some(1) });
+                }
+                if command.contains("abort") {
+                    return Err("aborted".to_string());
+                }
+                if command.contains("timeout") {
+                    return Err("timeout:2".to_string());
+                }
+                on_data(b"hello\n");
+                if let Some(token) = signal {
+                    token.cancelled().await;
+                }
+                Ok(BashExecResult { exit_code: Some(0) })
+            })
+        }
+    }
+
+    fn recording(calls: Arc<AtomicUsize>) -> Arc<dyn BashOperations> {
+        Arc::new(RecordingOperations { calls })
+    }
+
+    #[test]
+    fn description_uses_default_limits() {
+        let description = bash_tool_description();
+        assert!(description.contains("last 2000 lines"));
+        assert!(description.contains("50KB"));
+    }
+
+    #[test]
+    fn format_bash_call_previews_runner_commands() {
+        let args = BashToolInput {
+            command: "npx tsx ../../node_modules/vitest/dist/cli.js --run test/a.test.ts".to_string(),
+            timeout: Some(30.0),
+        };
+        let text = format_bash_call(Some(&args), &PlainTheme);
+        assert!(text.contains("$ vitest --run test/a.test.ts"));
+        assert!(text.contains("(timeout 30s)"));
+    }
+
+    #[test]
+    fn format_bash_call_marks_empty_command() {
+        let empty = BashToolInput {
+            command: String::new(),
+            timeout: None,
+        };
+        let text = format_bash_call(Some(&empty), &PlainTheme);
+        assert!(text.contains("$ ..."));
+    }
+
+    #[test]
+    fn format_duration_uses_one_decimal() {
+        assert_eq!(format_duration(1500.0), "1.5s");
+    }
+
+    #[tokio::test]
+    async fn execute_bash_streams_output_and_returns_details() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let input = BashToolInput {
+            command: "echo hello".to_string(),
+            timeout: None,
+        };
+        let (text, details) = execute_bash("/", recording(calls.clone()), None, None, &input, None, None)
+            .await
+            .expect("executed");
+        assert_eq!(text, "hello\n");
+        assert!(details.is_none());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_bash_reports_non_zero_exit_code() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let input = BashToolInput {
+            command: "fail".to_string(),
+            timeout: None,
+        };
+        let error = execute_bash("/", recording(calls), None, None, &input, None, None)
+            .await
+            .expect_err("must fail");
+        assert_eq!(error, "boom\n\nCommand exited with code 1");
+    }
+
+    #[tokio::test]
+    async fn execute_bash_reports_abort_and_timeout_statuses() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let abort_input = BashToolInput {
+            command: "abort".to_string(),
+            timeout: None,
+        };
+        let abort_error = execute_bash("/", recording(calls.clone()), None, None, &abort_input, None, None)
+            .await
+            .expect_err("aborted");
+        assert_eq!(abort_error, "Command aborted");
+
+        let timeout_input = BashToolInput {
+            command: "timeout".to_string(),
+            timeout: Some(2.0),
+        };
+        let timeout_error = execute_bash("/", recording(calls), None, None, &timeout_input, None, None)
+            .await
+            .expect_err("timed out");
+        assert_eq!(timeout_error, "Command timed out after 2 seconds");
+    }
+
+    #[tokio::test]
+    async fn execute_bash_applies_command_prefix() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let input = BashToolInput {
+            command: "echo hello".to_string(),
+            timeout: None,
+        };
+        let (text, _) = execute_bash("/", recording(calls), Some("set -e"), None, &input, None, None)
+            .await
+            .expect("executed");
+        assert_eq!(text, "hello\n");
+    }
+
+    #[tokio::test]
+    async fn execute_bash_rejects_missing_working_directory() {
+        let input = BashToolInput {
+            command: "echo hello".to_string(),
+            timeout: None,
+        };
+        let error = execute_bash(
+            "/definitely/missing/dir",
+            create_local_bash_operations(None),
+            None,
+            None,
+            &input,
+            None,
+            None,
+        )
+        .await
+        .expect_err("must reject");
+        assert!(error.starts_with(
+            "Working directory does not exist: /definitely/missing/dir\nCannot execute bash commands."
+        ));
+    }
+
+    #[test]
+    fn get_shell_config_uses_explicit_shell_path() {
+        let (shell, args) = get_shell_config(Some("/bin/zsh"));
+        assert_eq!(shell, "/bin/zsh");
+        assert_eq!(args, vec!["-c".to_string()]);
+    }
+
+    #[test]
+    fn render_component_shows_preview_hint_and_duration() {
+        let result = RenderResultLike {
+            content: vec![RenderContentBlock::from_text("l1\nl2\nl3\nl4\nl5\nl6\nl7")],
+        };
+        let mut component = BashResultRenderComponent::default();
+        rebuild_bash_result_render_component(
+            &mut component,
+            Some(&result),
+            None,
+            super::super::ToolRenderResultOptions::default(),
+            true,
+            true,
+            true,
+            Some(0.0),
+            Some(1000.0),
+            &PlainTheme,
+        );
+        assert_eq!(component.state.cached_skipped, Some(2));
+        assert!(component.children.iter().any(|child| child.contains("... 2 earlier lines")));
+        assert!(component.children.iter().any(|child| child.contains("Took 1.0s")));
+    }
+
+    #[test]
+    fn render_component_reports_truncation_warnings() {
+        let result = RenderResultLike {
+            content: vec![RenderContentBlock::from_text("out")],
+        };
+        let details = BashToolDetails {
+            truncation: Some(super::super::truncate::TruncationResult {
+                content: "out".to_string(),
+                truncated: true,
+                truncated_by: Some(super::super::truncate::TruncatedBy::Lines),
+                total_lines: 10,
+                total_bytes: 100,
+                output_lines: 2,
+                output_bytes: 8,
+                last_line_partial: false,
+                first_line_exceeds_limit: false,
+                max_lines: 2,
+                max_bytes: 1024,
+            }),
+            full_output_path: Some("/tmp/full.log".to_string()),
+        };
+        let mut component = BashResultRenderComponent::default();
+        rebuild_bash_result_render_component(
+            &mut component,
+            Some(&result),
+            Some(&details),
+            super::super::ToolRenderResultOptions::default(),
+            true,
+            true,
+            true,
+            None,
+            None,
+            &PlainTheme,
+        );
+        let warning = component
+            .children
+            .iter()
+            .find(|child| child.contains("Full output: /tmp/full.log"))
+            .expect("warning row");
+        assert!(warning.contains("Truncated: showing 2 of 10 lines"));
     }
 }

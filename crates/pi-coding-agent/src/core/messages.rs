@@ -13,10 +13,7 @@
 
 use pi_agent_core::types::{AgentMessage, CustomAgentMessage, CustomMessageContent};
 use pi_ai::compaction::ProviderCompactionCheckpoint;
-use pi_ai::types::{
-    ContentBlock, ImageOrTextContent, Message, StopReason, TextContent, UserContent, UserMessage,
-    ROLE_USER, STOP_REASON_ABORTED, STOP_REASON_ERROR, STOP_REASON_STOP,
-};
+use pi_ai::types::{ImageOrTextContent, Message, TextContent, UserContent, UserMessage, ROLE_USER};
 use serde_json::{Map, Value};
 
 use crate::core::model_tool_output_policy::{
@@ -390,6 +387,49 @@ pub fn bash_execution_to_text(msg: &BashExecutionMessage) -> String {
     format!("Ran `{}`\n{}", msg.command, bash_output_to_text(msg))
 }
 
+// ---------------------------------------------------------------------------
+// Structural-typing bridges
+// ---------------------------------------------------------------------------
+//
+// In TypeScript `CustomMessage`, `BranchSummaryMessage` and
+// `CompactionSummaryMessage` are members of the `AgentMessage` union by shape.
+// The Rust port models the union as an enum, so each factory result is wrapped
+// explicitly. These are crate-internal plumbing, not new behaviour.
+
+pub(crate) fn custom_message_to_agent_message(message: CustomMessage) -> AgentMessage {
+    AgentMessage::Custom(CustomAgentMessage::Custom {
+        custom_type: message.custom_type,
+        content: message.content,
+        display: message.display,
+        details: message.details,
+        timestamp: message.timestamp,
+    })
+}
+
+pub(crate) fn branch_summary_to_agent_message(message: BranchSummaryMessage) -> AgentMessage {
+    AgentMessage::Custom(CustomAgentMessage::BranchSummary {
+        summary: message.summary,
+        from_id: message.from_id,
+        timestamp: message.timestamp,
+    })
+}
+
+pub(crate) fn compaction_summary_to_agent_message(message: CompactionSummaryMessage) -> AgentMessage {
+    AgentMessage::Custom(CustomAgentMessage::CompactionSummary {
+        summary: message.summary,
+        provider_context: message.provider_context,
+        tokens_before: message.tokens_before,
+        retained_message_count: message.retained_message_count,
+        custom_instructions: message.custom_instructions,
+        harness_digest: message.harness_digest,
+        timestamp: message.timestamp,
+    })
+}
+
+pub(crate) fn harness_digest_to_agent_message(message: CustomAgentMessage) -> AgentMessage {
+    AgentMessage::Custom(message)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,7 +580,7 @@ mod tests {
     #[test]
     fn without_harness_digests_removes_snapshots() {
         let messages = vec![
-            create_harness_digest_message("digest".to_string(), 1).into(),
+            harness_digest_to_agent_message(create_harness_digest_message("digest".to_string(), 1)),
             AgentMessage::Custom(CustomAgentMessage::CompactionSummary {
                 summary: "sum".to_string(),
                 provider_context: None,
@@ -1185,13 +1225,3 @@ pub fn convert_to_llm(
     converted
 }
 
-/// `ContentBlock` (pi-ai) to the assistant content union used by callers.
-pub fn content_block_type(block: &ContentBlock) -> &'static str {
-    block.content_type()
-}
-
-/// Re-export used by the compaction summary carrier tests.
-pub const COMPACTION_SUMMARY_ROLE: &str = ROLE_USER;
-pub const STOP_REASON_ABORTED_VALUE: &str = STOP_REASON_ABORTED;
-pub const STOP_REASON_ERROR_VALUE: &str = STOP_REASON_ERROR;
-pub const STOP_REASON_STOP_VALUE: &str = STOP_REASON_STOP;

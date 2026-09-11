@@ -925,7 +925,7 @@ fn generate_content_parameters_to_vertex(params: &Value) -> Value {
 	}
 	let config = params.get("config").cloned().unwrap_or(Value::Object(Map::new()));
 	generate_content_config_to_vertex(&config, &mut body);
-	body
+	Value::Object(body)
 }
 
 /// TS: `generateContentConfigToVertex(apiClient, config, parentObject)`.

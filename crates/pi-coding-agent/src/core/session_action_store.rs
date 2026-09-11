@@ -766,17 +766,32 @@ impl<TAction: Clone> ActionStore<TAction> {
         candidates: Option<&[TAction]>,
     ) -> Result<Vec<TAction>, String> {
         let transition = Arc::clone(&self.transition);
-        let clearable: Vec<TAction> = match candidates {
-            Some(candidates) => candidates.to_vec(),
-            None => self.clearable_actions(None),
-        };
-        let removed: Vec<TAction> = clearable
-            .into_iter()
-            .filter(|action| predicate(action))
-            .collect();
-        for action in &removed {
-            let mut owned = action.clone();
-            transition(&mut owned, ActionLifecycle::Cancelled)?;
+        let state_of = Arc::clone(&self.state_of);
+        let id_of = Arc::clone(&self.id_of);
+        // `candidates` names the actions to consider; the store still owns the
+        // instances that get transitioned, exactly like the TypeScript.
+        let candidate_ids: Option<HashSet<String>> = candidates.map(|candidates| {
+            candidates
+                .iter()
+                .map(|action| (self.id_of)(action))
+                .collect()
+        });
+        let mut removed: Vec<TAction> = Vec::new();
+        for policy in [DeliveryPolicy::NextTurnBoundary, DeliveryPolicy::WhenRunIdle] {
+            let list = self.list(policy);
+            let mut index = 0usize;
+            while index < list.len() {
+                let eligible = CLEARABLE_STATES.contains(&state_of(&list[index]))
+                    && candidate_ids
+                        .as_ref()
+                        .map(|ids| ids.contains(&id_of(&list[index])))
+                        .unwrap_or(true);
+                if eligible && predicate(&list[index]) {
+                    transition(&mut list[index], ActionLifecycle::Cancelled)?;
+                    removed.push(list[index].clone());
+                }
+                index += 1;
+            }
         }
         Ok(removed)
     }
@@ -802,9 +817,10 @@ impl<TAction: Clone> ActionStore<TAction> {
         let delivery = self.delivery(left);
         let left_id = self.id(left);
         let right_id = self.id(right);
+        let id_of = Arc::clone(&self.id_of);
         let list = self.list(delivery);
-        let left_index = list.iter().position(|item| self.id(item) == left_id);
-        let right_index = list.iter().position(|item| self.id(item) == right_id);
+        let left_index = list.iter().position(|item| id_of(item) == left_id);
+        let right_index = list.iter().position(|item| id_of(item) == right_id);
         let (left_index, right_index) = match (left_index, right_index) {
             (Some(left_index), Some(right_index)) => (left_index, right_index),
             _ => return Err("Queued action is not owned by this store".to_string()),
@@ -824,10 +840,11 @@ impl<TAction: Clone> ActionStore<TAction> {
         }
         let id = self.id(action);
         let source_policy = self.delivery(action);
+        let id_of = Arc::clone(&self.id_of);
         let source_index = self
             .list_ref(source_policy)
             .iter()
-            .position(|item| self.id(item) == id);
+            .position(|item| id_of(item) == id);
         let source_index = match source_index {
             Some(source_index) => source_index,
             None => return Err(format!("Session action {id} is not owned by this store")),
@@ -839,14 +856,14 @@ impl<TAction: Clone> ActionStore<TAction> {
         let queued: Vec<String> = target
             .iter()
             .filter(|item| state_of(item) == ActionLifecycleState::Queued)
-            .map(|item| (self.id_of)(item))
+            .map(|item| id_of(item))
             .collect();
         let clamped = index.min(queued.len());
         let before_id = queued.get(clamped).cloned();
         let insert_at = match before_id {
             Some(before_id) => target
                 .iter()
-                .position(|item| (self.id_of)(item) == before_id)
+                .position(|item| id_of(item) == before_id)
                 .unwrap_or(target.len()),
             None => target.len(),
         };
@@ -934,8 +951,9 @@ impl<TAction: Clone> ActionStore<TAction> {
         }
         let delivery = self.delivery(action);
         let id = self.id(action);
+        let id_of = Arc::clone(&self.id_of);
         let list = self.list(delivery);
-        if let Some(index) = list.iter().position(|item| (self.id_of)(item) == id) {
+        if let Some(index) = list.iter().position(|item| id_of(item) == id) {
             list.remove(index);
         }
         self.tickets.remove(&id);

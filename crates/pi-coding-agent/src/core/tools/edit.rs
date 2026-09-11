@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
-use pi_ai::types::ContentBlock;
+use pi_agent_core::types::ContentBlock;
 use pi_tui::utils::wrap_text_with_ansi;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -51,7 +51,6 @@ pub struct EditRenderState {
 }
 
 /// TypeScript `type EditCallRenderComponent = Box & { preview?, previewArgsKey?, previewPending?, settledError? }`.
-#[derive(Default)]
 pub struct EditCallRenderComponent {
     pub preview: Option<EditPreview>,
     pub preview_args_key: Option<String>,
@@ -172,6 +171,14 @@ pub struct EditToolOptions {
     pub operations: Option<Arc<dyn EditOperations>>,
 }
 
+impl std::fmt::Debug for EditToolOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EditToolOptions")
+            .field("operations", &self.operations.as_ref().map(|_| "EditOperations"))
+            .finish()
+    }
+}
+
 /// TypeScript `prepareEditArguments(input: unknown)`.
 pub fn prepare_edit_arguments(input: Value) -> Value {
     let Value::Object(mut args) = input else {
@@ -271,6 +278,12 @@ fn get_edit_call_render_component(
     component
 }
 
+impl Default for EditCallRenderComponent {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Clone for EditCallRenderComponent {
     fn clone(&self) -> Self {
         Self {
@@ -282,12 +295,6 @@ impl Clone for EditCallRenderComponent {
             box_padding_y: self.box_padding_y,
             children: self.children.clone(),
         }
-    }
-}
-
-impl Default for EditCallRenderComponent {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -767,4 +774,264 @@ pub fn create_edit_tool_definition(cwd: &str, options: Option<&EditToolOptions>)
 
 pub fn create_edit_tool(cwd: &str, options: Option<&EditToolOptions>) -> AgentTool {
     wrap_tool_definition(&create_edit_tool_definition(cwd, options), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::tools::render_utils::{PlainTheme, RenderContentBlock};
+
+    #[test]
+    fn prepare_edit_arguments_parses_json_string_edits() {
+        let input = serde_json::json!({
+            "path": "a.txt",
+            "edits": "[{\"oldText\":\"a\",\"newText\":\"b\"}]"
+        });
+        let prepared = prepare_edit_arguments(input);
+        assert_eq!(prepared["edits"][0]["oldText"], serde_json::json!("a"));
+    }
+
+    #[test]
+    fn prepare_edit_arguments_keeps_non_json_string_edits() {
+        let input = serde_json::json!({ "path": "a.txt", "edits": "not json" });
+        let prepared = prepare_edit_arguments(input);
+        assert_eq!(prepared["edits"], serde_json::json!("not json"));
+    }
+
+    #[test]
+    fn prepare_edit_arguments_merges_legacy_fields() {
+        let input = serde_json::json!({
+            "path": "a.txt",
+            "oldText": "a",
+            "newText": "b",
+            "edits": [{ "oldText": "c", "newText": "d" }]
+        });
+        let prepared = prepare_edit_arguments(input);
+        assert_eq!(prepared["edits"].as_array().expect("edits").len(), 2);
+        assert_eq!(prepared["edits"][1]["oldText"], serde_json::json!("a"));
+        assert!(prepared.get("oldText").is_none());
+        assert!(prepared.get("newText").is_none());
+    }
+
+    #[test]
+    fn validate_edit_input_rejects_empty_edits() {
+        let input = EditToolInput {
+            path: "a.txt".to_string(),
+            edits: Vec::new(),
+        };
+        let error = validate_edit_input(&input).expect_err("must reject");
+        assert_eq!(
+            error,
+            "Edit tool input is invalid. edits must contain at least one replacement."
+        );
+    }
+
+    #[test]
+    fn get_renderable_preview_input_prefers_edits_then_legacy_fields() {
+        let args = RenderableEditArgs {
+            file_path: Some("a.txt".to_string()),
+            edits: Some(vec![Edit {
+                old_text: "a".to_string(),
+                new_text: "b".to_string(),
+            }]),
+            ..RenderableEditArgs::default()
+        };
+        let (path, edits) = get_renderable_preview_input(Some(&args)).expect("input");
+        assert_eq!(path, "a.txt");
+        assert_eq!(edits.len(), 1);
+
+        let legacy = RenderableEditArgs {
+            path: Some("b.txt".to_string()),
+            old_text: Some("x".to_string()),
+            new_text: Some("y".to_string()),
+            ..RenderableEditArgs::default()
+        };
+        let (path, edits) = get_renderable_preview_input(Some(&legacy)).expect("input");
+        assert_eq!(path, "b.txt");
+        assert_eq!(edits[0].old_text, "x");
+
+        assert!(get_renderable_preview_input(Some(&RenderableEditArgs::default())).is_none());
+        assert!(get_renderable_preview_input(None).is_none());
+    }
+
+    #[test]
+    fn format_edit_call_uses_path_and_invalid_marker() {
+        let args = RenderableEditArgs {
+            path: Some("/tmp/a.txt".to_string()),
+            ..RenderableEditArgs::default()
+        };
+        assert_eq!(format_edit_call(Some(&args), &PlainTheme), "edit /tmp/a.txt");
+        assert_eq!(format_edit_call(None, &PlainTheme), "edit [invalid arg]");
+    }
+
+    #[test]
+    fn count_changed_lines_counts_diff_markers() {
+        assert_eq!(count_changed_lines("-1 a\n+1 b\n 2 c"), (1, 1));
+        assert_eq!(count_changed_lines("no markers"), (0, 0));
+    }
+
+    #[test]
+    fn format_file_change_summary_line_truncates_to_width() {
+        let line = format_file_change_summary_line("a.txt", "/tmp", (2, 3), true, 80);
+        assert!(line.starts_with("\u{2570}\u{2500} "), "unexpected: {line}");
+        assert!(line.contains("+2 -3"));
+        let narrow = format_file_change_summary_line("a.txt", "/tmp", (2, 3), false, 6);
+        assert_eq!(narrow.chars().count(), 6);
+        assert!(narrow.ends_with("..."));
+    }
+
+    #[test]
+    fn set_edit_preview_reports_changes() {
+        let mut component = EditCallRenderComponent::new();
+        let first = EditPreview::Result {
+            diff: "-1 a\n+1 b".to_string(),
+            first_changed_line: Some(1),
+        };
+        assert!(set_edit_preview(&mut component, first.clone(), Some("key".to_string())));
+        assert!(!set_edit_preview(&mut component, first.clone(), Some("key".to_string())));
+        let second = EditPreview::Result {
+            diff: "-1 a\n+1 c".to_string(),
+            first_changed_line: Some(1),
+        };
+        assert!(set_edit_preview(&mut component, second, Some("key".to_string())));
+        let error = EditPreview::Error {
+            error: "boom".to_string(),
+        };
+        assert!(set_edit_preview(&mut component, error.clone(), None));
+        assert!(!set_edit_preview(&mut component, error, None));
+        assert!(!component.preview_pending);
+    }
+
+    #[tokio::test]
+    async fn execute_edit_replaces_text_and_reports_diff() {
+        let dir = std::env::temp_dir().join(format!("pi-edit-tool-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("target.txt");
+        std::fs::write(&file, "a\nb\nc\n").expect("write");
+        let input = EditToolInput {
+            path: "target.txt".to_string(),
+            edits: vec![Edit {
+                old_text: "b".to_string(),
+                new_text: "B".to_string(),
+            }],
+        };
+        let (text, details) = execute_edit(dir.to_string_lossy().as_ref(), None, &input, None)
+            .await
+            .expect("edited");
+        let written = std::fs::read_to_string(&file).expect("read");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(text, "Successfully replaced 1 block(s) in target.txt.");
+        assert_eq!(written, "a\nB\nc\n");
+        assert_eq!(details.diff, "-2 b\n+2 B");
+        assert_eq!(details.first_changed_line, Some(2));
+    }
+
+    #[tokio::test]
+    async fn execute_edit_restores_crlf_and_bom() {
+        let dir = std::env::temp_dir().join(format!("pi-edit-crlf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("crlf.txt");
+        std::fs::write(&file, "\u{FEFF}a\r\nb\r\n").expect("write");
+        let input = EditToolInput {
+            path: "crlf.txt".to_string(),
+            edits: vec![Edit {
+                old_text: "b".to_string(),
+                new_text: "B".to_string(),
+            }],
+        };
+        execute_edit(dir.to_string_lossy().as_ref(), None, &input, None)
+            .await
+            .expect("edited");
+        let written = std::fs::read_to_string(&file).expect("read");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(written, "\u{FEFF}a\r\nB\r\n");
+    }
+
+    #[tokio::test]
+    async fn execute_edit_reports_missing_file_with_path_and_code() {
+        let input = EditToolInput {
+            path: "missing-edit-tool.txt".to_string(),
+            edits: vec![Edit {
+                old_text: "a".to_string(),
+                new_text: "b".to_string(),
+            }],
+        };
+        let error = execute_edit(
+            std::env::temp_dir().to_string_lossy().as_ref(),
+            None,
+            &input,
+            None,
+        )
+        .await
+        .expect_err("must fail");
+        assert!(error.starts_with("Could not edit file: missing-edit-tool.txt. Error code: E"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn execute_edit_rejects_an_already_cancelled_signal() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let input = EditToolInput {
+            path: "a.txt".to_string(),
+            edits: vec![Edit {
+                old_text: "a".to_string(),
+                new_text: "b".to_string(),
+            }],
+        };
+        let error = execute_edit("/tmp", None, &input, Some(token))
+            .await
+            .expect_err("aborted");
+        assert_eq!(error, "Operation aborted");
+    }
+
+    #[test]
+    fn render_edit_result_reports_diff_and_error() {
+        let mut state = EditRenderState {
+            call_component: Some(EditCallRenderComponent::new()),
+        };
+        let result = EditToolResultLike {
+            content: vec![RenderContentBlock::from_text("ok")],
+            details: Some(EditToolDetails {
+                diff: "-1 a\n+1 b".to_string(),
+                first_changed_line: Some(1),
+            }),
+        };
+        let args = RenderableEditArgs {
+            path: Some("a.txt".to_string()),
+            ..RenderableEditArgs::default()
+        };
+        let lines = render_edit_result(&mut state, &result, Some(&args), &PlainTheme, false, "/tmp", false);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].contains("a.txt"));
+
+        let error_result = EditToolResultLike {
+            content: vec![RenderContentBlock::from_text("boom")],
+            details: None,
+        };
+        let lines = render_edit_result(
+            &mut state,
+            &error_result,
+            Some(&args),
+            &PlainTheme,
+            false,
+            "/tmp",
+            true,
+        );
+        assert_eq!(lines, vec![String::new(), "boom".to_string()]);
+    }
+
+    #[test]
+    fn edit_tool_definition_metadata_matches_typescript() {
+        let definition = create_edit_tool_definition("/tmp", None);
+        assert_eq!(definition.name, "edit");
+        assert_eq!(definition.label, "edit");
+        assert_eq!(definition.description, EDIT_TOOL_DESCRIPTION);
+        assert_eq!(definition.render_shell.as_deref(), Some("self"));
+        assert_eq!(definition.replay_built_in_tool_name.as_deref(), Some("edit"));
+        assert!(definition.prepare_arguments.is_some());
+        assert_eq!(
+            definition.parameters,
+            serde_json::from_str::<Value>(EDIT_SCHEMA).expect("schema")
+        );
+    }
 }

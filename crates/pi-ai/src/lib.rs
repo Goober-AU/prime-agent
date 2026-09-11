@@ -6,6 +6,7 @@ pub mod cli_entry;
 pub mod compaction;
 pub mod copilot_client_version;
 pub mod env_api_keys;
+pub mod index;
 pub mod log;
 pub mod mcp;
 pub mod mcp_api;

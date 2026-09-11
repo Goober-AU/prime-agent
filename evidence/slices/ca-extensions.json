@@ -3,21 +3,6 @@
  "crate": "pi-coding-agent",
  "files": [
   {
-   "src": "packages/coding-agent/src/core/extensions/builtin/herdr-agent-state.ts",
-   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/herdr_agent_state.rs",
-   "loc": 471
-  },
-  {
-   "src": "packages/coding-agent/src/core/extensions/builtin/memory.ts",
-   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/memory.rs",
-   "loc": 314
-  },
-  {
-   "src": "packages/coding-agent/src/core/extensions/builtin/telegram.ts",
-   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/telegram.rs",
-   "loc": 163
-  },
-  {
    "src": "packages/coding-agent/src/core/extensions/bundled-modules.ts",
    "rust": "crates/pi-coding-agent/src/core/extensions/bundled_modules.rs",
    "loc": 39
@@ -58,19 +43,9 @@
    "loc": 235
   },
   {
-   "src": "packages/coding-agent/src/core/mcp/mcp-manager.ts",
-   "rust": "crates/pi-coding-agent/src/core/mcp/mcp_manager.rs",
-   "loc": 249
-  },
-  {
    "src": "packages/coding-agent/src/core/prompt-templates.ts",
    "rust": "crates/pi-coding-agent/src/core/prompt_templates.rs",
    "loc": 286
-  },
-  {
-   "src": "packages/coding-agent/src/core/resource-loader.ts",
-   "rust": "crates/pi-coding-agent/src/core/resource_loader.rs",
-   "loc": 938
   },
   {
    "src": "packages/coding-agent/src/core/slash-commands.ts",
@@ -83,5 +58,5 @@
    "loc": 211
   }
  ],
- "loc": 6489
+ "loc": 4354
 }

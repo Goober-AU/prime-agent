@@ -1854,3 +1854,917 @@ fn subtract_selection_coverage(
 thread_local! {
     static DEFAULT_OVERLAY_OPTIONS: OverlayOptions = OverlayOptions::default();
 }
+impl TUI {
+    fn apply_line_resets(&self, lines: &mut [String]) {
+        let reset = Self::SEGMENT_RESET;
+        for line in lines.iter_mut() {
+            if !is_image_line(line) {
+                *line = format!("{}{reset}", normalize_terminal_output(line));
+            }
+        }
+    }
+
+    fn collect_kitty_image_ids(&self, lines: &[String]) -> HashSet<u32> {
+        let mut ids = HashSet::new();
+        for line in lines {
+            for id in extract_kitty_image_ids(line) {
+                ids.insert(id);
+            }
+        }
+        ids
+    }
+
+    fn delete_kitty_images(&self, ids: impl IntoIterator<Item = u32>) -> String {
+        let mut buffer = String::new();
+        for id in ids {
+            buffer.push_str(&delete_kitty_image(id));
+        }
+        buffer
+    }
+
+    fn expand_last_changed_for_kitty_images(&self, first_changed: usize, last_changed: usize) -> usize {
+        let mut expanded_last_changed = last_changed;
+        for i in first_changed..self.previous_lines.len() {
+            if !extract_kitty_image_ids(&self.previous_lines[i]).is_empty() {
+                expanded_last_changed = expanded_last_changed.max(i);
+            }
+        }
+        expanded_last_changed
+    }
+
+    fn delete_changed_kitty_images(&self, first_changed: i64, last_changed: i64) -> String {
+        if first_changed < 0 || last_changed < first_changed {
+            return String::new();
+        }
+
+        let mut ids: HashSet<u32> = HashSet::new();
+        let max_line = (last_changed as usize).min(self.previous_lines.len().saturating_sub(1));
+        for i in first_changed as usize..=max_line {
+            for id in extract_kitty_image_ids(self.previous_lines.get(i).map(String::as_str).unwrap_or("")) {
+                ids.insert(id);
+            }
+        }
+
+        self.delete_kitty_images(ids)
+    }
+
+    /// Splice overlay content into a base line at a specific column. Single-pass optimized.
+    fn composite_line_at(
+        &self,
+        base_line: &str,
+        overlay_line: &str,
+        start_col: i64,
+        overlay_width: i64,
+        total_width: i64,
+    ) -> String {
+        if is_image_line(base_line) {
+            return base_line.to_string();
+        }
+
+        // Single pass through baseLine extracts both before and after segments
+        let start_col = start_col.max(0) as usize;
+        let overlay_width = overlay_width.max(0) as usize;
+        let total_width = total_width.max(0) as usize;
+        let after_start = start_col + overlay_width;
+        let base = extract_segments(
+            base_line,
+            start_col,
+            after_start,
+            total_width.saturating_sub(after_start),
+            true,
+        );
+
+        // Extract overlay with width tracking (strict=true to exclude wide chars at boundary)
+        let overlay = slice_with_width(overlay_line, 0, overlay_width, true);
+
+        // Pad segments to target widths
+        let before_pad = start_col.saturating_sub(base.before_width);
+        let overlay_pad = overlay_width.saturating_sub(overlay.width);
+        let actual_before_width = start_col.max(base.before_width);
+        let actual_overlay_width = overlay_width.max(overlay.width);
+        let after_target = total_width.saturating_sub(actual_before_width + actual_overlay_width);
+        let after_pad = after_target.saturating_sub(base.after_width);
+
+        // Compose result
+        let reset = Self::SEGMENT_RESET;
+        let result = format!(
+            "{}{}{reset}{}{}{reset}{}{}",
+            base.before,
+            " ".repeat(before_pad),
+            overlay.text,
+            " ".repeat(overlay_pad),
+            base.after,
+            " ".repeat(after_pad)
+        );
+
+        // CRITICAL: Always verify and truncate to terminal width.
+        // This is the final safeguard against width overflow which would crash the TUI.
+        let result_width = visible_width(&result);
+        if result_width <= total_width {
+            return result;
+        }
+
+        // Truncate with strict=true to ensure we don't exceed totalWidth
+        slice_by_column(&result, 0, total_width, true)
+    }
+
+    /// Find and extract cursor position from rendered lines.
+    /// Searches for `CURSOR_MARKER`, calculates its position, and strips it from
+    /// the output. Only scans the bottom terminal height lines (visible viewport).
+    fn extract_cursor_position(&self, lines: &mut [String], height: usize) -> Option<CursorPosition> {
+        // Only scan the bottom `height` lines (visible viewport)
+        let viewport_top = lines.len().saturating_sub(height);
+        for row in (viewport_top..lines.len()).rev() {
+            let line = lines[row].clone();
+            let marker_index = match line.find(CURSOR_MARKER) {
+                Some(index) => index,
+                None => continue,
+            };
+            // Calculate visual column (width of text before marker)
+            let before_marker: String = line.chars().take(marker_index).collect();
+            let col = visible_width(&before_marker);
+
+            // Strip marker from the line
+            let prefix: String = line.chars().take(marker_index).collect();
+            let suffix: String = line.chars().skip(marker_index + CURSOR_MARKER.chars().count()).collect();
+            lines[row] = format!("{prefix}{suffix}");
+
+            return Some(CursorPosition { row, col });
+        }
+        None
+    }
+
+    fn render_fullscreen(&mut self) {
+        let width = self.terminal.columns();
+        let height = self.terminal.rows();
+        self.sync_fullscreen_mouse_tracking();
+        self.overlay_selection_regions = Vec::new();
+
+        let mut transcript: Vec<String> = Vec::new();
+        let mut selection_regions: Vec<TableCellSelectionRegion> = Vec::new();
+        let scroll_components: Vec<Rc<RefCell<dyn Component>>> = match &self.fullscreen {
+            Some(fullscreen) => fullscreen.scroll.clone(),
+            None => return,
+        };
+        let dock_component = match &self.fullscreen {
+            Some(fullscreen) => fullscreen.dock.clone(),
+            None => return,
+        };
+        let dock = with_fullscreen_image_fallback(|| {
+            for component in scroll_components.iter() {
+                let line_offset = transcript.len();
+                let component_lines = component.borrow_mut().render(width as f64);
+                for region in component.borrow().get_selection_regions() {
+                    selection_regions.push(TableCellSelectionRegion {
+                        line: region.line + line_offset,
+                        table_top: region.table_top + line_offset,
+                        table_bottom: region.table_bottom + line_offset,
+                        ..region
+                    });
+                }
+                transcript.extend(component_lines);
+            }
+            dock_component.borrow_mut().render(width as f64)
+        });
+
+        let (mut frame, window_height, scroll_info, viewport_controls) = match self.fullscreen.as_mut() {
+            Some(fullscreen) => {
+                let frame = fullscreen
+                    .viewport
+                    .compose_frame(&transcript, &dock, height, &selection_regions);
+                let window_height = fullscreen.viewport.window_height();
+                let scroll_info = fullscreen.viewport.scroll_info();
+                (frame, window_height, scroll_info, fullscreen.viewport_controls)
+            }
+            None => return,
+        };
+
+        let dock_regions = self.create_dock_selection_regions(&frame, window_height, width);
+        self.overlay_selection_regions.extend(dock_regions);
+
+        if viewport_controls && !scroll_info.following {
+            // Follow hint composited over the bottom of the transcript window,
+            // just above the dock. Overlays still paint on top of it.
+            let follow_key = get_keybindings()
+                .get_keys("tui.viewport.follow")
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "ctrl+shift+down".to_string());
+            let label = format!(" {follow_key} to follow ");
+            let label_width = visible_width(&label);
+            let row = window_height.saturating_sub(1);
+            if row < frame.len() && label_width <= width {
+                let col = (width - label_width) / 2;
+                frame[row] = self.composite_line_at(
+                    &frame[row],
+                    &format!("\x1b[7m{label}\x1b[27m"),
+                    col as i64,
+                    label_width as i64,
+                    width as i64,
+                );
+            }
+        }
+
+        if !self.overlay_stack.is_empty() {
+            frame = with_fullscreen_image_fallback(|| self.composite_overlays(&frame, width, height));
+        }
+
+        let cursor_pos = self.extract_cursor_position(&mut frame, height);
+        let overlay_regions = self.overlay_selection_regions.clone();
+        if let Some(fullscreen) = self.fullscreen.as_mut() {
+            fullscreen.viewport.apply_frame_selection(&mut frame, height, &overlay_regions);
+        }
+        self.apply_line_resets(&mut frame);
+        let write_buffer = std::cell::RefCell::new(String::new());
+        {
+            let mut write = |data: &str| write_buffer.borrow_mut().push_str(data);
+            if let Some(fullscreen) = self.fullscreen.as_mut() {
+                fullscreen.viewport.paint(
+                    &mut write,
+                    &frame,
+                    width,
+                    height,
+                    cursor_pos.map(|position| (position.row, position.col)),
+                );
+            }
+        }
+        let buffer = write_buffer.into_inner();
+        self.terminal.write(&buffer);
+        if cursor_pos.is_some() && self.show_hardware_cursor {
+            self.terminal.show_cursor();
+        } else {
+            self.terminal.hide_cursor();
+        }
+    }
+
+    fn do_render(&mut self) {
+        if self.stopped {
+            return;
+        }
+        if self.fullscreen.is_some() {
+            self.preserve_viewport_on_next_render = false;
+            self.render_fullscreen();
+            return;
+        }
+        // One-shot: consume here so it never leaks into a later render.
+        self.overlay_selection_regions = Vec::new();
+        let preserve_viewport = self.preserve_viewport_on_next_render;
+        self.preserve_viewport_on_next_render = false;
+        let width = self.terminal.columns();
+        let height = self.terminal.rows();
+        let width_changed = self.previous_width != 0 && self.previous_width != width as i64;
+        let height_changed = self.previous_height != 0 && self.previous_height != height;
+        let previous_buffer_length = if self.previous_height > 0 {
+            self.previous_viewport_top + self.previous_height
+        } else {
+            height
+        };
+        let mut prev_viewport_top = if height_changed {
+            previous_buffer_length.saturating_sub(height)
+        } else {
+            self.previous_viewport_top
+        };
+        let mut viewport_top = prev_viewport_top;
+        let mut hardware_cursor_row = self.hardware_cursor_row;
+        let compute_line_diff = |target_row: usize, hardware_cursor_row: usize, prev_viewport_top: usize, viewport_top: usize| -> i64 {
+            let current_screen_row = hardware_cursor_row as i64 - prev_viewport_top as i64;
+            let target_screen_row = target_row as i64 - viewport_top as i64;
+            target_screen_row - current_screen_row
+        };
+
+        // Render all components to get new lines
+        let mut new_lines = self.container.render(width as f64);
+
+        // Composite overlays into the rendered lines (before differential compare)
+        if !self.overlay_stack.is_empty() {
+            new_lines = self.composite_overlays(&new_lines, width, height);
+        }
+
+        // Extract cursor position before applying line resets (marker must be found first)
+        let cursor_pos = self.extract_cursor_position(&mut new_lines, height);
+
+        self.apply_line_resets(&mut new_lines);
+        let mut new_lines = new_lines;
+
+        let full_redraw_count = &mut self.full_redraw_count;
+        let terminal = &mut self.terminal;
+        let previous_lines = &mut self.previous_lines;
+        let previous_kitty_image_ids = &mut self.previous_kitty_image_ids;
+        let cursor_row = &mut self.cursor_row;
+        let hardware_cursor_row_field = &mut self.hardware_cursor_row;
+        let max_lines_rendered = &mut self.max_lines_rendered;
+        let previous_viewport_top_field = &mut self.previous_viewport_top;
+        let previous_width = &mut self.previous_width;
+        let previous_height = &mut self.previous_height;
+        let show_hardware_cursor = self.show_hardware_cursor;
+
+        // Helper to clear the viewport and repaint the current screen. Do not
+        // clear terminal scrollback: users rely on it to read long prior messages.
+        let mut full_render = |clear: bool, preserve_viewport: bool,
+                               terminal: &mut Box<dyn Terminal>,
+                               previous_lines: &mut Vec<String>,
+                               previous_kitty_image_ids: &mut HashSet<u32>,
+                               cursor_row: &mut usize,
+                               hardware_cursor_row_field: &mut usize,
+                               max_lines_rendered: &mut usize,
+                               previous_viewport_top_field: &mut usize,
+                               previous_width: &mut i64,
+                               previous_height: &mut usize,
+                               full_redraw_count: &mut usize,
+                               prev_viewport_top: usize,
+                               new_lines: &[String],
+                               cursor_pos: Option<CursorPosition>| {
+            *full_redraw_count += 1;
+            let mut buffer = String::from("\x1b[?2026h"); // Begin synchronized output
+
+            if preserve_viewport && !previous_lines.is_empty() {
+                let window_start = new_lines.len().saturating_sub(height);
+                let visible_count = new_lines.len() - window_start;
+                // Rows the previous frame occupied on screen.
+                let prev_screen_rows = height.min(previous_lines.len());
+                // Only delete Kitty images within the repainted viewport.
+                buffer.push_str(&delete_changed_kitty_images_static(
+                    previous_lines,
+                    prev_viewport_top as i64,
+                    (prev_viewport_top + prev_screen_rows).saturating_sub(1) as i64,
+                ));
+                // Move the hardware cursor up to the top of the visible screen.
+                let screen_row = (*hardware_cursor_row_field)
+                    .saturating_sub(prev_viewport_top)
+                    .min(prev_screen_rows.saturating_sub(1));
+                if screen_row > 0 {
+                    buffer.push_str(&format!("\x1b[{screen_row}A"));
+                }
+                buffer.push('\r');
+                // Clear the top row up front: the loop below clears it on its
+                // first iteration, but when there is no content
+                // (visibleCount === 0) the loop never runs.
+                if visible_count == 0 {
+                    buffer.push_str("\x1b[2K");
+                }
+                for i in 0..visible_count {
+                    if i > 0 {
+                        buffer.push_str("\r\n");
+                    }
+                    buffer.push_str("\x1b[2K"); // Clear current line
+                    buffer.push_str(&new_lines[window_start + i]);
+                }
+                // Clear any rows the previous frame used below the new content.
+                if visible_count < prev_screen_rows {
+                    let leftover = prev_screen_rows - visible_count.max(1);
+                    for _ in 0..leftover {
+                        buffer.push_str("\r\n\x1b[2K");
+                    }
+                    if leftover > 0 {
+                        buffer.push_str(&format!("\x1b[{leftover}A")); // Back up to the last content row
+                    }
+                }
+                buffer.push_str("\x1b[?2026l"); // End synchronized output
+                terminal.write(&buffer);
+                *cursor_row = new_lines.len().saturating_sub(1);
+                *hardware_cursor_row_field = *cursor_row;
+                // Reset (not just grow) the high-water mark to the repainted content.
+                *max_lines_rendered = new_lines.len();
+                *previous_viewport_top_field = window_start;
+                position_hardware_cursor_static(
+                    terminal,
+                    cursor_pos,
+                    new_lines.len(),
+                    hardware_cursor_row_field,
+                    show_hardware_cursor,
+                );
+                *previous_lines = new_lines.to_vec();
+                *previous_kitty_image_ids = collect_kitty_image_ids_static(new_lines);
+                *previous_width = width as i64;
+                *previous_height = height;
+                return;
+            }
+
+            let render_start = if clear && !previous_lines.is_empty() {
+                new_lines.len().saturating_sub(height)
+            } else {
+                0
+            };
+            if clear {
+                let previous_visible_top = prev_viewport_top.min(previous_lines.len().saturating_sub(height));
+                let previous_visible_bottom = previous_lines
+                    .len()
+                    .saturating_sub(1)
+                    .min(previous_visible_top + height.saturating_sub(1));
+                buffer.push_str(&delete_changed_kitty_images_static(
+                    previous_lines,
+                    previous_visible_top as i64,
+                    previous_visible_bottom as i64,
+                ));
+                buffer.push_str("\x1b[2J\x1b[H"); // Clear screen and home while preserving scrollback
+            }
+            for i in render_start..new_lines.len() {
+                if i > render_start {
+                    buffer.push_str("\r\n");
+                }
+                buffer.push_str(&new_lines[i]);
+            }
+            buffer.push_str("\x1b[?2026l"); // End synchronized output
+            terminal.write(&buffer);
+            *cursor_row = new_lines.len().saturating_sub(1);
+            *hardware_cursor_row_field = *cursor_row;
+            // Reset max lines when clearing, otherwise track growth
+            if clear {
+                *max_lines_rendered = new_lines.len();
+            } else {
+                *max_lines_rendered = (*max_lines_rendered).max(new_lines.len());
+            }
+            let buffer_length = height.max(new_lines.len());
+            *previous_viewport_top_field = buffer_length.saturating_sub(height);
+            position_hardware_cursor_static(
+                terminal,
+                cursor_pos,
+                new_lines.len(),
+                hardware_cursor_row_field,
+                show_hardware_cursor,
+            );
+            *previous_lines = new_lines.to_vec();
+            *previous_kitty_image_ids = collect_kitty_image_ids_static(new_lines);
+            *previous_width = width as i64;
+            *previous_height = height;
+        };
+        let _ = &full_render;
+
+        let debug_redraw = std::env::var("PI_DEBUG_REDRAW").map(|v| v == "1").unwrap_or(false);
+        let log_redraw = |reason: &str, previous_len: usize, new_len: usize, height: usize| {
+            if !debug_redraw {
+                return;
+            }
+            let log_path = debug_log_path("pi-debug.log");
+            let msg = format!(
+                "[{}] fullRender: {reason} (prev={previous_len}, new={new_len}, height={height})\n",
+                iso_timestamp()
+            );
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
+                let _ = file.write_all(msg.as_bytes());
+            }
+        };
+        let _ = &log_redraw;
+
+        // First render - just output everything without clearing (assumes clean screen)
+        if previous_lines.is_empty() && !width_changed && !height_changed {
+            log_redraw("first render", previous_lines.len(), new_lines.len(), height);
+            full_render(
+                false,
+                false,
+                terminal,
+                previous_lines,
+                previous_kitty_image_ids,
+                cursor_row,
+                hardware_cursor_row_field,
+                max_lines_rendered,
+                previous_viewport_top_field,
+                previous_width,
+                previous_height,
+                full_redraw_count,
+                prev_viewport_top,
+                &new_lines,
+                cursor_pos,
+            );
+            return;
+        }
+
+        // Width changes always need a full re-render because wrapping changes.
+        if width_changed {
+            log_redraw(
+                &format!("terminal width changed ({} -> {width})", *previous_width),
+                previous_lines.len(),
+                new_lines.len(),
+                height,
+            );
+            full_render(
+                true,
+                false,
+                terminal,
+                previous_lines,
+                previous_kitty_image_ids,
+                cursor_row,
+                hardware_cursor_row_field,
+                max_lines_rendered,
+                previous_viewport_top_field,
+                previous_width,
+                previous_height,
+                full_redraw_count,
+                prev_viewport_top,
+                &new_lines,
+                cursor_pos,
+            );
+            return;
+        }
+
+        // Height changes normally need a full re-render to keep the visible
+        // viewport aligned, but Termux changes height when the software keyboard
+        // shows or hides.
+        if height_changed && !is_termux_session() {
+            log_redraw(
+                &format!("terminal height changed ({} -> {height})", *previous_height),
+                previous_lines.len(),
+                new_lines.len(),
+                height,
+            );
+            full_render(
+                true,
+                false,
+                terminal,
+                previous_lines,
+                previous_kitty_image_ids,
+                cursor_row,
+                hardware_cursor_row_field,
+                max_lines_rendered,
+                previous_viewport_top_field,
+                previous_width,
+                previous_height,
+                full_redraw_count,
+                prev_viewport_top,
+                &new_lines,
+                cursor_pos,
+            );
+            return;
+        }
+
+        // Content shrunk below the working area and no overlays - re-render to
+        // clear empty rows (overlays need the padding, so only do this when no
+        // overlays are active).
+        if self.clear_on_shrink && new_lines.len() < *max_lines_rendered && self.overlay_stack.is_empty() {
+            log_redraw(
+                &format!("clearOnShrink (maxLinesRendered={})", *max_lines_rendered),
+                previous_lines.len(),
+                new_lines.len(),
+                height,
+            );
+            full_render(
+                true,
+                preserve_viewport,
+                terminal,
+                previous_lines,
+                previous_kitty_image_ids,
+                cursor_row,
+                hardware_cursor_row_field,
+                max_lines_rendered,
+                previous_viewport_top_field,
+                previous_width,
+                previous_height,
+                full_redraw_count,
+                prev_viewport_top,
+                &new_lines,
+                cursor_pos,
+            );
+            return;
+        }
+
+        // Find first and last changed lines
+        let mut first_changed: i64 = -1;
+        let mut last_changed: i64 = -1;
+        let max_lines = new_lines.len().max(previous_lines.len());
+        for i in 0..max_lines {
+            let old_line = previous_lines.get(i).map(String::as_str).unwrap_or("");
+            let new_line = new_lines.get(i).map(String::as_str).unwrap_or("");
+            if old_line != new_line {
+                if first_changed == -1 {
+                    first_changed = i as i64;
+                }
+                last_changed = i as i64;
+            }
+        }
+        let appended_lines = new_lines.len() > previous_lines.len();
+        if appended_lines {
+            if first_changed == -1 {
+                first_changed = previous_lines.len() as i64;
+            }
+            last_changed = new_lines.len() as i64 - 1;
+        }
+        if first_changed != -1 {
+            last_changed = expand_last_changed_for_kitty_images_static(
+                previous_lines,
+                first_changed as usize,
+                last_changed as usize,
+            ) as i64;
+        }
+        let append_start =
+            appended_lines && first_changed == previous_lines.len() as i64 && first_changed > 0;
+
+        // No changes - but still need to update hardware cursor position if it moved
+        if first_changed == -1 {
+            position_hardware_cursor_static(
+                terminal,
+                cursor_pos,
+                new_lines.len(),
+                hardware_cursor_row_field,
+                show_hardware_cursor,
+            );
+            *previous_viewport_top_field = prev_viewport_top;
+            *previous_height = height;
+            return;
+        }
+
+        // All changes are in deleted lines (nothing to render, just clear)
+        if first_changed >= new_lines.len() as i64 {
+            if previous_lines.len() > new_lines.len() {
+                let mut buffer = String::from("\x1b[?2026h");
+                buffer.push_str(&delete_changed_kitty_images_static(
+                    previous_lines,
+                    first_changed,
+                    last_changed,
+                ));
+                // Move to end of new content (clamp to 0 for empty content)
+                let target_row = new_lines.len().saturating_sub(1);
+                if target_row < prev_viewport_top {
+                    log_redraw(
+                        &format!("deleted lines moved viewport up ({target_row} < {prev_viewport_top})"),
+                        previous_lines.len(),
+                        new_lines.len(),
+                        height,
+                    );
+                    full_render(
+                        true,
+                        preserve_viewport,
+                        terminal,
+                        previous_lines,
+                        previous_kitty_image_ids,
+                        cursor_row,
+                        hardware_cursor_row_field,
+                        max_lines_rendered,
+                        previous_viewport_top_field,
+                        previous_width,
+                        previous_height,
+                        full_redraw_count,
+                        prev_viewport_top,
+                        &new_lines,
+                        cursor_pos,
+                    );
+                    return;
+                }
+                let line_diff =
+                    compute_line_diff(target_row, *hardware_cursor_row_field, prev_viewport_top, viewport_top);
+                if line_diff > 0 {
+                    buffer.push_str(&format!("\x1b[{line_diff}B"));
+                } else if line_diff < 0 {
+                    buffer.push_str(&format!("\x1b[{}A", -line_diff));
+                }
+                buffer.push('\r');
+                // Clear extra lines without scrolling
+                let extra_lines = previous_lines.len() - new_lines.len();
+                if extra_lines > height {
+                    log_redraw(
+                        &format!("extraLines > height ({extra_lines} > {height})"),
+                        previous_lines.len(),
+                        new_lines.len(),
+                        height,
+                    );
+                    full_render(
+                        true,
+                        preserve_viewport,
+                        terminal,
+                        previous_lines,
+                        previous_kitty_image_ids,
+                        cursor_row,
+                        hardware_cursor_row_field,
+                        max_lines_rendered,
+                        previous_viewport_top_field,
+                        previous_width,
+                        previous_height,
+                        full_redraw_count,
+                        prev_viewport_top,
+                        &new_lines,
+                        cursor_pos,
+                    );
+                    return;
+                }
+                if extra_lines > 0 {
+                    buffer.push_str("\x1b[1B");
+                }
+                for i in 0..extra_lines {
+                    buffer.push_str("\r\x1b[2K");
+                    if i < extra_lines - 1 {
+                        buffer.push_str("\x1b[1B");
+                    }
+                }
+                if extra_lines > 0 {
+                    buffer.push_str(&format!("\x1b[{extra_lines}A"));
+                }
+                buffer.push_str("\x1b[?2026l");
+                terminal.write(&buffer);
+                *cursor_row = target_row;
+                *hardware_cursor_row_field = target_row;
+            }
+            position_hardware_cursor_static(
+                terminal,
+                cursor_pos,
+                new_lines.len(),
+                hardware_cursor_row_field,
+                show_hardware_cursor,
+            );
+            *previous_lines = new_lines.to_vec();
+            *previous_kitty_image_ids = collect_kitty_image_ids_static(&new_lines);
+            *previous_width = width as i64;
+            *previous_height = height;
+            *previous_viewport_top_field = prev_viewport_top;
+            return;
+        }
+
+        // Differential rendering can only touch what was actually visible.
+        // If the first changed line is above the previous viewport, the rows on
+        // screen no longer correspond to newLines, so we have to repaint.
+        if (first_changed as usize) < prev_viewport_top {
+            log_redraw(
+                &format!("firstChanged < viewportTop ({first_changed} < {prev_viewport_top})"),
+                previous_lines.len(),
+                new_lines.len(),
+                height,
+            );
+            let preserve_scrollback = new_lines.len() > height && new_lines.len() >= previous_lines.len();
+            full_render(
+                true,
+                preserve_scrollback || preserve_viewport,
+                terminal,
+                previous_lines,
+                previous_kitty_image_ids,
+                cursor_row,
+                hardware_cursor_row_field,
+                max_lines_rendered,
+                previous_viewport_top_field,
+                previous_width,
+                previous_height,
+                full_redraw_count,
+                prev_viewport_top,
+                &new_lines,
+                cursor_pos,
+            );
+            return;
+        }
+
+        // Render from first changed line to end
+        // Build buffer with all updates wrapped in synchronized output
+        let mut buffer = String::from("\x1b[?2026h"); // Begin synchronized output
+        buffer.push_str(&delete_changed_kitty_images_static(
+            previous_lines,
+            first_changed,
+            last_changed,
+        ));
+        let prev_viewport_bottom = prev_viewport_top + height - 1;
+        let move_target_row = if append_start {
+            first_changed - 1
+        } else {
+            first_changed
+        } as usize;
+        if move_target_row > prev_viewport_bottom {
+            let current_screen_row = (*hardware_cursor_row_field)
+                .saturating_sub(prev_viewport_top)
+                .min(height - 1);
+            let move_to_bottom = height - 1 - current_screen_row;
+            if move_to_bottom > 0 {
+                buffer.push_str(&format!("\x1b[{move_to_bottom}B"));
+            }
+            let scroll = move_target_row - prev_viewport_bottom;
+            for _ in 0..scroll {
+                buffer.push_str("\r\n");
+            }
+            prev_viewport_top += scroll;
+            viewport_top += scroll;
+            *hardware_cursor_row_field = move_target_row;
+        }
+
+        // Move cursor to first changed line (use hardwareCursorRow for actual position)
+        let line_diff = compute_line_diff(
+            move_target_row,
+            *hardware_cursor_row_field,
+            prev_viewport_top,
+            viewport_top,
+        );
+        if line_diff > 0 {
+            buffer.push_str(&format!("\x1b[{line_diff}B")); // Move down
+        } else if line_diff < 0 {
+            buffer.push_str(&format!("\x1b[{}A", -line_diff)); // Move up
+        }
+
+        buffer.push_str(if append_start { "\r\n" } else { "\r" }); // Move to column 0
+
+        // Only render changed lines (firstChanged to lastChanged), not all lines
+        // to end. This reduces flicker when only a single line changes (e.g.,
+        // spinner animation).
+        let render_end = (last_changed as usize).min(new_lines.len() - 1);
+        for i in first_changed as usize..=render_end {
+            if i > first_changed as usize {
+                buffer.push_str("\r\n");
+            }
+            buffer.push_str("\x1b[2K"); // Clear current line
+            let line = new_lines[i].clone();
+            let is_image = is_image_line(&line);
+            if !is_image && visible_width(&line) > width {
+                // Log all lines to crash file for debugging
+                let crash_log_path = debug_log_path("pi-crash.log");
+                let mut crash_data = String::new();
+                crash_data.push_str(&format!("Crash at {}\n", iso_timestamp()));
+                crash_data.push_str(&format!("Terminal width: {width}\n"));
+                crash_data.push_str(&format!("Line {i} visible width: {}\n", visible_width(&line)));
+                crash_data.push_str("\n=== All rendered lines ===\n");
+                for (idx, rendered) in new_lines.iter().enumerate() {
+                    crash_data.push_str(&format!("[{idx}] (w={}) {rendered}\n", visible_width(rendered)));
+                }
+                crash_data.push('\n');
+                if let Some(parent) = crash_log_path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(&crash_log_path, crash_data);
+
+                // Clean up terminal state before throwing
+                self.stop(TuiStopOptions::default());
+
+                let error_msg = format!(
+                    "Rendered line {i} exceeds terminal width ({} > {width}).\n\nThis is likely caused by a custom TUI component not truncating its output.\nUse visibleWidth() to measure and truncateToWidth() to truncate lines.\n\nDebug log written to: {}",
+                    visible_width(&line),
+                    crash_log_path.display()
+                );
+                panic!("{error_msg}");
+            }
+            buffer.push_str(&line);
+        }
+
+        // Track where cursor ended up after rendering
+        let mut final_cursor_row = render_end;
+
+        // If we had more lines before, clear them and move cursor back
+        if previous_lines.len() > new_lines.len() {
+            // Move to end of new content first if we stopped before it
+            if render_end < new_lines.len() - 1 {
+                let move_down = new_lines.len() - 1 - render_end;
+                buffer.push_str(&format!("\x1b[{move_down}B"));
+                final_cursor_row = new_lines.len() - 1;
+            }
+            let extra_lines = previous_lines.len() - new_lines.len();
+            for _ in new_lines.len()..previous_lines.len() {
+                buffer.push_str("\r\n\x1b[2K");
+            }
+            // Move cursor back to end of new content
+            buffer.push_str(&format!("\x1b[{extra_lines}A"));
+        }
+
+        buffer.push_str("\x1b[?2026l"); // End synchronized output
+
+        if std::env::var("PI_TUI_DEBUG").map(|v| v == "1").unwrap_or(false) {
+            let debug_dir = std::path::PathBuf::from("/tmp/tui");
+            let _ = std::fs::create_dir_all(&debug_dir);
+            let debug_path = debug_dir.join(format!(
+                "render-{}-{}.log",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0),
+                rand::random::<u32>()
+            ));
+            let mut debug_data = String::new();
+            debug_data.push_str(&format!("firstChanged: {first_changed}\n"));
+            debug_data.push_str(&format!("viewportTop: {viewport_top}\n"));
+            debug_data.push_str(&format!("cursorRow: {}\n", *cursor_row));
+            debug_data.push_str(&format!("height: {height}\n"));
+            debug_data.push_str(&format!("lineDiff: {line_diff}\n"));
+            debug_data.push_str(&format!("hardwareCursorRow: {}\n", *hardware_cursor_row_field));
+            debug_data.push_str(&format!("renderEnd: {render_end}\n"));
+            debug_data.push_str(&format!("finalCursorRow: {final_cursor_row}\n"));
+            debug_data.push_str(&format!("cursorPos: {cursor_pos:?}\n"));
+            debug_data.push_str(&format!("newLines.length: {}\n", new_lines.len()));
+            debug_data.push_str(&format!("previousLines.length: {}\n", previous_lines.len()));
+            debug_data.push_str("\n=== newLines ===\n");
+            debug_data.push_str(&format!("{new_lines:?}\n"));
+            debug_data.push_str("\n=== previousLines ===\n");
+            debug_data.push_str(&format!("{previous_lines:?}\n"));
+            debug_data.push_str("\n=== buffer ===\n");
+            debug_data.push_str(&format!("{buffer:?}\n"));
+            let _ = std::fs::write(debug_path, debug_data);
+        }
+
+        // Write entire buffer at once
+        terminal.write(&buffer);
+
+        // Track cursor position for next render
+        // cursorRow tracks end of content (for viewport calculation)
+        // hardwareCursorRow tracks actual terminal cursor position (for movement)
+        *cursor_row = new_lines.len().saturating_sub(1);
+        *hardware_cursor_row_field = final_cursor_row;
+        // Track terminal's working area (grows but doesn't shrink unless cleared)
+        *max_lines_rendered = (*max_lines_rendered).max(new_lines.len());
+        *previous_viewport_top_field = prev_viewport_top.max(final_cursor_row.saturating_sub(height).saturating_add(1));
+
+        // Position hardware cursor for IME
+        position_hardware_cursor_static(
+            terminal,
+            cursor_pos,
+            new_lines.len(),
+            hardware_cursor_row_field,
+            show_hardware_cursor,
+        );
+
+        *previous_lines = new_lines;
+        *previous_kitty_image_ids = collect_kitty_image_ids_static(previous_lines);
+        *previous_width = width as i64;
+        *previous_height = height;
+    }
+}

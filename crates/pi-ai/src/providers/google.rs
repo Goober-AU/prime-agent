@@ -196,7 +196,7 @@ async fn run_stream_google(
 		.unwrap_or_default();
 	let client = create_client(
 		model,
-		&api_key,
+		Some(api_key.as_str()),
 		options.stream.headers.as_ref(),
 		options.stream.session_id.as_deref(),
 	);
@@ -655,7 +655,7 @@ fn generate_content_parameters_to_mldev(params: &Value) -> Value {
 	}
 	let config = params.get("config").cloned().unwrap_or(Value::Object(Map::new()));
 	generate_content_config_to_mldev(&config, &mut body);
-	body
+	Value::Object(body)
 }
 
 /// TS: `generateContentConfigToMldev(apiClient, config, parentObject)`.

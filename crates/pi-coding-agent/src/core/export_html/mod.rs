@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 use crate::config::{get_export_template_dir, APP_NAME};
 use crate::core::extensions::types::ToolDefinition;
 use crate::core::export_html::tool_renderer::ToolHtmlRenderer;
-use crate::core::session_manager::{SessionEntry, SessionHeader, SessionManager};
+use crate::core::session_manager::{SessionEntry, SessionManager};
 use crate::modes::interactive::theme::theme::{
     get_resolved_theme_colors, get_theme_export_colors,
 };
@@ -184,7 +184,7 @@ fn generate_theme_vars(theme_name: Option<&str>) -> Result<String, String> {
 /// `SessionData` passed to the template.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
-    pub header: Option<SessionHeader>,
+    pub header: Option<SessionEntry>,
     pub entries: Vec<SessionEntry>,
     #[serde(rename = "leafId")]
     pub leaf_id: Option<String>,
@@ -252,6 +252,9 @@ fn is_template_rendered_tool(name: &str) -> bool {
 }
 
 /// Pre-render custom tools to HTML using their TUI renderers.
+///
+/// Session entries are plain JSON objects (`SessionEntry = Map<String, Value>`),
+/// exactly like the TypeScript union is read structurally here.
 fn pre_render_custom_tools(
     entries: &[SessionEntry],
     tool_renderer: &dyn ToolHtmlRenderer,
@@ -259,72 +262,77 @@ fn pre_render_custom_tools(
     let mut rendered_tools: HashMap<String, RenderedToolHtml> = HashMap::new();
 
     for entry in entries {
-        let entry = match entry {
-            SessionEntry::Message(entry) => entry,
-            _ => continue,
+        if entry.get("type").and_then(Value::as_str) != Some("message") {
+            continue;
+        }
+        let Some(message) = entry.get("message") else {
+            continue;
         };
-        let message = &entry.message;
-        if message.role() == "assistant" {
-            if let Some(pi_ai::types::Message::Assistant(assistant)) = message.as_message() {
-                for block in &assistant.content {
-                    if let pi_ai::types::AssistantContentPart::ToolCall(call) = block {
-                        if !is_template_rendered_tool(&call.name) {
-                            if let Some(call_html) =
-                                tool_renderer.render_call(&call.id, &call.name, call.arguments.clone())
-                            {
-                                rendered_tools.insert(
-                                    call.id.clone(),
-                                    RenderedToolHtml {
-                                        call_html: Some(call_html),
-                                        ..Default::default()
-                                    },
-                                );
-                            }
-                        }
+        let role = message.get("role").and_then(Value::as_str).unwrap_or("");
+
+        if role == "assistant" {
+            if let Some(content) = message.get("content").and_then(Value::as_array) {
+                for block in content {
+                    if block.get("type").and_then(Value::as_str) != Some("toolCall") {
+                        continue;
+                    }
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                    if is_template_rendered_tool(name) {
+                        continue;
+                    }
+                    let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                    let arguments = block.get("arguments").cloned().unwrap_or(Value::Null);
+                    if let Some(call_html) = tool_renderer.render_call(id, name, arguments) {
+                        rendered_tools.insert(
+                            id.to_string(),
+                            RenderedToolHtml {
+                                call_html: Some(call_html),
+                                ..Default::default()
+                            },
+                        );
                     }
                 }
             }
         }
-        if message.role() == "toolResult" {
-            if let Some(pi_ai::types::Message::ToolResult(tool_result)) = message.as_message() {
-                if let Some(tool_call_id) = tool_result.tool_call_id.clone() {
-                    let tool_name = tool_result.tool_name.clone().unwrap_or_default();
-                    let existing = rendered_tools.get(&tool_call_id).cloned();
-                    if existing.is_some() || !is_template_rendered_tool(&tool_name) {
-                        let result = tool_result
-                            .content
+
+        if role == "toolResult" {
+            let Some(tool_call_id) = message.get("toolCallId").and_then(Value::as_str) else {
+                continue;
+            };
+            let tool_name = message.get("toolName").and_then(Value::as_str).unwrap_or("");
+            let existing = rendered_tools.get(tool_call_id).cloned();
+            if existing.is_some() || !is_template_rendered_tool(tool_name) {
+                let result = message
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .map(|content| {
+                        content
                             .iter()
-                            .map(|block| match block {
-                                pi_ai::types::UserContent::Text(text) => {
-                                    crate::core::export_html::tool_renderer::ToolResultContentPart {
-                                        content_type: "text".to_string(),
-                                        text: Some(text.text.clone()),
-                                        ..Default::default()
-                                    }
-                                }
-                                pi_ai::types::UserContent::Image(image) => {
-                                    crate::core::export_html::tool_renderer::ToolResultContentPart {
-                                        content_type: "image".to_string(),
-                                        data: Some(image.data.clone()),
-                                        mime_type: Some(image.mime_type.clone()),
-                                        ..Default::default()
-                                    }
-                                }
+                            .map(|part| crate::core::export_html::tool_renderer::ToolResultContentPart {
+                                content_type: part
+                                    .get("type")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .to_string(),
+                                text: part.get("text").and_then(Value::as_str).map(str::to_string),
+                                data: part.get("data").and_then(Value::as_str).map(str::to_string),
+                                mime_type: part
+                                    .get("mimeType")
+                                    .and_then(Value::as_str)
+                                    .map(str::to_string),
                             })
-                            .collect();
-                        if let Some(rendered) = tool_renderer.render_result(
-                            &tool_call_id,
-                            &tool_name,
-                            result,
-                            tool_result.details.clone().unwrap_or(Value::Null),
-                            tool_result.is_error.unwrap_or(false),
-                        ) {
-                            let mut merged = existing.unwrap_or_default();
-                            merged.result_html_collapsed = rendered.collapsed;
-                            merged.result_html_expanded = rendered.expanded;
-                            rendered_tools.insert(tool_call_id, merged);
-                        }
-                    }
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let details = message.get("details").cloned().unwrap_or(Value::Null);
+                let is_error = message.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                if let Some(rendered) =
+                    tool_renderer.render_result(tool_call_id, tool_name, result, details, is_error)
+                {
+                    let mut merged = existing.unwrap_or_default();
+                    merged.result_html_collapsed = rendered.collapsed;
+                    merged.result_html_expanded = rendered.expanded;
+                    rendered_tools.insert(tool_call_id.to_string(), merged);
                 }
             }
         }
@@ -404,8 +412,11 @@ pub fn export_from_file(input_path: &str, options: Option<ExportOptions>) -> Res
         return Err(format!("File not found: {input_path}"));
     }
 
-    let mut session_manager = SessionManager::in_memory();
-    session_manager.set_session_file(Some(input_path.to_string()), None);
+    let mut session_manager = SessionManager::in_memory(None, None)
+        .map_err(|error| error.to_string())?;
+    session_manager
+        .set_session_file(input_path, None, None)
+        .map_err(|error| error.to_string())?;
 
     let session_data = SessionData {
         header: session_manager.get_header(),

@@ -68,7 +68,7 @@ mod tests {
 
     #[test]
     fn keeps_paired_surrogates() {
-        let units: Vec<u16> = [0xD83D, 0xDE48];
+        let units: Vec<u16> = vec![0xD83D, 0xDE48];
         assert_eq!(sanitize_surrogate_units(&units), "\u{1F648}");
     }
 }

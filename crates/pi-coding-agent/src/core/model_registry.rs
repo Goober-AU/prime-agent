@@ -7,11 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use indexmap::IndexMap;
+use pi_ai::api_registry::ApiStreamSimpleFunction;
 use pi_ai::types::{
-    Api, ApiModel, AssistantMessageEventStream, Compat, Context, Model, ModelCost, NativeCompactionCapability,
-    OpenAICompletionsCompat, OpenAIResponsesCompat, AnthropicMessagesCompat, SimpleStreamOptions, ThinkingLevelMap,
+    Api, Compat, Context, Model, ModelCost, NativeCompactionCapability, SimpleStreamOptions, ThinkingLevelMap,
 };
-use pi_ai::utils::event_stream::AssistantMessageEventStream as EventStream;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -671,13 +670,48 @@ fn normalized_http_endpoint(value: &str) -> Option<String> {
     Some(text.strip_suffix('/').unwrap_or(&text).to_string())
 }
 
+/// The `modelDef` half of `validateNativeCompactionCapability` (both the
+/// models.json `ModelDefinition` and the `registerProvider` model shape).
+struct NativeCompactionModelRef<'a> {
+    id: &'a str,
+    api: Option<&'a str>,
+    base_url: Option<&'a str>,
+    capability: Option<&'a NativeCompactionCapability>,
+}
+
+/// The `providerConfig` half of `validateNativeCompactionCapability`.
+struct NativeCompactionProviderRef<'a> {
+    api: Option<&'a str>,
+    base_url: Option<&'a str>,
+}
+
+impl ProviderConfig {
+    fn native_compaction_provider_ref(&self) -> NativeCompactionProviderRef<'_> {
+        NativeCompactionProviderRef {
+            api: self.api.as_deref(),
+            base_url: self.base_url.as_deref(),
+        }
+    }
+}
+
+impl ModelDefinition {
+    fn native_compaction_model_ref(&self) -> NativeCompactionModelRef<'_> {
+        NativeCompactionModelRef {
+            id: &self.id,
+            api: self.api.as_deref(),
+            base_url: self.base_url.as_deref(),
+            capability: self.native_compaction.as_ref(),
+        }
+    }
+}
+
 /// `validateNativeCompactionCapability(providerName, modelDef, providerConfig)`.
 fn validate_native_compaction_capability(
     provider_name: &str,
-    model_def: &ModelDefinition,
-    provider_config: &ProviderConfig,
+    model_def: NativeCompactionModelRef<'_>,
+    provider_config: NativeCompactionProviderRef<'_>,
 ) -> Result<(), String> {
-    let Some(capability) = &model_def.native_compaction else {
+    let Some(capability) = model_def.capability else {
         return Ok(());
     };
     let label = format!(
@@ -690,7 +724,7 @@ fn validate_native_compaction_capability(
             label
         ));
     }
-    let api = model_def.api.as_deref().or(provider_config.api.as_deref());
+    let api = model_def.api.or(provider_config.api);
     if api != Some("openai-responses") {
         return Err(format!("{} requires api \"openai-responses\".", label));
     }
@@ -706,13 +740,7 @@ fn validate_native_compaction_capability(
             label
         ));
     }
-    let base_url = normalized_http_endpoint(
-        model_def
-            .base_url
-            .as_deref()
-            .or(provider_config.base_url.as_deref())
-            .unwrap_or(""),
-    );
+    let base_url = normalized_http_endpoint(model_def.base_url.or(provider_config.base_url).unwrap_or(""));
     let endpoint = normalized_http_endpoint(&capability.endpoint);
     let base_url_path_ok = base_url
         .as_deref()

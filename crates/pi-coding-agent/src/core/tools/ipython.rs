@@ -1021,10 +1021,10 @@ pub async fn execute_ipython(
     signal: Option<AbortSignal>,
     on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
     ctx: Option<&ExtensionContext>,
-) -> Result<(Vec<pi_ai::types::ContentBlock>, IpythonToolDetails, bool), KernelError> {
+) -> Result<(Vec<pi_agent_core::types::ContentBlock>, IpythonToolDetails, bool), KernelError> {
     if is_unsafe_windows_captured_launcher(&params.code) {
         return Ok((
-            vec![pi_ai::types::ContentBlock::text(UNSAFE_WINDOWS_CAPTURED_LAUNCHER_MESSAGE)],
+            vec![pi_agent_core::types::ContentBlock::text(UNSAFE_WINDOWS_CAPTURED_LAUNCHER_MESSAGE)],
             IpythonToolDetails {
                 duration_ms: Some(0.0),
                 status: Some("error".to_string()),
@@ -1054,7 +1054,7 @@ pub async fn execute_ipython(
             set_tool_working_message(Some(message));
             if let Some(on_update) = on_update.as_ref() {
                 on_update(pi_agent_core::types::AgentToolResult::new(
-                    vec![pi_ai::types::ContentBlock::text(message)],
+                    vec![pi_agent_core::types::ContentBlock::text(message)],
                     serde_json::json!({ "status": "starting" }),
                 ));
             }
@@ -1066,7 +1066,7 @@ pub async fn execute_ipython(
         Arc::new(move |chunk: &str, _name: StreamName| {
             if let Some(on_update) = on_update.as_ref() {
                 on_update(pi_agent_core::types::AgentToolResult::new(
-                    vec![pi_ai::types::ContentBlock::text(chunk)],
+                    vec![pi_agent_core::types::ContentBlock::text(chunk)],
                     serde_json::json!({ "status": "ok" }),
                 ));
             }
@@ -1134,9 +1134,10 @@ pub async fn execute_ipython(
     }
 
     let image_blocks = image_blocks_from_attachments(r.attachments.as_deref());
-    let mut content: Vec<pi_ai::types::ContentBlock> = vec![pi_ai::types::ContentBlock::text(text.clone())];
+    let mut content: Vec<pi_agent_core::types::ContentBlock> =
+        vec![pi_agent_core::types::ContentBlock::text(text.clone())];
     for image in &image_blocks {
-        content.push(pi_ai::types::ContentBlock::Image(image.clone()));
+        content.push(pi_agent_core::types::ContentBlock::Image(image.clone()));
     }
     let is_error = r.status == ExecuteStatus::Error || r.status == ExecuteStatus::Aborted;
     let mut model_output_artifact: Option<ModelToolOutputArtifactV1> = None;

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
-use pi_ai::types::ContentBlock;
+use pi_agent_core::types::ContentBlock;
 use tokio_util::sync::CancellationToken;
 
 use super::{ExtensionContext, ToolDefinition};

@@ -37,8 +37,9 @@ use crate::core::compaction::utils::{
     serialize_conversation, FileOperations, SUMMARIZATION_SYSTEM_PROMPT,
 };
 use crate::core::messages::{
-    convert_to_llm, create_branch_summary_message, create_compaction_summary_message, create_custom_message,
-    BashExecutionMessage, CustomMessage, HARNESS_DIGEST_CUSTOM_TYPE,
+    branch_summary_to_agent_message, compaction_summary_to_agent_message, convert_to_llm,
+    create_branch_summary_message, create_compaction_summary_message, create_custom_message,
+    custom_message_to_agent_message, HARNESS_DIGEST_CUSTOM_TYPE,
 };
 use crate::core::usage::{add_assistant_usage, empty_usage};
 
@@ -493,29 +494,30 @@ fn get_message_from_entry(entry: &CompactionSessionEntry) -> Option<AgentMessage
             details,
             timestamp,
             ..
-        } => Some(
-            create_custom_message(
-                custom_type.clone(),
-                content.clone(),
-                *display,
-                details.clone(),
-                timestamp,
-            )
-            .into(),
-        ),
+        } => Some(custom_message_to_agent_message(create_custom_message(
+            custom_type.clone(),
+            content.clone(),
+            *display,
+            details.clone(),
+            timestamp,
+        ))),
         CompactionSessionEntry::BranchSummary {
             summary,
             from_id,
             timestamp,
             ..
-        } => Some(create_branch_summary_message(summary.clone(), from_id.clone(), timestamp).into()),
+        } => Some(branch_summary_to_agent_message(create_branch_summary_message(
+            summary.clone(),
+            from_id.clone(),
+            timestamp,
+        ))),
         CompactionSessionEntry::Compaction {
             summary,
             tokens_before,
             custom_instructions,
             timestamp,
             ..
-        } => Some(
+        } => Some(compaction_summary_to_agent_message(
             create_compaction_summary_message(
                 summary.clone(),
                 *tokens_before,
@@ -524,9 +526,8 @@ fn get_message_from_entry(entry: &CompactionSessionEntry) -> Option<AgentMessage
                 None,
                 None,
                 None,
-            )
-            .into(),
-        ),
+            ),
+        )),
         CompactionSessionEntry::Other { .. } => None,
     }
 }
@@ -1324,4 +1325,232 @@ fn now_millis() -> i64 {
 /// port uses character offsets, which match for the text this function slices.
 fn slice_chars(text: &str, start: usize, end: usize) -> String {
     text.chars().skip(start).take(end.saturating_sub(start)).collect()
+}
+
+// ---------------------------------------------------------------------------
+// compact()
+// ---------------------------------------------------------------------------
+
+/// Generate summaries for compaction using prepared data.
+/// Returns CompactionResult - SessionManager adds uuid/parentUuid when saving.
+#[allow(clippy::too_many_arguments)]
+pub async fn compact(
+    preparation: &CompactionPreparation,
+    model: &Model,
+    api_key: &str,
+    custom_instructions: Option<&str>,
+    signal: Option<&tokio_util::sync::CancellationToken>,
+    thinking_level: Option<&ThinkingLevel>,
+    summary_call: SummaryCallRunner,
+    retry: Option<&ProviderRetryPolicy>,
+    provider_context: Option<(&Context, Option<&CompactionOptions>)>,
+) -> Result<CompactionResult, String> {
+    let CompactionPreparation {
+        first_kept_entry_id,
+        messages_to_summarize,
+        turn_prefix_messages,
+        is_split_turn,
+        tokens_before,
+        previous_summary,
+        file_ops,
+        settings,
+    } = preparation;
+    let mut native_compaction_unsupported = false;
+    if let Some((context, options)) = provider_context {
+        if supports_compaction(model) {
+            let model_for_call = model.clone();
+            let context = context.clone();
+            let options = options.cloned();
+            let api_key = api_key.to_string();
+            let custom_instructions = custom_instructions.map(str::to_string);
+            let signal_for_call = signal.cloned();
+            let attempt = Arc::new(move || {
+                let model = model_for_call.clone();
+                let context = context.clone();
+                let options = options.clone();
+                let api_key = api_key.clone();
+                let custom_instructions = custom_instructions.clone();
+                let signal = signal_for_call.clone();
+                Box::pin(async move {
+                    let mut merged = options.unwrap_or_default();
+                    merged.simple.api_key = Some(api_key);
+                    merged.simple.signal = signal;
+                    merged.custom_instructions = custom_instructions;
+                    let headers = merged.simple.headers.clone();
+                    let model_for_request = model.clone();
+                    let context_for_request = context.clone();
+                    let merged_for_request = merged.clone();
+                    let compact_call = move || {
+                        let model = model_for_request.clone();
+                        let context = context_for_request.clone();
+                        let options = merged_for_request.clone();
+                        Box::pin(async move {
+                            compact_simple(&model, &context, Some(&options)).await
+                        })
+                    };
+                    let _ = headers;
+                    compact_call().await
+                }) as pi_ai::types::BoxFuture<
+                    Result<Option<pi_ai::compaction::ProviderCompactionResult>, ProviderRequestError>,
+                >
+            });
+            let request = || {
+                let attempt = attempt.clone();
+                Box::pin(async move { attempt().await.map_err(provider_request_error) })
+            };
+            let remote = request_with_provider_retry(&request, retry, signal).await?;
+            if let Some(remote) = remote {
+                if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
+                    return Err(abort_error());
+                }
+                if !is_compaction_checkpoint(&serde_json::to_value(&remote.checkpoint).unwrap_or(Value::Null))
+                    || !compaction_matches_model(&remote.checkpoint, model)
+                {
+                    return Err("Provider compaction returned an incompatible checkpoint".to_string());
+                }
+                let (read_files, modified_files) = compute_file_lists(file_ops);
+                return Ok(CompactionResult {
+                    summary: "Conversation compacted on the server. The original transcript remains available in session history.".to_string(),
+                    first_kept_entry_id: first_kept_entry_id.clone(),
+                    tokens_before: *tokens_before,
+                    usage: remote.usage,
+                    details: Some(CompactionDetails {
+                        read_files,
+                        modified_files,
+                        provider_checkpoint: Some(remote.checkpoint),
+                    }),
+                });
+            }
+            native_compaction_unsupported = is_staged_azure_native_compaction_model(model);
+        }
+    }
+    let mut slices: Vec<SummarySlice> = Vec::new();
+    let summary: String;
+
+    if *is_split_turn && !turn_prefix_messages.is_empty() {
+        // Split turns make two wire calls with different bodies; each needs its own identity.
+        let history_future = async {
+            if !messages_to_summarize.is_empty() {
+                generate_summary(
+                    messages_to_summarize,
+                    model,
+                    settings.reserve_tokens,
+                    api_key,
+                    signal,
+                    custom_instructions,
+                    previous_summary.as_deref(),
+                    thinking_level,
+                    retry,
+                    summary_call.clone(),
+                    settings.summary_update_policy.as_deref().unwrap_or(SUMMARY_UPDATE_POLICY_OFF),
+                )
+                .await
+            } else {
+                Ok(SummarySlice {
+                    summary: "No prior history.".to_string(),
+                    usage: None,
+                })
+            }
+        };
+        let prefix_future = generate_turn_prefix_summary(
+            turn_prefix_messages,
+            model,
+            settings.reserve_tokens,
+            api_key,
+            signal,
+            thinking_level,
+            retry,
+            summary_call.clone(),
+        );
+        let (history_result, turn_prefix_result) = tokio::join!(history_future, prefix_future);
+        let history_result = history_result?;
+        let turn_prefix_result = turn_prefix_result?;
+        slices.push(history_result.clone());
+        slices.push(turn_prefix_result.clone());
+        summary = format!(
+            "{}\n\n---\n\n**Turn Context (split turn):**\n\n{}",
+            history_result.summary, turn_prefix_result.summary
+        );
+    } else {
+        let result = generate_summary(
+            messages_to_summarize,
+            model,
+            settings.reserve_tokens,
+            api_key,
+            signal,
+            custom_instructions,
+            previous_summary.as_deref(),
+            thinking_level,
+            retry,
+            summary_call,
+            settings.summary_update_policy.as_deref().unwrap_or(SUMMARY_UPDATE_POLICY_OFF),
+        )
+        .await?;
+        summary = result.summary.clone();
+        slices.push(result);
+    }
+    let (read_files, modified_files) = compute_file_lists(file_ops);
+    let mut summary = summary + &format_file_operations(&read_files, &modified_files);
+    if native_compaction_unsupported {
+        summary += "\n\n**Compaction fallback:** The staged Azure Astra native compaction endpoint returned an explicit unsupported response, so this checkpoint was created with the selected model's ordinary text summarizer. Authentication, rate-limit, timeout, cancellation, request-size, and malformed-checkpoint failures do not use this fallback. No provider checkpoint was committed.";
+    }
+
+    if first_kept_entry_id.is_empty() {
+        return Err("First kept entry has no UUID - session may need migration".to_string());
+    }
+
+    let mut usage: Option<Usage> = None;
+    for slice in &slices {
+        let Some(slice_usage) = &slice.usage else {
+            continue;
+        };
+        let total = usage.get_or_insert_with(empty_usage);
+        add_assistant_usage(total, slice_usage);
+    }
+    Ok(CompactionResult {
+        summary,
+        first_kept_entry_id: first_kept_entry_id.clone(),
+        tokens_before: *tokens_before,
+        details: Some(CompactionDetails {
+            read_files,
+            modified_files,
+            provider_checkpoint: None,
+        }),
+        usage,
+    })
+}
+
+fn provider_request_error(error: String) -> ProviderRequestError {
+    ProviderRequestError {
+        message: error,
+        ..Default::default()
+    }
+}
+
+/// Generate a summary for a turn prefix (when splitting a turn).
+#[allow(clippy::too_many_arguments)]
+async fn generate_turn_prefix_summary(
+    messages: &[AgentMessage],
+    model: &Model,
+    reserve_tokens: f64,
+    api_key: &str,
+    signal: Option<&tokio_util::sync::CancellationToken>,
+    thinking_level: Option<&ThinkingLevel>,
+    retry: Option<&ProviderRetryPolicy>,
+    summary_call: SummaryCallRunner,
+) -> Result<SummarySlice, String> {
+    let instructions = |_: Option<&str>| TURN_PREFIX_SUMMARIZATION_PROMPT.to_string();
+    generate_bounded_summary(
+        messages,
+        model,
+        (0.5 * reserve_tokens).floor(),
+        api_key,
+        signal,
+        thinking_level,
+        retry,
+        summary_call,
+        &instructions,
+        None,
+    )
+    .await
 }

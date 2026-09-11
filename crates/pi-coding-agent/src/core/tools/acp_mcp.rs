@@ -128,7 +128,7 @@ pub fn create_acp_mcp_tool_definitions(
                         .await
                         .map_err(anyhow::Error::msg)?;
                     Ok(pi_agent_core::types::AgentToolResult::new(
-                        vec![pi_ai::types::ContentBlock::text(text)],
+                        vec![pi_agent_core::types::ContentBlock::text(text)],
                         details,
                     ))
                 })
@@ -180,7 +180,7 @@ pub fn create_acp_mcp_tool_definitions(
                         .await
                         .map_err(anyhow::Error::msg)?;
                     Ok(pi_agent_core::types::AgentToolResult::new(
-                        vec![pi_ai::types::ContentBlock::text(text)],
+                        vec![pi_agent_core::types::ContentBlock::text(text)],
                         details,
                     ))
                 })

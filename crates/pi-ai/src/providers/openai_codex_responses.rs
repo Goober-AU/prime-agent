@@ -547,7 +547,7 @@ pub async fn try_compact_openai_codex_responses(
 
     // `decode(response)`: the Codex compaction SSE decoder.
     let decode = Arc::new(
-        move |response: reqwest::Response| -> BoxFuture<'static, Result<Value, CompactionRequestError>> {
+        move |response: reqwest::Response| -> BoxFuture<Result<Value, CompactionRequestError>> {
             let input = input.clone();
             Box::pin(async move {
                 let mut checkpoints: Vec<Value> = Vec::new();
@@ -799,9 +799,9 @@ async fn run_openai_codex_responses(
                 model,
                 {
                     let websocket_started = websocket_started.clone();
-                    move || {
+                    Arc::new(move || {
                         websocket_started.store(true, std::sync::atomic::Ordering::SeqCst);
-                    }
+                    })
                 },
                 options,
             )
@@ -2344,7 +2344,7 @@ async fn process_web_socket_stream(
     output: &mut AssistantMessage,
     stream: &AssistantMessageEventStream,
     model: &Model,
-    on_start: impl Fn() + Send + Sync + 'static,
+    on_start: Arc<dyn Fn() + Send + Sync>,
     options: &OpenAICodexResponsesOptions,
 ) -> Result<(), CodexThrown> {
     ensure_web_socket_session_cleanup_registered();
@@ -2429,7 +2429,7 @@ async fn process_web_socket_stream(
             events,
             output.clone(),
             stream.clone(),
-            Arc::new(on_start),
+            on_start,
             codex_error.clone(),
         );
 
@@ -3167,12 +3167,15 @@ mod tests {
     fn stream_requires_an_api_key_and_reports_it_in_the_stream() {
         std::env::remove_var("OPENAI_API_KEY");
         let model = model();
-        let stream = stream_openai_codex_responses(
-            &model,
-            &context(),
-            Some(OpenAICodexResponsesOptions::from_base(&StreamOptions::default())),
-        );
-        let result = tokio::runtime::Runtime::new().unwrap().block_on(stream.result());
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(async {
+            let stream = stream_openai_codex_responses(
+                &model,
+                &context(),
+                Some(OpenAICodexResponsesOptions::from_base(&StreamOptions::default())),
+            );
+            stream.result().await
+        });
         assert_eq!(result.stop_reason, "error");
         assert_eq!(
             result.error_message.as_deref(),
@@ -3205,7 +3208,7 @@ mod tests {
                 &mut AssistantMessage::default(),
                 &create_assistant_message_event_stream(),
                 &model,
-                || {},
+                Arc::new(|| {}),
                 &options,
             ))
             .unwrap_err();
@@ -3226,7 +3229,7 @@ mod tests {
     fn acquire_web_socket_reuses_and_releases_cached_connections() {
         let sockets: Arc<Mutex<Vec<Arc<FakeSocket>>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = sockets.clone();
-        set_web_socket_constructor(Some(Arc::new(move |_url: &str, _headers: IndexMap<String, String>| {
+        let constructor: WebSocketConstructor = Arc::new(move |_url: &str, _headers: IndexMap<String, String>| {
             let socket = fake_socket();
             socket.ready_state.store(1, std::sync::atomic::Ordering::SeqCst);
             recorded
@@ -3239,8 +3242,10 @@ mod tests {
                 tokio::task::yield_now().await;
                 opener.emit(WebSocketEventType::Open, json!({}));
             });
-            socket as Arc<dyn WebSocketLike>
-        }) as WebSocketConstructor));
+            let socket_like: Arc<dyn WebSocketLike> = socket;
+            socket_like
+        });
+        set_web_socket_constructor(Some(constructor));
 
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {

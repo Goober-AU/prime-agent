@@ -1167,17 +1167,34 @@ mod tests {
 
     #[test]
     fn message_detection_uses_details_shape() {
-        let message: AgentMessage = create_agent_session_message(&payload(), 5).into();
+        let message: AgentMessage = crate::core::messages::custom_message_to_agent_message(
+            match create_agent_session_message(&payload(), 5) {
+                CustomAgentMessage::Custom {
+                    custom_type,
+                    content,
+                    display,
+                    details,
+                    timestamp,
+                } => crate::core::messages::CustomMessage {
+                    role: "custom".to_string(),
+                    custom_type,
+                    content,
+                    display,
+                    details,
+                    timestamp,
+                },
+                _ => unreachable!("agent session messages are custom messages"),
+            },
+        );
         assert!(is_agent_session_message(&message));
         assert!(starts_agent_run(&message));
-        let other: AgentMessage = CustomAgentMessage::Custom {
+        let other = AgentMessage::Custom(CustomAgentMessage::Custom {
             custom_type: "other".to_string(),
             content: CustomMessageContent::Text("x".to_string()),
             display: true,
             details: None,
             timestamp: 1,
-        }
-        .into();
+        });
         assert!(!is_agent_session_message(&other));
         assert!(!starts_agent_run(&other));
     }

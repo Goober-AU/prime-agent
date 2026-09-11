@@ -23,8 +23,7 @@ use super::bedrock_responses_client::{
 	BedrockResponsesAuthOptions,
 };
 use super::openai_responses_shared::{
-	convert_responses_messages, convert_responses_tools, process_responses_stream, ConvertResponsesToolsOptions,
-	OpenAIResponsesStreamOptions,
+	convert_responses_messages, convert_responses_tools, process_responses_stream, OpenAIResponsesStreamOptions,
 };
 use super::simple_options::build_base_options;
 
@@ -240,7 +239,7 @@ pub fn build_params(
 	context: &Context,
 	options: Option<&BedrockResponsesOptions>,
 ) -> Result<Value, String> {
-	if let Some(service_tier) = options.and_then(|options| options.stream.service_tier.as_ref()).flatten() {
+	if let Some(Some(service_tier)) = options.and_then(|options| options.stream.service_tier.as_ref()) {
 		if service_tier != "default" && service_tier != "auto" {
 			return Err("Bedrock Astra supports only the Standard service tier.".to_string());
 		}
@@ -293,10 +292,111 @@ pub fn build_params(
 	Ok(Value::Object(params))
 }
 
+/// The whole `try { ... }` body of the TypeScript async IIFE.
+async fn run_bedrock_responses_stream(
+	model: &Model,
+	context: &Context,
+	options: &BedrockResponsesOptions,
+	output: &mut AssistantMessage,
+	stream: &AssistantMessageEventStream,
+) -> Result<(), ResponsesRunError> {
+	// TS: `const client = createBedrockResponsesClient(model, options);`
+	let client = create_bedrock_responses_client(model, Some(&options.auth_options()))
+		.map_err(ResponsesRunError::message)?;
+	// TS: `let params = buildParams(model, context, options);`
+	let mut params = build_params(model, context, Some(options)).map_err(ResponsesRunError::message)?;
+	// TS: `const nextParams = await options?.onPayload?.(params, model);`
+	if let Some(on_payload) = options.stream.on_payload.clone() {
+		if let Some(next) = on_payload(params.clone(), model).await {
+			params = next;
+		}
+	}
+
+	// TS: `const { data: openaiStream, response } = await client.responses
+	//      .create(params, requestOptions).withResponse();`
+	let response = client
+		.send_responses(
+			&match params {
+				Value::Object(object) => object,
+				_ => serde_json::Map::new(),
+			},
+			Some(&options.auth_options()),
+		)
+		.await
+		.map_err(ResponsesRunError::message)?;
+
+	let status = response.status().as_u16();
+	let response_headers = response.headers().clone();
+	// TS: `await options?.onResponse?.({ status, headers: headersToRecord(response.headers) }, model);`
+	{
+		let record = header_map_to_record(&response_headers);
+		if let Some(on_response) = options.stream.on_response.clone() {
+			on_response(
+				crate::types::ProviderResponse {
+					status: status as i64,
+					headers: record,
+				},
+				model,
+			)
+			.await;
+		}
+	}
+	// TS: `const requestId = response.headers.get("x-request-id") ?? undefined;`
+	let request_id = response_headers
+		.get("x-request-id")
+		.and_then(|value| value.to_str().ok())
+		.map(str::to_string);
+
+	stream.push(AssistantMessageEvent::Start {
+		partial: output.clone(),
+	});
+
+	// TS: `{ onUsageObservation: options?.onUsageObservation,
+	//      applyServiceTierPricing: applyBedrockAstraContextPricing }`
+	let stream_options = OpenAIResponsesStreamOptions {
+		on_output_item_done: None,
+		service_tier: None,
+		resolve_service_tier: None,
+		apply_service_tier_pricing: Some(Arc::new(|usage: &mut Usage, _service_tier: Option<&str>| {
+			apply_bedrock_astra_context_pricing(usage)
+		})),
+		on_usage_observation: options.stream.on_usage_observation.clone(),
+	};
+
+	let events = responses_event_stream(response);
+	process_responses_stream(events, output, stream, model, Some(&stream_options))
+		.await
+		.map_err(|error| match error {
+			super::openai_responses_shared::ResponsesStreamError::StreamFailure(failure) => {
+				ResponsesRunError::Failure(Box::new(failure))
+			}
+			super::openai_responses_shared::ResponsesStreamError::Message(message) => {
+				ResponsesRunError::Message(message)
+			}
+		})?;
+
+	if options
+		.stream
+		.signal
+		.as_ref()
+		.map(|signal| signal.is_cancelled())
+		.unwrap_or(false)
+	{
+		return Err(ResponsesRunError::message("Request was aborted"));
+	}
+
+	if output.stop_reason == "aborted" || output.stop_reason == "error" {
+		let failure = stream_failure_from_stop_reason(output.stop_reason_raw.as_deref(), request_id.as_deref());
+		return Err(ResponsesRunError::Failure(Box::new(failure)));
+	}
+
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::types::{Message, ModelCost, ProviderUsageObservation, Tool, UserContent, UserMessage};
+	use crate::types::{Message, ModelCost, Tool, UserContent, UserMessage};
 
 	fn model(id: &str) -> Model {
 		let mut model = Model::new(
@@ -520,7 +620,7 @@ mod tests {
 		let simple = SimpleStreamOptions {
 			stream: StreamOptions {
 				on_usage_observation: Some(Arc::new(
-					|_observation: ProviderUsageObservation, _model: &Model| {
+					|_observation: crate::types::ProviderUsageObservation, _model: &Model| {
 						Box::pin(async {}) as crate::types::BoxFuture<()>
 					},
 				)),
