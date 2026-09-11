@@ -1,0 +1,14 @@
+[package]
+name = "pi-coding-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+pi-ai = { workspace = true }
+pi-agent-core = { workspace = true }
+pi-tui = { workspace = true }
