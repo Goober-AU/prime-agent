@@ -13,11 +13,6 @@
    "loc": 40
   },
   {
-   "src": "packages/tui/src/components/editor.ts",
-   "rust": "crates/pi-tui/src/components/editor.rs",
-   "loc": 2410
-  },
-  {
    "src": "packages/tui/src/components/image.ts",
    "rust": "crates/pi-tui/src/components/image.rs",
    "loc": 135
@@ -63,5 +58,5 @@
    "loc": 59
   }
  ],
- "loc": 4970
+ "loc": 2560
 }

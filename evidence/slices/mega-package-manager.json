@@ -1,0 +1,13 @@
+{
+ "slice": "mega-package-manager",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/package-manager.ts",
+   "rust": "crates/pi-coding-agent/src/core/package_manager.rs",
+   "loc": 2443
+  }
+ ],
+ "loc": 2443,
+ "note": "Write in APPENDED CHUNKS of ~300-400 lines."
+}

@@ -1,0 +1,30 @@
+{
+  "slice": "ai-mcp",
+  "files": [
+    {
+      "src": "packages/ai/src/mcp/catalog.ts",
+      "rust": "crates/pi-ai/src/mcp/catalog.rs",
+      "status": "blocked",
+      "functions_mapped": 0,
+      "notes": "Not written yet. Recon only: needs registerOAuthProvider/getOAuthProvider (crates/pi-ai/src/utils/oauth/mod.rs) and createMcpOAuthProvider (mcp/oauth.rs), both still empty stubs owned by slices ai-core and ai-mcp."
+    },
+    {
+      "src": "packages/ai/src/mcp/index.ts",
+      "rust": "crates/pi-ai/src/mcp/mod.rs",
+      "status": "blocked",
+      "functions_mapped": 0,
+      "notes": "Stub exists (pub mod catalog; pub mod oauth;). Re-exports not added yet."
+    },
+    {
+      "src": "packages/ai/src/mcp/oauth.ts",
+      "rust": "crates/pi-ai/src/mcp/oauth.rs",
+      "status": "blocked",
+      "functions_mapped": 0,
+      "notes": "Not written yet. Recon complete: source read in full (583 LOC, 20 functions), plus its consumers (packages/coding-agent/src/core/mcp/mcp-manager.ts, modes/interactive/auth-flows.ts) and the TS test packages/ai/test/mcp-oauth.test.ts (12 cases) used as the behaviour spec."
+    }
+  ],
+  "build": "cargo check -p pi-ai: failed (pre-existing, not from this slice: crates/pi-ai/src/compaction.rs imports Api/Context/Model/SimpleStreamOptions/Usage from crate::types, which is still an empty stub owned by slice ai-core)",
+  "tests": "cargo test -p pi-ai: not run (no files written yet)",
+  "blocked_on": "Turn ended by output-limit recovery before any Rust file was written. Deps needed but not present: crate::utils::oauth::{get_oauth_provider, register_oauth_provider, OAuthProviderInterface, OAuthCredentials, OAuthLoginCallbacks, OAuthAuthInfo, OAuthPrompt, OAuthSelectPrompt, OAuthSelectOption} (utils/oauth/types.rs + utils/oauth/mod.rs are empty, slice ai-core), crate::utils::oauth::pkce::generate_pkce (empty, ai-core), crate::utils::oauth::oauth_page::{oauth_success_html, oauth_error_html} (empty, ai-core). No new Cargo dependencies needed: std (TcpListener, TcpStream, sha2/base64 not available) - SHA-256 for PKCE and base64url must be hand-written in-module or deferred to pkce.rs; sha2/base64/url/reqwest are NOT in the vendored offline registry (only serde, serde_json, thiserror, tokio, indexmap, bytes, parking_lot are cached), so no HTTP/TLS crate can be added.",
+  "honest_summary": "No Rust code was written for this slice. I completed full reconnaissance: read all 3 TypeScript files in full, their consumers, and the 12-case TS test that pins behaviour. The turn was cut off by an output-limit recovery before the first file was written, so catalog.rs and oauth.rs are still empty and mod.rs still holds only the two pub mod lines. cargo check -p pi-ai currently fails on a pre-existing error in crates/pi-ai/src/compaction.rs (empty crate::types stub, another slice)."
+}

@@ -53,11 +53,6 @@
    "loc": 1
   },
   {
-   "src": "packages/ai/src/models.generated.ts",
-   "rust": "crates/pi-ai/src/models_generated.rs",
-   "loc": 22884
-  },
-  {
    "src": "packages/ai/src/models.ts",
    "rust": "crates/pi-ai/src/models.rs",
    "loc": 123
@@ -178,5 +173,5 @@
    "loc": 324
   }
  ],
- "loc": 27164
+ "loc": 4280
 }

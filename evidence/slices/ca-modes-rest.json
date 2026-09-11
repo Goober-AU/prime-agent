@@ -93,11 +93,6 @@
    "loc": 174
   },
   {
-   "src": "packages/coding-agent/src/modes/agent-connection/daemon-agent-connection.ts",
-   "rust": "crates/pi-coding-agent/src/modes/agent_connection/daemon_agent_connection.rs",
-   "loc": 2483
-  },
-  {
    "src": "packages/coding-agent/src/modes/agent-connection/in-process-agent-connection.ts",
    "rust": "crates/pi-coding-agent/src/modes/agent_connection/in_process_agent_connection.rs",
    "loc": 697
@@ -148,5 +143,5 @@
    "loc": 172
   }
  ],
- "loc": 9954
+ "loc": 7471
 }

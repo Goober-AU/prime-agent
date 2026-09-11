@@ -33,11 +33,6 @@
    "loc": 116
   },
   {
-   "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
-   "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode.rs",
-   "loc": 10352
-  },
-  {
    "src": "packages/coding-agent/src/modes/interactive/onboarding.ts",
    "rust": "crates/pi-coding-agent/src/modes/interactive/onboarding.rs",
    "loc": 45
@@ -73,5 +68,5 @@
    "loc": 21
   }
  ],
- "loc": 13310
+ "loc": 2958
 }

@@ -1,0 +1,82 @@
+{
+ "slice": "ca-interactive-components-4",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/model-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs",
+   "loc": 601
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/tool-execution.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_execution.rs",
+   "loc": 534
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/oauth-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/oauth_selector.rs",
+   "loc": 416
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/scoped-models-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/scoped_models_selector.rs",
+   "loc": 336
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/diff.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/diff.rs",
+   "loc": 294
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/conversation-components.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/conversation_components.rs",
+   "loc": 182
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/subagent-summary-line.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/subagent_summary_line.rs",
+   "loc": 161
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/collapsible-error.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/collapsible_error.rs",
+   "loc": 125
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/tool-panel.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_panel.rs",
+   "loc": 93
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/custom-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_message.rs",
+   "loc": 88
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/user-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/user_message.rs",
+   "loc": 72
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/earendil-announcement.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/earendil_announcement.rs",
+   "loc": 53
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/compaction-summary-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/compaction_summary_message.rs",
+   "loc": 47
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/skill-invocation-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/skill_invocation_message.rs",
+   "loc": 36
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/dynamic-border.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/dynamic_border.rs",
+   "loc": 25
+  }
+ ],
+ "loc": 3063
+}

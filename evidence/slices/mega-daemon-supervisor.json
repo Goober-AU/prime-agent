@@ -1,0 +1,13 @@
+{
+ "slice": "mega-daemon-supervisor",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-supervisor.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_supervisor.rs",
+   "loc": 7389
+  }
+ ],
+ "loc": 7389,
+ "note": "Write in APPENDED CHUNKS of ~300-400 lines."
+}

@@ -42,6 +42,12 @@ Keep builds bounded. Set `CARGO_BUILD_JOBS=4` so parallel workers do not thrash
 the machine. A shared target directory is intentional; "Blocking waiting for
 file lock on build directory" is normal and resolves by itself.
 
+**CONCURRENCY CEILING (provider limit).** The model provider returns
+`429 too many concurrent requests` above 20 in-flight requests. The cap counts
+EVERY agent at every depth: the lead + all depth-1 children + all depth-2
+grandchildren. Keep at most 18 depth-1 children running at once so the lead plus
+one grandchild still fit. Never spawn a sub-agent from a sub-agent.
+
 **BUILD IT ALL AT ONCE. TEST AT THE END.** Hish's explicit rule for this port:
 do not test at every step or after every file. Write the whole slice first, then
 run ONE `cargo check -p <crate>` (and one `cargo test -p <crate>`) at the end of

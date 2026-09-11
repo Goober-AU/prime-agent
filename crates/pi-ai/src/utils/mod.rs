@@ -9,3 +9,8 @@ pub mod sanitize_unicode;
 pub mod stream_failure;
 pub mod typebox_helpers;
 pub mod validation;
+
+/// `Date.now()` - Unix timestamp in milliseconds.
+pub fn now_ms() -> i64 {
+    crate::utils::diagnostics::now_millis()
+}

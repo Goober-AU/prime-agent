@@ -61,12 +61,7 @@
    "src": "packages/coding-agent/src/core/orphan-process-journal.ts",
    "rust": "crates/pi-coding-agent/src/core/orphan_process_journal.rs",
    "loc": 176
-  },
-  {
-   "src": "packages/coding-agent/src/core/package-manager.ts",
-   "rust": "crates/pi-coding-agent/src/core/package_manager.rs",
-   "loc": 2443
   }
  ],
- "loc": 4081
+ "loc": 1638
 }

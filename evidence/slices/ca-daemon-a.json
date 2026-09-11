@@ -8,11 +8,6 @@
    "loc": 65
   },
   {
-   "src": "packages/coding-agent/src/modes/daemon/daemon-mode.ts",
-   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs",
-   "loc": 7949
-  },
-  {
    "src": "packages/coding-agent/src/modes/daemon/daemon-protocol.ts",
    "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_protocol.rs",
    "loc": 1496
@@ -21,12 +16,7 @@
    "src": "packages/coding-agent/src/modes/daemon/daemon-runtime-identity.ts",
    "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_runtime_identity.rs",
    "loc": 23
-  },
-  {
-   "src": "packages/coding-agent/src/modes/daemon/daemon-supervisor.ts",
-   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_supervisor.rs",
-   "loc": 7389
   }
  ],
- "loc": 16922
+ "loc": 1584
 }

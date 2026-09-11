@@ -1,0 +1,13 @@
+{
+ "slice": "mega-agent-session",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/agent-session.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_session.rs",
+   "loc": 13194
+  }
+ ],
+ "loc": 13194,
+ "note": "Largest hand-written file. Write in APPENDED CHUNKS of ~300-400 lines."
+}

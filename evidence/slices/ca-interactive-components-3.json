@@ -1,0 +1,82 @@
+{
+ "slice": "ca-interactive-components-3",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/config-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/config_selector.rs",
+   "loc": 603
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/settings-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/settings_selector.rs",
+   "loc": 526
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/login-dialog.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/login_dialog.rs",
+   "loc": 418
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/prime-onboarding-splash.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_onboarding_splash.rs",
+   "loc": 379
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/configuration-menu.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/configuration_menu.rs",
+   "loc": 258
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/injected-prompt-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/injected_prompt_message.rs",
+   "loc": 180
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/side-question.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/side_question.rs",
+   "loc": 152
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/centered-overlay.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/centered_overlay.rs",
+   "loc": 125
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/user-message-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/user_message_selector.rs",
+   "loc": 125
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/keybinding_hints.rs",
+   "loc": 76
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/bordered-loader.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/bordered_loader.rs",
+   "loc": 67
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/visual-truncate.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/visual_truncate.rs",
+   "loc": 50
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/show-images-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/show_images_selector.rs",
+   "loc": 43
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/footer.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/footer.rs",
+   "loc": 42
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/slash-command-result-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/slash_command_result_message.rs",
+   "loc": 15
+  }
+ ],
+ "loc": 3059
+}

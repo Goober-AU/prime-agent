@@ -1,0 +1,13 @@
+{
+ "slice": "mega-models-generated",
+ "crate": "pi-ai",
+ "files": [
+  {
+   "src": "packages/ai/src/models.generated.ts",
+   "rust": "crates/pi-ai/src/models_generated.rs",
+   "loc": 22884
+  }
+ ],
+ "loc": 22884,
+ "note": "Generated data table. Port as a Rust data module built from packages/ai/src/models.generated.ts. Write it in APPENDED CHUNKS (many small write calls, ~400 lines each); do not try to emit it in one write."
+}

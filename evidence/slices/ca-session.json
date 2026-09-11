@@ -33,11 +33,6 @@
    "loc": 359
   },
   {
-   "src": "packages/coding-agent/src/core/session-manager.ts",
-   "rust": "crates/pi-coding-agent/src/core/session_manager.rs",
-   "loc": 2761
-  },
-  {
    "src": "packages/coding-agent/src/core/session-resolver.ts",
    "rust": "crates/pi-coding-agent/src/core/session_resolver.rs",
    "loc": 147
@@ -48,5 +43,5 @@
    "loc": 20
   }
  ],
- "loc": 3898
+ "loc": 1137
 }
