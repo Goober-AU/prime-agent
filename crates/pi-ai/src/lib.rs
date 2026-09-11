@@ -1,2 +1,21 @@
 //! Port of packages/ai/src (see docs/MIGRATION-MAP.md).
-pub const PACKAGE_VERSION: &str = "0.9.3";
+pub mod api_registry;
+pub mod bedrock_provider;
+pub mod cache_pricing;
+pub mod cli_entry;
+pub mod compaction;
+pub mod copilot_client_version;
+pub mod env_api_keys;
+pub mod log;
+pub mod mcp;
+pub mod mcp_api;
+pub mod models;
+pub mod models_generated;
+pub mod oauth_api;
+pub mod openrouter_reasoning;
+pub mod prime_inference_model_catalog;
+pub mod providers;
+pub mod session_resources;
+pub mod stream;
+pub mod types;
+pub mod utils;

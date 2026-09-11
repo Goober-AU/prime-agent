@@ -1,0 +1,12 @@
+{
+ "packages/coding-agent/src/core/export-html/template.css": "crates/pi-coding-agent/assets/export-html/template.css",
+ "packages/coding-agent/src/core/export-html/template.html": "crates/pi-coding-agent/assets/export-html/template.html",
+ "packages/coding-agent/src/core/export-html/template.js": "crates/pi-coding-agent/assets/export-html/template.js",
+ "packages/coding-agent/src/core/export-html/vendor/highlight.min.js": "crates/pi-coding-agent/assets/export-html/vendor/highlight.min.js",
+ "packages/coding-agent/src/core/export-html/vendor/marked.min.js": "crates/pi-coding-agent/assets/export-html/vendor/marked.min.js",
+ "packages/coding-agent/src/modes/interactive/assets/clankolas.png": "crates/pi-coding-agent/assets/interactive/clankolas.png",
+ "packages/coding-agent/src/modes/interactive/theme/dark.json": "crates/pi-coding-agent/assets/theme/dark.json",
+ "packages/coding-agent/src/modes/interactive/theme/light.json": "crates/pi-coding-agent/assets/theme/light.json",
+ "packages/coding-agent/src/modes/interactive/theme/prime.json": "crates/pi-coding-agent/assets/theme/prime.json",
+ "packages/coding-agent/src/modes/interactive/theme/theme-schema.json": "crates/pi-coding-agent/assets/theme/theme-schema.json"
+}

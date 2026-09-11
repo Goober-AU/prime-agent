@@ -12,3 +12,7 @@ tokio = { workspace = true }
 pi-ai = { workspace = true }
 pi-agent-core = { workspace = true }
 pi-tui = { workspace = true }
+
+[[bin]]
+name = "optimus-rust"
+path = "src/bin/optimus_rust.rs"

@@ -1,2 +1,6 @@
-//! Port of packages/agent/src.
-pub const PACKAGE_VERSION: &str = "0.9.3";
+//! Port of packages/agent/src (see docs/MIGRATION-MAP.md).
+pub mod agent;
+pub mod agent_loop;
+pub mod performance_metrics;
+pub mod proxy;
+pub mod types;

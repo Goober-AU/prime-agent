@@ -1,0 +1,3298 @@
+[
+ {
+  "package": "agent",
+  "src": "packages/agent/src/agent-loop.ts",
+  "loc": 1287,
+  "crate": "pi-agent-core",
+  "rust": "crates/pi-agent-core/src/agent_loop.rs",
+  "status": "pending"
+ },
+ {
+  "package": "agent",
+  "src": "packages/agent/src/agent.ts",
+  "loc": 605,
+  "crate": "pi-agent-core",
+  "rust": "crates/pi-agent-core/src/agent.rs",
+  "status": "pending"
+ },
+ {
+  "package": "agent",
+  "src": "packages/agent/src/index.ts",
+  "loc": 5,
+  "crate": "pi-agent-core",
+  "rust": "crates/pi-agent-core/src/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "agent",
+  "src": "packages/agent/src/performance-metrics.ts",
+  "loc": 187,
+  "crate": "pi-agent-core",
+  "rust": "crates/pi-agent-core/src/performance_metrics.rs",
+  "status": "pending"
+ },
+ {
+  "package": "agent",
+  "src": "packages/agent/src/proxy.ts",
+  "loc": 348,
+  "crate": "pi-agent-core",
+  "rust": "crates/pi-agent-core/src/proxy.rs",
+  "status": "pending"
+ },
+ {
+  "package": "agent",
+  "src": "packages/agent/src/types.ts",
+  "loc": 409,
+  "crate": "pi-agent-core",
+  "rust": "crates/pi-agent-core/src/types.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/api-registry.ts",
+  "loc": 112,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/api_registry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/bedrock-provider.ts",
+  "loc": 9,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/bedrock_provider.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/cache-pricing.ts",
+  "loc": 63,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/cache_pricing.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/cli.ts",
+  "loc": 133,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/cli_entry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/compaction.ts",
+  "loc": 66,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/compaction.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/copilot-client-version.ts",
+  "loc": 13,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/copilot_client_version.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/env-api-keys.ts",
+  "loc": 221,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/env_api_keys.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/index.ts",
+  "loc": 47,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/log.ts",
+  "loc": 88,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/log.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/mcp.ts",
+  "loc": 1,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/mcp_api.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/mcp/catalog.ts",
+  "loc": 53,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/mcp/catalog.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/mcp/index.ts",
+  "loc": 4,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/mcp/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/mcp/oauth.ts",
+  "loc": 583,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/mcp/oauth.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/models.generated.ts",
+  "loc": 22884,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/models_generated.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/models.ts",
+  "loc": 123,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/models.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/oauth.ts",
+  "loc": 1,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/oauth_api.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/openrouter-reasoning.ts",
+  "loc": 67,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/openrouter_reasoning.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/prime-inference-model-catalog.ts",
+  "loc": 93,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/prime_inference_model_catalog.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/amazon-bedrock-responses.ts",
+  "loc": 144,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/amazon_bedrock_responses.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/amazon-bedrock.ts",
+  "loc": 968,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/amazon_bedrock.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/anthropic.ts",
+  "loc": 1288,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/anthropic.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/azure-openai-responses.ts",
+  "loc": 284,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/azure_openai_responses.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/bedrock-responses-client.ts",
+  "loc": 106,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/bedrock_responses_client.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/cloudflare.ts",
+  "loc": 32,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/cloudflare.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/faux.ts",
+  "loc": 499,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/faux.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/github-copilot-headers.ts",
+  "loc": 34,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/github_copilot_headers.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/google-shared.ts",
+  "loc": 340,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/google_shared.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/google-vertex.ts",
+  "loc": 543,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/google_vertex.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/google.ts",
+  "loc": 469,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/google.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/mistral.ts",
+  "loc": 634,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/mistral.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/openai-codex-responses.ts",
+  "loc": 1388,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/openai_codex_responses.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/openai-compaction.ts",
+  "loc": 229,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/openai_compaction.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/openai-completions.ts",
+  "loc": 1254,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/openai_completions.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/openai-responses-shared.ts",
+  "loc": 576,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/openai_responses_shared.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/openai-responses.ts",
+  "loc": 335,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/openai_responses.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/opencode-headers.ts",
+  "loc": 16,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/opencode_headers.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/register-builtins.ts",
+  "loc": 454,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/register_builtins.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/simple-options.ts",
+  "loc": 49,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/simple_options.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/providers/transform-messages.ts",
+  "loc": 219,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/providers/transform_messages.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/session-resources.ts",
+  "loc": 24,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/session_resources.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/stream.ts",
+  "loc": 74,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/stream.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/types.ts",
+  "loc": 501,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/types.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/diagnostics.ts",
+  "loc": 45,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/diagnostics.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/event-stream.ts",
+  "loc": 84,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/event_stream.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/hash.ts",
+  "loc": 12,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/hash.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/headers.ts",
+  "loc": 7,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/headers.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/json-parse.ts",
+  "loc": 124,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/json_parse.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/oauth/anthropic.ts",
+  "loc": 402,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/oauth/anthropic.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/oauth/github-copilot.ts",
+  "loc": 378,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/oauth/github_copilot.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/oauth/index.ts",
+  "loc": 128,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/oauth/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/oauth/oauth-page.ts",
+  "loc": 115,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/oauth/oauth_page.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/oauth/openai-codex.ts",
+  "loc": 458,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/oauth/openai_codex.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/oauth/pkce.ts",
+  "loc": 29,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/oauth/pkce.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/oauth/types.ts",
+  "loc": 71,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/oauth/types.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/overflow.ts",
+  "loc": 147,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/overflow.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/sanitize-unicode.ts",
+  "loc": 25,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/sanitize_unicode.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/stream-failure.ts",
+  "loc": 271,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/stream_failure.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/typebox-helpers.ts",
+  "loc": 24,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/typebox_helpers.rs",
+  "status": "pending"
+ },
+ {
+  "package": "ai",
+  "src": "packages/ai/src/utils/validation.ts",
+  "loc": 324,
+  "crate": "pi-ai",
+  "rust": "crates/pi-ai/src/utils/validation.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/bun/cli.ts",
+  "loc": 12,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/bun/cli.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/bun/register-bedrock.ts",
+  "loc": 4,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/bun/register_bedrock.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/bun/restore-sandbox-env.ts",
+  "loc": 32,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/bun/restore_sandbox_env.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli-main.ts",
+  "loc": 46,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli_main_entry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli.ts",
+  "loc": 15,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli_entry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/args.ts",
+  "loc": 346,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/args.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/command-registry.ts",
+  "loc": 378,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/command_registry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/config-selector.ts",
+  "loc": 46,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/config_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/daemon-command.ts",
+  "loc": 1688,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/daemon_command.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/daemon-launch.ts",
+  "loc": 607,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/daemon_launch.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/daemon-list-format.ts",
+  "loc": 125,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/daemon_list_format.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/daemon-ps-format.ts",
+  "loc": 90,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/daemon_ps_format.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/daemon-ps.ts",
+  "loc": 1286,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/daemon_ps.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/daemon-stop-confirm.ts",
+  "loc": 76,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/daemon_stop_confirm.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/daemon-update-restart.ts",
+  "loc": 602,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/daemon_update_restart.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/file-processor.ts",
+  "loc": 87,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/file_processor.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/initial-message.ts",
+  "loc": 43,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/initial_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/list-models.ts",
+  "loc": 96,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/list_models.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/node-version-check.ts",
+  "loc": 59,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/node_version_check.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/owned-session-worker.ts",
+  "loc": 533,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/owned_session_worker.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/public-command.ts",
+  "loc": 447,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/public_command.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/session-resolver.ts",
+  "loc": 1,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/session_resolver.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/cli/subprocess-launch.ts",
+  "loc": 61,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/cli/subprocess_launch.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/config.ts",
+  "loc": 634,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/config.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/agent-messages.ts",
+  "loc": 648,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/agent_messages.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/agent-observe.ts",
+  "loc": 216,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/agent_observe.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/agent-session-config.ts",
+  "loc": 157,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/agent_session_config.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/agent-session-runtime.ts",
+  "loc": 774,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/agent_session_runtime.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/agent-session-services.ts",
+  "loc": 287,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/agent_session_services.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/agent-session.ts",
+  "loc": 13194,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/agent_session.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/agent-traces.ts",
+  "loc": 1170,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/agent_traces.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/auth-guidance.ts",
+  "loc": 61,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/auth_guidance.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/auth-storage.ts",
+  "loc": 1177,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/auth_storage.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/autonomous.ts",
+  "loc": 592,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/autonomous.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/bash-executor.ts",
+  "loc": 114,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/bash_executor.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/compaction/branch-summarization.ts",
+  "loc": 327,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/compaction/branch_summarization.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/compaction/checkpoint.ts",
+  "loc": 54,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/compaction/checkpoint.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/compaction/compaction.ts",
+  "loc": 1031,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/compaction/compaction.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/compaction/index.ts",
+  "loc": 7,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/compaction/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/compaction/utils.ts",
+  "loc": 149,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/compaction/utils.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/context-tree.ts",
+  "loc": 321,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/context_tree.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/cron-jobs.ts",
+  "loc": 1719,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/cron_jobs.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/defaults.ts",
+  "loc": 3,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/defaults.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/diagnostics.ts",
+  "loc": 15,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/diagnostics.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/event-bus.ts",
+  "loc": 33,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/event_bus.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/event-log.ts",
+  "loc": 173,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/event_log.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/exec.ts",
+  "loc": 130,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/exec.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/export-html/ansi-to-html.ts",
+  "loc": 230,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/export_html/ansi_to_html.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/export-html/index.ts",
+  "loc": 301,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/export_html/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/export-html/tool-renderer.ts",
+  "loc": 167,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/export_html/tool_renderer.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/builtin/herdr-agent-state.ts",
+  "loc": 471,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/builtin/herdr_agent_state.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/builtin/memory.ts",
+  "loc": 314,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/builtin/memory.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/builtin/telegram.ts",
+  "loc": 163,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/builtin/telegram.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/bundled-modules.ts",
+  "loc": 39,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/bundled_modules.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/index.ts",
+  "loc": 148,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/loader.ts",
+  "loc": 593,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/loader.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/runner.ts",
+  "loc": 1074,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/runner.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/types.ts",
+  "loc": 1434,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/types.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/extensions/wrapper.ts",
+  "loc": 38,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/extensions/wrapper.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/footer-data-provider.ts",
+  "loc": 312,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/footer_data_provider.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/goals.ts",
+  "loc": 290,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/goals.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/index.ts",
+  "loc": 84,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/kernel/boot-gate.ts",
+  "loc": 34,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/kernel/boot_gate.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/kernel/bootstrap-cli.ts",
+  "loc": 13,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/kernel/bootstrap_cli.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/kernel/bootstrap.ts",
+  "loc": 962,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/kernel/bootstrap.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/kernel/index.ts",
+  "loc": 2,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/kernel/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/kernel/repl-manager.ts",
+  "loc": 1913,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/kernel/repl_manager.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/kernel/shared.ts",
+  "loc": 358,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/kernel/shared.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/kernel/state-snapshot.ts",
+  "loc": 116,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/kernel/state_snapshot.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/keybindings.ts",
+  "loc": 402,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/keybindings.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/legacy-rlm-continuation.ts",
+  "loc": 115,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/legacy_rlm_continuation.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/logging.ts",
+  "loc": 23,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/logging.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/mcp/acp-mcp-types.ts",
+  "loc": 15,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/mcp/acp_mcp_types.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/mcp/mcp-command.ts",
+  "loc": 235,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/mcp/mcp_command.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/mcp/mcp-manager.ts",
+  "loc": 249,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/mcp/mcp_manager.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/memory/evidence.ts",
+  "loc": 85,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/memory/evidence.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/memory/jobs.ts",
+  "loc": 200,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/memory/jobs.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/memory/project.ts",
+  "loc": 65,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/memory/project.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/memory/search.ts",
+  "loc": 136,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/memory/search.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/memory/server.ts",
+  "loc": 102,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/memory/server.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/memory/service.ts",
+  "loc": 326,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/memory/service.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/memory/sharing.ts",
+  "loc": 155,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/memory/sharing.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/memory/store.ts",
+  "loc": 331,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/memory/store.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/messages.ts",
+  "loc": 685,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/messages.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/model-registry.ts",
+  "loc": 1803,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/model_registry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/model-resolver.ts",
+  "loc": 639,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/model_resolver.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/model-tool-output-policy.ts",
+  "loc": 283,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/model_tool_output_policy.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/new-session-command.ts",
+  "loc": 54,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/new_session_command.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/orphan-process-journal.ts",
+  "loc": 176,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/orphan_process_journal.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/output-guard.ts",
+  "loc": 74,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/output_guard.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/package-manager.ts",
+  "loc": 2443,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/package_manager.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/performance-metrics.ts",
+  "loc": 483,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/performance_metrics.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/prime-inference-auth.ts",
+  "loc": 736,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/prime_inference_auth.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/prime-inference-model-catalog.ts",
+  "loc": 170,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/prime_inference_model_catalog.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/prime-inference-model-selection.ts",
+  "loc": 34,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/prime_inference_model_selection.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/prime-inference-models.ts",
+  "loc": 88,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/prime_inference_models.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/prompt-admission.ts",
+  "loc": 42,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/prompt_admission.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/prompt-templates.ts",
+  "loc": 286,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/prompt_templates.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/prompts/index.ts",
+  "loc": 7,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/prompts/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/prompts/rlm.ts",
+  "loc": 230,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/prompts/rlm.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/provider-display-names.ts",
+  "loc": 33,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/provider_display_names.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/provider-retry.ts",
+  "loc": 226,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/provider_retry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/refinement/index.ts",
+  "loc": 1,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/refinement/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/refinement/refinement.ts",
+  "loc": 1292,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/refinement/refinement.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/resolve-config-value.ts",
+  "loc": 142,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/resolve_config_value.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/resource-loader.ts",
+  "loc": 938,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/resource_loader.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/rlm-continuation.ts",
+  "loc": 169,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/rlm_continuation.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/rlm-max-depth.ts",
+  "loc": 13,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/rlm_max_depth.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/rlm-runtime.ts",
+  "loc": 320,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/rlm_runtime.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/sdk.ts",
+  "loc": 465,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/sdk.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/semantic-edges.ts",
+  "loc": 579,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/semantic_edges.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-action-store.ts",
+  "loc": 435,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_action_store.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-cwd.ts",
+  "loc": 59,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_cwd.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-file-actions.ts",
+  "loc": 74,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_file_actions.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-id.ts",
+  "loc": 34,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_id.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-import-errors.ts",
+  "loc": 9,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_import_errors.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-lease.ts",
+  "loc": 359,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_lease.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-manager.ts",
+  "loc": 2761,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_manager.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-resolver.ts",
+  "loc": 147,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_resolver.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/session-stats.ts",
+  "loc": 20,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/session_stats.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/settings-manager.ts",
+  "loc": 1357,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/settings_manager.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/side-question.ts",
+  "loc": 187,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/side_question.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/skill-blocks.ts",
+  "loc": 22,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/skill_blocks.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/skills.ts",
+  "loc": 623,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/skills.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/slash-commands.ts",
+  "loc": 281,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/slash_commands.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/source-info.ts",
+  "loc": 40,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/source_info.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/system-prompt.ts",
+  "loc": 211,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/system_prompt.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/telemetry.ts",
+  "loc": 781,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/telemetry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/thinking-levels.ts",
+  "loc": 3,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/thinking_levels.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/timings.ts",
+  "loc": 36,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/timings.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/acp-mcp.ts",
+  "loc": 99,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/acp_mcp.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/bash.ts",
+  "loc": 455,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/bash.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/code-preview.ts",
+  "loc": 539,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/code_preview.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/edit-diff.ts",
+  "loc": 424,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/edit_diff.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/edit.ts",
+  "loc": 533,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/edit.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/file-mutation-queue.ts",
+  "loc": 39,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/file_mutation_queue.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/index.ts",
+  "loc": 57,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/ipython-cell-code.ts",
+  "loc": 13,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/ipython_cell_code.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/ipython.ts",
+  "loc": 810,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/ipython.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/output-accumulator.ts",
+  "loc": 261,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/output_accumulator.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/path-utils.ts",
+  "loc": 90,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/path_utils.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/render-utils.ts",
+  "loc": 68,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/render_utils.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/tool-definition-wrapper.ts",
+  "loc": 45,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/tool_definition_wrapper.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/tools/truncate.ts",
+  "loc": 258,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/tools/truncate.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/usage.ts",
+  "loc": 76,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/usage.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/core/websearch-credential.ts",
+  "loc": 6,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/core/websearch_credential.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/index.ts",
+  "loc": 418,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/main.ts",
+  "loc": 1780,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/main_entry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/migrations.ts",
+  "loc": 449,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/migrations.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/acp/acp-events.ts",
+  "loc": 323,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/acp/acp_events.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/acp/acp-mcp.ts",
+  "loc": 95,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/acp/acp_mcp.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/acp/acp-meta.ts",
+  "loc": 132,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/acp/acp_meta.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/acp/acp-mode.ts",
+  "loc": 1109,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/acp/acp_mode.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/acp/acp-stop-reason.ts",
+  "loc": 29,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/acp/acp_stop_reason.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/acp/index.ts",
+  "loc": 4,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/acp/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agent-connection/daemon-agent-connection.ts",
+  "loc": 2483,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agent_connection/daemon_agent_connection.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agent-connection/in-process-agent-connection.ts",
+  "loc": 697,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agent_connection/in_process_agent_connection.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agent-connection/index.ts",
+  "loc": 80,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agent_connection/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agent-connection/snapshot.ts",
+  "loc": 198,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agent_connection/snapshot.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agent-connection/tool-definition.ts",
+  "loc": 23,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agent_connection/tool_definition.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agent-connection/types.ts",
+  "loc": 803,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agent_connection/types.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agents-view/agents-view-mode.ts",
+  "loc": 3003,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agents_view/agents_view_mode.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agents-view/agents-view-state.ts",
+  "loc": 1156,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agents_view/agents_view_state.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agents-view/roster-store.ts",
+  "loc": 131,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agents_view/roster_store.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/agents-view/session-view-search.ts",
+  "loc": 142,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/agents_view/session_view_search.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/active-session-state.ts",
+  "loc": 142,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/active_session_state.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/agent-roster.ts",
+  "loc": 234,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/agent_roster.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/command-recovery-journal.ts",
+  "loc": 208,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/command_recovery_journal.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/compact-session-stream.ts",
+  "loc": 213,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/compact_session_stream.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-catalog-entry.ts",
+  "loc": 7,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_catalog_entry.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-catalog-process.ts",
+  "loc": 484,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_catalog_process.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-client-env.ts",
+  "loc": 97,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_client_env.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-client.ts",
+  "loc": 750,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_client.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-errors.ts",
+  "loc": 65,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_errors.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-extension-binding.ts",
+  "loc": 254,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_extension_binding.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-mode.ts",
+  "loc": 7949,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-protocol.ts",
+  "loc": 1496,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_protocol.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-routed-client.ts",
+  "loc": 275,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_routed_client.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-runtime-identity.ts",
+  "loc": 23,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_runtime_identity.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-session-id.ts",
+  "loc": 1,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_session_id.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-session-list.ts",
+  "loc": 466,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_session_list.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-session-summarizer.ts",
+  "loc": 427,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_session_summarizer.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-socket.ts",
+  "loc": 332,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_socket.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-supervisor-ownership.ts",
+  "loc": 961,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_supervisor_ownership.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-supervisor.ts",
+  "loc": 7389,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_supervisor.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-worker-client.ts",
+  "loc": 354,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_worker_client.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/daemon-worker-protocol.ts",
+  "loc": 280,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_worker_protocol.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/heartbeat-catalog.ts",
+  "loc": 25,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/heartbeat_catalog.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/mutation-drain-latch.ts",
+  "loc": 37,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/mutation_drain_latch.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/rlm-ledger.ts",
+  "loc": 823,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/rlm_ledger.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/rlm-subagent-display.ts",
+  "loc": 100,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/rlm_subagent_display.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/saved-session-catalog.ts",
+  "loc": 77,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/saved_session_catalog.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/saved-session-info.ts",
+  "loc": 41,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/saved_session_info.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/snapshot-transcript-cache.ts",
+  "loc": 290,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/snapshot_transcript_cache.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/daemon/worker-recovery-journal.ts",
+  "loc": 114,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/daemon/worker_recovery_journal.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/headless-completion.ts",
+  "loc": 137,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/headless_completion.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/index.ts",
+  "loc": 126,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/agent-activity.ts",
+  "loc": 135,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/agent_activity.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/auth-flows.ts",
+  "loc": 877,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/auth_flows.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/agent-message.ts",
+  "loc": 111,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/agent_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/armin.ts",
+  "loc": 382,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/armin.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/assistant-message.ts",
+  "loc": 388,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/assistant_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/bash-execution.ts",
+  "loc": 211,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/bash_execution.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/bordered-loader.ts",
+  "loc": 67,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/bordered_loader.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/branch-summary-message.ts",
+  "loc": 56,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/branch_summary_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/centered-overlay.ts",
+  "loc": 125,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/centered_overlay.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/collapsible-error.ts",
+  "loc": 125,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/collapsible_error.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/compaction-outcome-message.ts",
+  "loc": 27,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/compaction_outcome_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/compaction-summary-message.ts",
+  "loc": 47,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/compaction_summary_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/config-selector.ts",
+  "loc": 603,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/config_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/configuration-menu.ts",
+  "loc": 258,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/configuration_menu.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/context-tree-format.ts",
+  "loc": 200,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/context_tree_format.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/conversation-components.ts",
+  "loc": 182,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/conversation_components.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/countdown-timer.ts",
+  "loc": 34,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/countdown_timer.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/custom-editor.ts",
+  "loc": 332,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_editor.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/custom-message.ts",
+  "loc": 88,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/daxnuts.ts",
+  "loc": 164,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/daxnuts.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/diff.ts",
+  "loc": 294,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/diff.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/dynamic-border.ts",
+  "loc": 25,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/dynamic_border.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/earendil-announcement.ts",
+  "loc": 53,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/earendil_announcement.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/edit-summary.ts",
+  "loc": 135,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/edit_summary.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/expandable-custom-message.ts",
+  "loc": 33,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/expandable_custom_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/extension-editor.ts",
+  "loc": 133,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_editor.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/extension-input.ts",
+  "loc": 87,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_input.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/extension-selector.ts",
+  "loc": 172,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/feature-hint.ts",
+  "loc": 46,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/feature_hint.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/footer.ts",
+  "loc": 42,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/footer.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/heartbeat-manager.ts",
+  "loc": 326,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/heartbeat_manager.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/index.ts",
+  "loc": 51,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/injected-prompt-message.ts",
+  "loc": 180,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/injected_prompt_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/ipython-cell.ts",
+  "loc": 774,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/ipython_cell.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts",
+  "loc": 76,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/keybinding_hints.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/login-dialog.ts",
+  "loc": 418,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/login_dialog.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/menu-panel.ts",
+  "loc": 433,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/menu_panel.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/mermaid.ts",
+  "loc": 77,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/mermaid.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/modal-back.ts",
+  "loc": 31,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/modal_back.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/model-selector.ts",
+  "loc": 601,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/oauth-selector.ts",
+  "loc": 416,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/oauth_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/prime-onboarding-splash.ts",
+  "loc": 379,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_onboarding_splash.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/prime-team-selector.ts",
+  "loc": 203,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_team_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/prompt-highlight.ts",
+  "loc": 199,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/prompt_highlight.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/refinement-outcome-message.ts",
+  "loc": 117,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/refinement_outcome_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/scoped-models-selector.ts",
+  "loc": 336,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/scoped_models_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/settings-selector.ts",
+  "loc": 526,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/settings_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/show-images-selector.ts",
+  "loc": 43,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/show_images_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/side-question.ts",
+  "loc": 152,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/side_question.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/skill-invocation-message.ts",
+  "loc": 36,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/skill_invocation_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/slash-command-message.ts",
+  "loc": 47,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/slash_command_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/slash-command-result-message.ts",
+  "loc": 15,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/slash_command_result_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/subagent-summary-line.ts",
+  "loc": 161,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/subagent_summary_line.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/theme-selector.ts",
+  "loc": 59,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/theme_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/thinking-selector.ts",
+  "loc": 68,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/thinking_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/tool-execution.ts",
+  "loc": 534,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_execution.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/tool-panel.ts",
+  "loc": 93,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_panel.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/tree-selector.ts",
+  "loc": 1238,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/tree_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/user-message-selector.ts",
+  "loc": 125,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/user_message_selector.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/user-message.ts",
+  "loc": 72,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/user_message.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/components/visual-truncate.ts",
+  "loc": 50,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/components/visual_truncate.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/feature-hints.ts",
+  "loc": 137,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/feature_hints.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/heartbeat-scope.ts",
+  "loc": 31,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/heartbeat_scope.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/image-markers.ts",
+  "loc": 80,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/image_markers.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/interactive-mode-services.ts",
+  "loc": 116,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode_services.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+  "loc": 10352,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/onboarding.ts",
+  "loc": 45,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/onboarding.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/prompt-stash-state.ts",
+  "loc": 38,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/prompt_stash_state.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/queue-selection.ts",
+  "loc": 91,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/queue_selection.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/resume-hint.ts",
+  "loc": 15,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/resume_hint.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/theme/code-highlighter.ts",
+  "loc": 7,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/theme/code_highlighter.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/theme/theme.ts",
+  "loc": 1365,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/theme/theme.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/interactive/theme/working-icon.ts",
+  "loc": 21,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/interactive/theme/working_icon.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/model-autocomplete.ts",
+  "loc": 28,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/model_autocomplete.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/print-mode.ts",
+  "loc": 172,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/print_mode.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/rpc/jsonl.ts",
+  "loc": 117,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/rpc/jsonl.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/rpc/rpc-client.ts",
+  "loc": 672,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/rpc/rpc_client.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/rpc/rpc-extension-ui-context.ts",
+  "loc": 157,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/rpc/rpc_extension_ui_context.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/rpc/rpc-mode.ts",
+  "loc": 553,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/rpc/rpc_mode.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/rpc/rpc-types.ts",
+  "loc": 356,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/rpc/rpc_types.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/session-worker/private-framing.ts",
+  "loc": 200,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/session_worker/private_framing.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/shared/startup-notices.ts",
+  "loc": 128,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/shared/startup_notices.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/telegram/api.ts",
+  "loc": 163,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/telegram/api.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/telegram/bridge.ts",
+  "loc": 387,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/telegram/bridge.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/telegram/commands.ts",
+  "loc": 324,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/telegram/commands.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/telegram/manager.ts",
+  "loc": 111,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/telegram/manager.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/telegram/store.ts",
+  "loc": 173,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/telegram/store.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/modes/telegram/worker.ts",
+  "loc": 174,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/modes/telegram/worker.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/package-manager-cli.ts",
+  "loc": 1630,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/package_manager_cli.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/postinstall.ts",
+  "loc": 32,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/postinstall.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/themes/optimus-logo-data.ts",
+  "loc": 401,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/themes/optimus_logo_data.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/themes/optimus-logo.ts",
+  "loc": 53,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/themes/optimus_logo.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/themes/prime-logo.ts",
+  "loc": 18,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/themes/prime_logo.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/atomic-file.ts",
+  "loc": 298,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/atomic_file.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/changelog.ts",
+  "loc": 99,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/changelog.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/child-process.ts",
+  "loc": 281,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/child_process.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/clipboard-image.ts",
+  "loc": 285,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/clipboard_image.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/clipboard-native.ts",
+  "loc": 22,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/clipboard_native.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/clipboard.ts",
+  "loc": 127,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/clipboard.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/daemon-socket-path.ts",
+  "loc": 9,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/daemon_socket_path.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/dir-lock.ts",
+  "loc": 207,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/dir_lock.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/exif-orientation.ts",
+  "loc": 184,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/exif_orientation.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/file-lines.ts",
+  "loc": 102,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/file_lines.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/frontmatter.ts",
+  "loc": 43,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/frontmatter.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/fs-watch.ts",
+  "loc": 30,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/fs_watch.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/git.ts",
+  "loc": 272,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/git.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/image-convert.ts",
+  "loc": 41,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/image_convert.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/image-resize.ts",
+  "loc": 176,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/image_resize.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/mime.ts",
+  "loc": 30,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/mime.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/paths.ts",
+  "loc": 57,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/paths.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/photon.ts",
+  "loc": 139,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/photon.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/pi-user-agent.ts",
+  "loc": 4,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/pi_user_agent.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/semaphore.ts",
+  "loc": 63,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/semaphore.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/shell.ts",
+  "loc": 252,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/shell.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/sleep.ts",
+  "loc": 18,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/sleep.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/tools-manager.ts",
+  "loc": 384,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/tools_manager.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/update-source.ts",
+  "loc": 3,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/update_source.rs",
+  "status": "pending"
+ },
+ {
+  "package": "coding-agent",
+  "src": "packages/coding-agent/src/utils/version-check.ts",
+  "loc": 178,
+  "crate": "pi-coding-agent",
+  "rust": "crates/pi-coding-agent/src/utils/version_check.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/autocomplete.ts",
+  "loc": 749,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/autocomplete.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/box.ts",
+  "loc": 150,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/box.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/cancellable-loader.ts",
+  "loc": 40,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/cancellable_loader.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/editor.ts",
+  "loc": 2410,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/editor.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/image.ts",
+  "loc": 135,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/image.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/input.ts",
+  "loc": 462,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/input.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/loader.ts",
+  "loc": 84,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/loader.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/markdown.ts",
+  "loc": 979,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/markdown.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/select-list.ts",
+  "loc": 296,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/select_list.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/settings-list.ts",
+  "loc": 235,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/settings_list.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/spacer.ts",
+  "loc": 26,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/spacer.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/text.ts",
+  "loc": 94,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/text.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/components/truncated-text.ts",
+  "loc": 59,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/components/truncated_text.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/editor-component.ts",
+  "loc": 68,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/editor_component.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/fullscreen.ts",
+  "loc": 715,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/fullscreen.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/fuzzy.ts",
+  "loc": 146,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/fuzzy.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/index.ts",
+  "loc": 136,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/mod.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/keybindings.ts",
+  "loc": 296,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/keybindings.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/keys.ts",
+  "loc": 1381,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/keys.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/kill-ring.ts",
+  "loc": 44,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/kill_ring.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/latex.ts",
+  "loc": 834,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/latex.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/mouse.ts",
+  "loc": 54,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/mouse.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/render-cache.ts",
+  "loc": 25,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/render_cache.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/selection-metadata.ts",
+  "loc": 184,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/selection_metadata.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/slash-command-context.ts",
+  "loc": 46,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/slash_command_context.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/stdin-buffer.ts",
+  "loc": 399,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/stdin_buffer.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/terminal-colors.ts",
+  "loc": 206,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/terminal_colors.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/terminal-image.ts",
+  "loc": 423,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/terminal_image.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/terminal.ts",
+  "loc": 614,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/terminal.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/tui.ts",
+  "loc": 1992,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/tui.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/undo-stack.ts",
+  "loc": 27,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/undo_stack.rs",
+  "status": "pending"
+ },
+ {
+  "package": "tui",
+  "src": "packages/tui/src/utils.ts",
+  "loc": 1382,
+  "crate": "pi-tui",
+  "rust": "crates/pi-tui/src/utils.rs",
+  "status": "pending"
+ }
+]
