@@ -145,11 +145,6 @@ fn try_wayland_or_x11_clipboard(options: &NativeClipboardExecOptions, spawn_opti
     let is_wayland = is_wayland_session();
     if is_wayland && has_wayland_display {
         // Verify wl-copy exists (spawn errors are async and won't be caught)
-        let which_options = SpawnOptions {
-            capture_stdout: false,
-            capture_stderr: false,
-            ..Default::default()
-        };
         if std::process::Command::new("which")
             .arg("wl-copy")
             .stdout(std::process::Stdio::null())

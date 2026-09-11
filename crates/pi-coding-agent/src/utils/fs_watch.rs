@@ -103,8 +103,8 @@ mod tests {
         assert!(called.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    #[test]
-    fn existing_paths_watch_and_close() {
+    #[tokio::test]
+    async fn existing_paths_watch_and_close() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("watched.txt");
         std::fs::write(&path, b"one").unwrap();

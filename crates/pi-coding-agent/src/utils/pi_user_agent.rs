@@ -54,6 +54,7 @@ mod tests {
     fn formats_the_expected_user_agent() {
         let agent = get_pi_user_agent("0.9.3");
         assert!(agent.starts_with("prime-agent/0.9.3 ("));
-        assert!(agent.ends_with(&format!("; {}; {})", process_platform(), process_arch())));
+        assert!(agent.contains(&format!("({}; node/", process_platform())));
+        assert!(agent.ends_with(&format!("; {})", process_arch())));
     }
 }

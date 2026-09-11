@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::api_registry::{register_api_provider, unregister_api_providers, ApiProvider};
 use crate::types::{
-	Api, AssistantMessage, AssistantMessageEvent, Context, ContentBlock, ImageContent, ImageOrTextContent, Message,
-	Model, ModelCost, SimpleStreamOptions, StreamOptions, TextContent, ThinkingContent, ToolCall, ToolResultMessage,
-	Usage, UsageCost, UserContent,
+	AssistantMessage, AssistantMessageEvent, ContentBlock, Context, ImageOrTextContent, Message, Model, ModelCost,
+	SimpleStreamOptions, StreamOptions, TextContent, ThinkingContent, ToolCall, ToolResultMessage, Usage, UsageCost,
+	UserContent,
 };
 use crate::utils::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use futures::future::BoxFuture;
@@ -937,7 +937,7 @@ mod tests {
 	fn content_to_text_formats_images_like_typescript() {
 		let content = UserContent::Blocks(vec![
 			ImageOrTextContent::Text(TextContent::new("look")),
-			ImageOrTextContent::Image(ImageContent::new("AAAA", "image/png")),
+			ImageOrTextContent::Image(crate::types::ImageContent::new("AAAA", "image/png")),
 		]);
 		assert_eq!(content_to_text(&content), "look\n[image:image/png:4]");
 	}

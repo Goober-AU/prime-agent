@@ -29,7 +29,8 @@ impl TruncatedText {
 }
 
 impl Component for TruncatedText {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        let width = width.max(0.0).floor() as usize;
         let mut result: Vec<String> = Vec::new();
 
         let empty_line = " ".repeat(width);
@@ -45,7 +46,7 @@ impl Component for TruncatedText {
             single_line_text = self.text[..newline_index].to_string();
         }
 
-        let display_text = truncate_to_width(&single_line_text, available_width, "...", false);
+        let display_text = truncate_to_width(&single_line_text, available_width as f64, "...", false);
 
         let left_padding = " ".repeat(self.padding_x);
         let right_padding = " ".repeat(self.padding_x);
@@ -74,14 +75,14 @@ mod tests {
     #[test]
     fn only_renders_first_line() {
         let mut text = TruncatedText::new("first\nsecond".to_string(), 0, 0);
-        assert_eq!(text.render(10), vec!["first     ".to_string()]);
+        assert_eq!(text.render(10.0), vec!["first     ".to_string()]);
     }
 
     #[test]
     fn applies_vertical_and_horizontal_padding() {
         let mut text = TruncatedText::new("hi".to_string(), 1, 1);
         assert_eq!(
-            text.render(6),
+            text.render(6.0),
             vec![
                 "      ".to_string(),
                 " hi   ".to_string(),

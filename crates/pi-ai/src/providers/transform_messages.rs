@@ -141,7 +141,12 @@ pub fn try_transform_messages(
 							transformed_content.push(ContentBlock::Text(TextContent::new(thinking.thinking.clone())));
 						}
 						ContentBlock::Text(text) => {
-							transformed_content.push(ContentBlock::Text(text.clone()));
+							if is_same_model {
+								transformed_content.push(ContentBlock::Text(text.clone()));
+							} else {
+								// TS builds a new `{ type: "text", text }` block, dropping any signature.
+								transformed_content.push(ContentBlock::Text(TextContent::new(text.text.clone())));
+							}
 						}
 						ContentBlock::ToolCall(tool_call) => {
 							let mut normalized_tool_call = tool_call.clone();
@@ -300,6 +305,45 @@ mod tests {
 	}
 
 	#[test]
+	fn try_transform_messages_returns_err_for_foreign_compaction_checkpoint() {
+		use crate::compaction::ProviderCompactionCheckpoint;
+		let checkpoint = ProviderCompactionCheckpoint {
+			version: 1,
+			provider: "other-provider".to_string(),
+			api: "other-api".to_string(),
+			model: "other-model".to_string(),
+			base_url: "https://example.invalid".to_string(),
+			endpoint: None,
+			items: vec![serde_json::Map::new()],
+			estimated_tokens: 1.0,
+		};
+		let user = Message::user(UserMessage {
+			content: UserContent::Text("hi".to_string()),
+			provider_context: Some(checkpoint.clone()),
+			timestamp: 0,
+		});
+		let error = try_transform_messages(vec![user.clone()], &text_model(), None).unwrap_err();
+		assert_eq!(
+			error,
+			"Compaction checkpoint belongs to another model or provider; rebuild context from the session transcript"
+		);
+
+		// A checkpoint that matches the model passes through untouched.
+		let matching = ProviderCompactionCheckpoint {
+			provider: "test-provider".to_string(),
+			api: "test-api".to_string(),
+			model: "test-model".to_string(),
+			..checkpoint
+		};
+		let user = Message::user(UserMessage {
+			content: UserContent::Text("hi".to_string()),
+			provider_context: Some(matching),
+			timestamp: 0,
+		});
+		assert_eq!(try_transform_messages(vec![user], &text_model(), None).unwrap().len(), 1);
+	}
+
+	#[test]
 	fn replaces_user_images_for_non_vision_model() {
 		let user = Message::user(UserMessage::new(
 			UserContent::Blocks(vec![
@@ -397,6 +441,43 @@ mod tests {
 			None,
 		);
 		assert_eq!(out.len(), 1);
+	}
+
+	#[test]
+	fn drops_text_signature_for_other_model() {
+		let mut text = TextContent::new("hello");
+		text.text_signature = Some("sig".to_string());
+		let out = transform_messages(
+			vec![assistant("other-model", vec![ContentBlock::Text(text)], "stop")],
+			&text_model(),
+			None,
+		);
+		match &out[0] {
+			Message::Assistant(a) => match &a.content[0] {
+				ContentBlock::Text(t) => {
+					assert_eq!(t.text, "hello");
+					assert_eq!(t.text_signature, None);
+				}
+				_ => panic!("expected text block"),
+			},
+			_ => panic!("expected assistant"),
+		}
+
+		// Same model keeps the signature for replay.
+		let mut text = TextContent::new("hello");
+		text.text_signature = Some("sig".to_string());
+		let out = transform_messages(
+			vec![assistant("test-model", vec![ContentBlock::Text(text)], "stop")],
+			&text_model(),
+			None,
+		);
+		match &out[0] {
+			Message::Assistant(a) => match &a.content[0] {
+				ContentBlock::Text(t) => assert_eq!(t.text_signature.as_deref(), Some("sig")),
+				_ => panic!("expected text block"),
+			},
+			_ => panic!("expected assistant"),
+		}
 	}
 
 	#[test]

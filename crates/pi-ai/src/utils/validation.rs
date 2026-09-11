@@ -127,7 +127,7 @@ fn convert_primitive_by_type(value: &Value, schema_type: &str) -> Option<Value> 
                 }
                 Some(serde_json::Number::from_f64(parsed).map(Value::Number)?)
             }
-            Value::Boolean(flag) => Some(Value::Number(if *flag { 1.into() } else { 0.into() })),
+            Value::Bool(flag) => Some(Value::Number(if *flag { 1.into() } else { 0.into() })),
             _ => None,
         },
         "boolean" => match value {

@@ -352,6 +352,10 @@ impl TokenBuilder {
             Event::Rule => self.push_token(Token::Hr),
             Event::FootnoteReference(name) => self.text(&format!("[^{name}]")),
             Event::TaskListMarker(checked) => self.text(if checked { "[x] " } else { "[ ] " }),
+            // pulldown-cmark only emits these with `ENABLE_MATH`, which the port
+            // does not set; the TypeScript `marked` math extensions are ported
+            // directly above instead.
+            Event::InlineMath(_) | Event::DisplayMath(_) => {}
         }
     }
 
@@ -1614,7 +1618,7 @@ impl Markdown {
                         "{text}{}",
                         " ".repeat(column_widths[col_idx].saturating_sub(visible_width(&text)))
                     );
-                    mark_table_cell(&(self.theme.bold)(&padded), 0, col_idx, line_idx, content)
+                    mark_table_cell(&(self.theme.bold)(&padded), 0, col_idx as i64, line_idx as i64, content)
                 })
                 .collect();
             lines.push(format!("│ {} │", row_parts.join(" │ ")));
@@ -1648,7 +1652,7 @@ impl Markdown {
                         let text = cell_lines.get(line_idx).cloned().unwrap_or_default();
                         let width = column_widths.get(col_idx).copied().unwrap_or(1);
                         let padded = format!("{text}{}", " ".repeat(width.saturating_sub(visible_width(&text))));
-                        mark_table_cell(&padded, row_index + 1, col_idx, line_idx, content)
+                        mark_table_cell(&padded, (row_index + 1) as i64, col_idx as i64, line_idx as i64, content)
                     })
                     .collect();
                 lines.push(format!("│ {} │", row_parts.join(" │ ")));
@@ -1751,7 +1755,8 @@ fn collapse_math_whitespace(text: &str) -> String {
 }
 
 impl Component for Markdown {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        let width = width.max(0.0).floor() as usize;
         if let (Some(lines), Some(cached_text), Some(cached_width)) =
             (&self.cached_lines, &self.cached_text, self.cached_width)
         {
@@ -1975,32 +1980,32 @@ mod tests {
     #[test]
     fn empty_markdown_renders_nothing() {
         let mut md = markdown("   ");
-        assert_eq!(md.render(20), Vec::<String>::new());
+        assert_eq!(md.render(20.0), Vec::<String>::new());
     }
 
     #[test]
     fn heading_uses_heading_theme_and_prefix_for_level_3() {
         let mut md = markdown("### Title");
-        let lines = md.render(20);
+        let lines = md.render(20.0);
         assert_eq!(lines[0], "H<**### **>H<**Title**>");
     }
 
     #[test]
     fn paragraph_is_padded_to_width() {
         let mut md = markdown("hi");
-        assert_eq!(md.render(6), vec!["hi    ".to_string()]);
+        assert_eq!(md.render(6.0), vec!["hi    ".to_string()]);
     }
 
     #[test]
     fn code_block_is_indented_and_wrapped() {
         let mut md = markdown("```\nabc\n```");
-        assert_eq!(md.render(8), vec!["  abc   ".to_string()]);
+        assert_eq!(md.render(8.0), vec!["  abc   ".to_string()]);
     }
 
     #[test]
     fn bullet_list_renders_bullets() {
         let mut md = markdown("- one\n- two");
-        let lines = md.render(10);
+        let lines = md.render(10.0);
         assert_eq!(lines[0], "- one     ");
         assert_eq!(lines[1], "- two     ");
     }
@@ -2008,7 +2013,7 @@ mod tests {
     #[test]
     fn ordered_list_uses_start_number() {
         let mut md = markdown("3. three\n4. four");
-        let lines = md.render(10);
+        let lines = md.render(10.0);
         assert_eq!(lines[0], "3. three  ");
         assert_eq!(lines[1], "4. four   ");
     }
@@ -2016,7 +2021,7 @@ mod tests {
     #[test]
     fn table_renders_borders_and_cells() {
         let mut md = markdown("| a | b |\n| --- | --- |\n| 1 | 2 |");
-        let lines = md.render(20);
+        let lines = md.render(20.0);
         let joined = lines.join("\n");
         assert!(joined.contains('┌'), "{joined}");
         assert!(joined.contains("a"), "{joined}");
@@ -2028,7 +2033,7 @@ mod tests {
     #[test]
     fn narrow_table_falls_back_to_raw_markdown() {
         let mut md = markdown("| a | b |\n| --- | --- |\n| 1 | 2 |");
-        let lines = md.render(4);
+        let lines = md.render(4.0);
         let joined = lines.join("\n");
         assert!(!joined.contains('┌'), "{joined}");
         assert!(joined.contains('|'), "{joined}");
@@ -2037,61 +2042,61 @@ mod tests {
     #[test]
     fn blockquote_is_prefixed_with_border() {
         let mut md = markdown("> quoted");
-        assert_eq!(md.render(12), vec!["│ quoted    ".to_string()]);
+        assert_eq!(md.render(12.0), vec!["│ quoted    ".to_string()]);
     }
 
     #[test]
     fn horizontal_rule_is_capped_at_80_columns() {
         let mut md = markdown("---");
-        assert_eq!(md.render(100), vec!["─".repeat(80)]);
+        assert_eq!(md.render(100.0), vec!["─".repeat(80)]);
     }
 
     #[test]
     fn inline_code_and_bold_use_theme() {
         let mut md = markdown("a `b` **c**");
-        assert_eq!(md.render(20), vec!["a `b` **c**        ".to_string()]);
+        assert_eq!(md.render(20.0), vec!["a `b` **c**        ".to_string()]);
     }
 
     #[test]
     fn link_prints_url_when_text_differs() {
         let mut md = markdown("[text](https://example.com)");
-        assert_eq!(md.render(40)[0], "textURL< (https://example.com)>     ");
+        assert_eq!(md.render(40.0)[0], "textURL< (https://example.com)>     ");
     }
 
     #[test]
     fn link_hides_url_when_text_matches_href() {
         let mut md = markdown("[https://example.com](https://example.com)");
-        assert_eq!(md.render(40)[0], "https://example.com                 ");
+        assert_eq!(md.render(40.0)[0], "https://example.com                 ");
     }
 
     #[test]
     fn block_math_uses_math_block_style() {
         let mut md = markdown("$$x^2$$");
-        let lines = md.render(20);
+        let lines = md.render(20.0);
         assert!(lines[0].contains("x"), "{lines:?}");
     }
 
     #[test]
     fn inline_math_is_rendered_through_latex_to_unicode() {
         let mut md = markdown("value $\\alpha$ end");
-        let rendered = md.render(40)[0].clone();
+        let rendered = md.render(40.0)[0].clone();
         assert!(rendered.contains("value"), "{rendered}");
     }
 
     #[test]
     fn render_cache_returns_same_lines_for_same_input() {
         let mut md = markdown("hello");
-        let first = md.render(10);
-        let second = md.render(10);
+        let first = md.render(10.0);
+        let second = md.render(10.0);
         assert_eq!(first, second);
         md.set_text("world".to_string());
-        assert_eq!(md.render(10), vec!["world     ".to_string()]);
+        assert_eq!(md.render(10.0), vec!["world     ".to_string()]);
     }
 
     #[test]
     fn invalidate_clears_block_cache() {
         let mut md = markdown("a\n\nb");
-        let _ = md.render(10);
+        let _ = md.render(10.0);
         assert!(!md.block_cache.is_empty());
         md.invalidate();
         assert!(md.block_cache.is_empty());
@@ -2110,7 +2115,7 @@ mod tests {
                 base_url: None,
             },
         );
-        assert_eq!(md.render(5), vec!["x-5  ".to_string()]);
+        assert_eq!(md.render(5.0), vec!["x-5  ".to_string()]);
     }
 
     #[test]
@@ -2130,7 +2135,7 @@ mod tests {
             }),
             MarkdownOptions::default(),
         );
-        let lines = md.render(20);
+        let lines = md.render(20.0);
         assert_eq!(lines[0], "[**plain**]        ");
     }
 
@@ -2151,6 +2156,6 @@ mod tests {
             }),
             MarkdownOptions::default(),
         );
-        assert_eq!(md.render(3), vec!["<x  >".to_string()]);
+        assert_eq!(md.render(3.0), vec!["<x  >".to_string()]);
     }
 }

@@ -108,7 +108,7 @@ pub async fn refresh_oauth_token(
     let Some(provider) = get_oauth_provider(provider_id) else {
         return Err(format!("Unknown OAuth provider: {}", provider_id));
     };
-    Ok((provider.refresh_token)(credentials).await)
+    (provider.refresh_token)(credentials).await
 }
 
 /// Get API key for a provider from OAuth credentials.
@@ -129,12 +129,8 @@ pub async fn get_oauth_api_key(
     };
 
     if crate::utils::now_ms() as f64 >= creds.expires {
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (provider.refresh_token)(creds.clone())
-        })) {
-            Ok(future) => match future.await {
-                refreshed => creds = refreshed,
-            },
+        match (provider.refresh_token)(creds.clone()).await {
+            Ok(refreshed) => creds = refreshed,
             Err(_) => {
                 return Err(format!("Failed to refresh OAuth token for {}", provider_id));
             }
@@ -159,146 +155,157 @@ pub fn credentials_from_value(value: &Value) -> Option<OAuthCredentials> {
     serde_json::from_value(value.clone()).ok()
 }
 
-// ---------------------------------------------------------------------------
-// Shared local callback server (Node http.createServer replacement)
-// ---------------------------------------------------------------------------
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+/// Private plumbing that replaces the Node `http.createServer` callback server
+/// used by the OAuth flows. Not a public API: it exists only because Rust links
+/// the HTTP server at build time instead of `import("node:http")`.
+pub(crate) mod plumbing {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
-/// A one-shot slot that settles with a value or a cancellation.
-pub struct CallbackSlot<T> {
-    result: Arc<Mutex<Option<T>>>,
-    notify: Arc<tokio::sync::Notify>,
-    cancelled: Arc<AtomicBool>,
-}
-
-impl<T> Clone for CallbackSlot<T> {
-    fn clone(&self) -> Self {
-        Self {
-            result: self.result.clone(),
-            notify: self.notify.clone(),
-            cancelled: self.cancelled.clone(),
-        }
+    /// A one-shot slot that settles with a value or a cancellation
+    /// (`settleWait` / `cancelWait` / `waitForCode` in the TypeScript).
+    pub(crate) struct CallbackSlot<T> {
+        result: Arc<Mutex<Option<T>>>,
+        notify: Arc<tokio::sync::Notify>,
+        cancelled: Arc<AtomicBool>,
     }
-}
 
-impl<T> Default for CallbackSlot<T> {
-    fn default() -> Self {
-        Self {
-            result: Arc::new(Mutex::new(None)),
-            notify: Arc::new(tokio::sync::Notify::new()),
-            cancelled: Arc::new(AtomicBool::new(false)),
-        }
-    }
-}
-
-impl<T: Clone + Send + 'static> CallbackSlot<T> {
-    /// `settleWait(value)` - first value wins.
-    pub fn settle(&self, value: Option<T>) {
-        {
-            let mut result = self.result.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if result.is_none() {
-                *result = value;
+    impl<T> Clone for CallbackSlot<T> {
+        fn clone(&self) -> Self {
+            Self {
+                result: self.result.clone(),
+                notify: self.notify.clone(),
+                cancelled: self.cancelled.clone(),
             }
         }
-        self.notify.notify_waiters();
     }
 
-    /// `cancelWait()` - settles with `null`.
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-        self.settle(None);
+    impl<T> Default for CallbackSlot<T> {
+        fn default() -> Self {
+            Self {
+                result: Arc::new(Mutex::new(None)),
+                notify: Arc::new(tokio::sync::Notify::new()),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            }
+        }
     }
 
-    /// `waitForCode()`.
-    pub async fn wait(&self) -> Option<T> {
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
+    impl<T: Clone + Send + 'static> CallbackSlot<T> {
+        /// `settleWait(value)` - first value wins.
+        pub(crate) fn settle(&self, value: Option<T>) {
             {
-                let result = self.result.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                if result.is_some() {
-                    return result.clone();
+                let mut result = self.result.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                if result.is_none() {
+                    *result = value;
                 }
             }
-            if self.cancelled.load(Ordering::SeqCst) {
-                return None;
+            self.notify.notify_waiters();
+        }
+
+        /// `cancelWait()` - settles with `null`.
+        pub(crate) fn cancel(&self) {
+            self.cancelled.store(true, Ordering::SeqCst);
+            self.settle(None);
+        }
+
+        /// `waitForCode()`.
+        pub(crate) async fn wait(&self) -> Option<T> {
+            loop {
+                let notified = self.notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                {
+                    let result = self.result.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if result.is_some() {
+                        return result.clone();
+                    }
+                }
+                if self.cancelled.load(Ordering::SeqCst) {
+                    return None;
+                }
+                notified.await;
             }
-            notified.await;
         }
     }
-}
 
-/// Serve one HTTP request at a time on `listener` and reply with the handler's
-/// `(status, body)`. Mirrors `http.createServer((req, res) => ...)`.
-pub fn spawn_http_callback_server<F>(listener: TcpListener, handler: F) -> tokio::task::JoinHandle<()>
-where
-    F: Fn(&str, &HashMap<String, String>) -> (u16, String) + Send + Sync + 'static,
-{
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut socket, _)) = listener.accept().await else {
-                return;
-            };
-            let handler = &handler;
-            let mut buffer = vec![0u8; 8192];
-            let Ok(read) = socket.read(&mut buffer).await else {
-                continue;
-            };
-            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
-            let request_line = request.lines().next().unwrap_or_default().to_string();
-            let target = request_line.split_whitespace().nth(1).unwrap_or("/").to_string();
-            let (path, query) = match target.split_once('?') {
-                Some((path, query)) => (path.to_string(), query.to_string()),
-                None => (target.clone(), String::new()),
-            };
-            let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect();
-            let (status, body) = handler(&path, &params);
-            let response = format!(
-                "HTTP/1.1 {} {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                status,
-                if status == 200 { "OK" } else { "Bad Request" },
-                body.len(),
-                body
-            );
-            let _ = socket.write_all(response.as_bytes()).await;
-            let _ = socket.shutdown().await;
-        }
-    });
-}
+    /// Serve one HTTP request at a time on `listener` and reply with the
+    /// handler's `(status, body)`, mirroring `http.createServer((req, res) => ...)`.
+    pub(crate) fn spawn_http_callback_server<F>(
+        listener: TcpListener,
+        handler: F,
+    ) -> tokio::task::JoinHandle<()>
+    where
+        F: Fn(&str, &HashMap<String, String>) -> (u16, String) + Send + Sync + 'static,
+    {
+        let handler = Arc::new(handler);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let handler = handler.clone();
+                let mut buffer = vec![0u8; 8192];
+                let Ok(read) = socket.read(&mut buffer).await else {
+                    continue;
+                };
+                let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+                let request_line = request.lines().next().unwrap_or_default().to_string();
+                let target = request_line.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let (path, query) = match target.split_once('?') {
+                    Some((path, query)) => (path.to_string(), query.to_string()),
+                    None => (target.clone(), String::new()),
+                };
+                let params: HashMap<String, String> = url::form_urlencoded::parse(query.as_bytes())
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect();
+                let (status, body) = handler(&path, &params);
+                let response = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    status,
+                    if status == 200 { "OK" } else { "Bad Request" },
+                    body.len(),
+                    body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        })
+    }
 
-/// Bind the callback listener on `host:port` (Node `server.listen`).
-pub async fn bind_callback_listener(host: &str, port: u16) -> std::io::Result<TcpListener> {
-    TcpListener::bind((host, port)).await
-}
+    /// Bind the callback listener on `host:port` (Node `server.listen`).
+    pub(crate) async fn bind_callback_listener(
+        host: &str,
+        port: u16,
+    ) -> std::io::Result<TcpListener> {
+        TcpListener::bind((host, port)).await
+    }
 
-/// `process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1"`
-pub fn oauth_callback_host() -> String {
-    std::env::var("PI_OAUTH_CALLBACK_HOST")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "127.0.0.1".to_string())
-}
+    /// `process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1"`
+    pub(crate) fn oauth_callback_host() -> String {
+        std::env::var("PI_OAUTH_CALLBACK_HOST")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "127.0.0.1".to_string())
+    }
 
-/// `const decode = (s: string) => atob(s)`.
-pub fn decode_base64(value: &str) -> String {
-    use base64::Engine;
-    let padded = match value.len() % 4 {
-        2 => format!("{}==", value),
-        3 => format!("{}=", value),
-        _ => value.to_string(),
-    };
-    base64::engine::general_purpose::STANDARD
-        .decode(padded)
-        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
-        .unwrap_or_default()
+    /// `const decode = (s: string) => atob(s)`.
+    pub(crate) fn decode_base64(value: &str) -> String {
+        use base64::Engine;
+        let padded = match value.len() % 4 {
+            2 => format!("{}==", value),
+            3 => format!("{}=", value),
+            _ => value.to_string(),
+        };
+        base64::engine::general_purpose::STANDARD
+            .decode(padded)
+            .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

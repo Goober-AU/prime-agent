@@ -569,12 +569,13 @@ fn spawn_callback_server(listener: TcpListener, label: String, state: String, sh
                         "{} authentication completed. You can close this window.",
                         label
                     ));
-                    shared.settle(Some((code.unwrap(), callback_state.unwrap())));
+                    // state is validated by the caller after the callback settles.
+                    shared.settle(Some((
+                        code.clone().unwrap_or_default(),
+                        callback_state.clone().unwrap_or_default(),
+                    )));
                     body
                 };
-                if callback_state.as_deref() != Some(state.as_str()) && status == 200 {
-                    // state is validated by the caller; nothing else to do here.
-                }
                 let _ = socket.write_all(respond(status, body).as_bytes()).await;
                 let _ = socket.shutdown().await;
             });
@@ -887,9 +888,11 @@ pub fn create_mcp_oauth_provider(config: McpOAuthConfig) -> OAuthProviderInterfa
                 let from_callback = callback.wait_for_code();
                 let manual = async {
                     match manual_future.await {
-                        input => match parse_redirect_input(&input, &state) {
+                        Ok(input) => match parse_redirect_input(&input, &state) {
                             Ok(parsed) => Some(parsed),
                             Err(error) => {
+                                // A validation error on a real paste (bad state / no code)
+                                // is a genuine failure to surface.
                                 if error.contains("state mismatch") || error.contains("authorization code") {
                                     manual_error = Some(error);
                                 } else {
@@ -899,6 +902,15 @@ pub fn create_mcp_oauth_provider(config: McpOAuthConfig) -> OAuthProviderInterfa
                                 None
                             }
                         },
+                        Err(error) => {
+                            if error.contains("state mismatch") || error.contains("authorization code") {
+                                manual_error = Some(error);
+                            } else {
+                                manual_cancelled = true;
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            None
+                        }
                     }
                 };
                 let (from_callback, from_manual) = tokio::join!(from_callback, manual);
@@ -958,7 +970,7 @@ pub fn create_mcp_oauth_provider(config: McpOAuthConfig) -> OAuthProviderInterfa
                 discovery.issuer.as_deref(),
                 None,
             ))
-        })
+        }) as crate::types::BoxFuture<Result<OAuthCredentials, String>>
     });
 
     let refresh_config = config.clone();
@@ -974,7 +986,8 @@ pub fn create_mcp_oauth_provider(config: McpOAuthConfig) -> OAuthProviderInterfa
                     config.url, config.server
                 ));
             }
-            let configured_resource = canonical_resource(validated_https_url(&config.url, "MCP endpoint")?);
+            let configured_resource =
+                canonical_resource(&validated_https_url(&config.url, "MCP endpoint")?);
             let stored_resource = extra_str(&credentials, "resource").map(str::to_string);
             if let Some(resource) = stored_resource.as_deref() {
                 if resource != configured_resource {
@@ -1058,7 +1071,7 @@ pub fn create_mcp_oauth_provider(config: McpOAuthConfig) -> OAuthProviderInterfa
                 stored_issuer.as_deref(),
                 Some(&credentials.refresh),
             ))
-        })
+        }) as crate::types::BoxFuture<Result<OAuthCredentials, String>>
     });
 
     OAuthProviderInterface {

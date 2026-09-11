@@ -182,7 +182,7 @@ impl SelectList {
                 let remaining_width = width.saturating_sub(description_start).saturating_sub(2); // -2 for safety
 
                 if remaining_width > MIN_DESCRIPTION_WIDTH {
-                    let truncated_desc = truncate_to_width(description, remaining_width, "…", false);
+                    let truncated_desc = truncate_to_width(description, remaining_width as f64, "…", false);
                     if is_selected {
                         return (self.theme.selected_text)(&format!("{prefix}{truncated_value}{spacing}{truncated_desc}"));
                     }
@@ -249,7 +249,7 @@ impl SelectList {
             primary.clone()
         };
         if !show_metadata {
-            return truncate_to_width(&format!("{styled_prefix}{styled_primary}"), width, "", false);
+            return truncate_to_width(&format!("{styled_prefix}{styled_primary}"), width as f64, "", false);
         }
 
         let spacing = " ".repeat(
@@ -265,7 +265,7 @@ impl SelectList {
         let mut metadata: Vec<String> = Vec::new();
         if let Some(argument_hint) = &argument_hint {
             if remaining_width > 0 {
-                let truncated_argument_hint = truncate_to_width(argument_hint, remaining_width, "…", false);
+                let truncated_argument_hint = truncate_to_width(argument_hint, remaining_width as f64, "…", false);
                 metadata.push(self.theme.argument_hint(&truncated_argument_hint));
                 remaining_width = remaining_width.saturating_sub(visible_width(&truncated_argument_hint));
             }
@@ -277,12 +277,12 @@ impl SelectList {
                     metadata.push(" ".repeat(PRIMARY_COLUMN_GAP));
                     remaining_width = remaining_width.saturating_sub(PRIMARY_COLUMN_GAP);
                 }
-                metadata.push(self.theme.source_tag(&truncate_to_width(source_tag, remaining_width, "…", false)));
+                metadata.push(self.theme.source_tag(&truncate_to_width(source_tag, remaining_width as f64, "…", false)));
             }
         }
         truncate_to_width(
             &format!("{styled_prefix}{styled_primary}{spacing}{}", metadata.join("")),
-            width,
+            width as f64,
             "",
             false,
         )
@@ -325,10 +325,10 @@ impl SelectList {
                 item: item.clone(),
                 is_selected,
             }),
-            None => truncate_to_width(&display_value, max_width, "", false),
+            None => truncate_to_width(&display_value, max_width as f64, "", false),
         };
 
-        truncate_to_width(&truncated_value, max_width, "", false)
+        truncate_to_width(&truncated_value, max_width as f64, "", false)
     }
 
     fn get_display_value(&self, item: &SelectItem) -> String {
@@ -368,7 +368,8 @@ impl SelectList {
 }
 
 impl Component for SelectList {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        let width = width.max(0.0).floor() as usize;
         let mut lines: Vec<String> = Vec::new();
 
         if self.filtered_items.is_empty() {
@@ -409,7 +410,7 @@ impl Component for SelectList {
             } else {
                 format!("  ({}/{})", self.selected_index + 1, self.filtered_items.len())
             };
-            lines.push((self.theme.scroll_info)(&truncate_to_width(&scroll_text, width - 2, "", false)));
+            lines.push((self.theme.scroll_info)(&truncate_to_width(&scroll_text, (width - 2) as f64, "", false)));
         }
 
         if self.layout.show_selected_description {
@@ -491,13 +492,13 @@ mod tests {
     #[test]
     fn empty_list_renders_no_match() {
         let mut list = SelectList::new(Vec::new(), 5, theme(), SelectListLayoutOptions::default());
-        assert_eq!(list.render(20), vec!["  No matching commands".to_string()]);
+        assert_eq!(list.render(20.0), vec!["  No matching commands".to_string()]);
     }
 
     #[test]
     fn selected_item_is_marked_with_prefix() {
         let mut list = SelectList::new(items(), 5, theme(), SelectListLayoutOptions::default());
-        let lines = list.render(40);
+        let lines = list.render(40.0);
         assert!(lines[0].starts_with("› "));
         assert!(lines[1].starts_with("  "));
     }
@@ -523,7 +524,7 @@ mod tests {
     #[test]
     fn scroll_info_shows_position_when_list_overflows() {
         let mut list = SelectList::new(items(), 1, theme(), SelectListLayoutOptions::default());
-        let lines = list.render(40);
+        let lines = list.render(40.0);
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[1], "  (1/2)");
     }
@@ -533,7 +534,7 @@ mod tests {
         let mut list = SelectList::new(items(), 1, theme(), SelectListLayoutOptions::default());
         list.set_selected_index(1);
         list.layout.show_directional_scroll_info = true;
-        let lines = list.render(40);
+        let lines = list.render(40.0);
         assert_eq!(lines[1], "  ↑ 1 more");
     }
 
@@ -541,7 +542,7 @@ mod tests {
     fn selected_description_is_appended() {
         let mut list = SelectList::new(items(), 5, theme(), SelectListLayoutOptions::default());
         list.layout.show_selected_description = true;
-        let lines = list.render(40);
+        let lines = list.render(40.0);
         assert_eq!(lines.last().unwrap(), "  show help");
     }
 
@@ -573,7 +574,7 @@ mod tests {
             theme(),
             layout,
         );
-        let lines = list.render(12);
+        let lines = list.render(12.0);
         assert!(visible_width(&lines[0]) <= 12, "line too wide: {:?}", lines[0]);
         assert!(lines[0].contains("core"));
     }

@@ -59,7 +59,8 @@ impl Default for Text {
 }
 
 impl Component for Text {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        let width = width.max(0.0).floor() as usize;
         if let (Some(lines), Some(cached_text), Some(cached_width)) =
             (&self.cached_lines, &self.cached_text, self.cached_width)
         {
@@ -143,7 +144,7 @@ mod tests {
     #[test]
     fn empty_text_renders_nothing() {
         let mut text = Text::new(String::new(), 1, 1, None);
-        assert_eq!(text.render(10), Vec::<String>::new());
+        assert_eq!(text.render(10.0), Vec::<String>::new());
         let mut whitespace = Text::new("   ".to_string(), 1, 1, None);
         assert_eq!(whitespace.render(10), Vec::<String>::new());
     }
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn renders_padding_and_pads_to_width() {
         let mut text = Text::new("hello".to_string(), 1, 1, None);
-        let lines = text.render(9);
+        let lines = text.render(9.0);
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], " ".repeat(9));
         assert_eq!(lines[1], " hello   ");
@@ -161,16 +162,16 @@ mod tests {
     #[test]
     fn wraps_long_lines() {
         let mut text = Text::new("hello world".to_string(), 0, 0, None);
-        let lines = text.render(6);
+        let lines = text.render(6.0);
         assert_eq!(lines, vec!["hello ".to_string(), "world ".to_string()]);
     }
 
     #[test]
     fn cache_invalidated_by_set_text() {
         let mut text = Text::new("a".to_string(), 0, 0, None);
-        let first = text.render(4);
+        let first = text.render(4.0);
         assert_eq!(first, vec!["a   ".to_string()]);
         text.set_text("bb".to_string());
-        assert_eq!(text.render(4), vec!["bb  ".to_string()]);
+        assert_eq!(text.render(4.0), vec!["bb  ".to_string()]);
     }
 }

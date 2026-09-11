@@ -18,7 +18,7 @@ use crate::utils::oauth::pkce::generate_pkce;
 use crate::utils::oauth::types::{
     OAuthAuthInfo, OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface,
 };
-use crate::utils::oauth::{
+use crate::utils::oauth::plumbing::{
     bind_callback_listener, decode_base64, oauth_callback_host, spawn_http_callback_server, CallbackSlot,
 };
 
@@ -365,7 +365,8 @@ pub struct AnthropicLoginOptions {
     pub on_auth: Option<Arc<dyn Fn(OAuthAuthInfo) + Send + Sync>>,
     pub on_prompt: Option<Arc<dyn Fn(OAuthPrompt) -> BoxFuture<String> + Send + Sync>>,
     pub on_progress: Option<Arc<dyn Fn(String) + Send + Sync>>,
-    pub on_manual_code_input: Option<Arc<dyn Fn() -> BoxFuture<Result<String, String>> + Send + Sync>>,
+    /// `onManualCodeInput(): Promise<string>` - `Err` is the rejected promise.
+    pub on_manual_code_input: Option<crate::utils::oauth::types::OnManualCodeInput>,
 }
 
 /// Refresh Anthropic OAuth token.
@@ -423,10 +424,11 @@ pub fn anthropic_oauth_provider() -> OAuthProviderInterface {
                     on_manual_code_input: callbacks.on_manual_code_input.clone(),
                 })
                 .await
-            })
+            }) as crate::types::BoxFuture<Result<OAuthCredentials, String>>
         }),
         refresh_token: Arc::new(|credentials: OAuthCredentials| {
             Box::pin(async move { refresh_anthropic_token(&credentials.refresh).await })
+                as crate::types::BoxFuture<Result<OAuthCredentials, String>>
         }),
         get_api_key: Arc::new(|credentials: &OAuthCredentials| credentials.access.clone()),
         modify_models: None,

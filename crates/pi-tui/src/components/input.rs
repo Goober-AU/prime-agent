@@ -93,7 +93,7 @@ impl Input {
     }
 
     fn push_undo(&mut self) {
-        self.undo_stack.push(InputState {
+        self.undo_stack.push(&InputState {
             value: self.value.clone(),
             cursor: self.cursor,
         });
@@ -531,7 +531,8 @@ impl Component for Input {
 
     fn invalidate(&mut self) {}
 
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        let width = width.max(0.0).floor() as usize;
         let prompt = "> ";
         // `width - prompt.length` stays signed because TypeScript can go negative.
         let available_width = width as i64 - prompt.len() as i64;
@@ -541,7 +542,7 @@ impl Component for Input {
         }
         let available_width = available_width as usize;
 
-        let mut visible_text = String::new();
+        let visible_text;
         let mut cursor_display = self.cursor;
         let total_width = visible_width(&self.value);
 
@@ -629,7 +630,7 @@ mod tests {
     fn render_marks_cursor_with_reverse_video() {
         let mut input = Input::new();
         input.set_value("ab".to_string());
-        let lines = input.render(10);
+        let lines = input.render(10.0);
         // Cursor at column 0 highlights "a"; marker absent while unfocused.
         assert_eq!(lines, vec!["> \x1b[7ma\x1b[27mb    ".to_string()]);
     }
@@ -638,15 +639,15 @@ mod tests {
     fn render_emits_cursor_marker_when_focused() {
         let mut input = Input::new();
         input.set_focused(true);
-        let lines = input.render(6);
+        let lines = input.render(6.0);
         assert_eq!(lines, vec!["> \x1b_pi:c\x07\x1b[7m \x1b[27m ".to_string()]);
     }
 
     #[test]
     fn render_returns_prompt_when_too_narrow() {
         let mut input = Input::new();
-        assert_eq!(input.render(2), vec!["> ".to_string()]);
-        assert_eq!(input.render(1), vec!["> ".to_string()]);
+        assert_eq!(input.render(2.0), vec!["> ".to_string()]);
+        assert_eq!(input.render(1.0), vec!["> ".to_string()]);
     }
 
     #[test]

@@ -747,6 +747,12 @@ impl AssistantMessage {
     }
 }
 
+impl crate::utils::diagnostics::HasDiagnostics for AssistantMessage {
+    fn diagnostics_field(&mut self) -> &mut Option<Vec<AssistantMessageDiagnostic>> {
+        &mut self.diagnostics
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResultMessage {
     pub role: String,

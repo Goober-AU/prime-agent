@@ -41,7 +41,15 @@ pub fn parse_frontmatter(content: &str) -> Result<ParsedFrontmatter, serde_yaml:
         });
     };
 
-    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_string)?;
+    // js-yaml reads the frontmatter slice as a whole document even when the
+    // slice has no final newline (block scalars then keep their clipped break),
+    // so the document is terminated before parsing.
+    let yaml_document = if yaml_string.ends_with('\n') {
+        yaml_string
+    } else {
+        format!("{}\n", yaml_string)
+    };
+    let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_document)?;
     let frontmatter = yaml_to_json(parsed);
     let frontmatter = match frontmatter {
         Value::Null => Value::Object(serde_json::Map::new()),

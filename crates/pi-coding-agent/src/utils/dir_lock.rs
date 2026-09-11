@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirLockAttempt {
@@ -116,15 +117,18 @@ where
     }
 }
 
-async fn acquire_attempt<F, Fut>(
-    lock_path: &str,
+/// The retry after a swept candidate recurses, so the future is boxed like the
+/// TypeScript's async recursion.
+fn acquire_attempt<'a, F, Fut>(
+    lock_path: &'a str,
     owner_alive: F,
     retry_on_swept_candidate: bool,
-) -> std::io::Result<DirLockAttempt>
+) -> Pin<Box<dyn Future<Output = std::io::Result<DirLockAttempt>> + 'a>>
 where
-    F: Fn(Option<i32>) -> Fut + Copy,
-    Fut: Future<Output = bool>,
+    F: Fn(Option<i32>) -> Fut + Copy + 'a,
+    Fut: Future<Output = bool> + 'a,
 {
+    Box::pin(async move {
     let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4());
     let temp_path = format!("{}.candidate-{}", lock_path, token);
 
@@ -153,6 +157,7 @@ where
                 if candidate_swept && retry_on_swept_candidate {
                     return acquire_attempt(lock_path, owner_alive, false).await;
                 }
+
                 if !is_already_exists(&link_error) {
                     return Err(link_error);
                 }
@@ -176,6 +181,7 @@ where
     // Cleanup only: a leaked candidate must never mask a settled acquisition.
     let _ = std::fs::remove_file(&temp_path);
     result
+    })
 }
 
 #[cfg(unix)]
@@ -355,14 +361,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn treats_a_legacy_directory_lock_as_held() {
+    async fn reclaims_a_legacy_directory_lock_without_an_owner() {
         let dir = temp_dir();
         let lock = dir.join("session.lock");
         std::fs::create_dir_all(&lock).unwrap();
+        // `readOwnerRaw(lockPath, isDir)` reads <lock>/pid: ENOENT is "absent", so
+        // an ownerless legacy directory is judged stale and reclaimed.
         let attempt = try_acquire_dir_lock(lock.to_str().unwrap(), |_| async { false })
             .await
             .unwrap();
+        assert_eq!(attempt, DirLockAttempt::Reclaimed);
+        assert!(!lock.exists());
+    }
+
+    #[tokio::test]
+    async fn treats_a_legacy_directory_lock_with_a_live_owner_as_held() {
+        let dir = temp_dir();
+        let lock = dir.join("session.lock");
+        std::fs::create_dir_all(&lock).unwrap();
+        std::fs::write(lock.join("pid"), format!("{}\n", std::process::id())).unwrap();
+        let attempt = try_acquire_dir_lock(lock.to_str().unwrap(), |pid| async move { pid.is_some() })
+            .await
+            .unwrap();
         assert_eq!(attempt, DirLockAttempt::Held);
+        assert!(lock.exists());
     }
 
     #[test]

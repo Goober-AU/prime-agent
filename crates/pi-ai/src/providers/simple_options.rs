@@ -1,7 +1,5 @@
 //! Port of packages/ai/src/providers/simple-options.ts
-use crate::types::{
-	Api, Model, ModelThinkingLevel, SimpleStreamOptions, StreamOptions, ThinkingBudgets, ThinkingLevel,
-};
+use crate::types::{Model, SimpleStreamOptions, StreamOptions, ThinkingBudgets, ThinkingLevel};
 
 /// TS: `buildBaseOptions(model, options?, apiKey?)`
 pub fn build_base_options(model: &Model, options: Option<&SimpleStreamOptions>, api_key: Option<&str>) -> StreamOptions {
@@ -91,15 +89,6 @@ pub fn adjust_max_tokens_for_thinking(
 	AdjustedMaxTokens { max_tokens, thinking_budget }
 }
 
-/// Helper used by the providers: the model's thinking level map entry.
-/// TS: `model.thinkingLevelMap?.[level]` (`null` marks a level as unsupported).
-pub fn thinking_level_mapped(model: &Model, level: &ModelThinkingLevel) -> Option<Option<String>> {
-	model.thinking_level_map.as_ref().and_then(|map| map.get(level).cloned())
-}
-
-/// Kept so the module always references `Api` the same way the TS module does.
-pub fn _api_marker(_api: &Api) {}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -107,17 +96,6 @@ mod tests {
 	fn model_with_max_tokens(max_tokens: f64) -> Model {
 		Model {
 			max_tokens,
-			..Default::default()
-		}
-	}
-
-	fn model_with_thinking_map() -> Model {
-		Model {
-			thinking_level_map: Some(
-				[("high".to_string(), Some("high-value".to_string())), ("max".to_string(), None)]
-					.into_iter()
-					.collect(),
-			),
 			..Default::default()
 		}
 	}
@@ -187,13 +165,5 @@ mod tests {
 		let adjusted = adjust_max_tokens_for_thinking(100.0, 100_000.0, &"low".to_string(), Some(&custom));
 		assert_eq!(adjusted.max_tokens, 120.0);
 		assert_eq!(adjusted.thinking_budget, 20.0);
-	}
-
-	#[test]
-	fn thinking_level_map_distinguishes_absent_from_null() {
-		let model = model_with_thinking_map();
-		assert_eq!(thinking_level_mapped(&model, &"high".to_string()), Some(Some("high-value".to_string())));
-		assert_eq!(thinking_level_mapped(&model, &"max".to_string()), Some(None));
-		assert_eq!(thinking_level_mapped(&model, &"low".to_string()), None);
 	}
 }

@@ -10,9 +10,9 @@ use crate::copilot_client_version::{COPILOT_CLIENT_HEADERS, COPILOT_CLIENT_USER_
 use crate::models::get_models;
 use crate::types::{BoxFuture, Model};
 use crate::utils::oauth::types::{
-    OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface,
+    OAuthAuthInfo, OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface,
 };
-use crate::utils::oauth::decode_base64;
+use crate::utils::oauth::plumbing::decode_base64;
 
 pub fn client_id() -> String {
     decode_base64("SXYxLmI1MDdhMDhjODdlY2ZlOTg=")
@@ -490,7 +490,7 @@ pub fn github_copilot_oauth_provider() -> OAuthProviderInterface {
                 login_github_copilot(GitHubCopilotLoginOptions {
                     on_auth: on_auth.map(|on_auth| {
                         Arc::new(move |url: String, instructions: Option<String>| {
-                            on_auth(OAuthAuthInfoForCopilot { url, instructions })
+                            on_auth(OAuthAuthInfo { url, instructions })
                         }) as Arc<dyn Fn(String, Option<String>) + Send + Sync>
                     }),
                     on_prompt: callbacks.on_prompt.clone(),
@@ -499,7 +499,7 @@ pub fn github_copilot_oauth_provider() -> OAuthProviderInterface {
                     on_model_progress: None,
                 })
                 .await
-            })
+            }) as crate::types::BoxFuture<Result<OAuthCredentials, String>>
         }),
         refresh_token: Arc::new(|credentials: OAuthCredentials| {
             Box::pin(async move {
@@ -509,7 +509,7 @@ pub fn github_copilot_oauth_provider() -> OAuthProviderInterface {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 refresh_github_copilot_token(&credentials.refresh, enterprise_url.as_deref()).await
-            })
+            }) as crate::types::BoxFuture<Result<OAuthCredentials, String>>
         }),
         get_api_key: Arc::new(|credentials: &OAuthCredentials| credentials.access.clone()),
         modify_models: Some(Arc::new(|models: Vec<Model>, credentials: &OAuthCredentials| {
@@ -533,12 +533,6 @@ pub fn github_copilot_oauth_provider() -> OAuthProviderInterface {
                 .collect()
         })),
     }
-}
-
-/// Small struct so the copilot onAuth adapter can reuse the shared OAuthAuthInfo.
-pub struct OAuthAuthInfoForCopilot {
-    pub url: String,
-    pub instructions: Option<String>,
 }
 
 #[cfg(test)]

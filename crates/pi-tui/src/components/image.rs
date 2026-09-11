@@ -95,7 +95,8 @@ impl Image {
 }
 
 impl Component for Image {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        let width = width.max(0.0).floor() as usize;
         let fallback_flag = fullscreen_fallback();
         if let (Some(lines), Some(cached_width), Some(cached_fallback)) = (
             &self.cached_lines,
@@ -121,23 +122,23 @@ impl Component for Image {
                 parts.insert(0, filename.clone());
             }
             lines = vec![(self.theme.fallback_color)(&format!(
-                "{}{}",
+                "{}[{}]",
                 self.options.fallback_prefix.clone().unwrap_or_default(),
-                format!("[{}]", parts.join(" · "))
+                parts.join(" · ")
             ))];
-        } else if caps.images != ImageProtocol::None {
-            if caps.images == ImageProtocol::Kitty && self.image_id.is_none() {
+        } else if caps.images.is_some() {
+            if caps.images == Some(ImageProtocol::Kitty) && self.image_id.is_none() {
                 self.image_id = Some(allocate_image_id());
             }
             let result = render_image(
                 &self.base64_data,
                 &self.dimensions,
                 &ImageRenderOptions {
-                    max_width_cells: Some(max_width.max(0) as usize),
+                    max_width_cells: Some(max_width.max(0)),
                     max_height_cells: None,
-                    preserve_aspect_ratio: true,
+                    preserve_aspect_ratio: Some(true),
                     image_id: self.image_id,
-                    move_cursor: false,
+                    move_cursor: Some(false),
                 },
             );
 
@@ -162,7 +163,7 @@ impl Component for Image {
                     } else {
                         String::new()
                     };
-                    let move_down = if caps.images == ImageProtocol::Kitty && row_offset > 0 {
+                    let move_down = if caps.images == Some(ImageProtocol::Kitty) && row_offset > 0 {
                         format!("\x1b[{row_offset}B")
                     } else {
                         String::new()
@@ -234,7 +235,7 @@ mod tests {
             }),
         );
         let mut image = image;
-        let lines = image.render(40);
+        let lines = image.render(40.0);
         assert_eq!(lines, vec!["> [cat.png · image/png · 10×20]".to_string()]);
     }
 }

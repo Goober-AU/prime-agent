@@ -118,32 +118,6 @@ fn split_parts(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// Node's `path.resolve` for an absolute-or-relative path, without filesystem access.
-/// Used by the agents-view port (`resolve(canonicalizePath(path))`).
-pub fn resolve_absolute(value: &str) -> String {
-    resolve_path(value)
-}
-
-/// Node's `path.resolve` for an already-absolute path (same lexical result).
-pub fn normalize_absolute(path: &Path) -> String {
-    normalize_lexically(path)
-}
-
-/// Node's `path.basename`.
-pub fn basename(value: &str) -> String {
-    let trimmed = value.trim_end_matches(['/', '\\']);
-    match trimmed.rsplit(['/', '\\']).next() {
-        Some(part) if !part.is_empty() => part.to_string(),
-        _ => {
-            if value == "/" || value == "\\" {
-                value.to_string()
-            } else {
-                String::new()
-            }
-        }
-    }
-}
-
 pub fn get_cwd_relative_path(file_path: &str, cwd: &str) -> Option<String> {
     let resolved_cwd = resolve_path(cwd);
     let resolved_path = resolve_against_cwd(file_path, &resolved_cwd);

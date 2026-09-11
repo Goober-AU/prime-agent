@@ -121,7 +121,7 @@ impl SettingsList {
 
         if self.search_enabled {
             if let Some(search_input) = self.search_input.as_mut() {
-                lines.extend(search_input.render(width));
+                lines.extend(search_input.render(width as f64));
                 lines.push(String::new());
             }
         }
@@ -138,7 +138,7 @@ impl SettingsList {
         if display_items.is_empty() {
             lines.push(truncate_to_width(
                 &(self.theme.hint)("  No matching settings"),
-                width,
+                width as f64,
                 "...",
                 false,
             ));
@@ -187,13 +187,13 @@ impl SettingsList {
             let value_max_width = width.saturating_sub(used_width).saturating_sub(2);
 
             let value_text = (self.theme.value)(
-                &truncate_to_width(&item.current_value, value_max_width, "", false),
+                &truncate_to_width(&item.current_value, value_max_width as f64, "", false),
                 is_selected,
             );
 
             lines.push(truncate_to_width(
                 &format!("{prefix}{label_text}{separator}{value_text}"),
-                width,
+                width as f64,
                 "...",
                 false,
             ));
@@ -201,7 +201,7 @@ impl SettingsList {
 
         if start_index > 0 || end_index < display_items.len() {
             let scroll_text = format!("  ({}/{})", self.selected_index + 1, display_items.len());
-            lines.push((self.theme.hint)(&truncate_to_width(&scroll_text, width - 2, "", false)));
+            lines.push((self.theme.hint)(&truncate_to_width(&scroll_text, (width - 2) as f64, "", false)));
         }
 
         let selected_item = display_items.get(self.selected_index).and_then(|i| self.items.get(*i));
@@ -304,7 +304,7 @@ impl SettingsList {
             } else {
                 "  Enter/Space to change · Esc to cancel"
             }),
-            width,
+            width as f64,
             "...",
             false,
         ));
@@ -312,14 +312,14 @@ impl SettingsList {
 }
 
 impl Component for SettingsList {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
         if self.submenu_component.is_some() {
             let lines = self.submenu_component.as_mut().unwrap().render(width);
             self.settle_submenu_done();
             return lines;
         }
 
-        self.render_main_list(width)
+        self.render_main_list(width.max(0.0).floor() as usize)
     }
 
     fn handle_input(&mut self, data: &str) {
@@ -419,7 +419,7 @@ mod tests {
             Box::new(|| {}),
             SettingsListOptions::default(),
         );
-        let lines = list.render(20);
+        let lines = list.render(20.0);
         assert_eq!(lines[0], "  No settings available");
         assert_eq!(lines[1], "");
         assert_eq!(lines[2], "  Enter/Space to change · Esc to cancel");
@@ -546,11 +546,11 @@ mod tests {
         );
 
         list.handle_input("\r");
-        assert_eq!(list.render(20), vec!["submenu".to_string()]);
+        assert_eq!(list.render(20.0), vec!["submenu".to_string()]);
         list.handle_input("\r");
         // done("picked") applies the value and closes the submenu.
         assert_eq!(list.items()[0].current_value, "picked");
         assert_eq!(*changes.borrow(), vec![("m".to_string(), "picked".to_string())]);
-        assert!(list.render(20)[0].starts_with("› "));
+        assert!(list.render(20.0)[0].starts_with("› "));
     }
 }

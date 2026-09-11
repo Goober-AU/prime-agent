@@ -114,12 +114,12 @@ pub const ENV_GITHUB_COPILOT: [&str; 3] = ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "
 /// ANTHROPIC_OAUTH_TOKEN takes precedence over ANTHROPIC_API_KEY
 pub const ENV_ANTHROPIC: [&str; 2] = ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
 
-fn get_api_key_env_vars(provider: &str) -> Option<&'static [&'static str]> {
+fn get_api_key_env_vars(provider: &str) -> Vec<&'static str> {
     if provider == "github-copilot" {
-        return Some(&ENV_GITHUB_COPILOT);
+        return ENV_GITHUB_COPILOT.to_vec();
     }
     if provider == "anthropic" {
-        return Some(&ENV_ANTHROPIC);
+        return ENV_ANTHROPIC.to_vec();
     }
 
     let env_var: Option<&'static str> = match provider {
@@ -154,7 +154,10 @@ fn get_api_key_env_vars(provider: &str) -> Option<&'static [&'static str]> {
         _ => None,
     };
 
-    env_var.map(std::slice::from_ref)
+    match env_var {
+        Some(env_var) => vec![env_var],
+        None => Vec::new(),
+    }
 }
 
 /// Find configured environment variables that can provide an API key for a provider.
@@ -163,7 +166,10 @@ fn get_api_key_env_vars(provider: &str) -> Option<&'static [&'static str]> {
 /// credential sources such as AWS profiles, AWS IAM credentials, and Google
 /// Application Default Credentials.
 pub fn find_env_keys(provider: &str) -> Option<Vec<String>> {
-    let env_vars = get_api_key_env_vars(provider)?;
+    let env_vars = get_api_key_env_vars(provider);
+    if env_vars.is_empty() {
+        return None;
+    }
     let found: Vec<String> = env_vars
         .iter()
         .filter(|env_var| {
@@ -273,22 +279,19 @@ mod tests {
 
     #[test]
     fn env_var_table_matches_typescript() {
-        assert_eq!(get_api_key_env_vars("openai"), Some(&["OPENAI_API_KEY"][..]));
-        assert_eq!(get_api_key_env_vars("google"), Some(&["GEMINI_API_KEY"][..]));
+        assert_eq!(get_api_key_env_vars("openai"), vec!["OPENAI_API_KEY"]);
+        assert_eq!(get_api_key_env_vars("google"), vec!["GEMINI_API_KEY"]);
         assert_eq!(
             get_api_key_env_vars("anthropic"),
-            Some(&["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"][..])
+            vec!["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]
         );
         assert_eq!(
             get_api_key_env_vars("github-copilot"),
-            Some(&["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"][..])
+            vec!["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
         );
-        assert_eq!(
-            get_api_key_env_vars("moonshotai-cn"),
-            Some(&["MOONSHOT_API_KEY"][..])
-        );
-        assert_eq!(get_api_key_env_vars("amazon-bedrock"), None);
-        assert_eq!(get_api_key_env_vars("unknown-provider"), None);
+        assert_eq!(get_api_key_env_vars("moonshotai-cn"), vec!["MOONSHOT_API_KEY"]);
+        assert!(get_api_key_env_vars("amazon-bedrock").is_empty());
+        assert!(get_api_key_env_vars("unknown-provider").is_empty());
     }
 
     #[test]

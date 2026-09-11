@@ -97,7 +97,8 @@ impl Default for Box_ {
 }
 
 impl Component for Box_ {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        let width = width.max(0.0).floor() as usize;
         if self.children.is_empty() {
             self.cache = None;
             return Vec::new();
@@ -110,7 +111,7 @@ impl Component for Box_ {
         let mut selection_regions: Vec<TableCellSelectionRegion> = Vec::new();
         for child in self.children.iter_mut() {
             let line_offset = child_lines.len();
-            let lines = child.render(content_width);
+            let lines = child.render(content_width as f64);
             for region in child.get_selection_regions() {
                 selection_regions.push(TableCellSelectionRegion {
                     line: region.line + line_offset + self.padding_y,
@@ -197,7 +198,7 @@ mod tests {
     #[test]
     fn empty_box_renders_nothing() {
         let mut box_ = Box_::new(1, 1, None);
-        assert_eq!(box_.render(10), Vec::<String>::new());
+        assert_eq!(box_.render(10.0), Vec::<String>::new());
     }
 
     #[test]
@@ -205,7 +206,7 @@ mod tests {
         let mut box_ = Box_::new(1, 1, None);
         box_.add_child(Box::new(Lines(vec!["hi".to_string()])));
         assert_eq!(
-            box_.render(6),
+            box_.render(6.0),
             vec![
                 "      ".to_string(),
                 " hi   ".to_string(),
@@ -218,9 +219,9 @@ mod tests {
     fn background_sampling_invalidates_cache() {
         let mut box_ = Box_::new(0, 0, None);
         box_.add_child(Box::new(Lines(vec!["hi".to_string()])));
-        assert_eq!(box_.render(4), vec!["hi  ".to_string()]);
+        assert_eq!(box_.render(4.0), vec!["hi  ".to_string()]);
         box_.set_bg_fn(Some(Box::new(|text: &str| format!("<{text}>"))));
-        assert_eq!(box_.render(4), vec!["<hi  >".to_string()]);
+        assert_eq!(box_.render(4.0), vec!["<hi  >".to_string()]);
     }
 
     #[test]
@@ -229,8 +230,8 @@ mod tests {
         box_.add_child(Box::new(Lines(vec!["a".to_string()])));
         box_.add_child(Box::new(Lines(vec!["b".to_string()])));
         box_.remove_child_at(0);
-        assert_eq!(box_.render(1), vec!["b".to_string()]);
+        assert_eq!(box_.render(1.0), vec!["b".to_string()]);
         box_.clear();
-        assert_eq!(box_.render(1), Vec::<String>::new());
+        assert_eq!(box_.render(1.0), Vec::<String>::new());
     }
 }

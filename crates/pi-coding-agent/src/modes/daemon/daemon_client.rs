@@ -1,0 +1,2080 @@
+//! Port of packages/coding-agent/src/modes/daemon/daemon-client.ts
+//!
+//! The TypeScript daemon protocol module is owned by another slice; the daemon
+//! transports in this slice need the wire primitives it exports, so this module
+//! carries the ported subset it consumes (protocol identity, command envelopes,
+//! compatibility gating, event metadata, responses and the saved-session row).
+//! When the full protocol port lands, these items move to `daemon_protocol.rs`
+//! unchanged.
+// Internal plumbing for this slice: the daemon protocol module is owned by
+// another slice, so the wire primitives these transports need live here.
+pub(crate) mod protocol {
+    use serde::{Deserialize, Serialize};
+    use serde_json::{Map, Value};
+
+    use crate::modes::daemon::daemon_errors::DaemonErrorInfo;
+
+    pub const DAEMON_PROTOCOL_NAME: &str = "prime-agent.daemon";
+    pub const DAEMON_PROTOCOL_VERSION: u32 = 7;
+    pub const DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION: u32 = 7;
+    pub const DAEMON_SCHEMA_REVISION: u32 = 29;
+    pub const DAEMON_SCHEMA_ID: &str = "protocol-7-schema-29-c16da0e12d5a";
+
+    /// The allowlist of env vars a client may forward (wire contract).
+    pub const DAEMON_CLIENT_ENV_KEYS: [&str; 5] = [
+        "HERDR_ENV",
+        "HERDR_PANE_ID",
+        "HERDR_SOCKET_PATH",
+        "HERDR_TAB_ID",
+        "HERDR_WORKSPACE_ID",
+    ];
+
+    pub const DAEMON_DEFAULT_CLIENT_CAPABILITIES: [&str; 2] = ["attach_snapshot", "event_sequence"];
+
+    pub const DAEMON_SUPPORTED_CLIENT_CAPABILITIES: [&str; 7] = [
+        "attach_snapshot",
+        "event_sequence",
+        "extension_ui",
+        "slim_attach",
+        "chunked_snapshot",
+        "history_ranges",
+        "client_owned_sessions",
+    ];
+
+    pub const DAEMON_DEFAULT_SERVER_CAPABILITIES: [&str; 22] = [
+        "attach_snapshot",
+        "event_sequence",
+        "extension_ui",
+        "slim_attach",
+        "chunked_snapshot",
+        "history_ranges",
+        "client_owned_sessions",
+        "delete_rlm_subagent",
+        "heartbeat_catalog",
+        "heartbeat_management",
+        "model_catalog",
+        "side_question_transcript",
+        "transient_bash",
+        "session_input_admission",
+        "prompt_admission_cancellation",
+        "owned_prompt_cancellation",
+        "queue_message_mutation",
+        "authoritative_child_roster",
+        "owned_session_recovery_context",
+        "rlm_quiescence_barrier",
+        "session_input_pause",
+        "acp_mcp_servers",
+    ];
+
+    pub const DAEMON_DIALOG_EXTENSION_UI_METHODS: [&str; 4] = ["select", "confirm", "input", "editor"];
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct DaemonProtocolInfo {
+        pub name: String,
+        pub version: u32,
+    }
+
+    pub fn daemon_protocol_info() -> DaemonProtocolInfo {
+        DaemonProtocolInfo {
+            name: DAEMON_PROTOCOL_NAME.to_string(),
+            version: DAEMON_PROTOCOL_VERSION,
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct DaemonEventCursor {
+        pub generation: String,
+        pub sequence: u64,
+    }
+
+    /// One command on the wire: `id` plus the tagged command body.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct DaemonCommand {
+        pub id: Option<String>,
+        pub type_: String,
+        pub body: Map<String, Value>,
+    }
+
+    impl DaemonCommand {
+        pub fn new(type_: impl Into<String>) -> Self {
+            let type_: String = type_.into();
+            let mut body = Map::new();
+            body.insert("type".to_string(), Value::String(type_.clone()));
+            Self { id: None, type_, body }
+        }
+
+        pub fn from_value(value: &Value) -> Option<Self> {
+            let object = value.as_object()?;
+            let type_ = object.get("type")?.as_str()?.to_string();
+            Some(Self {
+                id: object.get("id").and_then(Value::as_str).map(str::to_string),
+                type_,
+                body: object.clone(),
+            })
+        }
+
+        /// The command body with `id` removed (a `DaemonCommandBody` in TypeScript).
+        pub fn body_without_id(&self) -> Map<String, Value> {
+            let mut body = self.body.clone();
+            body.shift_remove("id");
+            body
+        }
+
+        pub fn to_value(&self) -> Value {
+            let mut object = self.body.clone();
+            object.insert("type".to_string(), Value::String(self.type_.clone()));
+            if let Some(id) = &self.id {
+                object.insert("id".to_string(), Value::String(id.clone()));
+            }
+            Value::Object(object)
+        }
+
+        pub fn field(&self, key: &str) -> Option<&Value> {
+            self.body.get(key)
+        }
+
+        pub fn has_field(&self, key: &str) -> bool {
+            self.body.get(key).is_some_and(|value| !value.is_null())
+        }
+
+        pub fn string_field(&self, key: &str) -> Option<&str> {
+            self.body.get(key).and_then(Value::as_str)
+        }
+
+        pub fn bool_field(&self, key: &str) -> bool {
+            self.body.get(key).and_then(Value::as_bool) == Some(true)
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    pub struct DaemonCommandCompatibility {
+        pub min_protocol: u32,
+        #[serde(rename = "minSchemaRevision", skip_serializing_if = "Option::is_none", default)]
+        pub min_schema_revision: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub capability: Option<String>,
+    }
+
+    impl DaemonCommandCompatibility {
+        const fn legacy() -> Self {
+            Self { min_protocol: 7, min_schema_revision: None, capability: None }
+        }
+
+        fn with(capability: &str) -> Self {
+            Self { min_protocol: 7, min_schema_revision: None, capability: Some(capability.to_string()) }
+        }
+
+        fn with_revision(min_schema_revision: u32) -> Self {
+            Self { min_protocol: 7, min_schema_revision: Some(min_schema_revision), capability: None }
+        }
+
+        fn with_revision_and_capability(min_schema_revision: u32, capability: &str) -> Self {
+            Self {
+                min_protocol: 7,
+                min_schema_revision: Some(min_schema_revision),
+                capability: Some(capability.to_string()),
+            }
+        }
+    }
+
+    /// `DAEMON_COMMAND_COMPATIBILITY` from the TypeScript table.
+    pub fn daemon_command_compatibility(command_type: &str) -> DaemonCommandCompatibility {
+        match command_type {
+            "list_agent_peers" => DaemonCommandCompatibility::with_revision(23),
+            "get_direct_worker_transport" => {
+                DaemonCommandCompatibility::with_revision_and_capability(25, "direct_peer_transport")
+            }
+            "complete_owned_session" | "promote_owned_session" => {
+                DaemonCommandCompatibility::with("client_owned_sessions")
+            }
+            "prompt" | "prompt_and_wait" | "steer" | "follow_up" | "resume_queue" => {
+                DaemonCommandCompatibility::with("session_input_admission")
+            }
+            "cancel_prompt_admission" => {
+                DaemonCommandCompatibility::with_revision_and_capability(8, "prompt_admission_cancellation")
+            }
+            "delete_rlm_subagent" => DaemonCommandCompatibility::with("delete_rlm_subagent"),
+            "get_history_range" => {
+                DaemonCommandCompatibility::with_revision_and_capability(29, "history_ranges")
+            }
+            "get_rlm_children" => {
+                DaemonCommandCompatibility::with_revision_and_capability(17, "authoritative_child_roster")
+            }
+            "replace_acp_mcp_servers" => {
+                DaemonCommandCompatibility::with_revision_and_capability(22, "acp_mcp_servers")
+            }
+            "get_model_catalog" => DaemonCommandCompatibility::with("model_catalog"),
+            "mutate_queued_message" => {
+                DaemonCommandCompatibility::with_revision_and_capability(15, "queue_message_mutation")
+            }
+            "acquire_session_input_pause" | "release_session_input_pause" => {
+                DaemonCommandCompatibility::with("session_input_pause")
+            }
+            "heartbeats_list" => DaemonCommandCompatibility::with("heartbeat_catalog"),
+            "roster_subscribe" | "roster_unsubscribe" => DaemonCommandCompatibility::with("agent_roster"),
+            "heartbeat_manage" => DaemonCommandCompatibility::with("heartbeat_management"),
+            "get_rlm_max_depth_status" | "set_rlm_max_depth" => {
+                DaemonCommandCompatibility::with_revision(11)
+            }
+            "get_session_tree" => DaemonCommandCompatibility::with_revision(3),
+            _ => DaemonCommandCompatibility::legacy(),
+        }
+    }
+
+    const OWNED_SESSION_RECOVERY_CONTEXT: u32 = 17;
+    const TELEMETRY_POLICY_REVISION: u32 = 14;
+    const RLM_QUIESCENCE_BARRIER_REVISION: u32 = 18;
+    const OWNED_PROMPT_CANCELLATION_REVISION: u32 = 20;
+
+    pub fn get_daemon_command_compatibilities(command: &DaemonCommand) -> Vec<DaemonCommandCompatibility> {
+        let mut requirements: Vec<DaemonCommandCompatibility> = Vec::new();
+        if (command.type_ == "attach" || command.type_ == "reattach") && command.has_field("recoveryConfig") {
+            requirements.push(DaemonCommandCompatibility::with_revision_and_capability(
+                OWNED_SESSION_RECOVERY_CONTEXT,
+                "owned_session_recovery_context",
+            ));
+        }
+        let carries_telemetry_policy = ((command.type_ == "attach" || command.type_ == "reattach")
+            && command.has_field("telemetryDisabled"))
+            || (command.type_ == "create"
+                && command
+                    .field("config")
+                    .and_then(Value::as_object)
+                    .is_some_and(|config| config.contains_key("telemetryDisabled")));
+        if carries_telemetry_policy {
+            requirements.push(DaemonCommandCompatibility::with_revision(TELEMETRY_POLICY_REVISION));
+        }
+        if (command.type_ == "prompt" || command.type_ == "prompt_and_wait") && command.has_field("admissionId") {
+            requirements.push(DaemonCommandCompatibility::with_revision_and_capability(
+                8,
+                "prompt_admission_cancellation",
+            ));
+        }
+        if command.type_ == "wait_for_headless_completion" && command.bool_field("waitForRlmQuiescence") {
+            requirements.push(DaemonCommandCompatibility::with_revision_and_capability(
+                RLM_QUIESCENCE_BARRIER_REVISION,
+                "rlm_quiescence_barrier",
+            ));
+        }
+        if command.type_ == "cancel_prompt_admission" && command.bool_field("cancelOwned") {
+            requirements.push(DaemonCommandCompatibility::with_revision_and_capability(
+                OWNED_PROMPT_CANCELLATION_REVISION,
+                "owned_prompt_cancellation",
+            ));
+        }
+        requirements.push(daemon_command_compatibility(&command.type_));
+        requirements
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DaemonHello {
+        pub protocol: DaemonProtocolInfo,
+        pub schema_revision: Option<u32>,
+        pub server_capabilities: Vec<String>,
+        pub raw: Value,
+    }
+
+    impl DaemonHello {
+        pub fn from_value(value: &Value) -> Option<Self> {
+            let object = value.as_object()?;
+            if object.get("type")?.as_str()? != "daemon_hello" {
+                return None;
+            }
+            let protocol_value = object.get("protocol")?;
+            if !protocol_value.is_object() {
+                return None;
+            }
+            let protocol = serde_json::from_value::<DaemonProtocolInfo>(protocol_value.clone()).ok()?;
+            let schema_revision = object
+                .get("schemaRevision")
+                .and_then(Value::as_u64)
+                .map(|value| value as u32);
+            let server_capabilities = object
+                .get("serverCapabilities")
+                .and_then(Value::as_array)
+                .map(|entries| {
+                    entries.iter().filter_map(Value::as_str).map(str::to_string).collect()
+                })
+                .unwrap_or_default();
+            Some(Self { protocol, schema_revision, server_capabilities, raw: value.clone() })
+        }
+
+        pub fn supports(&self, capability: &str) -> bool {
+            self.server_capabilities.iter().any(|entry| entry == capability)
+        }
+    }
+
+    pub fn is_daemon_hello(value: &Value) -> bool {
+        value
+            .as_object()
+            .is_some_and(|candidate| {
+                candidate.get("type").and_then(Value::as_str) == Some("daemon_hello")
+                    && candidate.get("protocol").is_some_and(Value::is_object)
+            })
+    }
+
+    pub fn meets_daemon_command_compatibility(
+        hello: &DaemonHello,
+        compatibility: &DaemonCommandCompatibility,
+    ) -> bool {
+        hello.protocol.version >= compatibility.min_protocol
+            && compatibility
+                .min_schema_revision
+                .is_none_or(|revision| hello.schema_revision.unwrap_or(0) >= revision)
+            && compatibility
+                .capability
+                .as_deref()
+                .is_none_or(|capability| hello.supports(capability))
+    }
+
+    const READ_ONLY_DAEMON_COMMANDS: [&str; 34] = [
+        "ack_result",
+        "list",
+        "list_saved_sessions",
+        "list_agent_peers",
+        "get_direct_worker_transport",
+        "attach",
+        "reattach",
+        "roster_subscribe",
+        "roster_unsubscribe",
+        "agent_messages_status",
+        "wait_for_idle",
+        "get_session_header",
+        "get_state",
+        "get_connection_state",
+        "get_messages",
+        "get_history_range",
+        "get_rlm_children",
+        "get_session_stats",
+        "get_context_tree",
+        "get_commands",
+        "get_resource_snapshot",
+        "get_model_catalog",
+        "get_available_models",
+        "get_queue",
+        "cron_list",
+        "heartbeats_list",
+        "heartbeat_get",
+        "get_session_context",
+        "get_session_tree",
+        "get_user_messages_for_forking",
+        "get_last_assistant_text",
+        "get_system_prompt",
+        "get_rlm_max_depth_status",
+        "get_tool_definition",
+    ];
+
+    pub fn is_daemon_mutating_command(command_type: &str) -> bool {
+        !READ_ONLY_DAEMON_COMMANDS.contains(&command_type)
+    }
+
+    const SESSION_PLANE_COMMANDS: [&str; 76] = [
+        "attach",
+        "detach",
+        "prompt",
+        "cancel_prompt_admission",
+        "prompt_and_wait",
+        "steer",
+        "follow_up",
+        "restore_next_turn",
+        "restore_actions",
+        "append_custom_message",
+        "resume_queue",
+        "abort",
+        "start_side_question",
+        "abort_side_question",
+        "execute_bash",
+        "abort_bash",
+        "cancel_rlm_child",
+        "delete_rlm_subagent",
+        "wait_for_idle",
+        "wait_for_headless_completion",
+        "get_session_header",
+        "get_state",
+        "get_connection_state",
+        "get_messages",
+        "get_history_range",
+        "get_rlm_children",
+        "get_session_stats",
+        "get_context_tree",
+        "get_commands",
+        "get_resource_snapshot",
+        "replace_acp_mcp_servers",
+        "get_model_catalog",
+        "get_available_models",
+        "get_queue",
+        "mutate_queued_message",
+        "clear_queue",
+        "abort_and_clear_queue",
+        "acquire_session_input_pause",
+        "release_session_input_pause",
+        "set_model",
+        "cycle_model",
+        "set_scoped_models",
+        "set_thinking_level",
+        "set_service_tier",
+        "cycle_thinking_level",
+        "set_transport",
+        "set_steering_mode",
+        "set_follow_up_mode",
+        "set_auto_compaction",
+        "set_auto_retry",
+        "compact",
+        "refine",
+        "abort_compaction",
+        "abort_branch_summary",
+        "abort_retry",
+        "execute_bash_and_wait",
+        "reload",
+        "new_session",
+        "switch_session",
+        "fork",
+        "navigate_tree",
+        "import_jsonl",
+        "export_html",
+        "export_jsonl",
+        "get_rlm_max_depth_status",
+        "set_rlm_max_depth",
+        "get_session_context",
+        "get_session_tree",
+        "get_user_messages_for_forking",
+        "get_last_assistant_text",
+        "get_system_prompt",
+        "get_tool_definition",
+        "set_session_entry_label",
+        "extension_ui_response",
+    ];
+
+    pub fn is_session_plane_daemon_command(command_type: &str) -> bool {
+        SESSION_PLANE_COMMANDS.contains(&command_type)
+    }
+
+    pub fn is_daemon_dialog_extension_ui_request(method: &str) -> bool {
+        DAEMON_DIALOG_EXTENSION_UI_METHODS.contains(&method)
+    }
+
+    /// True when a daemon rejected a command it does not know.
+    pub fn is_unknown_daemon_command_error(message: &str, command_type: &str) -> bool {
+        message.contains(&format!("Unknown daemon command: {command_type}"))
+    }
+
+    pub fn create_daemon_command_envelope(
+        command: &DaemonCommand,
+        id: &str,
+        client_id: Option<&str>,
+        protocol_version: u32,
+    ) -> Value {
+        let mut envelope = Map::new();
+        envelope.insert("type".to_string(), Value::String("command".to_string()));
+        envelope.insert("id".to_string(), Value::String(id.to_string()));
+        envelope.insert(
+            "protocol".to_string(),
+            serde_json::json!({ "name": DAEMON_PROTOCOL_NAME, "version": protocol_version }),
+        );
+        if let Some(client_id) = client_id {
+            envelope.insert("clientId".to_string(), Value::String(client_id.to_string()));
+        }
+        envelope.insert("command".to_string(), command.to_value());
+        Value::Object(envelope)
+    }
+
+    pub fn is_daemon_command_envelope(value: &Value) -> bool {
+        let Some(candidate) = value.as_object() else {
+            return false;
+        };
+        let Some(protocol) = candidate.get("protocol").and_then(Value::as_object) else {
+            return false;
+        };
+        let Some(version) = protocol.get("version").and_then(Value::as_u64) else {
+            return false;
+        };
+        candidate.get("type").and_then(Value::as_str) == Some("command")
+            && candidate.get("id").and_then(Value::as_str).is_some()
+            && protocol.get("name").and_then(Value::as_str) == Some(DAEMON_PROTOCOL_NAME)
+            && version >= u64::from(DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION)
+            && version <= u64::from(DAEMON_PROTOCOL_VERSION)
+            && candidate.get("command").is_some_and(|command| command.is_object())
+    }
+
+    /// Salvage the correlation id from a command line that failed to parse as an envelope.
+    pub fn salvage_daemon_command_id(line: &str) -> Option<String> {
+        let candidate: Value = serde_json::from_str(line).ok()?;
+        candidate.as_object()?.get("id").and_then(Value::as_str).map(str::to_string)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct DaemonEventMeta {
+        pub id: String,
+        pub protocol: DaemonProtocolInfo,
+        #[serde(rename = "activeSessionId", skip_serializing_if = "Option::is_none", default)]
+        pub active_session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub sequence: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub cursor: Option<DaemonEventCursor>,
+        #[serde(rename = "emittedAt")]
+        pub emitted_at: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub replayed: Option<bool>,
+    }
+
+    pub fn create_daemon_event_meta(
+        active_session_id: &str,
+        sequence: u64,
+        emitted_at: &str,
+        generation: &str,
+    ) -> DaemonEventMeta {
+        DaemonEventMeta {
+            id: format!("{active_session_id}:{sequence}"),
+            protocol: daemon_protocol_info(),
+            active_session_id: Some(active_session_id.to_string()),
+            sequence: Some(sequence),
+            cursor: Some(DaemonEventCursor { generation: generation.to_string(), sequence }),
+            emitted_at: emitted_at.to_string(),
+            replayed: None,
+        }
+    }
+
+    pub fn create_daemon_event_envelope(event: Value, meta: &DaemonEventMeta) -> Value {
+        let mut envelope = Map::new();
+        envelope.insert("type".to_string(), Value::String("event".to_string()));
+        envelope.insert("id".to_string(), Value::String(meta.id.clone()));
+        envelope.insert(
+            "protocol".to_string(),
+            serde_json::to_value(&meta.protocol).unwrap_or(Value::Null),
+        );
+        if let Some(active_session_id) = &meta.active_session_id {
+            envelope.insert("activeSessionId".to_string(), Value::String(active_session_id.clone()));
+        }
+        if let Some(sequence) = meta.sequence {
+            envelope.insert("sequence".to_string(), Value::from(sequence));
+        }
+        if let Some(cursor) = &meta.cursor {
+            envelope.insert("cursor".to_string(), serde_json::to_value(cursor).unwrap_or(Value::Null));
+        }
+        envelope.insert("emittedAt".to_string(), Value::String(meta.emitted_at.clone()));
+        envelope.insert("event".to_string(), event);
+        Value::Object(envelope)
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct DaemonReplayInfo {
+        pub status: String,
+        #[serde(rename = "fromSequence", skip_serializing_if = "Option::is_none", default)]
+        pub from_sequence: Option<u64>,
+        #[serde(rename = "toSequence")]
+        pub to_sequence: u64,
+        #[serde(rename = "fromCursor", skip_serializing_if = "Option::is_none", default)]
+        pub from_cursor: Option<DaemonEventCursor>,
+        #[serde(rename = "toCursor", skip_serializing_if = "Option::is_none", default)]
+        pub to_cursor: Option<DaemonEventCursor>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub reason: Option<String>,
+    }
+
+    /// A resume cursor: either a full cursor or the legacy `eventSequence` shape.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct DaemonResumeCursor {
+        pub active_session_id: Option<String>,
+        pub generation: Option<String>,
+        pub sequence: u64,
+    }
+
+    pub fn create_daemon_replay_info(
+        resume_cursor: Option<&DaemonResumeCursor>,
+        last_event_sequence: u64,
+        generation: &str,
+    ) -> DaemonReplayInfo {
+        let to_cursor = DaemonEventCursor { generation: generation.to_string(), sequence: last_event_sequence };
+        let Some(resume_cursor) = resume_cursor else {
+            return DaemonReplayInfo {
+                status: "complete".to_string(),
+                from_sequence: None,
+                to_sequence: last_event_sequence,
+                from_cursor: None,
+                to_cursor: Some(to_cursor),
+                reason: None,
+            };
+        };
+        let resume_sequence = resume_cursor.sequence;
+        let from_cursor = resume_cursor
+            .generation
+            .as_ref()
+            .map(|generation| DaemonEventCursor { generation: generation.clone(), sequence: resume_sequence });
+        if let Some(from_cursor) = &from_cursor {
+            if from_cursor.generation != generation {
+                return DaemonReplayInfo {
+                    status: "unavailable".to_string(),
+                    from_sequence: Some(resume_sequence),
+                    to_sequence: last_event_sequence,
+                    from_cursor,
+                    to_cursor: Some(to_cursor),
+                    reason: Some("event_generation_changed".to_string()),
+                };
+            }
+        }
+        if resume_sequence > last_event_sequence {
+            return DaemonReplayInfo {
+                status: "unavailable".to_string(),
+                from_sequence: Some(resume_sequence),
+                to_sequence: last_event_sequence,
+                from_cursor,
+                to_cursor: Some(to_cursor),
+                reason: Some("resume_cursor_ahead_of_session".to_string()),
+            };
+        }
+        if resume_sequence == last_event_sequence {
+            return DaemonReplayInfo {
+                status: "complete".to_string(),
+                from_sequence: Some(resume_sequence),
+                to_sequence: last_event_sequence,
+                from_cursor,
+                to_cursor: Some(to_cursor),
+                reason: None,
+            };
+        }
+        DaemonReplayInfo {
+            status: "unavailable".to_string(),
+            from_sequence: Some(resume_sequence),
+            to_sequence: last_event_sequence,
+            from_cursor,
+            to_cursor: Some(to_cursor),
+            reason: Some("event_replay_not_available".to_string()),
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct DaemonResponse {
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub id: Option<String>,
+        #[serde(rename = "type", default = "response_type")]
+        pub type_: String,
+        pub command: String,
+        pub success: bool,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub data: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub error: Option<String>,
+        #[serde(rename = "errorInfo", skip_serializing_if = "Option::is_none", default)]
+        pub error_info: Option<DaemonErrorInfo>,
+    }
+
+    fn response_type() -> String {
+        "response".to_string()
+    }
+
+    impl DaemonResponse {
+        pub fn success(id: Option<&str>, command: &str, data: Option<Value>) -> Self {
+            Self {
+                id: id.map(str::to_string),
+                type_: "response".to_string(),
+                command: command.to_string(),
+                success: true,
+                data,
+                error: None,
+                error_info: None,
+            }
+        }
+
+        pub fn failure(id: Option<&str>, command: &str, error: &str, error_info: Option<DaemonErrorInfo>) -> Self {
+            Self {
+                id: id.map(str::to_string),
+                type_: "response".to_string(),
+                command: command.to_string(),
+                success: false,
+                data: None,
+                error: Some(error.to_string()),
+                error_info,
+            }
+        }
+
+        pub fn from_value(value: &Value) -> Option<Self> {
+            let candidate = value.as_object()?;
+            if candidate.get("type").and_then(Value::as_str) != Some("response") {
+                return None;
+            }
+            let command = candidate.get("command").and_then(Value::as_str)?.to_string();
+            let success = candidate.get("success").and_then(Value::as_bool)?;
+            Some(Self {
+                id: candidate.get("id").and_then(Value::as_str).map(str::to_string),
+                type_: "response".to_string(),
+                command,
+                success,
+                data: candidate.get("data").cloned(),
+                error: candidate.get("error").and_then(Value::as_str).map(str::to_string),
+                error_info: candidate
+                    .get("errorInfo")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok()),
+            })
+        }
+    }
+
+    pub fn is_daemon_response(value: &Value) -> bool {
+        let Some(candidate) = value.as_object() else {
+            return false;
+        };
+        candidate.get("type").and_then(Value::as_str) == Some("response")
+            && candidate.get("command").and_then(Value::as_str).is_some()
+            && candidate.get("success").and_then(Value::as_bool).is_some()
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct DaemonSavedSessionInfo {
+        pub path: String,
+        pub id: String,
+        pub cwd: String,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub state: Option<Value>,
+        #[serde(rename = "parentSessionPath", skip_serializing_if = "Option::is_none", default)]
+        pub parent_session_path: Option<String>,
+        #[serde(rename = "rlmDepth", skip_serializing_if = "Option::is_none", default)]
+        pub rlm_depth: Option<i64>,
+        pub created: String,
+        pub modified: String,
+        #[serde(rename = "messageCount")]
+        pub message_count: i64,
+        #[serde(rename = "firstMessage")]
+        pub first_message: String,
+        #[serde(rename = "allMessagesText")]
+        pub all_messages_text: String,
+        #[serde(rename = "agentStatus", skip_serializing_if = "Option::is_none", default)]
+        pub agent_status: Option<Value>,
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        pub usage: Option<Value>,
+    }
+
+    pub fn is_daemon_saved_session_info(value: &Value) -> bool {
+        let Some(candidate) = value.as_object() else {
+            return false;
+        };
+        candidate.get("path").and_then(Value::as_str).is_some()
+            && candidate.get("id").and_then(Value::as_str).is_some()
+            && candidate.get("cwd").and_then(Value::as_str).is_some()
+            && candidate.get("created").and_then(Value::as_str).is_some()
+            && candidate.get("modified").and_then(Value::as_str).is_some()
+            && candidate.get("messageCount").and_then(Value::as_f64).is_some()
+            && candidate.get("firstMessage").and_then(Value::as_str).is_some()
+            && candidate.get("allMessagesText").and_then(Value::as_str).is_some()
+            && candidate.get("agentStatus").is_none_or(is_daemon_saved_session_agent_status)
+    }
+
+    fn is_daemon_saved_session_agent_status(value: &Value) -> bool {
+        let Some(candidate) = value.as_object() else {
+            return false;
+        };
+        candidate.get("summary").and_then(Value::as_str).is_some()
+            && candidate.get("basedOnMessageCount").and_then(Value::as_f64).is_some()
+            && candidate
+                .get("taskState")
+                .is_none_or(|task_state| matches!(task_state.as_str(), Some("needs_input") | Some("completed")))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn compatibility_table_matches_the_published_schema() {
+            let hello = DaemonHello {
+                protocol: daemon_protocol_info(),
+                schema_revision: Some(DAEMON_SCHEMA_REVISION),
+                server_capabilities: DAEMON_DEFAULT_SERVER_CAPABILITIES
+                    .iter()
+                    .map(|entry| entry.to_string())
+                    .collect(),
+                raw: Value::Null,
+            };
+            let command = DaemonCommand::new("get_history_range");
+            assert!(get_daemon_command_compatibilities(&command)
+                .iter()
+                .all(|compatibility| meets_daemon_command_compatibility(&hello, compatibility)));
+
+            let stale = DaemonHello {
+                protocol: daemon_protocol_info(),
+                schema_revision: Some(28),
+                server_capabilities: vec![],
+                raw: Value::Null,
+            };
+            assert!(!meets_daemon_command_compatibility(
+                &stale,
+                &daemon_command_compatibility("get_history_range")
+            ));
+        }
+
+        #[test]
+        fn envelope_round_trip() {
+            let command = DaemonCommand::new("list");
+            let envelope = create_daemon_command_envelope(&command, "daemon_1", Some("client"), 7);
+            assert!(is_daemon_command_envelope(&envelope));
+            assert_eq!(salvage_daemon_command_id(&envelope.to_string()).as_deref(), Some("daemon_1"));
+            assert!(salvage_daemon_command_id("{not json").is_none());
+        }
+
+        #[test]
+        fn telemetry_policy_requirement_is_detected() {
+            let mut command = DaemonCommand::new("attach");
+            command.body.insert("telemetryDisabled".to_string(), Value::Bool(true));
+            let requirements = get_daemon_command_compatibilities(&command);
+            assert_eq!(requirements.len(), 2);
+            assert_eq!(requirements[0].min_schema_revision, Some(14));
+        }
+
+        #[test]
+        fn mutating_and_plane_classification() {
+            assert!(!is_daemon_mutating_command("get_state"));
+            assert!(is_daemon_mutating_command("prompt"));
+            assert!(is_session_plane_daemon_command("attach"));
+            assert!(!is_session_plane_daemon_command("create"));
+        }
+    }
+}
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::Duration;
+
+use futures_util::stream::SplitSink;
+use futures_util::{SinkExt, StreamExt};
+use serde_json::Value;
+use tokio::sync::{oneshot, Mutex, Notify};
+use tokio::time::Instant;
+use tokio_util::codec::{Framed, LinesCodec};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use crate::utils::daemon_socket_path::normalize_socket_path;
+
+use self::protocol::{
+    create_daemon_command_envelope, get_daemon_command_compatibilities, is_daemon_mutating_command,
+    is_daemon_response, is_daemon_saved_session_info, meets_daemon_command_compatibility, DaemonCommand,
+    DaemonCommandCompatibility, DaemonHello, DaemonResponse, DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION,
+    DAEMON_PROTOCOL_VERSION,
+};
+
+/// `getDaemonLogPath` from config.ts (logs live under the agent dir).
+// Private config.ts plumbing (config.ts belongs to another slice).
+fn get_daemon_log_path(socket_path: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = normalize_socket_path(socket_path, None);
+    let mut hasher = Sha256::new();
+    hasher.update(normalized.as_bytes());
+    let digest = hasher.finalize();
+    let hash: String = digest.iter().take(4).map(|byte| format!("{byte:02x}")).collect();
+    let basename = Path::new(&normalized)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| normalized.clone());
+    join_path(&get_logs_dir(), &format!("{basename}.{hash}.log"))
+}
+
+fn get_logs_dir() -> String {
+    join_path(&get_agent_dir(), "logs")
+}
+
+fn get_agent_dir() -> String {
+    if let Ok(env_dir) = std::env::var("PRIME_AGENT_CODING_AGENT_DIR") {
+        if !env_dir.is_empty() {
+            return expand_tilde_path(&env_dir);
+        }
+    }
+    join_path(&home_dir(), ".prime/agent")
+}
+
+fn home_dir() -> String {
+    std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .unwrap_or_else(|_| ".".to_string())
+}
+
+fn expand_tilde_path(path: &str) -> String {
+    if path == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        return join_path(&home_dir(), rest);
+    }
+    path.to_string()
+}
+
+fn join_path(base: &str, name: &str) -> String {
+    let base = base.trim_end_matches(['/', '\\']);
+    format!("{base}/{name}")
+}
+
+fn daemon_endpoint_details(socket_path: &str) -> String {
+    format!(
+        "Socket: {socket_path}. Daemon log: {}.",
+        get_daemon_log_path(socket_path)
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonRequestAbortError {
+    pub command_type: String,
+}
+
+impl DaemonRequestAbortError {
+    pub fn message(&self) -> String {
+        format!("Daemon request \"{}\" was cancelled", self.command_type)
+    }
+}
+
+impl std::fmt::Display for DaemonRequestAbortError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for DaemonRequestAbortError {}
+
+pub(crate) fn daemon_request_abort_error(command_type: &str) -> DaemonClientError {
+    DaemonClientError::Aborted(DaemonRequestAbortError { command_type: command_type.to_string() })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonSocketClosedError {
+    pub socket_path: String,
+    pub daemon_closing_reason: Option<String>,
+    pub cause: Option<String>,
+}
+
+impl DaemonSocketClosedError {
+    pub fn new(socket_path: &str, daemon_closing_reason: Option<&str>, cause: Option<&str>) -> Self {
+        Self {
+            socket_path: socket_path.to_string(),
+            daemon_closing_reason: daemon_closing_reason.map(str::to_string),
+            cause: cause.map(str::to_string),
+        }
+    }
+
+    pub fn message(&self) -> String {
+        let reason_details = self
+            .daemon_closing_reason
+            .as_ref()
+            .map(|reason| format!(" Reason: {reason}."))
+            .unwrap_or_default();
+        let cause_details = self
+            .cause
+            .as_ref()
+            .map(|cause| format!(" Cause: {cause}."))
+            .unwrap_or_default();
+        format!(
+            "Connection to the Prime Agent daemon closed.{reason_details}{cause_details} {}",
+            daemon_endpoint_details(&self.socket_path)
+        )
+    }
+}
+
+impl std::fmt::Display for DaemonSocketClosedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for DaemonSocketClosedError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonCapabilityUnavailableError {
+    pub command: String,
+    pub capability: Option<String>,
+    pub after_reconnect: bool,
+}
+
+impl DaemonCapabilityUnavailableError {
+    pub fn new(command: &str, capability: Option<&str>, after_reconnect: bool) -> Self {
+        Self {
+            command: command.to_string(),
+            capability: capability.map(str::to_string),
+            after_reconnect,
+        }
+    }
+
+    pub fn message(&self) -> String {
+        match &self.capability {
+            Some(capability) => format!("The running Prime Agent daemon does not support {capability}."),
+            None => format!("The running Prime Agent daemon does not support {}.", self.command),
+        }
+    }
+}
+
+impl std::fmt::Display for DaemonCapabilityUnavailableError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for DaemonCapabilityUnavailableError {}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonClientError {
+    Message(String),
+    SocketClosed(DaemonSocketClosedError),
+    CapabilityUnavailable(DaemonCapabilityUnavailableError),
+    Aborted(DaemonRequestAbortError),
+}
+
+impl DaemonClientError {
+    pub fn message(&self) -> String {
+        match self {
+            DaemonClientError::Message(message) => message.clone(),
+            DaemonClientError::SocketClosed(error) => error.message(),
+            DaemonClientError::CapabilityUnavailable(error) => error.message(),
+            DaemonClientError::Aborted(error) => error.message(),
+        }
+    }
+
+    pub fn is_abort(&self) -> bool {
+        matches!(self, DaemonClientError::Aborted(_))
+    }
+}
+
+impl std::fmt::Display for DaemonClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for DaemonClientError {}
+
+pub type DaemonClientResult<T> = Result<T, DaemonClientError>;
+
+pub fn get_daemon_socket_close_reason(error: &DaemonClientError) -> Option<String> {
+    match error {
+        DaemonClientError::SocketClosed(closed) => closed.daemon_closing_reason.clone(),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonClientReconnectStatus {
+    Reconnecting { error: String },
+    Connected,
+    Failed { error: String },
+}
+
+#[derive(Clone)]
+pub struct DaemonClientReconnectOptions {
+    pub recover_daemon: Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>,
+    pub timeout_ms: Option<u64>,
+    pub on_status: Option<Arc<dyn Fn(DaemonClientReconnectStatus) + Send + Sync>>,
+}
+
+pub type DaemonClientMessageListener = Arc<dyn Fn(&Value) + Send + Sync>;
+pub type DaemonClientCloseListener = Arc<dyn Fn(&DaemonClientError) + Send + Sync>;
+pub type DaemonClientProgressListener = Arc<dyn Fn(&Value) + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct DaemonClientRequestOptions {
+    pub on_progress: Option<DaemonClientProgressListener>,
+    pub signal: Option<CancellationToken>,
+    /// False opts out of reconnect parking: a close rejects so the caller's own retry loop stays live.
+    pub recoverable: Option<bool>,
+}
+
+const DEFAULT_DAEMON_REQUEST_TIMEOUT_MS: u64 = 30_000;
+// Windows worker startup can exceed 30 seconds under antivirus scanning.
+const WINDOWS_DAEMON_CREATE_TIMEOUT_MS: u64 = 120_000;
+
+fn default_daemon_request_timeout(command: &DaemonCommand) -> u64 {
+    if command.type_ == "create" && crate::utils::pi_user_agent::process_platform() == "win32" {
+        WINDOWS_DAEMON_CREATE_TIMEOUT_MS
+    } else {
+        DEFAULT_DAEMON_REQUEST_TIMEOUT_MS
+    }
+}
+
+const DEFAULT_RECONNECT_TIMEOUT_MS: u64 = 60_000;
+const RECONNECT_CONNECT_TIMEOUT_MS: u64 = 1000;
+const RECONNECT_HELLO_TIMEOUT_MS: u64 = 3000;
+const MAX_RECONNECT_DELAY_MS: u64 = 2000;
+
+/// LF-only JSONL framing: payload strings may contain U+2028/U+2029, so records
+/// must split on `\n` only (mirrors `attachJsonlLineReader`).
+pub const DAEMON_MAX_LINE_LENGTH: usize = 256 * 1024 * 1024;
+
+/// Private plumbing (modes/rpc/jsonl.ts belongs to another slice).
+pub(crate) fn serialize_json_line(value: &Value) -> String {
+    format!("{value}\n")
+}
+
+struct PendingDaemonRequest {
+    command_type: String,
+    timeout_ms: u64,
+    on_progress: Option<DaemonClientProgressListener>,
+    wire_data: String,
+    awaiting_reconnect: bool,
+    acknowledge_result: bool,
+    recoverable: bool,
+    compatibilities: Vec<DaemonCommandCompatibility>,
+    deadline: Instant,
+    result: Arc<StdMutex<Option<DaemonClientResult<DaemonResponse>>>>,
+    wake: Arc<Notify>,
+}
+
+impl PendingDaemonRequest {
+    fn settle(&self, result: DaemonClientResult<DaemonResponse>) {
+        let mut slot = self.result.lock().expect("pending request slot poisoned");
+        if slot.is_none() {
+            *slot = Some(result);
+        }
+        self.wake.notify_waiters();
+    }
+}
+
+struct HelloWaiter {
+    sender: oneshot::Sender<DaemonClientResult<DaemonHello>>,
+}
+
+#[cfg(unix)]
+pub type DaemonSocketStream = tokio::net::UnixStream;
+#[cfg(windows)]
+pub type DaemonSocketStream = tokio::net::windows::named_pipe::NamedPipeClient;
+
+type DaemonSink = SplitSink<Framed<DaemonSocketStream, LinesCodec>, String>;
+
+struct ClientSocket {
+    writer: Mutex<Option<DaemonSink>>,
+    reader_task: StdMutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+impl ClientSocket {
+    async fn write_line(&self, line: String) -> std::io::Result<()> {
+        let mut writer = self.writer.lock().await;
+        match writer.as_mut() {
+            Some(writer) => writer.send(line).await.map_err(std::io::Error::other),
+            None => Err(std::io::Error::new(std::io::ErrorKind::NotConnected, "socket closed")),
+        }
+    }
+
+    fn destroy(&self) {
+        let task = self.reader_task.lock().expect("reader task slot poisoned").take();
+        if let Some(task) = task {
+            task.abort();
+        }
+    }
+}
+
+async fn connect_daemon_socket(socket_path: &str) -> std::io::Result<DaemonSocketStream> {
+    #[cfg(unix)]
+    {
+        tokio::net::UnixStream::connect(socket_path).await
+    }
+    #[cfg(windows)]
+    {
+        tokio::net::windows::named_pipe::ClientOptions::new().open(socket_path)
+    }
+}
+
+#[derive(Default)]
+struct ClientState {
+    socket: Option<Arc<ClientSocket>>,
+    pending: HashMap<String, PendingDaemonRequest>,
+    hello_waiters: Vec<HelloWaiter>,
+    request_id: u64,
+    hello_message: Option<DaemonHello>,
+    daemon_closing_reason: Option<String>,
+    request_recovery_enabled: bool,
+    reconnect_options: Option<DaemonClientReconnectOptions>,
+}
+
+/// The daemon transport a `DaemonAgentConnection` talks to.
+pub trait DaemonTransportClient: Send + Sync {
+    fn hello(&self) -> Option<DaemonHello>;
+    fn is_connected(&self) -> bool;
+    fn supports_server_capability(&self, capability: &str) -> bool;
+    fn on_message(&self, listener: DaemonClientMessageListener) -> Box<dyn Fn() + Send + Sync>;
+    fn on_close(&self, listener: DaemonClientCloseListener) -> Box<dyn Fn() + Send + Sync>;
+    fn enable_request_recovery(&self);
+    fn request_boxed(
+        &self,
+        command: DaemonCommand,
+        timeout_ms: Option<u64>,
+        options: DaemonClientRequestOptions,
+    ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>>;
+    fn close(&self);
+}
+
+/// The daemon JSONL client: one socket, request/response correlation by id.
+pub struct DaemonClient {
+    socket_path: String,
+    state: Mutex<ClientState>,
+    listeners: Arc<StdMutex<HashMap<u64, DaemonClientMessageListener>>>,
+    close_listeners: Arc<StdMutex<HashMap<u64, DaemonClientCloseListener>>>,
+    next_listener_id: AtomicU64,
+    protocol_client_id: String,
+    closed: AtomicBool,
+    quick_hello: StdMutex<Option<DaemonHello>>,
+    quick_connected: AtomicBool,
+    reconnect_busy: Mutex<()>,
+}
+
+impl DaemonClient {
+    pub fn new(socket_path: &str) -> Self {
+        Self {
+            socket_path: socket_path.to_string(),
+            state: Mutex::new(ClientState::default()),
+            listeners: Arc::new(StdMutex::new(HashMap::new())),
+            close_listeners: Arc::new(StdMutex::new(HashMap::new())),
+            next_listener_id: AtomicU64::new(0),
+            protocol_client_id: format!("daemon-client:{}", Uuid::new_v4()),
+            closed: AtomicBool::new(false),
+            quick_hello: StdMutex::new(None),
+            quick_connected: AtomicBool::new(false),
+            reconnect_busy: Mutex::new(()),
+        }
+    }
+
+    pub fn socket_path(&self) -> &str {
+        &self.socket_path
+    }
+
+    /// Synchronous getter mirroring `get hello()`.
+    pub fn hello(&self) -> Option<DaemonHello> {
+        self.quick_hello.lock().expect("hello slot poisoned").clone()
+    }
+
+    /// Synchronous getter mirroring `get isConnected()`.
+    pub fn is_connected(&self) -> bool {
+        self.quick_connected.load(Ordering::SeqCst)
+    }
+
+    pub fn supports_server_capability(&self, capability: &str) -> bool {
+        self.hello().is_some_and(|hello| hello.supports(capability))
+    }
+
+    /// Wait for the daemon_hello greeting sent on connect.
+    pub async fn wait_for_hello(&self, timeout_ms: u64) -> DaemonClientResult<DaemonHello> {
+        let (sender, receiver) = oneshot::channel::<DaemonClientResult<DaemonHello>>();
+        {
+            let mut state = self.state.lock().await;
+            if let Some(hello) = &state.hello_message {
+                return Ok(hello.clone());
+            }
+            if state.socket.is_none() {
+                return Err(DaemonClientError::Message(format!(
+                    "Cannot wait for the Prime Agent daemon handshake because the daemon is not connected. {}",
+                    daemon_endpoint_details(&self.socket_path)
+                )));
+            }
+            state.hello_waiters.push(HelloWaiter { sender });
+        }
+        let details = daemon_endpoint_details(&self.socket_path);
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), receiver).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(DaemonClientError::Message(format!(
+                "Cannot wait for the Prime Agent daemon handshake because the daemon is not connected. {details}"
+            ))),
+            Err(_) => {
+                let mut state = self.state.lock().await;
+                state.hello_waiters.retain(|waiter| !waiter.sender.is_closed());
+                Err(DaemonClientError::Message(format!(
+                    "Timed out after {timeout_ms}ms waiting for the Prime Agent daemon handshake. {details}"
+                )))
+            }
+        }
+    }
+
+    pub async fn connect(self: &Arc<Self>, timeout_ms: u64) -> DaemonClientResult<()> {
+        if self.closed.load(Ordering::SeqCst) {
+            return Err(DaemonClientError::Message(
+                "Prime Agent daemon client is closed".to_string(),
+            ));
+        }
+        {
+            let mut state = self.state.lock().await;
+            if state.socket.is_some() {
+                return Err(DaemonClientError::Message(format!(
+                    "Prime Agent daemon client is already connected. {}",
+                    daemon_endpoint_details(&self.socket_path)
+                )));
+            }
+            state.hello_message = None;
+            state.daemon_closing_reason = None;
+        }
+        *self.quick_hello.lock().expect("hello slot poisoned") = None;
+        self.quick_connected.store(false, Ordering::SeqCst);
+
+        let stream = match tokio::time::timeout(
+            Duration::from_millis(timeout_ms),
+            connect_daemon_socket(&self.socket_path),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(error)) => {
+                return Err(DaemonClientError::Message(format!(
+                    "Failed to connect to the Prime Agent daemon: {error}. {}",
+                    daemon_endpoint_details(&self.socket_path)
+                )));
+            }
+            Err(_) => {
+                return Err(DaemonClientError::Message(format!(
+                    "Timed out after {timeout_ms}ms connecting to the Prime Agent daemon. {}",
+                    daemon_endpoint_details(&self.socket_path)
+                )));
+            }
+        };
+
+        let framed = Framed::new(stream, LinesCodec::new_with_max_length(DAEMON_MAX_LINE_LENGTH));
+        let (writer, mut reader) = framed.split();
+        let socket = Arc::new(ClientSocket {
+            writer: Mutex::new(Some(writer)),
+            reader_task: StdMutex::new(None),
+        });
+        let weak = Arc::downgrade(self);
+        let reader_socket = socket.clone();
+        let reader_task = tokio::spawn(async move {
+            while let Some(line) = reader.next().await {
+                match line {
+                    Ok(line) => match weak.upgrade() {
+                        Some(client) => client.handle_line(&line).await,
+                        None => return,
+                    },
+                    Err(_) => break,
+                }
+            }
+            if let Some(client) = weak.upgrade() {
+                let reason = client.state.lock().await.daemon_closing_reason.clone();
+                client
+                    .notify_closed(
+                        &reader_socket,
+                        Some(DaemonSocketClosedError::new(
+                            &client.socket_path,
+                            reason.as_deref(),
+                            None,
+                        )),
+                    )
+                    .await;
+            }
+        });
+        *socket.reader_task.lock().expect("reader task slot poisoned") = Some(reader_task);
+        self.state.lock().await.socket = Some(socket);
+        self.quick_connected.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub async fn reconnect(self: &Arc<Self>, timeout_ms: u64) -> DaemonClientResult<()> {
+        if self.is_connected() {
+            return Ok(());
+        }
+        self.connect(timeout_ms).await
+    }
+
+    pub async fn disconnect_for_reconnect(&self, reason: &str) {
+        let socket = { self.state.lock().await.socket.clone() };
+        let Some(socket) = socket else {
+            return;
+        };
+        self.state.lock().await.daemon_closing_reason = Some(reason.to_string());
+        self.notify_closed(
+            &socket,
+            Some(DaemonSocketClosedError::new(&self.socket_path, Some(reason), None)),
+        )
+        .await;
+        socket.destroy();
+    }
+
+    /// Discard a partially recovered transport so the next retry can reconnect cleanly.
+    pub async fn reset_transport_for_reconnect(&self) {
+        let socket = { self.state.lock().await.socket.take() };
+        let Some(socket) = socket else {
+            return;
+        };
+        self.quick_connected.store(false, Ordering::SeqCst);
+        let preserve = self.state.lock().await.request_recovery_enabled;
+        self.reject_all(
+            DaemonClientError::SocketClosed(DaemonSocketClosedError::new(
+                &self.socket_path,
+                None,
+                Some("reconnect attempt did not complete"),
+            )),
+            preserve,
+        )
+        .await;
+        socket.destroy();
+    }
+
+    pub fn on_message(&self, listener: DaemonClientMessageListener) -> Box<dyn Fn() + Send + Sync> {
+        let id = self.next_listener_id.fetch_add(1, Ordering::SeqCst);
+        self.listeners.lock().expect("listeners poisoned").insert(id, listener);
+        let registry = Arc::clone(&self.listeners);
+        Box::new(move || {
+            registry.lock().expect("listeners poisoned").remove(&id);
+        })
+    }
+
+    pub fn on_close(&self, listener: DaemonClientCloseListener) -> Box<dyn Fn() + Send + Sync> {
+        let id = self.next_listener_id.fetch_add(1, Ordering::SeqCst);
+        self.close_listeners
+            .lock()
+            .expect("close listeners poisoned")
+            .insert(id, listener);
+        let registry = Arc::clone(&self.close_listeners);
+        Box::new(move || {
+            registry.lock().expect("close listeners poisoned").remove(&id);
+        })
+    }
+
+    /// Keep in-flight command promises alive and resend their stable envelopes after reconnect.
+    pub async fn enable_request_recovery(&self) {
+        self.state.lock().await.request_recovery_enabled = true;
+    }
+
+    /// Reconnect a global/raw daemon client after supervisor replacement.
+    pub async fn enable_auto_reconnect(&self, options: DaemonClientReconnectOptions) {
+        let mut state = self.state.lock().await;
+        state.request_recovery_enabled = true;
+        state.reconnect_options = Some(options);
+    }
+}
+
+impl DaemonClient {
+    pub async fn request(
+        self: &Arc<Self>,
+        command: DaemonCommand,
+        timeout_ms: Option<u64>,
+        options: DaemonClientRequestOptions,
+    ) -> DaemonClientResult<DaemonResponse> {
+        let timeout_ms = timeout_ms.unwrap_or_else(|| default_daemon_request_timeout(&command));
+        if options.signal.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(daemon_request_abort_error(&command.type_));
+        }
+        {
+            let state = self.state.lock().await;
+            if state.socket.is_none() {
+                return Err(DaemonClientError::Message(format!(
+                    "Cannot send daemon command \"{}\" because the Prime Agent daemon is not connected. {}",
+                    command.type_,
+                    daemon_endpoint_details(&self.socket_path)
+                )));
+            }
+        }
+        let hello = match self.hello() {
+            Some(hello) => hello,
+            None => self.wait_for_hello(3000).await?,
+        };
+        if options.signal.as_ref().is_some_and(CancellationToken::is_cancelled) {
+            return Err(daemon_request_abort_error(&command.type_));
+        }
+        let compatibilities = get_daemon_command_compatibilities(&command);
+        if let Some(missing) = compatibilities
+            .iter()
+            .find(|compatibility| !meets_daemon_command_compatibility(&hello, compatibility))
+        {
+            return Err(DaemonClientError::CapabilityUnavailable(
+                DaemonCapabilityUnavailableError::new(&command.type_, missing.capability.as_deref(), false),
+            ));
+        }
+        let envelope_protocol_version = hello.protocol.version.min(DAEMON_PROTOCOL_VERSION);
+        let public_envelope = (envelope_protocol_version >= DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION)
+            .then_some(envelope_protocol_version);
+        self.request_wire(command, timeout_ms, options, public_envelope, compatibilities)
+            .await
+    }
+
+    pub async fn authenticate_worker(
+        self: &Arc<Self>,
+        token: &str,
+        timeout_ms: u64,
+    ) -> DaemonClientResult<()> {
+        let mut command = DaemonCommand::new("worker_auth");
+        command
+            .body
+            .insert("token".to_string(), Value::String(token.to_string()));
+        let response = self
+            .request_wire(command, timeout_ms, Default::default(), None, Vec::new())
+            .await?;
+        if !response.success {
+            return Err(DaemonClientError::Message(
+                response.error.unwrap_or_else(|| "worker authentication failed".to_string()),
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn request_worker(
+        self: &Arc<Self>,
+        command: DaemonCommand,
+        timeout_ms: u64,
+    ) -> DaemonClientResult<DaemonResponse> {
+        self.request_wire(command, timeout_ms, Default::default(), None, Vec::new())
+            .await
+    }
+
+    pub async fn request_wire(
+        self: &Arc<Self>,
+        command: DaemonCommand,
+        timeout_ms: u64,
+        options: DaemonClientRequestOptions,
+        public_envelope_protocol_version: Option<u32>,
+        compatibilities: Vec<DaemonCommandCompatibility>,
+    ) -> DaemonClientResult<DaemonResponse> {
+        let socket = {
+            let state = self.state.lock().await;
+            match state.socket.clone() {
+                Some(socket) => socket,
+                None => {
+                    return Err(DaemonClientError::Message(format!(
+                        "Cannot send daemon command \"{}\" because the Prime Agent daemon is not connected. {}",
+                        command.type_,
+                        daemon_endpoint_details(&self.socket_path)
+                    )));
+                }
+            }
+        };
+
+        let id = {
+            let mut state = self.state.lock().await;
+            state.request_id += 1;
+            format!("daemon_{}", state.request_id)
+        };
+        let mut full_command = command.clone();
+        full_command.id = Some(id.clone());
+        let wire_value = match public_envelope_protocol_version {
+            Some(protocol_version) => create_daemon_command_envelope(
+                &full_command,
+                &id,
+                Some(&self.protocol_client_id),
+                protocol_version,
+            ),
+            None => full_command.to_value(),
+        };
+        let wire_data = serialize_json_line(&wire_value);
+        let acknowledge_result =
+            public_envelope_protocol_version.is_some() && is_daemon_mutating_command(&command.type_);
+
+        let result = Arc::new(StdMutex::new(None));
+        let wake = Arc::new(Notify::new());
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        {
+            let mut state = self.state.lock().await;
+            state.pending.insert(
+                id.clone(),
+                PendingDaemonRequest {
+                    command_type: command.type_.clone(),
+                    timeout_ms,
+                    on_progress: options.on_progress.clone(),
+                    wire_data: wire_data.clone(),
+                    awaiting_reconnect: false,
+                    acknowledge_result,
+                    recoverable: options.recoverable.unwrap_or(true),
+                    compatibilities,
+                    deadline,
+                    result: Arc::clone(&result),
+                    wake: Arc::clone(&wake),
+                },
+            );
+        }
+        if let Err(error) = socket.write_line(wire_data).await {
+            let pending = self.state.lock().await.pending.remove(&id);
+            if let Some(pending) = pending {
+                pending.settle(Err(DaemonClientError::Message(error.to_string())));
+            }
+            return Err(DaemonClientError::Message(error.to_string()));
+        }
+
+        let details = daemon_endpoint_details(&self.socket_path);
+        let command_type = command.type_.clone();
+        let abort = options.signal.clone();
+        tokio::select! {
+            _ = wake.notified() => {}
+            _ = tokio::time::sleep_until(deadline) => {
+                let pending = self.state.lock().await.pending.remove(&id);
+                if let Some(pending) = pending {
+                    pending.settle(Err(DaemonClientError::Message(format!(
+                        "Timed out after {}ms waiting for the Prime Agent daemon response to \"{}\". {details}",
+                        pending.timeout_ms, pending.command_type
+                    ))));
+                }
+            }
+            _ = async {
+                match &abort {
+                    Some(signal) => signal.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
+                let pending = self.state.lock().await.pending.remove(&id);
+                if let Some(pending) = pending {
+                    pending.settle(Err(daemon_request_abort_error(&pending.command_type)));
+                }
+            }
+        }
+        let settled = result.lock().expect("pending request slot poisoned").take();
+        settled.unwrap_or_else(|| {
+            Err(DaemonClientError::Message(format!(
+                "Prime Agent daemon client closed before the operation completed. {details} (command \"{command_type}\")"
+            )))
+        })
+    }
+
+    pub async fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        let socket = {
+            let mut state = self.state.lock().await;
+            state.reconnect_options = None;
+            state.socket.take()
+        };
+        self.quick_connected.store(false, Ordering::SeqCst);
+        self.reject_all(
+            DaemonClientError::Message(format!(
+                "Prime Agent daemon client closed before the operation completed. {}",
+                daemon_endpoint_details(&self.socket_path)
+            )),
+            false,
+        )
+        .await;
+        if let Some(socket) = socket {
+            socket.destroy();
+        }
+    }
+
+    async fn handle_line(self: &Arc<Self>, line: &str) {
+        let Ok(message) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+
+        if let Some(hello) = DaemonHello::from_value(&message) {
+            {
+                let mut state = self.state.lock().await;
+                state.hello_message = Some(hello.clone());
+                let waiters = std::mem::take(&mut state.hello_waiters);
+                for waiter in waiters {
+                    let _ = waiter.sender.send(Ok(hello.clone()));
+                }
+            }
+            *self.quick_hello.lock().expect("hello slot poisoned") = Some(hello.clone());
+            if self.is_connected() {
+                let replays = self.take_reconnect_replays().await;
+                for (id, pending) in replays {
+                    if let Some(missing) = pending
+                        .compatibilities
+                        .iter()
+                        .find(|compatibility| !meets_daemon_command_compatibility(&hello, compatibility))
+                    {
+                        self.state.lock().await.pending.remove(&id);
+                        pending.settle(Err(DaemonClientError::CapabilityUnavailable(
+                            DaemonCapabilityUnavailableError::new(
+                                &pending.command_type,
+                                missing.capability.as_deref(),
+                                true,
+                            ),
+                        )));
+                        continue;
+                    }
+                    let socket = { self.state.lock().await.socket.clone() };
+                    if let Some(socket) = socket {
+                        let _ = socket.write_line(pending.wire_data.clone()).await;
+                    }
+                }
+            }
+        }
+        if is_daemon_closing(&message) {
+            if let Some(reason) = message.get("reason").and_then(Value::as_str) {
+                self.state.lock().await.daemon_closing_reason = Some(reason.to_string());
+            }
+        }
+
+        if is_daemon_response(&message) {
+            if let Some(id) = message.get("id").and_then(Value::as_str) {
+                let pending = self.state.lock().await.pending.remove(id);
+                if let Some(pending) = pending {
+                    let acknowledge = pending.acknowledge_result;
+                    match DaemonResponse::from_value(&message) {
+                        Some(response) => pending.settle(Ok(response)),
+                        None => pending.settle(Err(DaemonClientError::Message(
+                            "Invalid daemon response".to_string(),
+                        ))),
+                    }
+                    if acknowledge {
+                        self.acknowledge_command_result(id).await;
+                    }
+                    return;
+                }
+            }
+        }
+        if is_daemon_request_progress(&message) {
+            if let Some(id) = message.get("id").and_then(Value::as_str) {
+                let on_progress = {
+                    let state = self.state.lock().await;
+                    state.pending.get(id).and_then(|pending| pending.on_progress.clone())
+                };
+                if let Some(on_progress) = on_progress {
+                    on_progress(&message);
+                    return;
+                }
+            }
+        }
+
+        let listeners: Vec<DaemonClientMessageListener> = {
+            let registry = self.listeners.lock().expect("listeners poisoned");
+            registry.values().cloned().collect()
+        };
+        for listener in listeners {
+            listener(&message);
+        }
+    }
+
+    async fn take_reconnect_replays(&self) -> Vec<(String, PendingDaemonRequest)> {
+        let mut state = self.state.lock().await;
+        let ids: Vec<String> = state
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.awaiting_reconnect)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut replays = Vec::new();
+        for id in ids {
+            if let Some(mut pending) = state.pending.remove(&id) {
+                pending.awaiting_reconnect = false;
+                pending.deadline = Instant::now() + Duration::from_millis(pending.timeout_ms);
+                replays.push((id, pending));
+            }
+        }
+        for (id, pending) in &replays {
+            state.pending.insert(id.clone(), clone_pending(pending));
+        }
+        replays
+    }
+
+    async fn acknowledge_command_result(&self, command_id: &str) {
+        let hello = self.hello();
+        if !self.is_connected()
+            || hello.is_none()
+            || hello
+                .as_ref()
+                .is_some_and(|hello| hello.protocol.version < DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION)
+        {
+            return;
+        }
+        let hello = hello.expect("checked above");
+        let id = {
+            let mut state = self.state.lock().await;
+            state.request_id += 1;
+            format!("daemon_ack_{}", state.request_id)
+        };
+        let mut command = DaemonCommand::new("ack_result");
+        command
+            .body
+            .insert("commandId".to_string(), Value::String(command_id.to_string()));
+        command.id = Some(id.clone());
+        let protocol_version = hello.protocol.version.min(DAEMON_PROTOCOL_VERSION);
+        let envelope =
+            create_daemon_command_envelope(&command, &id, Some(&self.protocol_client_id), protocol_version);
+        let socket = { self.state.lock().await.socket.clone() };
+        if let Some(socket) = socket {
+            let _ = socket.write_line(serialize_json_line(&envelope)).await;
+        }
+    }
+
+    async fn reject_all(&self, error: DaemonClientError, preserve_pending_requests: bool) {
+        let mut pending: Vec<PendingDaemonRequest> = Vec::new();
+        {
+            let mut state = self.state.lock().await;
+            let ids: Vec<String> = state.pending.keys().cloned().collect();
+            for id in ids {
+                let Some(mut entry) = state.pending.remove(&id) else {
+                    continue;
+                };
+                if preserve_pending_requests && entry.recoverable {
+                    entry.awaiting_reconnect = true;
+                    state.pending.insert(id, entry);
+                    continue;
+                }
+                pending.push(entry);
+            }
+            let waiters = std::mem::take(&mut state.hello_waiters);
+            for waiter in waiters {
+                let _ = waiter.sender.send(Err(error.clone()));
+            }
+        }
+        for entry in pending {
+            entry.settle(Err(error.clone()));
+        }
+    }
+
+    async fn notify_closed(self: &Arc<Self>, socket: &Arc<ClientSocket>, error: Option<DaemonSocketClosedError>) {
+        {
+            let mut state = self.state.lock().await;
+            match &state.socket {
+                Some(current) if Arc::ptr_eq(current, socket) => {}
+                _ => return,
+            }
+            state.socket = None;
+        }
+        self.quick_connected.store(false, Ordering::SeqCst);
+        let error = DaemonClientError::SocketClosed(error.unwrap_or_else(|| {
+            DaemonSocketClosedError::new(&self.socket_path, None, None)
+        }));
+        let preserve = self.state.lock().await.request_recovery_enabled;
+        self.reject_all(error.clone(), preserve).await;
+        let listeners: Vec<DaemonClientCloseListener> = {
+            let registry = self.close_listeners.lock().expect("close listeners poisoned");
+            registry.values().cloned().collect()
+        };
+        for listener in listeners {
+            listener(&error);
+        }
+        let reconnect_options = self.state.lock().await.reconnect_options.clone();
+        if reconnect_options.is_some() && !self.closed.load(Ordering::SeqCst) {
+            self.auto_reconnect(error).await;
+        }
+    }
+
+    async fn auto_reconnect(self: &Arc<Self>, cause: DaemonClientError) {
+        let _guard = self.reconnect_busy.lock().await;
+        let options = self.state.lock().await.reconnect_options.clone();
+        let Some(options) = options else {
+            return;
+        };
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        self.emit_reconnect_status(&options, DaemonClientReconnectStatus::Reconnecting { error: cause.message() });
+        let deadline = Instant::now() + Duration::from_millis(options.timeout_ms.unwrap_or(DEFAULT_RECONNECT_TIMEOUT_MS));
+        let mut attempt = 0u32;
+        let mut last_error = cause;
+        while !self.closed.load(Ordering::SeqCst) && Instant::now() < deadline {
+            match (options.recover_daemon)().await {
+                _ => {}
+            }
+            if self.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            match self.connect(RECONNECT_CONNECT_TIMEOUT_MS).await {
+                Ok(()) => match self.wait_for_hello(RECONNECT_HELLO_TIMEOUT_MS).await {
+                    Ok(_) => {
+                        self.emit_reconnect_status(&options, DaemonClientReconnectStatus::Connected);
+                        return;
+                    }
+                    Err(error) => {
+                        last_error = error;
+                        self.reset_transport_for_reconnect().await;
+                    }
+                },
+                Err(error) => {
+                    last_error = error;
+                    self.reset_transport_for_reconnect().await;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let backoff = 100u64 * 2u64.pow(attempt.min(5));
+            let delay_ms = remaining.as_millis() as u64;
+            let delay_ms = delay_ms.min(MAX_RECONNECT_DELAY_MS).min(backoff);
+            attempt += 1;
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        if self.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let failure = DaemonClientError::Message(format!(
+            "Daemon reconnection failed: {}",
+            last_error.message()
+        ));
+        self.reject_all(failure.clone(), false).await;
+        self.emit_reconnect_status(
+            &options,
+            DaemonClientReconnectStatus::Failed { error: failure.message() },
+        );
+        self.state.lock().await.reconnect_options = None;
+    }
+
+    fn emit_reconnect_status(&self, options: &DaemonClientReconnectOptions, status: DaemonClientReconnectStatus) {
+        if let Some(on_status) = &options.on_status {
+            on_status(status);
+        }
+    }
+}
+
+fn clone_pending(pending: &PendingDaemonRequest) -> PendingDaemonRequest {
+    PendingDaemonRequest {
+        command_type: pending.command_type.clone(),
+        timeout_ms: pending.timeout_ms,
+        on_progress: pending.on_progress.clone(),
+        wire_data: pending.wire_data.clone(),
+        awaiting_reconnect: pending.awaiting_reconnect,
+        acknowledge_result: pending.acknowledge_result,
+        recoverable: pending.recoverable,
+        compatibilities: pending.compatibilities.clone(),
+        deadline: pending.deadline,
+        result: Arc::clone(&pending.result),
+        wake: Arc::clone(&pending.wake),
+    }
+}
+
+pub(crate) fn is_daemon_closing(value: &Value) -> bool {
+    let Some(candidate) = value.as_object() else {
+        return false;
+    };
+    candidate.get("type").and_then(Value::as_str) == Some("daemon_closing")
+        && matches!(
+            candidate.get("reason").and_then(Value::as_str),
+            Some("shutdown") | Some("update")
+        )
+}
+
+pub(crate) fn is_daemon_request_progress(value: &Value) -> bool {
+    let Some(candidate) = value.as_object() else {
+        return false;
+    };
+    if candidate.get("command").and_then(Value::as_str) != Some("list_saved_sessions")
+        || candidate.get("id").and_then(Value::as_str).is_none()
+    {
+        return false;
+    }
+    match candidate.get("type").and_then(Value::as_str) {
+        Some("session_list_progress") => {
+            candidate.get("loaded").and_then(Value::as_f64).is_some()
+                && candidate.get("total").and_then(Value::as_f64).is_some()
+        }
+        Some("session_list_item") => candidate
+            .get("session")
+            .is_some_and(is_daemon_saved_session_info),
+        _ => false,
+    }
+}
+
+impl DaemonTransportClient for DaemonClient {
+    fn hello(&self) -> Option<DaemonHello> {
+        DaemonClient::hello(self)
+    }
+
+    fn is_connected(&self) -> bool {
+        DaemonClient::is_connected(self)
+    }
+
+    fn supports_server_capability(&self, capability: &str) -> bool {
+        DaemonClient::supports_server_capability(self, capability)
+    }
+
+    fn on_message(&self, listener: DaemonClientMessageListener) -> Box<dyn Fn() + Send + Sync> {
+        DaemonClient::on_message(self, listener)
+    }
+
+    fn on_close(&self, listener: DaemonClientCloseListener) -> Box<dyn Fn() + Send + Sync> {
+        DaemonClient::on_close(self, listener)
+    }
+
+    fn enable_request_recovery(&self) {
+        let state = self.state.try_lock();
+        if let Ok(mut state) = state {
+            state.request_recovery_enabled = true;
+        }
+    }
+
+    fn request_boxed(
+        &self,
+        command: DaemonCommand,
+        timeout_ms: Option<u64>,
+        options: DaemonClientRequestOptions,
+    ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>> {
+        let _ = (command, timeout_ms, options);
+        Box::pin(async move {
+            Err(DaemonClientError::Message(
+                "DaemonClient requires an Arc handle for requests".to_string(),
+            ))
+        })
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.quick_connected.store(false, Ordering::SeqCst);
+        let socket = self.state.try_lock().ok().and_then(|mut state| state.socket.take());
+        if let Some(socket) = socket {
+            socket.destroy();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::protocol::*;
+    use super::*;
+
+    #[test]
+    fn jsonl_serialization_is_lf_terminated() {
+        let line = serialize_json_line(&serde_json::json!({ "a": 1 }));
+        assert!(line.ends_with('\n'));
+        assert_eq!(line, "{\"a\":1}\n");
+    }
+
+    #[test]
+    fn closing_and_progress_detection() {
+        assert!(is_daemon_closing(&serde_json::json!({
+            "type": "daemon_closing",
+            "reason": "shutdown"
+        })));
+        assert!(!is_daemon_closing(&serde_json::json!({
+            "type": "daemon_closing",
+            "reason": "other"
+        })));
+        assert!(is_daemon_request_progress(&serde_json::json!({
+            "type": "session_list_progress",
+            "command": "list_saved_sessions",
+            "id": "x",
+            "loaded": 1,
+            "total": 2
+        })));
+        assert!(!is_daemon_request_progress(&serde_json::json!({
+            "type": "session_list_progress",
+            "command": "list",
+            "id": "x",
+            "loaded": 1,
+            "total": 2
+        })));
+    }
+
+    #[test]
+    fn endpoint_details_include_the_socket_and_log_path() {
+        let details = daemon_endpoint_details("\\\\\\\\.\\\\pipe\\\\prime-agent-daemon");
+        assert!(details.contains("Socket: "));
+        assert!(details.contains("Daemon log: "));
+    }
+
+    #[test]
+    fn capability_unavailable_message_matches_the_typescript() {
+        let with_capability =
+            DaemonCapabilityUnavailableError::new("get_history_range", Some("history_ranges"), false);
+        assert_eq!(
+            with_capability.message(),
+            "The running Prime Agent daemon does not support history_ranges."
+        );
+        let without = DaemonCapabilityUnavailableError::new("bogus", None, false);
+        assert_eq!(without.message(), "The running Prime Agent daemon does not support bogus.");
+    }
+
+    #[test]
+    fn abort_error_uses_the_typescript_wording() {
+        let error = daemon_request_abort_error("prompt");
+        assert_eq!(error.message(), "Daemon request \"prompt\" was cancelled");
+        assert!(error.is_abort());
+    }
+
+    #[test]
+    fn socket_closed_error_carries_reason_and_cause() {
+        let error = DaemonSocketClosedError::new("/tmp/sock", Some("update"), Some("reset"));
+        assert!(error.message().starts_with("Connection to the Prime Agent daemon closed."));
+        assert!(error.message().contains(" Reason: update."));
+        assert!(error.message().contains(" Cause: reset."));
+        assert_eq!(
+            get_daemon_socket_close_reason(&DaemonClientError::SocketClosed(error)),
+            Some("update".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_dir_prefers_the_environment_override() {
+        std::env::set_var("PRIME_AGENT_CODING_AGENT_DIR", "/tmp/agent-dir");
+        assert_eq!(get_agent_dir(), "/tmp/agent-dir");
+        assert_eq!(get_logs_dir(), "/tmp/agent-dir/logs");
+        std::env::remove_var("PRIME_AGENT_CODING_AGENT_DIR");
+        assert_eq!(expand_tilde_path("/abs/path"), "/abs/path");
+    }
+}

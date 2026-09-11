@@ -328,7 +328,6 @@ mod tests {
             parse_package_version("1.2.3-beta.4.5.abcdef").unwrap().prerelease,
             Some("beta.4.5.abcdef".to_string())
         );
-        assert_eq!(parse_package_version("1.2").unwrap().major, 1);
         assert!(parse_package_version("invalid").is_none());
         assert!(parse_package_version("1.2").is_none());
     }

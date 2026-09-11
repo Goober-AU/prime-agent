@@ -5,7 +5,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
-use crate::types::{Api, Model};
+use crate::types::Model;
 
 /// `OAuthCredentials = { refresh: string; access: string; expires: number; [key: string]: unknown }`
 ///
@@ -56,7 +56,8 @@ pub struct OAuthSelectPrompt {
 pub type OnAuth = Arc<dyn Fn(OAuthAuthInfo) + Send + Sync>;
 pub type OnPrompt = Arc<dyn Fn(OAuthPrompt) -> crate::types::BoxFuture<String> + Send + Sync>;
 pub type OnProgress = Arc<dyn Fn(String) + Send + Sync>;
-pub type OnManualCodeInput = Arc<dyn Fn() -> crate::types::BoxFuture<String> + Send + Sync>;
+pub type OnManualCodeInput =
+    Arc<dyn Fn() -> crate::types::BoxFuture<Result<String, String>> + Send + Sync>;
 pub type OnSelect =
     Arc<dyn Fn(OAuthSelectPrompt) -> crate::types::BoxFuture<Option<String>> + Send + Sync>;
 
@@ -80,12 +81,15 @@ pub struct OAuthProviderInterface {
     pub id: OAuthProviderId,
     pub name: String,
     /// Run the login flow, return credentials to persist.
-    pub login: Arc<dyn Fn(OAuthLoginCallbacks) -> crate::types::BoxFuture<OAuthCredentials> + Send + Sync>,
+    /// `Result::Err` is the TypeScript promise rejection.
+    pub login:
+        Arc<dyn Fn(OAuthLoginCallbacks) -> crate::types::BoxFuture<Result<OAuthCredentials, String>> + Send + Sync>,
     /// Whether login uses a local callback server and supports manual code input.
     pub uses_callback_server: Option<bool>,
     /// Refresh expired credentials, return updated credentials to persist.
-    pub refresh_token:
-        Arc<dyn Fn(OAuthCredentials) -> crate::types::BoxFuture<OAuthCredentials> + Send + Sync>,
+    pub refresh_token: Arc<
+        dyn Fn(OAuthCredentials) -> crate::types::BoxFuture<Result<OAuthCredentials, String>> + Send + Sync,
+    >,
     /// Convert credentials to API key string for the provider.
     pub get_api_key: Arc<dyn Fn(&OAuthCredentials) -> String + Send + Sync>,
     /// Optional: modify models for this provider (e.g., update baseUrl).
@@ -100,8 +104,8 @@ pub struct OAuthProviderInfo {
     pub available: bool,
 }
 
-/// Helper: `Api` re-export used by `modifyModels(models: Model<Api>[], ...)`.
-pub type ApiModel = Model<Api>;
+/// Helper: `Model<Api>` is not generic in Rust, so `ApiModel` is `Model`.
+pub type ApiModel = Model;
 
 #[cfg(test)]
 mod tests {

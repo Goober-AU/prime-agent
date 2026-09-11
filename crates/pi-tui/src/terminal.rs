@@ -1,0 +1,713 @@
+//! Port of packages/tui/src/terminal.ts.
+
+use crate::keys::set_kitty_protocol_active;
+use crate::stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
+use crate::terminal_colors::{
+    parse_osc_color_response, set_default_terminal_colors, DefaultTerminalColors, OscColorKind, Rgb,
+    QUERY_DEFAULT_BACKGROUND, QUERY_DEFAULT_FOREGROUND,
+};
+use once_cell::sync::Lazy;
+use std::cell::RefCell;
+use std::io::{Read, Write};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
+
+const TERMINAL_PROGRESS_KEEPALIVE_MS: u64 = 1000;
+const TERMINAL_PROGRESS_ACTIVE_SEQUENCE: &str = "\x1b]9;4;3\x07";
+const TERMINAL_PROGRESS_CLEAR_SEQUENCE: &str = "\x1b]9;4;0;\x07";
+
+/// A preserved alternate screen is adopted by the next ProcessTerminal during in-process handoff.
+static PENDING_ALT_SCREEN_HANDOFF: AtomicBool = AtomicBool::new(false);
+
+struct PendingInputHandoff {
+    token: u64,
+    was_raw: bool,
+}
+
+// Keep stdin raw and drain input while a preserved fullscreen frame waits for
+// the next in-process TUI. Worker-backed session attach can make this handoff
+// noticeably longer; restoring cooked mode during the gap makes arrow escape
+// sequences echo into the preserved frame.
+static PENDING_INPUT_HANDOFF: Lazy<Mutex<Option<PendingInputHandoff>>> = Lazy::new(|| Mutex::new(None));
+static HANDOFF_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn consume_alt_screen_handoff() -> bool {
+    PENDING_ALT_SCREEN_HANDOFF.swap(false, Ordering::SeqCst)
+}
+
+fn begin_input_handoff(token: u64, was_raw: bool) {
+    let mut slot = PENDING_INPUT_HANDOFF.lock().unwrap();
+    let inherited_was_raw = slot.as_ref().map(|h| h.was_raw).unwrap_or(was_raw);
+    *slot = Some(PendingInputHandoff {
+        token,
+        was_raw: inherited_was_raw,
+    });
+}
+
+fn consume_input_handoff() -> Option<bool> {
+    PENDING_INPUT_HANDOFF.lock().unwrap().take().map(|h| h.was_raw)
+}
+
+fn cancel_input_handoff(token: u64) {
+    let handoff = {
+        let mut slot = PENDING_INPUT_HANDOFF.lock().unwrap();
+        let matches = slot.as_ref().map(|h| h.token == token).unwrap_or(false);
+        if !matches {
+            return;
+        }
+        slot.take().unwrap()
+    };
+    let _ = set_raw_mode(handoff.was_raw);
+}
+
+pub(crate) fn stdout_write(data: &str) {
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    let _ = lock.write_all(data.as_bytes());
+    let _ = lock.flush();
+}
+
+fn set_raw_mode(raw: bool) -> std::io::Result<()> {
+    if raw {
+        crossterm::terminal::enable_raw_mode()
+    } else {
+        crossterm::terminal::disable_raw_mode()
+    }
+}
+
+/// Minimal terminal interface for TUI
+pub trait Terminal {
+    // Start the terminal with input and resize handlers
+    fn start(&mut self, on_input: Box<dyn Fn(String)>, on_resize: Box<dyn Fn()>);
+
+    // Stop the terminal and restore state
+    fn stop(&mut self, options: TerminalStopOptions);
+
+    /// Drain stdin before exiting to prevent Kitty key release events from
+    /// leaking to the parent shell over slow SSH connections.
+    fn drain_input(&mut self, max_ms: u64, idle_ms: u64);
+
+    // Write output to terminal
+    fn write(&mut self, data: &str);
+
+    fn columns(&self) -> usize;
+    fn rows(&self) -> usize;
+
+    /// Whether Kitty keyboard protocol is active
+    fn kitty_protocol_active(&self) -> bool;
+
+    /// Move cursor up (negative) or down (positive) by N lines.
+    fn move_by(&mut self, lines: i64);
+
+    fn hide_cursor(&mut self);
+    fn show_cursor(&mut self);
+
+    fn clear_line(&mut self);
+    fn clear_from_cursor(&mut self);
+    fn clear_screen(&mut self);
+
+    fn enter_alt_screen(&mut self);
+    fn leave_alt_screen(&mut self);
+    fn alt_screen_active(&self) -> bool;
+
+    /// SGR mouse tracking (?1000 + ?1006); motion tracking is deliberately never enabled.
+    fn set_mouse_tracking(&mut self, enabled: bool);
+    fn mouse_tracking_active(&self) -> bool;
+
+    fn set_title(&mut self, title: &str);
+
+    /// Progress indicator (OSC 9;4)
+    fn set_progress(&mut self, active: bool);
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TerminalStopOptions {
+    pub preserve_alt_screen: bool,
+}
+
+struct DefaultColorProbe {
+    foreground: Option<Rgb>,
+    background: Option<Rgb>,
+}
+
+/// State shared with the stdin dispatcher closure.
+struct Shared {
+    input_handler: Option<Box<dyn Fn(String)>>,
+    resize_handler: Option<Box<dyn Fn()>>,
+    kitty_protocol_active: bool,
+    modify_other_keys_active: bool,
+    keyboard_protocol_fallback_timer: Option<u64>,
+    default_color_probe: Option<DefaultColorProbe>,
+}
+
+/// Real terminal using process stdin/stdout
+pub struct ProcessTerminal {
+    shared: Rc<RefCell<Shared>>,
+    was_raw: bool,
+    started: bool,
+    alt_screen_handoff_token: u64,
+    alt_screen_active: bool,
+    mouse_tracking_active: bool,
+    stdin_buffer: Option<Rc<RefCell<StdinBuffer>>>,
+    stdin_dispatcher: Option<Rc<dyn Fn(String)>>,
+    progress_interval: Option<u64>,
+    write_log_path: String,
+}
+
+fn timestamp_for_log() -> String {
+    chrono::Local::now().format("%Y-%m-%d_%H-%M-%S").to_string()
+}
+
+fn compute_write_log_path() -> String {
+    let env = std::env::var("PI_TUI_WRITE_LOG").unwrap_or_default();
+    if env.is_empty() {
+        return String::new();
+    }
+    let path = std::path::PathBuf::from(&env);
+    if path.is_dir() {
+        let ts = timestamp_for_log();
+        return path
+            .join(format!("tui-{ts}-{}.log", std::process::id()))
+            .to_string_lossy()
+            .to_string();
+    }
+    env
+}
+
+impl ProcessTerminal {
+    pub fn new() -> Self {
+        Self {
+            shared: Rc::new(RefCell::new(Shared {
+                input_handler: None,
+                resize_handler: None,
+                kitty_protocol_active: false,
+                modify_other_keys_active: false,
+                keyboard_protocol_fallback_timer: None,
+                default_color_probe: None,
+            })),
+            was_raw: false,
+            started: false,
+            alt_screen_handoff_token: HANDOFF_TOKEN_COUNTER.fetch_add(1, Ordering::SeqCst),
+            alt_screen_active: consume_alt_screen_handoff(),
+            mouse_tracking_active: false,
+            stdin_buffer: None,
+            stdin_dispatcher: None,
+            progress_interval: None,
+            write_log_path: compute_write_log_path(),
+        }
+    }
+
+    pub fn kitty_protocol_active(&self) -> bool {
+        self.shared.borrow().kitty_protocol_active
+    }
+
+    /// Port of `setupStdinBuffer()`.
+    fn setup_stdin_buffer(&mut self) {
+        let buffer = Rc::new(RefCell::new(StdinBuffer::new(StdinBufferOptions {
+            timeout: Some(10),
+        })));
+        self.stdin_buffer = Some(buffer.clone());
+
+        let shared = self.shared.clone();
+        let dispatcher = Rc::new(move |sequence: String| {
+            // Check for Kitty protocol response (only if not already enabled).
+            {
+                let mut s = shared.borrow_mut();
+                if handle_default_color_probe_response(&mut s, &sequence) {
+                    return;
+                }
+                if !s.kitty_protocol_active && is_kitty_protocol_response(&sequence) {
+                    s.keyboard_protocol_fallback_timer = None;
+                    s.kitty_protocol_active = true;
+                    set_kitty_protocol_active(true);
+
+                    // Enable Kitty keyboard protocol (push flags)
+                    // Flag 1 = disambiguate escape codes
+                    // Flag 2 = report event types (press/repeat/release)
+                    // Flag 4 = report alternate keys (shifted key, base layout key)
+                    stdout_write("\x1b[>7u");
+                    return;
+                }
+            }
+            let handler = shared.borrow_mut().input_handler.take();
+            if let Some(handler) = handler {
+                handler(sequence);
+                shared.borrow_mut().input_handler = Some(handler);
+            }
+        });
+        self.stdin_dispatcher = Some(dispatcher);
+    }
+
+    /// Port of `queryAndEnableKittyProtocol()`.
+    fn query_and_enable_kitty_protocol(&mut self) {
+        self.setup_stdin_buffer();
+        self.query_default_terminal_colors();
+        stdout_write("\x1b[?u");
+        self.clear_keyboard_protocol_fallback_timer();
+        self.shared.borrow_mut().keyboard_protocol_fallback_timer = Some(150);
+    }
+
+    fn clear_keyboard_protocol_fallback_timer(&mut self) {
+        self.shared.borrow_mut().keyboard_protocol_fallback_timer = None;
+    }
+
+    /// Fallback timer body: enable xterm modifyOtherKeys mode 2 when Kitty never answers.
+    pub fn apply_keyboard_protocol_fallback(&mut self) {
+        let mut s = self.shared.borrow_mut();
+        if s.keyboard_protocol_fallback_timer.is_none() {
+            return;
+        }
+        s.keyboard_protocol_fallback_timer = None;
+        if !s.kitty_protocol_active && !s.modify_other_keys_active {
+            stdout_write("\x1b[>4;2m");
+            s.modify_other_keys_active = true;
+        }
+    }
+
+    fn query_default_terminal_colors(&mut self) {
+        if !crossterm::tty::IsTty::is_tty(&std::io::stdin()) || !crossterm::tty::IsTty::is_tty(&std::io::stdout())
+        {
+            return;
+        }
+        self.finish_default_color_probe();
+        self.shared.borrow_mut().default_color_probe = Some(DefaultColorProbe {
+            foreground: None,
+            background: None,
+        });
+        stdout_write(QUERY_DEFAULT_FOREGROUND);
+        stdout_write(QUERY_DEFAULT_BACKGROUND);
+    }
+
+    /// Called by the owner after 100 ms to close an unanswered colour probe.
+    pub fn apply_default_color_probe_timeout(&mut self) {
+        self.finish_default_color_probe();
+    }
+
+    fn finish_default_color_probe(&mut self) {
+        let probe = self.shared.borrow_mut().default_color_probe.take();
+        let probe = match probe {
+            Some(p) => p,
+            None => return,
+        };
+        if let (Some(foreground), Some(background)) = (probe.foreground, probe.background) {
+            set_default_terminal_colors(Some(DefaultTerminalColors {
+                foreground,
+                background,
+            }));
+            let handler = self.shared.borrow_mut().resize_handler.take();
+            if let Some(handler) = handler {
+                handler();
+                self.shared.borrow_mut().resize_handler = Some(handler);
+            }
+        }
+    }
+
+    /// On Windows, add ENABLE_VIRTUAL_TERMINAL_INPUT (0x0200) to the stdin console handle.
+    fn enable_windows_vt_input(&mut self) {
+        #[cfg(windows)]
+        {
+            const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+            const ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x0200;
+            unsafe {
+                use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode};
+                let handle = GetStdHandle(STD_INPUT_HANDLE);
+                let mut mode: u32 = 0;
+                if GetConsoleMode(handle, &mut mode) != 0 {
+                    let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_INPUT);
+                }
+            }
+        }
+    }
+
+    /// Feed raw bytes through the stdin buffer and dispatch the emitted sequences.
+    pub fn process_input_bytes(&mut self, data: &[u8]) {
+        let dispatcher = match &self.stdin_dispatcher {
+            Some(d) => d.clone(),
+            None => return,
+        };
+        let buffer = match &self.stdin_buffer {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        let events = {
+            let mut buffer = buffer.borrow_mut();
+            buffer.process(data);
+            buffer.take_events()
+        };
+        for event in events {
+            match event {
+                StdinBufferEvent::Data(sequence) => dispatcher(sequence),
+                // Re-wrap paste content with bracketed paste markers for existing editor handling.
+                StdinBufferEvent::Paste(content) => dispatcher(format!("\x1b[200~{content}\x1b[201~")),
+            }
+        }
+    }
+
+    /// Flush a pending partial sequence (the TypeScript flush timer).
+    pub fn flush_pending_input(&mut self) {
+        let dispatcher = match &self.stdin_dispatcher {
+            Some(d) => d.clone(),
+            None => return,
+        };
+        let buffer = match &self.stdin_buffer {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        let events = {
+            let mut buffer = buffer.borrow_mut();
+            buffer.flush_events();
+            buffer.take_events()
+        };
+        for event in events {
+            match event {
+                StdinBufferEvent::Data(sequence) => dispatcher(sequence),
+                StdinBufferEvent::Paste(content) => dispatcher(format!("\x1b[200~{content}\x1b[201~")),
+            }
+        }
+    }
+
+    fn clear_progress_interval(&mut self) -> bool {
+        if self.progress_interval.is_none() {
+            return false;
+        }
+        self.progress_interval = None;
+        true
+    }
+
+    fn release_alt_screen(&mut self) {
+        let owns_pending_handoff = self.owns_pending_alt_screen_handoff();
+        if !self.alt_screen_active && !owns_pending_handoff {
+            return;
+        }
+        self.alt_screen_active = false;
+        if owns_pending_handoff {
+            PENDING_ALT_SCREEN_HANDOFF.store(false, Ordering::SeqCst);
+            cancel_input_handoff(self.alt_screen_handoff_token);
+        }
+        self.write("\x1b[?1049l");
+    }
+
+    fn owns_pending_alt_screen_handoff(&self) -> bool {
+        PENDING_ALT_SCREEN_HANDOFF.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for ProcessTerminal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn is_kitty_protocol_response(sequence: &str) -> bool {
+    // Kitty protocol response pattern: \x1b[?<flags>u
+    let bytes = sequence.as_bytes();
+    if !sequence.starts_with("\x1b[?") || !sequence.ends_with('u') {
+        return false;
+    }
+    let inner = &sequence[3..sequence.len() - 1];
+    !inner.is_empty() && bytes.len() > 4 && inner.chars().all(|c| c.is_ascii_digit())
+}
+
+fn handle_default_color_probe_response(shared: &mut Shared, sequence: &str) -> bool {
+    let response = match parse_osc_color_response(sequence) {
+        Some(r) => r,
+        None => return false,
+    };
+    if shared.default_color_probe.is_none() {
+        return true;
+    }
+    let probe = shared.default_color_probe.as_mut().unwrap();
+    match response.kind {
+        OscColorKind::Foreground => probe.foreground = Some(response.rgb),
+        OscColorKind::Background => probe.background = Some(response.rgb),
+    }
+    if probe.foreground.is_some() && probe.background.is_some() {
+        let done = shared.default_color_probe.take();
+        if let Some(done) = done {
+            if let (Some(foreground), Some(background)) = (done.foreground, done.background) {
+                set_default_terminal_colors(Some(DefaultTerminalColors {
+                    foreground,
+                    background,
+                }));
+                let handler = shared.resize_handler.take();
+                if let Some(handler) = handler {
+                    handler();
+                    shared.resize_handler = Some(handler);
+                }
+            }
+        }
+    }
+    true
+}
+
+impl Terminal for ProcessTerminal {
+    fn start(&mut self, on_input: Box<dyn Fn(String)>, on_resize: Box<dyn Fn()>) {
+        self.started = true;
+        {
+            let mut s = self.shared.borrow_mut();
+            s.input_handler = Some(on_input);
+            s.resize_handler = Some(on_resize);
+        }
+
+        // Save previous state and enable raw mode
+        self.was_raw = consume_input_handoff().unwrap_or(false);
+        let _ = set_raw_mode(true);
+
+        // Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
+        stdout_write("\x1b[?2004h");
+
+        // On Windows, enable ENABLE_VIRTUAL_TERMINAL_INPUT so the console sends
+        // VT escape sequences (e.g. \x1b[Z for Shift+Tab) instead of raw console
+        // events that lose modifier information. Must run AFTER setRawMode(true).
+        self.enable_windows_vt_input();
+
+        // Query and enable Kitty keyboard protocol.
+        self.query_and_enable_kitty_protocol();
+    }
+
+    fn stop(&mut self, options: TerminalStopOptions) {
+        let was_started = self.started;
+        self.started = false;
+        self.finish_default_color_probe();
+        self.clear_keyboard_protocol_fallback_timer();
+
+        if self.clear_progress_interval() {
+            stdout_write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+        }
+
+        if self.mouse_tracking_active {
+            stdout_write("\x1b[?1006l\x1b[?1002l");
+            self.mouse_tracking_active = false;
+        }
+        if self.alt_screen_active {
+            if options.preserve_alt_screen {
+                PENDING_ALT_SCREEN_HANDOFF.store(true, Ordering::SeqCst);
+                self.alt_screen_active = false;
+            } else {
+                self.release_alt_screen();
+            }
+        } else if !options.preserve_alt_screen {
+            self.release_alt_screen();
+        }
+
+        // Disable bracketed paste mode
+        stdout_write("\x1b[?2004l");
+
+        // Disable Kitty keyboard protocol if not already done by drainInput()
+        {
+            let mut s = self.shared.borrow_mut();
+            if s.kitty_protocol_active {
+                stdout_write("\x1b[<u");
+                s.kitty_protocol_active = false;
+                set_kitty_protocol_active(false);
+            }
+            if s.modify_other_keys_active {
+                stdout_write("\x1b[>4;0m");
+                s.modify_other_keys_active = false;
+            }
+            s.input_handler = None;
+            s.resize_handler = None;
+        }
+
+        // Clean up StdinBuffer
+        self.stdin_buffer = None;
+        self.stdin_dispatcher = None;
+
+        if options.preserve_alt_screen && was_started {
+            begin_input_handoff(self.alt_screen_handoff_token, self.was_raw);
+        } else {
+            // Pause stdin to prevent any buffered input (e.g., Ctrl+D) from being
+            // re-interpreted after raw mode is disabled.
+            let _ = set_raw_mode(self.was_raw);
+        }
+    }
+
+    fn drain_input(&mut self, max_ms: u64, idle_ms: u64) {
+        {
+            let mut s = self.shared.borrow_mut();
+            if s.kitty_protocol_active {
+                // Disable Kitty keyboard protocol first so any late key releases
+                // do not generate new Kitty escape sequences.
+                stdout_write("\x1b[<u");
+                s.kitty_protocol_active = false;
+                set_kitty_protocol_active(false);
+            }
+            if s.modify_other_keys_active {
+                stdout_write("\x1b[>4;0m");
+                s.modify_other_keys_active = false;
+            }
+            s.input_handler = None;
+        }
+
+        let start = std::time::Instant::now();
+        let mut last_data_time = std::time::Instant::now();
+        let mut stdin = std::io::stdin();
+        let mut buf = [0u8; 1024];
+        loop {
+            let now = std::time::Instant::now();
+            if now.duration_since(start).as_millis() as u64 >= max_ms {
+                break;
+            }
+            if now.duration_since(last_data_time).as_millis() as u64 >= idle_ms {
+                break;
+            }
+            // Non-blocking-ish read: rely on the terminal being in raw mode.
+            match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {
+                    last_data_time = std::time::Instant::now();
+                }
+                Err(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(idle_ms.min(10)));
+                }
+            }
+        }
+    }
+
+    fn write(&mut self, data: &str) {
+        stdout_write(data);
+        if !self.write_log_path.is_empty() {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.write_log_path)
+            {
+                let _ = file.write_all(data.as_bytes());
+            }
+        }
+    }
+
+    fn columns(&self) -> usize {
+        crossterm::terminal::size()
+            .map(|(cols, _)| cols as usize)
+            .unwrap_or_else(|_| {
+                std::env::var("COLUMNS")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(80)
+            })
+    }
+
+    fn rows(&self) -> usize {
+        crossterm::terminal::size()
+            .map(|(_, rows)| rows as usize)
+            .unwrap_or_else(|_| {
+                std::env::var("LINES")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(24)
+            })
+    }
+
+    fn kitty_protocol_active(&self) -> bool {
+        self.shared.borrow().kitty_protocol_active
+    }
+
+    fn move_by(&mut self, lines: i64) {
+        if lines > 0 {
+            self.write(&format!("\x1b[{lines}B"));
+        } else if lines < 0 {
+            self.write(&format!("\x1b[{}A", -lines));
+        }
+        // lines === 0: no movement
+    }
+
+    fn hide_cursor(&mut self) {
+        self.write("\x1b[?25l");
+    }
+
+    fn show_cursor(&mut self) {
+        self.write("\x1b[?25h");
+    }
+
+    fn clear_line(&mut self) {
+        self.write("\x1b[K");
+    }
+
+    fn clear_from_cursor(&mut self) {
+        self.write("\x1b[J");
+    }
+
+    fn clear_screen(&mut self) {
+        self.write("\x1b[2J\x1b[H"); // Clear screen and move to home (1,1)
+    }
+
+    fn enter_alt_screen(&mut self) {
+        if self.alt_screen_active {
+            return;
+        }
+        if self.owns_pending_alt_screen_handoff() {
+            PENDING_ALT_SCREEN_HANDOFF.store(false, Ordering::SeqCst);
+            self.alt_screen_active = true;
+            return;
+        }
+        self.alt_screen_active = true;
+        self.write("\x1b[?1049h");
+    }
+
+    fn leave_alt_screen(&mut self) {
+        self.release_alt_screen();
+    }
+
+    fn alt_screen_active(&self) -> bool {
+        self.alt_screen_active
+    }
+
+    fn set_mouse_tracking(&mut self, enabled: bool) {
+        if enabled == self.mouse_tracking_active {
+            return;
+        }
+        self.mouse_tracking_active = enabled;
+        // ?1002 (button-event tracking) reports drag motion for in-app selection
+        // but not hover, keeping passive mouse movement unreported.
+        let seq = if enabled {
+            "\x1b[?1002h\x1b[?1006h"
+        } else {
+            "\x1b[?1006l\x1b[?1002l"
+        };
+        self.write(seq);
+    }
+
+    fn mouse_tracking_active(&self) -> bool {
+        self.mouse_tracking_active
+    }
+
+    fn set_title(&mut self, title: &str) {
+        // OSC 0;title BEL - set terminal window title
+        self.write(&format!("\x1b]0;{title}\x07"));
+    }
+
+    fn set_progress(&mut self, active: bool) {
+        if active {
+            // OSC 9;4;3 - indeterminate progress
+            stdout_write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
+            if self.progress_interval.is_none() {
+                self.progress_interval = Some(TERMINAL_PROGRESS_KEEPALIVE_MS);
+            }
+        } else {
+            self.clear_progress_interval();
+            // OSC 9;4;0 - clear progress
+            stdout_write(TERMINAL_PROGRESS_CLEAR_SEQUENCE);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kitty_response_pattern() {
+        assert!(is_kitty_protocol_response("\x1b[?1u"));
+        assert!(is_kitty_protocol_response("\x1b[?7u"));
+        assert!(!is_kitty_protocol_response("\x1b[?u"));
+        assert!(!is_kitty_protocol_response("\x1b[A"));
+    }
+
+    #[test]
+    fn write_log_path_falls_back_to_env() {
+        std::env::remove_var("PI_TUI_WRITE_LOG");
+        assert_eq!(compute_write_log_path(), "");
+    }
+}

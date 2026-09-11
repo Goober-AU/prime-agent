@@ -44,52 +44,9 @@ pub fn spawn_sync_hidden(
 
 pub fn exec_sync_hidden(command: &str, options: SpawnOptions) -> std::io::Result<std::process::Output> {
     // Node runs the string through the shell; cmd.exe /c and /bin/sh -c are the equivalents.
-    let mut builder = if cfg!(windows) {
-        let mut builder = std::process::Command::new("cmd");
-        builder.arg("/c").arg(command);
-        builder
-    } else {
-        let mut builder = std::process::Command::new("/bin/sh");
-        builder.arg("-c").arg(command);
-        builder
-    };
+    let mut builder = shell_command(command);
     apply_std_options(&mut builder, &options);
     builder.output()
-}
-
-/// `execSync(command, { input, timeout, stdio: ["pipe", "ignore", "ignore"] })`.
-pub fn exec_sync_hidden_with_input(
-    command: &str,
-    input: &str,
-    options: SpawnOptions,
-    timeout_ms: u64,
-) -> std::io::Result<std::process::ExitStatus> {
-    use std::io::Write;
-    let mut builder = if cfg!(windows) {
-        let mut builder = std::process::Command::new("cmd");
-        builder.arg("/c").arg(command);
-        builder
-    } else {
-        let mut builder = std::process::Command::new("/bin/sh");
-        builder.arg("-c").arg(command);
-        builder
-    };
-    let mut options = options;
-    options.stdin_piped = true;
-    apply_std_options(&mut builder, &options);
-    let mut child = builder.spawn()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
-        let _ = stdin.flush();
-        drop(stdin);
-    }
-    match wait_with_timeout(&mut child, timeout_ms) {
-        Some(status) => Ok(status),
-        None => Err(std::io::Error::new(
-            std::io::ErrorKind::TimedOut,
-            format!("command timed out after {}ms: {}", timeout_ms, command),
-        )),
-    }
 }
 
 pub fn exec_file_hidden(
@@ -108,6 +65,45 @@ pub fn exec_file_sync_hidden(
 ) -> std::io::Result<std::process::Output> {
     let mut builder = build_std_command(file, args, &options);
     builder.output()
+}
+
+/// `execSync(command, { input, timeout, stdio: ["pipe", "ignore", "ignore"] })`.
+pub fn exec_sync_hidden_with_input(
+    command: &str,
+    input: &str,
+    options: SpawnOptions,
+    timeout_ms: u64,
+) -> std::io::Result<std::process::ExitStatus> {
+    use std::io::Write;
+    let mut builder = shell_command(command);
+    let mut options = options;
+    options.stdin_piped = true;
+    apply_std_options(&mut builder, &options);
+    let mut child = builder.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
+        let _ = stdin.flush();
+        drop(stdin);
+    }
+    match wait_with_timeout(&mut child, timeout_ms) {
+        Some(status) => Ok(status),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("command timed out after {}ms: {}", timeout_ms, command),
+        )),
+    }
+}
+
+fn shell_command(command: &str) -> std::process::Command {
+    if cfg!(windows) {
+        let mut builder = std::process::Command::new("cmd");
+        builder.arg("/c").arg(command);
+        builder
+    } else {
+        let mut builder = std::process::Command::new("/bin/sh");
+        builder.arg("-c").arg(command);
+        builder
+    }
 }
 
 fn apply_std_options(builder: &mut std::process::Command, options: &SpawnOptions) {
@@ -150,6 +146,9 @@ fn build_std_command(command: &str, args: &[String], options: &SpawnOptions) -> 
     builder
 }
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt as _;
+
 fn build_tokio_command(command: &str, args: &[String], options: &SpawnOptions) -> tokio::process::Command {
     let mut builder = if options.shell && cfg!(windows) {
         let mut builder = tokio::process::Command::new("cmd");
@@ -183,6 +182,7 @@ fn build_tokio_command(command: &str, args: &[String], options: &SpawnOptions) -
         Stdio::null()
     });
     if options.detached {
+        #[cfg(unix)]
         builder.process_group(0);
     }
     hide_console_window_tokio(&mut builder);
@@ -191,7 +191,6 @@ fn build_tokio_command(command: &str, args: &[String], options: &SpawnOptions) -
 
 #[cfg(windows)]
 fn hide_console_window_std(builder: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     builder.creation_flags(CREATE_NO_WINDOW);
 }
@@ -201,7 +200,6 @@ fn hide_console_window_std(_builder: &mut std::process::Command) {}
 
 #[cfg(windows)]
 fn hide_console_window_tokio(builder: &mut tokio::process::Command) {
-    use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     builder.creation_flags(CREATE_NO_WINDOW);
 }
@@ -267,7 +265,12 @@ pub fn is_zombie_process(pid: i32) -> bool {
     // Fall through to the portable process listing used on macOS and BSD.
     match exec_file_sync_hidden(
         "ps",
-        &["-p".to_string(), pid.to_string(), "-o".to_string(), "stat=".to_string()],
+        &[
+            "-p".to_string(),
+            pid.to_string(),
+            "-o".to_string(),
+            "stat=".to_string(),
+        ],
         SpawnOptions {
             capture_stdout: true,
             ..Default::default()
@@ -285,8 +288,10 @@ pub fn is_process_alive(pid: i32) -> bool {
 
 /// True while the group has any member left, zombies included; a group can outlive its leader.
 pub fn process_group_exists(pgid: i32) -> bool {
-    if cfg!(windows) {
-        return false;
+    #[cfg(windows)]
+    {
+        let _ = pgid;
+        false
     }
     #[cfg(not(windows))]
     unsafe {
@@ -295,8 +300,6 @@ pub fn process_group_exists(pgid: i32) -> bool {
         }
         std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
     }
-    #[cfg(windows)]
-    false
 }
 
 /// True while the group has a RUNNING member; unreaped zombies have exited and must not block a group stop.
@@ -305,39 +308,50 @@ pub fn process_group_has_live_member(pgid: i32) -> bool {
         return false;
     }
 
-    let listing = exec_file_sync_hidden(
-        "ps",
-        &[
-            "-A".to_string(),
-            "-o".to_string(),
-            "pgid=".to_string(),
-            "-o".to_string(),
-            "stat=".to_string(),
-        ],
-        SpawnOptions {
-            capture_stdout: true,
-            ..Default::default()
-        },
-    );
-    match listing {
-        Ok(output) => {
-            for line in String::from_utf8_lossy(&output.stdout).split('\n') {
-                let fields: Vec<&str> = line.split_whitespace().collect();
-                if fields.len() < 2 {
-                    continue;
+    #[cfg(windows)]
+    {
+        let _ = pgid;
+        return false;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let listing = exec_file_sync_hidden(
+            "ps",
+            &[
+                "-A".to_string(),
+                "-o".to_string(),
+                "pgid=".to_string(),
+                "-o".to_string(),
+                "stat=".to_string(),
+            ],
+            SpawnOptions {
+                capture_stdout: true,
+                ..Default::default()
+            },
+        );
+        match listing {
+            Ok(output) => {
+                for line in String::from_utf8_lossy(&output.stdout).split('\n') {
+                    let fields: Vec<&str> = line.split_whitespace().collect();
+                    if fields.len() < 2 {
+                        continue;
+                    }
+                    if fields[0].parse::<i32>() == Ok(pgid) && !fields[1].starts_with('Z') {
+                        return true;
+                    }
                 }
-                if fields[0].parse::<i32>() == Ok(pgid) && !fields[1].starts_with('Z') {
-                    return true;
-                }
+                false
             }
-            false
+            // Unverifiable listing reads alive: callers keep escalating instead of dropping records over live descendants.
+            Err(_) => true,
         }
-        // Unverifiable listing reads alive: callers keep escalating instead of dropping records over live descendants.
-        Err(_) => true,
     }
 }
 
-/// Signal the group only while it is provably still the target.
+/// Signal the group only while it is provably still the target: the leader process (even a zombie)
+/// anchors its pgid against reuse; once the leader is gone, a live member must hold the pgid at
+/// signal time, narrowing reuse exposure to the inherent kill() TOCTOU of any single-pid signal.
 pub fn signal_process_group_if_held(pgid: i32, signal: Signal) -> bool {
     if !process_id_exists(pgid) && !process_group_has_live_member(pgid) {
         return false;
@@ -453,13 +467,14 @@ pub async fn wait_for_child_process(mut child: tokio::process::Child) -> std::io
     #[cfg(unix)]
     {
         use std::os::unix::process::ExitStatusExt;
-        Ok(normalized_exit_code(status.code(), status.signal().map(|number| match number {
-            1 => Signal::Hup,
-            2 => Signal::Int,
-            9 => Signal::Kill,
-            15 => Signal::Term,
+        let signal = status.signal().map(|number| match number {
+            libc::SIGHUP => Signal::Hup,
+            libc::SIGINT => Signal::Int,
+            libc::SIGKILL => Signal::Kill,
+            libc::SIGTERM => Signal::Term,
             _ => Signal::Term,
-        })))
+        });
+        Ok(normalized_exit_code(status.code(), signal))
     }
     #[cfg(not(unix))]
     {

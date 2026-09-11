@@ -344,6 +344,8 @@ pub fn find_binary_recursively(root_dir: &Path, binary_file_name: &str) -> Optio
 #[derive(Debug)]
 pub struct UnsupportedToolPlatformError(pub String);
 
+impl std::error::Error for UnsupportedToolPlatformError {}
+
 impl std::fmt::Display for UnsupportedToolPlatformError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.0)
@@ -784,9 +786,16 @@ mod tests {
 
     #[tokio::test]
     async fn offline_mode_skips_the_download() {
+        // PATH is process-wide, so this test never clears it: it only asserts the
+        // offline gate when the tool is genuinely absent.
+        let empty_bin_dir = tempfile::tempdir().unwrap().path().to_string_lossy().to_string();
+        std::env::set_var("PI_BIN_DIR", &empty_bin_dir);
+        if get_tool_path(FD).is_some() {
+            std::env::remove_var("PI_BIN_DIR");
+            return;
+        }
         std::env::set_var("PI_OFFLINE", "1");
-        std::env::set_var("PI_BIN_DIR", tempfile::tempdir().unwrap().path().to_string_lossy().to_string());
-        let result = ensure_tool_with_status(RG, true).await;
+        let result = ensure_tool_with_status(FD, true).await;
         std::env::remove_var("PI_OFFLINE");
         std::env::remove_var("PI_BIN_DIR");
         match result {

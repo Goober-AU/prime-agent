@@ -148,7 +148,7 @@ fn fsync_directory_sync(path: &str, platform: &str) -> std::io::Result<()> {
     }
 }
 
-fn fsync_directory(path: &str, platform: &str) -> std::io::Result<()> {
+async fn fsync_directory(path: &str, platform: &str) -> std::io::Result<()> {
     let result = (|| -> std::io::Result<()> {
         let file = std::fs::File::open(path)?;
         file.sync_all()
@@ -207,12 +207,10 @@ pub fn write_file_atomic_sync(path: &str, data: &str, mut options: WriteFileAtom
         drop(descriptor);
 
         // openSync's mode is masked by the umask; enforce the requested bits exactly.
+        #[cfg(unix)]
         if let Some(mode) = options.mode {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode))?;
-            }
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode))?;
         }
         if let Some(before_rename) = options.before_rename.take() {
             before_rename(&temp_path);
@@ -262,12 +260,10 @@ pub async fn write_file_atomic(
         }
         drop(handle);
 
+        #[cfg(unix)]
         if let Some(mode) = options.mode {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                tokio::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode)).await?;
-            }
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode)).await?;
         }
         if let Some(before_rename) = options.before_rename.take() {
             before_rename(&temp_path);
@@ -359,7 +355,8 @@ impl AtomicFileWriteCoordinator {
     ) -> std::io::Result<AtomicFileWriteResult> {
         let path = path.to_string();
         let data = data.to_string();
-        self.run(&path, move || async move {
+        let key = path.clone();
+        self.run(&key, move || async move {
             write_file_atomic(&path, &data, options).await
         })
         .await

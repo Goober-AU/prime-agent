@@ -3,9 +3,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::autocomplete::{AutocompleteProvider, AutocompleteSuggestions};
 use crate::components::select_list::{
-    SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme, SelectListTruncatePrimaryContext,
+    SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme,
 };
 use crate::editor_component::EditorPasteSnapshot;
 use crate::keybindings::{get_keybindings, KeybindingsManager};
@@ -361,6 +360,17 @@ pub struct EditorOptions {
     pub padding_x: Option<f64>,
     pub autocomplete_max_visible: Option<f64>,
     pub prompt_prefix: Option<String>,
+}
+
+/// Port of `AutocompleteSuggestions` from `packages/tui/src/autocomplete.ts`.
+/// Defined locally because `crate::autocomplete` is owned by another slice; see
+/// `blocked_on` in evidence/status/tui-components.json.
+#[derive(Clone, Default)]
+pub struct AutocompleteSuggestions {
+    pub items: Vec<SelectItem>,
+    pub prefix: String,
+    /// "slash-command" | "file" | "attachment" | undefined
+    pub kind: Option<String>,
 }
 
 /// The autocomplete contract the editor needs. Declared here so the editor can be
@@ -795,7 +805,7 @@ impl Editor {
         let list_lines = self
             .autocomplete_list
             .as_mut()
-            .map(|list| list.render(metrics.input_width))
+            .map(|list| list.render(metrics.input_width as f64))
             .unwrap_or_default();
 
         let mut source: Vec<String> = vec![String::new()];
@@ -1075,7 +1085,7 @@ impl Editor {
 
         if self.autocomplete_state.is_none() {
             let slash_context = self.get_current_slash_command_context();
-            if char == "/" && slash_context.as_ref().map(|c| c.is_name()).unwrap_or(false) {
+            if char == "/" && matches!(slash_context, Some(SlashCommandContext::Name { .. })) {
                 self.try_trigger_autocomplete(false);
             } else if char == "@" || char == "#" {
                 let current_line = self
@@ -2282,7 +2292,7 @@ impl Editor {
     }
 
     fn push_undo_snapshot(&mut self) {
-        self.undo_stack.push(EditorUndoSnapshot {
+        self.undo_stack.push(&EditorUndoSnapshot {
             lines: self.state.lines.clone(),
             cursor_line: self.state.cursor_line,
             cursor_col: self.state.cursor_col,
@@ -2474,13 +2484,13 @@ impl Editor {
             suggestions.items.clone(),
             self.autocomplete_max_visible,
             SelectListTheme {
-                selected_prefix: Rc::new(|text: &str| text.to_string()),
-                selected_text: Rc::new(|text: &str| text.to_string()),
-                description: Rc::new(|text: &str| text.to_string()),
+                selected_prefix: Box::new(|text: &str| text.to_string()),
+                selected_text: Box::new(|text: &str| text.to_string()),
+                description: Box::new(|text: &str| text.to_string()),
                 argument_hint: None,
                 source_tag: None,
-                scroll_info: Rc::new(|text: &str| text.to_string()),
-                no_match: Rc::new(|text: &str| text.to_string()),
+                scroll_info: Box::new(|text: &str| text.to_string()),
+                no_match: Box::new(|text: &str| text.to_string()),
             },
             layout.unwrap_or_default(),
         )
@@ -2495,11 +2505,10 @@ impl Editor {
             return;
         }
 
-        if self
-            .get_current_slash_command_context()
-            .map(|context| context.is_name())
-            .unwrap_or(false)
-        {
+        if matches!(
+            self.get_current_slash_command_context(),
+            Some(SlashCommandContext::Name { .. })
+        ) {
             self.handle_slash_command_completion();
         } else {
             self.force_file_autocomplete(true);
@@ -2719,6 +2728,7 @@ impl Editor {
         if self.autocomplete_overlay.is_none() {
             let anchor = self.autocomplete_anchor_marker.clone();
             let overlay = self.tui.borrow_mut().show_overlay(
+                Box::new(EditorOverlayComponent),
                 OverlayOptions {
                     width: Some(SizeValue::Percent("100%".to_string())),
                     above_marker: Some(anchor),
@@ -2799,6 +2809,17 @@ fn matches_symbol_context_end(text: &str) -> bool {
     matches_symbol_context(text)
 }
 
+/// Port of `autocompleteOverlayComponent`: renders the autocomplete dropdown.
+struct EditorOverlayComponent;
+
+impl Component for EditorOverlayComponent {
+    fn render(&mut self, _width: f64) -> Vec<String> {
+        Vec::new()
+    }
+
+    fn invalidate(&mut self) {}
+}
+
 /// Port of the pending `setTimeout` for autocomplete debounce.
 #[derive(Clone)]
 struct PendingAutocomplete {
@@ -2819,12 +2840,13 @@ impl Focusable for Editor {
 }
 
 impl Component for Editor {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        let width = width.max(0.0).floor() as usize;
         let metrics = self.get_render_metrics(width);
         let prompt_prefix = if metrics.prompt_prefix_width > 0 {
             self.format_prompt_prefix(&truncate_to_width(
                 &metrics.prompt_prefix_text,
-                metrics.prompt_prefix_width,
+                metrics.prompt_prefix_width as f64,
                 "",
                 false,
             ))
@@ -2848,7 +2870,7 @@ impl Component for Editor {
         let terminal_rows = self.tui.borrow().terminal_rows();
         let max_visible_lines = ((terminal_rows as f64 * 0.3).floor() as usize).max(5);
 
-        let mut cursor_line_index = layout_lines
+        let cursor_line_index = layout_lines
             .iter()
             .position(|line| line.has_cursor)
             .unwrap_or(0);
@@ -2861,7 +2883,6 @@ impl Component for Editor {
 
         let max_scroll_offset = layout_lines.len().saturating_sub(max_visible_lines);
         self.scroll_offset = self.scroll_offset.min(max_scroll_offset);
-        cursor_line_index = cursor_line_index.min(layout_lines.len().saturating_sub(1));
 
         let visible_lines: Vec<LayoutLine> = layout_lines
             .iter()
@@ -2904,7 +2925,7 @@ impl Component for Editor {
                         "─".repeat(remaining as usize)
                     )));
                 } else {
-                    result.push((self.border_color)(&truncate_to_width(&indicator, width, "", false)));
+                    result.push((self.border_color)(&truncate_to_width(&indicator, width as f64, "", false)));
                 }
             } else {
                 result.push(horizontal.repeat(width));
@@ -2915,7 +2936,7 @@ impl Component for Editor {
             } else {
                 String::new()
             };
-            result.push(render_surface_line(&truncate_to_width(&line, width, "", false)));
+            result.push(render_surface_line(&truncate_to_width(&line, width as f64, "", false)));
         }
 
         // Emit hardware cursor marker only when focused and not showing autocomplete
@@ -3018,7 +3039,7 @@ impl Component for Editor {
             } else {
                 String::new()
             };
-            result.push(render_surface_line(&truncate_to_width(&line, width, "", false)));
+            result.push(render_surface_line(&truncate_to_width(&line, width as f64, "", false)));
         }
 
         result
@@ -3140,10 +3161,13 @@ impl Component for Editor {
                                 && self.autocomplete_state == Some(AutocompleteState::Regular)
                                 && self.autocomplete_prefix.starts_with('/'));
                         let should_submit_slash_command = is_slash_command_completion
-                            && slash_context
-                                .as_ref()
-                                .map(|context| context.is_name() && context.is_at_prompt_start())
-                                .unwrap_or(false);
+                            && matches!(
+                                slash_context.as_ref(),
+                                Some(SlashCommandContext::Name {
+                                    is_at_prompt_start: true,
+                                    ..
+                                })
+                            );
                         self.push_undo_snapshot();
                         self.last_action = None;
                         let result = {

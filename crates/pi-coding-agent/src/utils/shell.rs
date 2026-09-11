@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use super::child_process::{spawn_hidden, spawn_sync_hidden, SpawnOptions};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellConfig {
     pub shell: String,
     pub args: Vec<String>,
@@ -333,14 +334,9 @@ pub fn kill_process_tree(pid: i32) {
             },
         );
     } else {
-        // Use SIGKILL on Unix/Linux/Mac
-        if !super::child_process::signal_process_group_or_process(pid, super::child_process::Signal::Kill) {
-            // Fallback to killing just the child if process group kill fails
-            let _ = super::child_process::signal_process_group_or_process(
-                pid,
-                super::child_process::Signal::Kill,
-            );
-        }
+        // Use SIGKILL on Unix/Linux/Mac: the helper already falls back to a
+        // single-pid kill when the process group is unavailable.
+        super::child_process::signal_process_group_or_process(pid, super::child_process::Signal::Kill);
     }
 }
 

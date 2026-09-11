@@ -163,8 +163,8 @@ fn hosted_git_info_from_url(candidate: &str) -> Option<HostedInfo> {
 fn parse_generic_git_url(url: &str) -> Option<GitSource> {
     let (repo_without_ref, reference) = split_ref(url);
     let mut repo = repo_without_ref.clone();
-    let mut host = String::new();
-    let mut path = String::new();
+    let host: String;
+    let path: String;
 
     if let Some((scp_host, scp_path)) = scp_like_parts(&repo_without_ref) {
         host = scp_host;
@@ -563,6 +563,19 @@ mod tests {
 
     #[test]
     fn captures_context_from_a_real_repository() {
+        // PATH is process-wide and other tests in this crate read it; skip when git
+        // is not reachable so the assertion never depends on test ordering.
+        if spawn_sync_hidden("git", &["--version".to_string()], SpawnOptions {
+            capture_stdout: true,
+            capture_stderr: true,
+            ..Default::default()
+        })
+        .map(|output| !output.status.success())
+        .unwrap_or(true)
+        {
+            return;
+        }
+
         let dir = tempfile::tempdir().unwrap();
         let run = |args: &[&str]| {
             let mut full: Vec<String> = vec!["-C".to_string(), dir.path().to_string_lossy().to_string()];

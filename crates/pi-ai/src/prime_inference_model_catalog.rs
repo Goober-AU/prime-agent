@@ -251,7 +251,7 @@ mod tests {
     fn skips_ids_with_control_characters_and_bad_shapes() {
         let value = json!({
             "data": [
-                {"id": "bad\u0001id", "pricing": {"input_usd_per_mtok": 0, "output_usd_per_mtok": 0}},
+                {"id": "bad\u{0001}id", "pricing": {"input_usd_per_mtok": 0, "output_usd_per_mtok": 0}},
                 {"id": 42, "pricing": {"input_usd_per_mtok": 0, "output_usd_per_mtok": 0}},
                 {"id": "good", "pricing": {"input_usd_per_mtok": 0, "output_usd_per_mtok": 0}}
             ]

@@ -96,7 +96,15 @@ pub fn project_identity(cwd: &str, agent_dir: &str, bind_id: Option<&str>) -> Re
 	let dir = Path::new(agent_dir).join("memory");
 	std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
 	let file = dir.join("projects.json");
-	let _lock = crate::utils::dir_lock::lock_dir_sync(&lock_key(&dir), None);
+	let _lock = super::acquire_lock_sync(
+		&lock_key(&dir),
+		super::MemoryLockRetries {
+			stale_ms: 10_000,
+			retries: 0,
+			min_timeout_ms: 0,
+			max_timeout_ms: 0,
+		},
+	)?;
 	let registry = read_registry(&file);
 	let existing: Vec<String> = aliases
 		.iter()

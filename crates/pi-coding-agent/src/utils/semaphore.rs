@@ -15,11 +15,13 @@ pub enum SemaphoreError {
     Aborted(String),
 }
 
+#[derive(Debug)]
 struct Waiter {
     id: u64,
     sender: oneshot::Sender<()>,
 }
 
+#[derive(Debug)]
 struct State {
     available: usize,
     waiters: VecDeque<Waiter>,
@@ -27,6 +29,7 @@ struct State {
 
 /// Counting semaphore for bounding async concurrency. FIFO: waiters acquire in
 /// the order they queued.
+#[derive(Debug)]
 pub struct Semaphore {
     permits: usize,
     state: Mutex<State>,

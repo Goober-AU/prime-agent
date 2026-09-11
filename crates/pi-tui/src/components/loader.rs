@@ -28,6 +28,8 @@ pub struct Loader {
     shared_frame: Arc<AtomicUsize>,
     running: Arc<AtomicBool>,
     interval_task: Option<tokio::task::JoinHandle<()>>,
+    /// Render request hook owned by the TUI. The animation task advances the
+    /// shared frame counter; the TUI reads it while rendering.
     ui: Option<Rc<RefCell<TUI>>>,
     render_indicator_verbatim: bool,
     spinner_color_fn: Box<dyn Fn(&str) -> String>,
@@ -167,7 +169,7 @@ impl Loader {
 }
 
 impl Component for Loader {
-    fn render(&mut self, width: usize) -> Vec<String> {
+    fn render(&mut self, width: f64) -> Vec<String> {
         let mut result = vec![String::new()];
         result.extend(self.text.render(width));
         result

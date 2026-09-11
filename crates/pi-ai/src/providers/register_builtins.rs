@@ -7,7 +7,8 @@
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::api_registry::{clear_api_providers, get_api_providers, register_api_provider, ApiProvider};
-use crate::compaction::{CompactFunction, CompactionOptions, ProviderCompactionResult};
+use crate::compaction::{CompactionOptions, ProviderCompactionResult};
+use crate::types::CompactFunction;
 use crate::types::{AssistantMessage, Context, Model, StreamFunction, StreamOptions, Usage};
 use crate::utils::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use futures::future::BoxFuture;
@@ -670,6 +671,19 @@ mod tests {
 		assert!(check(&model("openai-responses", "openai", "gpt-6-astra")));
 		assert!(!check(&model("openai-completions", "openai", "gpt-6-astra")));
 		clear_api_providers();
+	}
+
+	#[tokio::test]
+	async fn compaction_guard_reports_api_mismatch() {
+		let mismatched = model("openai-completions", "openai", "gpt-5");
+		let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let _ = compact_openai_responses_guarded(&mismatched, &context(), None);
+		}));
+		// The guard is evaluated inside the future, so run it on the runtime.
+		assert!(result.is_ok());
+		let future = compact_openai_responses_guarded(&mismatched, &context(), None);
+		let joined = tokio::spawn(future).await;
+		assert!(joined.is_err(), "guard must panic with the mismatched api");
 	}
 
 	#[tokio::test]

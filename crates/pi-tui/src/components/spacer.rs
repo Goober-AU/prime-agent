@@ -24,7 +24,7 @@ impl Default for Spacer {
 }
 
 impl Component for Spacer {
-    fn render(&mut self, _width: usize) -> Vec<String> {
+    fn render(&mut self, _width: f64) -> Vec<String> {
         let mut result: Vec<String> = Vec::new();
         for _ in 0..self.lines {
             result.push(String::new());
@@ -42,9 +42,9 @@ mod tests {
     #[test]
     fn renders_requested_number_of_empty_lines() {
         let mut spacer = Spacer::new(3);
-        assert_eq!(spacer.render(10), vec!["", "", ""]);
+        assert_eq!(spacer.render(10.0), vec!["", "", ""]);
         spacer.set_lines(0);
-        assert_eq!(spacer.render(10), Vec::<String>::new());
+        assert_eq!(spacer.render(10.0), Vec::<String>::new());
         assert_eq!(Spacer::default().render(1), vec![""]);
     }
 }
