@@ -33,6 +33,6 @@
    "loc": 5
   }
  ],
- "note": "REPAIR slice. All files are written; agent_loop.rs has 60 compile errors, performance_metrics.rs 7, types.rs 1. Fix them in place against the TypeScript reference, then ONE cargo check + ONE cargo test for pi-agent-core.",
+ "note": "REPAIR slice. All 6 files are written. Key facts: (1) crates/pi-ai now COMPILES CLEAN, so the temporary `pub mod pi_ai_shim` inside crates/pi-agent-core/src/types.rs (starts around line 754, ends at the file end) must be DELETED and the two alias lines `use self::pi_ai_shim as pi_ai;` (types.rs:23, agent_loop.rs:16) replaced with the real crate dependency `use pi_ai::...`. The shim was only a stand-in because pi-ai was empty. (2) agent_loop.rs has ~60 errors: it uses AgentMessage::Assistant / ::ToolResult variants that do not exist (the enum is AgentMessage::Message(Message) | Custom(CustomAgentMessage) - use Message variants and the message.role() helper), AssistantMessage has no `tool_calls` field (tool calls live in `content` as ContentBlock entries), and there are several type mismatches. (3) performance_metrics.rs has ~7 errors, types.rs 1. Fix in place against the TypeScript reference, then ONE cargo check + ONE cargo test for pi-agent-core.",
  "loc": 2841
 }

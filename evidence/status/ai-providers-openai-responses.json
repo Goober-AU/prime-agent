@@ -47,6 +47,21 @@
       "parse_web_socket scopes the MutexGuard so it is not held across the await (future must be Send)",
       "fn as_arguments(Value) -> Map<String, Value> used at the three ToolCall.arguments sites",
       "five js_display uses wrapped as map(|value| js_display(Some(value)))"
-    ]
+    ],
+    "test_compile": {
+      "check": "cargo test -p pi-ai --no-run (read-only, run by me at the lead's request)",
+      "my_files": "openai_responses_shared.rs, openai_responses.rs, openai_codex_responses.rs -> 0 errors, 0 warnings",
+      "fixes_i_applied": [
+        "shared.rs test module: imported UserMessage; `allowed` now takes &'static [&'static str] and returns impl Fn(&str)->bool + 'static (E0106)",
+        "openai_responses.rs test: replaced unwrap_err() with a match (ResponsesClient is not Debug)",
+        "codex.rs tests: replaced both unwrap_err() calls with matches (dyn WebSocketLike / AcquiredWebSocket are not Debug); FakeSocket::emit clones the event per listener; dropped the unused ResponsesEventStream import; bound the must-use cleanup Fn"
+      ],
+      "remaining_errors_outside_my_files": [
+        "amazon_bedrock_responses.rs:614,624,650,651,656",
+        "azure_openai_responses.rs:624",
+        "transform_messages.rs:339",
+        "openai_completions.rs:2934,3030"
+      ]
+    }
   }
 }
