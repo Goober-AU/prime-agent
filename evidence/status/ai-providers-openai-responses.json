@@ -1,0 +1,36 @@
+{
+  "slice": "ai-providers-openai-responses",
+  "files": [
+    {
+      "src": "packages/ai/src/providers/openai-responses-shared.ts",
+      "rust": "crates/pi-ai/src/providers/openai_responses_shared.rs",
+      "status": "ported",
+      "functions_mapped": 18,
+      "notes": "encodeTextSignatureV1/parseTextSignature/convertResponsesMessages/convertResponsesTools/processResponsesStream + all event handlers. processResponsesStream takes ResponsesEventStream = Pin<Box<dyn Stream<Item=Value>+Send>> (pre-parsed SSE JSON) and returns Result<(),ResponsesStreamError{StreamFailure|Message}> because Rust has no throw inside a loop; the same StreamFailureError text/kind is produced. convertResponsesMessages returns Result<Vec<Value>,String> (uses try_transform_messages)."
+    },
+    {
+      "src": "packages/ai/src/providers/openai-responses.ts",
+      "rust": "crates/pi-ai/src/providers/openai_responses.rs",
+      "status": "ported",
+      "functions_mapped": 13,
+      "notes": "streamOpenAIResponses/streamSimpleOpenAIResponses/compactOpenAIResponses/try_compact_openai_responses/createClient/buildParams/getCompat/getPromptCacheRetention/resolveCacheRetention/applyServiceTierPricing/getServiceTierCostMultiplier + local SSE buffer. The OpenAI SDK is replaced by reqwest: base URL + /responses, same headers (session_id, x-client-request-id, copilot, cloudflare cf-aig-authorization, opencode), same JSON body keys/defaults."
+    },
+    {
+      "src": "packages/ai/src/providers/azure-openai-responses.ts",
+      "rust": "crates/pi-ai/src/providers/azure_openai_responses.rs",
+      "status": "partial",
+      "functions_mapped": 7,
+      "notes": "Only the helper half is mine (DEFAULT_AZURE_API_VERSION, AZURE_TOOL_CALL_PROVIDERS, AzureOpenAIResponsesOptions::from_base, parseDeploymentNameMap, resolveDeploymentName, normalizeAzureBaseUrl, buildDefaultBaseUrl, resolveAzureConfig). The lead reassigned the file to itself mid-task; I stopped at 201 of 284 lines so it could be overwritten instead of merged. streamAzureOpenAIResponses/streamSimpleAzureOpenAIResponses/createClient/buildParams are NOT written by me."
+    },
+    {
+      "src": "packages/ai/src/providers/openai-codex-responses.ts",
+      "rust": "crates/pi-ai/src/providers/openai_codex_responses.rs",
+      "status": "ported",
+      "functions_mapped": 34,
+      "notes": "Whole file: streamOpenAICodexResponses/streamSimpleOpenAICodexResponses/compactOpenAICodexResponses/buildRequestBody/mapCodexEvents/parseSSE/parseWebSocket/acquireWebSocket/connectWebSocket/processWebSocketStream/buildCachedWebSocketRequestBody/getCachedWebSocketInputDelta/startWebSocketOutputOnFirstEvent/debug-stats + cache API/resolveCodexUrl/resolveCodexWebSocketUrl/parseErrorResponse/extractAccountId/createCodexRequestId/buildBaseCodexHeaders/buildSSEHeaders/buildWebSocketHeaders/codexUsageLimitMessage/resolveCodexServiceTier/applyServiceTierPricing/normalizeCodexStatus. reqwest only. One gap: no WebSocket crate exists in the workspace, so the socket comes from set_web_socket_constructor (None by default). With no constructor connectWebSocket fails with the exact TS message 'WebSocket transport is not available in this runtime', which drives the real fallback path (diagnostic + recordWebSocketFailure + recordWebSocketSseFallback) and then SSE. mapCodexEvents throws via an Arc<Mutex<Option<CodexThrown>>> slot because a Rust stream cannot reject; the caller re-raises it at the same point in the catch boundary."
+    }
+  ],
+  "build": "not run (lead builds)",
+  "blocked_on": "1) crate::providers::openai_compaction is still 0 bytes; I call request_openai_compaction(model,url,&IndexMap<String,String>,Map<String,Value>,Option<&CompactionOptions>,Option<Decode>) -> Result<Option<ProviderCompactionResult>,CompactionRequestError>, CompactionRequestError::new(msg, Option<i64> status, Option<f64> retry_after_ms), build_codex_compacted_window(&[Value],&Value)->Vec<Value>, supports_openai_compaction, validated_native_compaction_endpoint. 2) register_builtins.rs imports openai_responses_shared::{process_responses_stream,...} only indirectly - if the lead's own openai_responses_shared.rs replaces mine, the names above must match. 3) azure_openai_responses.rs is half-written by me (helpers only) - overwrite, do not merge.",
+  "honest_summary": "openai_responses_shared.rs, openai_responses.rs and openai_codex_responses.rs are complete 1:1 ports with unit tests (parsing, serialisation, ordering, error mapping, thresholds, header building, defaults, cached-context delta, fallback diagnostics) and no real network calls. azure_openai_responses.rs is only the helper half: the lead reassigned it while I was writing it, so I stopped rather than merge two authors into one file. The one real functional gap is the WebSocket transport in the Codex provider: there is no WebSocket dependency in the workspace, so the socket is injectable and defaults to 'unavailable', which reproduces the TypeScript's no-WebSocket runtime path exactly (same error message, same reconnect/fallback bookkeeping) and lands on SSE. I could not run cargo check or cargo test (lead builds once at the end), so the files are unverified by a compiler."
+}
