@@ -38,11 +38,15 @@ or set the environment yourself:
     CARGO_HOME=C:\Users\openclawuser\optimus-rust-toolchain\cargo
     PATH=%CARGO_HOME%\bin;%PATH%
 
-Keep builds bounded: use `cargo check -p <crate>` while iterating, and
-`cargo build -p <crate>` only when you need to run a binary. `cargo test -p <crate>`
-for tests. Set `CARGO_BUILD_JOBS=4` so parallel workers do not thrash the machine.
-A shared target directory is intentional; "Blocking waiting for file lock on
-build directory" is normal and resolves by itself.
+Keep builds bounded. Set `CARGO_BUILD_JOBS=4` so parallel workers do not thrash
+the machine. A shared target directory is intentional; "Blocking waiting for
+file lock on build directory" is normal and resolves by itself.
+
+**BUILD IT ALL AT ONCE. TEST AT THE END.** Hish's explicit rule for this port:
+do not test at every step or after every file. Write the whole slice first, then
+run ONE `cargo check -p <crate>` (and one `cargo test -p <crate>`) at the end of
+the slice. Do not loop file-by-file through compile/fix cycles. Do not stop after
+one file. Finish the slice, then check once, fix the real errors, and report.
 
 ## 1:1 mapping rules
 
@@ -83,12 +87,15 @@ build directory" is normal and resolves by itself.
 - Never introduce a new concurrency structure that changes ordering, buffering,
   or error propagation.
 
-## Definition of done for one file
+## Definition of done for one slice (not one file)
 
+0. BUILD IT ALL AT ONCE. Do not run cargo between files. Do not test at every
+   step. Write every file in the slice, then run exactly one `cargo check` and
+   one `cargo test` at the end.
 1. The Rust file exists at the mapped path.
 2. Every significant TypeScript function has an identifiable Rust counterpart.
 3. `cargo check -p <crate>` passes with no errors (warnings are acceptable while
-   the port is incomplete, but note them).
+   the port is incomplete, but note them). Run this ONCE, at the end of the slice.
 4. Tests that exist for the TypeScript file have a Rust equivalent where the
    behaviour is testable without real network or real credentials.
 5. You write a short status entry to `evidence/status/<slice>.json`:
