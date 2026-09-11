@@ -575,7 +575,8 @@ impl SseMessageReader {
 /// a classified failure.
 fn anthropic_sse_error(data: &str, request_id: Option<&str>) -> StreamFailureError {
 	let mut error_type: Option<String> = None;
-	let mut detail: Option<String> = None;
+	// Both arms below assign `detail`, like the TS `let detail` + try/catch.
+	let detail: Option<String>;
 	let mut request_id = request_id.map(str::to_string);
 	match parse_json_with_repair(data) {
 		Ok(parsed) => {

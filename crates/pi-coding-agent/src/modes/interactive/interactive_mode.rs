@@ -14,7 +14,7 @@ use std::sync::Arc;
 use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 use pi_ai::types::{ImageContent, Model, ServiceTier};
 
-use crate::config::{app_name, APP_TITLE, VERSION};
+use crate::config::{APP_TITLE, VERSION};
 use crate::utils::paths::get_cwd_relative_path;
 
 use super::agent_activity::format_token_count;
@@ -28,7 +28,7 @@ use super::interactive_mode_services::{
     AgentConnectionSessionEvent, AgentConnectionSnapshot, AgentConnectionState, ContextUsage, GoalState,
     InteractiveModeLocalSessionHost, InteractiveModeUiServices, OverlayHandle, Text, Theme,
 };
-use super::onboarding::{is_onboarding_model_ready, should_run_onboarding, OnboardingStartupState};
+use super::onboarding::should_run_onboarding;
 use super::prompt_stash_state::{ClientPromptStashStore, PromptStash, PromptStashState};
 use super::queue_selection::{QueueSelection, QueueSelectionItem};
 use super::resume_hint::format_resume_hint;
@@ -49,7 +49,9 @@ pub const AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL: &str = "Message";
 pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Bash";
 
 /// `APP_NAME`
-pub const APP_NAME: &str = app_name();
+pub fn app_name() -> String {
+    crate::utils::tools_manager::app_name()
+}
 
 const HEARTBEAT_LEGACY_PROMPT_MIN_TOLERANCE_MS: f64 = 15_000.0;
 const HEARTBEAT_LEGACY_PROMPT_MAX_TOLERANCE_MS: f64 = 120_000.0;
@@ -1377,7 +1379,7 @@ impl InteractiveMode {
             last_status_spacer_index: None,
             last_status_text_index: None,
             last_goal_announcement: None,
-            feature_hint_deck: FeatureHintDeck::new(),
+            feature_hint_deck: FeatureHintDeck::default(),
             current_feature_hint: None,
             feature_hint_eligible_at: 0.0,
             feature_hint_run_pending: false,
@@ -1389,7 +1391,7 @@ impl InteractiveMode {
             working_indicator_options: None,
             pulse_frame: 0,
             working_pulse_active: false,
-            activity_tracker: super::agent_activity::AgentActivityTracker::new(),
+            activity_tracker: super::agent_activity::AgentActivityTracker::default(),
             context_usage_token_baseline: 0.0,
             context_usage_refresh_generation: 0,
             context_usage_last_success_generation: 0,
@@ -2961,10 +2963,11 @@ impl InteractiveMode {
                     Some(key)
                 }
             };
-            let hint = self.feature_hint_deck.next(
-                &get_keybinding,
-                self.options.return_to_agents_view,
-            );
+            let context = super::feature_hints::FeatureHintContext {
+                get_keybinding: Box::new(get_keybinding),
+                is_resident_session: self.options.return_to_agents_view,
+            };
+            let hint = self.feature_hint_deck.next(&context);
             self.current_feature_hint = hint.map(|hint| hint.text);
         }
         if self.current_feature_hint.is_none() {
@@ -3600,15 +3603,20 @@ impl InteractiveMode {
 
     /// Port of the pasted-image eviction loop (`MAX_PASTED_IMAGE_BYTES`).
     fn evict_pasted_images(&mut self, incoming_bytes: f64) {
-        let mut images: HashMap<i64, (ImageContent, f64)> = self
+        let mut images: Vec<(i64, ImageContent)> = self
             .pasted_images
             .iter()
-            .map(|(id, image)| (*id, (image.clone(), image.data.len() as f64)))
+            .map(|(id, image)| (*id, image.clone()))
             .collect();
-        let evicted = evict_images_to_budget(&mut images, MAX_PASTED_IMAGE_BYTES - incoming_bytes);
-        for marker_id in evicted {
-            self.pasted_images.remove(&marker_id);
-        }
+        let keep: HashSet<i64> = images.iter().map(|(id, _)| *id).collect();
+        evict_images_to_budget(
+            &mut images,
+            |image: &ImageContent| image.data.len() as f64,
+            MAX_PASTED_IMAGE_BYTES - incoming_bytes,
+            &keep,
+        );
+        let retained: HashSet<i64> = images.into_iter().map(|(id, _)| id).collect();
+        self.pasted_images.retain(|id, _| retained.contains(id));
     }
 
     /// Port of `formatImageMarker`.

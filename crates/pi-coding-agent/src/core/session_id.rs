@@ -8,7 +8,10 @@ pub fn normalize_session_id(id: &str) -> String {
 }
 
 fn is_hex_id(value: &str) -> bool {
-    !value.is_empty() && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn normalize_hex_session_id(id: &str) -> Option<String> {
@@ -72,17 +75,35 @@ mod tests {
 
     #[test]
     fn formats_display_ids_from_hex_ids() {
-        assert_eq!(format_session_display_id("01924f7a-1234-7abc-8def-0123456789ab"), "0123456789ab");
+        assert_eq!(
+            format_session_display_id("01924f7a-1234-7abc-8def-0123456789ab"),
+            "0123456789ab"
+        );
         assert_eq!(format_session_display_id("abc"), "abc");
-        assert_eq!(format_session_display_id("not-a-hex-id-1234567890"), "d-1234567890");
+        assert_eq!(
+            format_session_display_id("not-a-hex-id-1234567890"),
+            "d-1234567890"
+        );
     }
 
     #[test]
     fn matches_suffixes_and_selectors() {
-        assert!(matches_session_id_suffix("01924f7a-1234-7abc-8def-0123456789ab", "0123456789ab"));
-        assert!(!matches_session_id_suffix("01924f7a-1234-7abc-8def-0123456789ab", "zz"));
-        assert!(matches_saved_session_selector("01924f7a-1234-7abc-8def-0123456789ab", "01924f7a"));
-        assert!(matches_saved_session_selector("01924f7a-1234-7abc-8def-0123456789ab", "0123456789ab"));
+        assert!(matches_session_id_suffix(
+            "01924f7a-1234-7abc-8def-0123456789ab",
+            "0123456789ab"
+        ));
+        assert!(!matches_session_id_suffix(
+            "01924f7a-1234-7abc-8def-0123456789ab",
+            "zz"
+        ));
+        assert!(matches_saved_session_selector(
+            "01924f7a-1234-7abc-8def-0123456789ab",
+            "01924f7a"
+        ));
+        assert!(matches_saved_session_selector(
+            "01924f7a-1234-7abc-8def-0123456789ab",
+            "0123456789ab"
+        ));
         assert!(matches_saved_session_selector("plain-name", "plai"));
     }
 }

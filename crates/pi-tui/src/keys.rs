@@ -31,6 +31,72 @@ pub enum KeyEventType {
 /// Key identifier strings accepted by [`matches_key`] (e.g. "ctrl+c", "escape").
 pub type KeyId = str;
 
+/// Port of the `Key` constant: key-name identifiers accepted by [`matches_key`].
+pub mod key {
+    // Key-name identifiers (e.g. `Key::escape`, `Key::page_up`).
+    pub const escape: &str = "escape";
+    pub const esc: &str = "esc";
+    pub const enter: &str = "enter";
+    pub const return: &str = "return";
+    pub const tab: &str = "tab";
+    pub const space: &str = "space";
+    pub const backspace: &str = "backspace";
+    pub const delete: &str = "delete";
+    pub const insert: &str = "insert";
+    pub const clear: &str = "clear";
+    pub const home: &str = "home";
+    pub const end: &str = "end";
+    pub const page_up: &str = "pageUp";
+    pub const page_down: &str = "pageDown";
+    pub const up: &str = "up";
+    pub const down: &str = "down";
+    pub const left: &str = "left";
+    pub const right: &str = "right";
+    pub const f1: &str = "f1";
+    pub const f2: &str = "f2";
+    pub const f3: &str = "f3";
+    pub const f4: &str = "f4";
+    pub const f5: &str = "f5";
+    pub const f6: &str = "f6";
+    pub const f7: &str = "f7";
+    pub const f8: &str = "f8";
+    pub const f9: &str = "f9";
+    pub const f10: &str = "f10";
+    pub const f11: &str = "f11";
+    pub const f12: &str = "f12";
+    pub const backtick: &str = "`";
+    pub const hyphen: &str = "-";
+    pub const equals: &str = "=";
+    pub const leftbracket: &str = "[";
+    pub const rightbracket: &str = "]";
+    pub const backslash: &str = "\\\\";
+    pub const semicolon: &str = ";";
+    pub const quote: &str = "'";
+    pub const comma: &str = ",";
+    pub const period: &str = ".";
+    pub const slash: &str = "/";
+    pub const exclamation: &str = "!";
+    pub const at: &str = "@";
+    pub const hash: &str = "#";
+    pub const dollar: &str = "$";
+    pub const percent: &str = "%";
+    pub const caret: &str = "^";
+    pub const ampersand: &str = "&";
+    pub const asterisk: &str = "*";
+    pub const leftparen: &str = "(";
+    pub const rightparen: &str = ")";
+    pub const underscore: &str = "_";
+    pub const plus: &str = "+";
+    pub const pipe: &str = "|";
+    pub const tilde: &str = "~";
+    pub const leftbrace: &str = "{";
+    pub const rightbrace: &str = "}";
+    pub const colon: &str = ":";
+    pub const lessthan: &str = "<";
+    pub const greaterthan: &str = ">";
+    pub const question: &str = "?";
+}
+
 const SYMBOL_KEYS: &[&str] = &[
     "`", "-", "=", "[", "]", "\\", ";", "'", ",", ".", "/", "!", "@", "#", "$", "%", "^", "&", "*", "(", ")", "_",
     "+", "|", "~", "{", "}", ":", "<", ">", "?",

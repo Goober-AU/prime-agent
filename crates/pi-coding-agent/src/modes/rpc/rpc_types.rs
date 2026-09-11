@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::modes::agent_connection::types::{
     AgentConnectionHeartbeat, AgentConnectionModel, AgentConnectionSourceInfo,
 };
-use pi_agent_core::types::{AgentEvent, AgentMessage, ThinkingLevel};
+use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 
 // ============================================================================
 // RPC Commands (stdin)
@@ -553,7 +553,9 @@ pub type RpcCommandType = String;
 pub enum RpcObservedSessionEvent {
     ObservedSessionEvent {
         active_session_id: String,
-        event: AgentEvent,
+        /// `event: AgentEvent`; serialized with the TypeScript event names via
+        /// `AgentEvent::to_json`.
+        event: Value,
     },
     ObservedSessionClosed {
         active_session_id: String,

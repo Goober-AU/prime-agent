@@ -14,7 +14,6 @@
 //! JSONL line, mutates a few fields during migration, and writes every unknown
 //! field back verbatim on rewrite. A typed enum would drop unknown fields.
 
-
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -28,7 +27,9 @@ use pi_ai::types::{Message, ServiceTier, Usage};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-use crate::utils::file_lines::{read_bytes_sync, read_first_line_sync, read_lines_as_buffers, ReadLinesRange};
+use crate::utils::file_lines::{
+    read_bytes_sync, read_first_line_sync, read_lines_as_buffers, ReadLinesRange,
+};
 
 pub const CURRENT_SESSION_VERSION: i64 = 3;
 const SESSION_LIST_SEARCH_TEXT_MAX_CHARS: usize = 64 * 1024;
@@ -210,7 +211,10 @@ fn split_git_ref(url: &str) -> (String, Option<String>) {
                 let repo_path = &path_with_maybe_ref[..separator];
                 let reference = &path_with_maybe_ref[separator + 1..];
                 if !repo_path.is_empty() && !reference.is_empty() {
-                    return (format!("git@{}:{repo_path}", &rest[..colon]), Some(reference.to_string()));
+                    return (
+                        format!("git@{}:{repo_path}", &rest[..colon]),
+                        Some(reference.to_string()),
+                    );
                 }
             }
         }
@@ -227,7 +231,10 @@ fn split_git_ref(url: &str) -> (String, Option<String>) {
                     let reference = &path_with_maybe_ref[separator + 1..];
                     if !repo_path.is_empty() && !reference.is_empty() {
                         let repo = format!("{}://{authority}/{repo_path}", &url[..scheme_end]);
-                        return (repo.trim_end_matches('/').to_string(), Some(reference.to_string()));
+                        return (
+                            repo.trim_end_matches('/').to_string(),
+                            Some(reference.to_string()),
+                        );
                     }
                 }
             }
@@ -691,7 +698,10 @@ pub fn serialize_session_file_entry(entry: &FileEntry) -> String {
     }
 }
 
-fn decode_inline_tool_text_reference(message: &Map<String, Value>, value: &Value) -> Option<String> {
+fn decode_inline_tool_text_reference(
+    message: &Map<String, Value>,
+    value: &Value,
+) -> Option<String> {
     let candidate = value.as_object()?.get(INLINE_TOOL_TEXT_REFERENCE_KEY)?;
     let reference = candidate.as_object()?;
     if reference.get("version").and_then(Value::as_i64) != Some(INLINE_TOOL_TEXT_REFERENCE_VERSION)
@@ -703,7 +713,11 @@ fn decode_inline_tool_text_reference(message: &Map<String, Value>, value: &Value
     let start = is_nonnegative_safe_integer(reference.get("start")?)? as usize;
     let length = is_nonnegative_safe_integer(reference.get("length")?)? as usize;
     let sha = reference.get("sha256").and_then(Value::as_str)?;
-    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+    if sha.len() != 64
+        || !sha
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
         return None;
     }
     let source = tool_result_content_text(message, content_index)?;
@@ -741,7 +755,10 @@ pub fn rehydrate_session_file_entry(entry: FileEntry) -> FileEntry {
     let mut decoded_details = source_details.clone();
     let mut failed_keys: Vec<String> = Vec::new();
     for key in &encoded_fields {
-        match decode_inline_tool_text_reference(&message, source_details.get(key).unwrap_or(&Value::Null)) {
+        match decode_inline_tool_text_reference(
+            &message,
+            source_details.get(key).unwrap_or(&Value::Null),
+        ) {
             Some(decoded) => {
                 decoded_details.insert(key.clone(), Value::String(decoded));
             }
@@ -749,7 +766,9 @@ pub fn rehydrate_session_file_entry(entry: FileEntry) -> FileEntry {
                 failed_keys.push(key.clone());
                 decoded_details.insert(
                     key.clone(),
-                    Value::String(format!("[session recovery error: invalid inline {key} reference]")),
+                    Value::String(format!(
+                        "[session recovery error: invalid inline {key} reference]"
+                    )),
                 );
             }
         }
@@ -771,7 +790,9 @@ pub fn rehydrate_session_file_entry(entry: FileEntry) -> FileEntry {
             Value::Array(parts)
         }
         Some(Value::String(text)) => Value::String(format!("{text}\n{diagnostic}")),
-        _ => Value::Array(vec![serde_json::json!({ "type": "text", "text": diagnostic })]),
+        _ => Value::Array(vec![
+            serde_json::json!({ "type": "text", "text": diagnostic }),
+        ]),
     };
     out_message.insert("content".to_string(), content);
     out_message.insert("isError".to_string(), Value::Bool(true));
@@ -1083,7 +1104,9 @@ pub fn build_session_context_with_entry_ids(
         let details = entry.get("details").cloned().unwrap_or(Value::Null);
         if has_provider_checkpoint(&details) {
             let checkpoint = get_provider_checkpoint(&details);
-            let Some(checkpoint) = checkpoint else { continue };
+            let Some(checkpoint) = checkpoint else {
+                continue;
+            };
             let Some(checkpoint_model) = checkpoint_model.as_ref() else {
                 continue;
             };
@@ -1163,11 +1186,12 @@ pub fn build_session_context_with_entry_ids(
             let compaction_id = entry_id(&compaction);
             let compaction_idx = path
                 .iter()
-                .position(|entry| entry_type(entry) == "compaction" && entry_id(entry) == compaction_id)
+                .position(|entry| {
+                    entry_type(entry) == "compaction" && entry_id(entry) == compaction_id
+                })
                 .unwrap_or(0);
-            let provider_context = get_provider_checkpoint(
-                compaction.get("details").unwrap_or(&Value::Null),
-            );
+            let provider_context =
+                get_provider_checkpoint(compaction.get("details").unwrap_or(&Value::Null));
 
             // Collect kept messages (before compaction, starting from firstKeptEntryId).
             // The context remains summary-first for the model; retainedMessageCount records
@@ -1208,7 +1232,9 @@ pub fn build_session_context_with_entry_ids(
                         .get("customInstructions")
                         .and_then(Value::as_str)
                         .map(str::to_string),
-                    compaction.get("retainedMessageCount").and_then(Value::as_f64),
+                    compaction
+                        .get("retainedMessageCount")
+                        .and_then(Value::as_f64),
                     provider_context,
                     compaction
                         .get("harnessDigest")
@@ -1230,7 +1256,10 @@ pub fn build_session_context_with_entry_ids(
     }
 
     SessionContextWithEntryIds {
-        messages: message_entries.iter().map(|item| item.message.clone()).collect(),
+        messages: message_entries
+            .iter()
+            .map(|item| item.message.clone())
+            .collect(),
         entry_ids: message_entries
             .iter()
             .map(|item| item.entry_id.clone())
@@ -1288,9 +1317,7 @@ pub fn order_session_context_for_transcript(
                 }
                 _ => remaining
                     .iter()
-                    .filter(|(message, _)| {
-                        message_timestamp(message) < *timestamp
-                    })
+                    .filter(|(message, _)| message_timestamp(message) < *timestamp)
                     .count(),
             },
             _ => 0,
@@ -1433,7 +1460,7 @@ fn tail_looks_damaged(target_path: &str) -> bool {
     let previous_newline = match previous_newline {
         // No boundary inside the window: the final line exceeds it; scan to be sure.
         None => {
-            if window_bytes as u64 < size {
+            if (window_bytes as u64) < size {
                 return true;
             }
             None
@@ -1536,10 +1563,7 @@ fn repair_jsonl_damage(file_path: &str) {
     match write_file_atomic_sync(
         &target_path,
         &content,
-        WriteFileAtomicOptions {
-            mode,
-            fsync: false,
-        },
+        WriteFileAtomicOptions { mode, fsync: false },
         Some(&before_rename),
     ) {
         Ok(()) => {}
@@ -1629,7 +1653,10 @@ fn apply_child_usage_attributions(entries: &mut [FileEntry]) {
 
     for (target_id, usage) in attributions {
         if let Some(index) = assistant_entries_by_id.get(&target_id).copied() {
-            if let Some(message) = entries[index].get_mut("message").and_then(Value::as_object_mut) {
+            if let Some(message) = entries[index]
+                .get_mut("message")
+                .and_then(Value::as_object_mut)
+            {
                 message.insert(
                     "usage".to_string(),
                     serde_json::to_value(clone_usage(&usage)).unwrap_or(Value::Null),
@@ -1688,7 +1715,8 @@ async fn load_entries_from_file_async_observed(
             observation: None,
         };
     }
-    let stream_threshold_bytes = stream_threshold_bytes.unwrap_or(SESSION_STREAMING_LOAD_THRESHOLD_BYTES);
+    let stream_threshold_bytes =
+        stream_threshold_bytes.unwrap_or(SESSION_STREAMING_LOAD_THRESHOLD_BYTES);
     let size_at_open = match std::fs::metadata(file_path) {
         Ok(metadata) => metadata.len(),
         Err(_) => {
@@ -1741,7 +1769,8 @@ async fn load_entries_from_file_async_observed(
     let mut on_bytes_read = |bytes: usize| {
         observed_bytes.set(observed_bytes.get() + bytes as u64);
     };
-    let lines = read_lines_as_buffers(file_path, Some(&range), Some(&mut on_bytes_read)).unwrap_or_default();
+    let lines = read_lines_as_buffers(file_path, Some(&range), Some(&mut on_bytes_read))
+        .unwrap_or_default();
     read_bytes += observed_bytes.get();
     for line in lines {
         append_entry_from_buffer(&mut entries, &line, 0, line.len());
@@ -1781,7 +1810,10 @@ fn read_session_header(file_path: &str) -> Option<Map<String, Value>> {
 }
 
 fn header_rlm_depth(header: &Map<String, Value>) -> Option<i64> {
-    header.get("rlmDepth").and_then(is_safe_integer).filter(|value| *value >= 0)
+    header
+        .get("rlmDepth")
+        .and_then(is_safe_integer)
+        .filter(|value| *value >= 0)
 }
 
 fn header_parent_session(header: &Map<String, Value>) -> Option<String> {
@@ -1908,7 +1940,10 @@ pub fn find_most_recent_session(session_dir: &str) -> Option<String> {
         if !name.ends_with(".jsonl") {
             continue;
         }
-        let path = Path::new(session_dir).join(&name).to_string_lossy().to_string();
+        let path = Path::new(session_dir)
+            .join(&name)
+            .to_string_lossy()
+            .to_string();
         if !is_valid_session_file(&path) {
             continue;
         }
@@ -1953,7 +1988,10 @@ pub fn find_most_recent_session_for_cwd(session_dir: &str, cwd: &str) -> Option<
         if !name.ends_with(".jsonl") {
             continue;
         }
-        let path = Path::new(session_dir).join(&name).to_string_lossy().to_string();
+        let path = Path::new(session_dir)
+            .join(&name)
+            .to_string_lossy()
+            .to_string();
         let header = read_session_header(&path);
         if !session_header_matches_cwd(header.as_ref(), cwd) {
             continue;
@@ -2124,7 +2162,9 @@ fn session_scan_queue() -> &'static Mutex<HashMap<String, Arc<tokio::sync::Mutex
 
 pub async fn read_session_info(file_path: &str) -> Option<SessionInfo> {
     let lock = {
-        let mut queue = session_scan_queue().lock().unwrap_or_else(|e| e.into_inner());
+        let mut queue = session_scan_queue()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         queue
             .entry(file_path.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -2135,7 +2175,9 @@ pub async fn read_session_info(file_path: &str) -> Option<SessionInfo> {
 }
 
 fn drop_session_scan_state(file_path: &str) {
-    let mut store = session_scan_store().lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = session_scan_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if let Some(state) = store.states.remove(file_path) {
         store.retained_usage_entries = store
             .retained_usage_entries
@@ -2148,7 +2190,9 @@ fn store_session_scan_state(file_path: &str, mut state: SessionScanState) {
     drop_session_scan_state(file_path);
     state.accounted_usage_entries = state.acc.assistant_usage_by_id.len();
     let accounted = state.accounted_usage_entries;
-    let mut store = session_scan_store().lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = session_scan_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     store.retained_usage_entries += accounted;
     store.states.insert(file_path.to_string(), state);
     while store.retained_usage_entries > SESSION_SCAN_MAX_RETAINED_USAGE_ENTRIES {
@@ -2185,7 +2229,9 @@ fn scanned_prefix_intact(file_path: &str, state: &SessionScanState) -> bool {
     if state.offset == 0 {
         return true;
     }
-    let start = state.offset.saturating_sub(SESSION_SCAN_RESUME_TAIL_BYTES as u64) as i64;
+    let start = state
+        .offset
+        .saturating_sub(SESSION_SCAN_RESUME_TAIL_BYTES as u64) as i64;
     read_bytes_sync(file_path, start, state.offset as i64) == state.tail
 }
 
@@ -2219,7 +2265,9 @@ async fn scan_session_info(file_path: &str, retry_on_replacement: bool) -> Optio
     let mtime = stats.modified().ok();
 
     let previous = {
-        let store = session_scan_store().lock().unwrap_or_else(|e| e.into_inner());
+        let store = session_scan_store()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         store.states.get(file_path).map(|state| SessionScanState {
             file_size: state.file_size,
             mtime: state.mtime,
@@ -2300,8 +2348,13 @@ async fn scan_session_info(file_path: &str, retry_on_replacement: bool) -> Optio
     state.file_size = size;
     state.mtime = mtime;
     store_session_scan_state(file_path, state);
-    let store = session_scan_store().lock().unwrap_or_else(|e| e.into_inner());
-    store.states.get(file_path).and_then(|state| state.info.clone())
+    let store = session_scan_store()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    store
+        .states
+        .get(file_path)
+        .and_then(|state| state.info.clone())
 }
 
 fn clone_scan_state(state: &SessionScanState) -> SessionScanState {
@@ -2386,12 +2439,11 @@ fn fold_session_scan_line(acc: &mut SessionScanAccumulator, line_buffer: &[u8]) 
             acc.message_count += 1;
             let summary = extract_oversized_message_summary(&line);
             if let Some(timestamp) = summary.timestamp {
-                if summary.role.as_deref() == Some("user") || summary.role.as_deref() == Some("assistant") {
-                    acc.last_activity_time = Some(
-                        acc.last_activity_time
-                            .unwrap_or(0.0)
-                            .max(timestamp),
-                    );
+                if summary.role.as_deref() == Some("user")
+                    || summary.role.as_deref() == Some("assistant")
+                {
+                    acc.last_activity_time =
+                        Some(acc.last_activity_time.unwrap_or(0.0).max(timestamp));
                 }
             }
             if summary.role.as_deref() == Some("user") && acc.first_message.is_empty() {
@@ -2541,11 +2593,8 @@ fn snapshot_session_info(
         .to_string();
     let parent_session_path = header_parent_session(&header);
     let rlm_depth = resolve_session_rlm_depth(&header, file_path);
-    let modified = get_session_modified_date_from_last_activity(
-        acc.last_activity_time,
-        &header,
-        mtime,
-    );
+    let modified =
+        get_session_modified_date_from_last_activity(acc.last_activity_time, &header, mtime);
 
     Some(SessionInfo {
         path: file_path.to_string(),
@@ -2606,7 +2655,10 @@ fn extract_text_content(message: &Map<String, Value>) -> String {
             .filter_map(|block| {
                 let block = block.as_object()?;
                 if block.get("type").and_then(Value::as_str) == Some("text") {
-                    block.get("text").and_then(Value::as_str).map(str::to_string)
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
                 } else {
                     None
                 }
@@ -2628,7 +2680,10 @@ fn normalize_session_state_status(value: &Value) -> Option<SessionStateStatus> {
     }
 }
 
-fn update_last_activity_time(last_activity_time: Option<f64>, entry: &Map<String, Value>) -> Option<f64> {
+fn update_last_activity_time(
+    last_activity_time: Option<f64>,
+    entry: &Map<String, Value>,
+) -> Option<f64> {
     if entry_type(entry) != "message" {
         return last_activity_time;
     }
@@ -2693,7 +2748,10 @@ fn append_capped_search_text(current: &str, text: &str) -> String {
         format!(" {text}")
     };
     let remaining = SESSION_LIST_SEARCH_TEXT_MAX_CHARS - current.len();
-    format!("{current}{}", next.chars().take(remaining).collect::<String>())
+    format!(
+        "{current}{}",
+        next.chars().take(remaining).collect::<String>()
+    )
 }
 
 fn looks_like_message_entry(line: &str) -> bool {
@@ -2707,7 +2765,8 @@ fn extract_json_string_property_prefix(
     start_index: usize,
 ) -> Option<String> {
     let needle = format!("\"{property_name}\"");
-    let property_index = text[start_index.min(text.len())..].find(&needle)? + start_index.min(text.len());
+    let property_index =
+        text[start_index.min(text.len())..].find(&needle)? + start_index.min(text.len());
     let mut chars: Vec<char> = text.chars().collect();
     let byte_to_char = |byte_index: usize| text[..byte_index.min(text.len())].chars().count();
     let mut index = byte_to_char(property_index + property_name.len() + 2);
@@ -2797,7 +2856,9 @@ async fn list_sessions_from_dir(
     let mut sessions: Vec<SessionInfo> = Vec::new();
     if !Path::new(dir).exists() {
         let keys: Vec<String> = {
-            let store = session_scan_store().lock().unwrap_or_else(|e| e.into_inner());
+            let store = session_scan_store()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             store.states.keys().cloned().collect()
         };
         for key in keys {
@@ -2824,7 +2885,9 @@ async fn list_sessions_from_dir(
 
     let present: HashSet<String> = files.iter().cloned().collect();
     let keys: Vec<String> = {
-        let store = session_scan_store().lock().unwrap_or_else(|e| e.into_inner());
+        let store = session_scan_store()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         store.states.keys().cloned().collect()
     };
     for key in keys {
@@ -2931,12 +2994,10 @@ pub fn get_session_artifact_path(session_dir: &str, session_id: &str) -> String 
 }
 
 pub fn get_session_artifact_path_for_file(session_file: &str, session_id: Option<&str>) -> String {
-    let session_id = session_id
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            let name = basename(session_file);
-            name.strip_suffix(".jsonl").unwrap_or(&name).to_string()
-        });
+    let session_id = session_id.map(str::to_string).unwrap_or_else(|| {
+        let name = basename(session_file);
+        name.strip_suffix(".jsonl").unwrap_or(&name).to_string()
+    });
     get_session_artifact_path(&dirname(session_file), &session_id)
 }
 
@@ -2980,7 +3041,8 @@ fn migrate_v1_to_v2(entries: &mut Vec<FileEntry>) {
                 if let Some(target) = entries.get(first_kept_index.max(0) as usize) {
                     if entry_type(target) != "session" {
                         let target_id = entry_id(target);
-                        entries[index].insert("firstKeptEntryId".to_string(), Value::String(target_id));
+                        entries[index]
+                            .insert("firstKeptEntryId".to_string(), Value::String(target_id));
                     }
                 }
                 entries[index].shift_remove("firstKeptEntryIndex");
@@ -3129,11 +3191,9 @@ impl SessionManager {
         }
 
         match session_file {
-            Some(session_file) => manager.set_session_file(
-                &session_file,
-                preloaded_entries,
-                preloaded_observation,
-            )?,
+            Some(session_file) => {
+                manager.set_session_file(&session_file, preloaded_entries, preloaded_observation)?
+            }
             None => {
                 manager.new_session(None)?;
             }
@@ -3228,7 +3288,10 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn new_session(&mut self, options: Option<&NewSessionOptions>) -> Result<Option<String>, String> {
+    pub fn new_session(
+        &mut self,
+        options: Option<&NewSessionOptions>,
+    ) -> Result<Option<String>, String> {
         self.load_observation = None;
         let mut session_id = options
             .and_then(|options| options.id.clone())
@@ -3247,7 +3310,8 @@ impl SessionManager {
         if self.persist {
             match options.and_then(|options| options.id.clone()) {
                 Some(explicit_id) => {
-                    session_file = Some(get_session_file_path(&self.get_session_dir(), &session_id));
+                    session_file =
+                        Some(get_session_file_path(&self.get_session_dir(), &session_id));
                     if let Some(file) = session_file.as_ref() {
                         if Path::new(file).exists() {
                             return Err(format!(
@@ -3328,7 +3392,8 @@ impl SessionManager {
                 let label = entry.get("label").and_then(Value::as_str);
                 match label {
                     Some(label) => {
-                        self.labels_by_id.insert(target_id.clone(), label.to_string());
+                        self.labels_by_id
+                            .insert(target_id.clone(), label.to_string());
                         self.label_timestamps_by_id
                             .insert(target_id, entry_timestamp(entry));
                     }
@@ -3362,10 +3427,7 @@ impl SessionManager {
         let _ = write_file_atomic_sync(
             &target_path,
             &content,
-            WriteFileAtomicOptions {
-                mode,
-                fsync: false,
-            },
+            WriteFileAtomicOptions { mode, fsync: false },
             None,
         );
         self.notify_persist_listeners();
@@ -3386,10 +3448,7 @@ impl SessionManager {
     }
 
     /// `onPersist(listener): () => void` - the returned closure unsubscribes.
-    pub fn on_persist(
-        &self,
-        listener: SessionPersistListener,
-    ) -> Box<dyn Fn() + Send + Sync> {
+    pub fn on_persist(&self, listener: SessionPersistListener) -> Box<dyn Fn() + Send + Sync> {
         let listeners = Arc::clone(&self.persist_listeners);
         let index = {
             let mut guard = listeners.lock().unwrap_or_else(|error| error.into_inner());
@@ -3433,15 +3492,13 @@ impl SessionManager {
         if let Some(session_file) = self.session_file.clone() {
             return session_file;
         }
-        let dir = session_dir
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                if self.session_dir.is_empty() {
-                    get_default_session_dir(&self.cwd, None)
-                } else {
-                    self.session_dir.clone()
-                }
-            });
+        let dir = session_dir.map(str::to_string).unwrap_or_else(|| {
+            if self.session_dir.is_empty() {
+                get_default_session_dir(&self.cwd, None)
+            } else {
+                self.session_dir.clone()
+            }
+        });
         if !Path::new(&dir).exists() {
             let _ = std::fs::create_dir_all(&dir);
         }
@@ -3483,7 +3540,10 @@ impl SessionManager {
 
     pub fn get_session_artifact_dir(&self) -> Option<String> {
         if self.persist {
-            Some(get_session_artifact_path(&self.session_dir, &self.session_id))
+            Some(get_session_artifact_path(
+                &self.session_dir,
+                &self.session_id,
+            ))
         } else {
             None
         }
@@ -3538,7 +3598,8 @@ impl SessionManager {
                 .open(&session_file)
                 .map_err(|error| error.to_string())?;
             use std::io::Write;
-            writeln!(file, "{}", serialize_session_file_entry(entry)).map_err(|error| error.to_string())?;
+            writeln!(file, "{}", serialize_session_file_entry(entry))
+                .map_err(|error| error.to_string())?;
             self.notify_persist_listeners();
         }
         Ok(())
@@ -3653,7 +3714,10 @@ impl SessionManager {
         Ok(id)
     }
 
-    pub fn append_service_tier_change(&mut self, service_tier: &ServiceTier) -> Result<String, String> {
+    pub fn append_service_tier_change(
+        &mut self,
+        service_tier: &ServiceTier,
+    ) -> Result<String, String> {
         let entry: SessionEntry = serde_json::json!({
             "type": "service_tier_change",
             "id": self.next_entry_id(),
@@ -3672,7 +3736,11 @@ impl SessionManager {
         Ok(id)
     }
 
-    pub fn append_model_change(&mut self, provider: &str, model_id: &str) -> Result<String, String> {
+    pub fn append_model_change(
+        &mut self,
+        provider: &str,
+        model_id: &str,
+    ) -> Result<String, String> {
         let entry: SessionEntry = serde_json::json!({
             "type": "model_change",
             "id": self.next_entry_id(),
@@ -3753,7 +3821,11 @@ impl SessionManager {
         })
     }
 
-    pub fn append_custom_entry(&mut self, custom_type: &str, data: Option<Value>) -> Result<String, String> {
+    pub fn append_custom_entry(
+        &mut self,
+        custom_type: &str,
+        data: Option<Value>,
+    ) -> Result<String, String> {
         let mut entry: SessionEntry = serde_json::json!({
             "type": "custom",
             "customType": custom_type,
@@ -3780,7 +3852,9 @@ impl SessionManager {
         custom_type: &str,
         data: Option<Value>,
     ) -> Result<String, String> {
-        self.append_entry_with_rollback(|manager| manager.append_custom_entry(custom_type, data.clone()))
+        self.append_entry_with_rollback(|manager| {
+            manager.append_custom_entry(custom_type, data.clone())
+        })
     }
 
     pub fn append_child_usage_attribution(
@@ -4145,7 +4219,8 @@ impl SessionManager {
         self.append_entry(entry)?;
         match label {
             Some(label) => {
-                self.labels_by_id.insert(target_id.to_string(), label.to_string());
+                self.labels_by_id
+                    .insert(target_id.to_string(), label.to_string());
                 self.label_timestamps_by_id
                     .insert(target_id.to_string(), timestamp);
             }
@@ -4160,9 +4235,7 @@ impl SessionManager {
     pub fn get_branch(&self, from_id: Option<&str>) -> Vec<SessionEntry> {
         // push+reverse, not unshift-per-entry: unshift is O(n), which makes this O(n^2) on long sessions.
         let mut path: Vec<SessionEntry> = Vec::new();
-        let start_id = from_id
-            .map(str::to_string)
-            .or_else(|| self.leaf_id.clone());
+        let start_id = from_id.map(str::to_string).or_else(|| self.leaf_id.clone());
         let mut current = start_id.and_then(|id| self.by_id.get(&id)).cloned();
         while let Some(entry) = current {
             current = entry_parent_id(&entry).and_then(|parent| self.by_id.get(&parent).cloned());
@@ -4210,7 +4283,9 @@ impl SessionManager {
     ) -> Result<SessionHistorySnapshot, String> {
         if let Some(tip_entry_id) = tip_entry_id {
             if !self.by_id.contains_key(tip_entry_id) {
-                return Err(format!("Session history tip no longer exists: {tip_entry_id}"));
+                return Err(format!(
+                    "Session history tip no longer exists: {tip_entry_id}"
+                ));
             }
         }
         let entries: Vec<SessionEntry> = self.file_entries.clone();
@@ -4306,7 +4381,8 @@ impl SessionManager {
         // Sort children by timestamp (oldest first, newest at bottom)
         // Use iterative approach to avoid stack overflow on deep trees
         let mut stack: Vec<SessionTreeNode> = roots.clone();
-        let mut sorted: indexmap::IndexMap<String, Vec<SessionTreeNode>> = indexmap::IndexMap::new();
+        let mut sorted: indexmap::IndexMap<String, Vec<SessionTreeNode>> =
+            indexmap::IndexMap::new();
         while let Some(node) = stack.pop() {
             let mut children = node.children.clone();
             children.sort_by(|a, b| {
@@ -4663,21 +4739,24 @@ impl SessionManager {
             .map(str::to_string)
             .unwrap_or_else(|| get_default_session_dir(cwd, None));
         match find_most_recent_session_for_cwd(&dir, cwd) {
-            Some(most_recent) => {
-                SessionManager::new_internal(cwd.to_string(), dir, Some(most_recent), true, None, None)
-            }
+            Some(most_recent) => SessionManager::new_internal(
+                cwd.to_string(),
+                dir,
+                Some(most_recent),
+                true,
+                None,
+                None,
+            ),
             None => SessionManager::new_internal(cwd.to_string(), dir, None, true, None, None),
         }
     }
 
     pub fn in_memory(cwd: Option<&str>, session_dir: Option<&str>) -> Result<Self, String> {
-        let cwd = cwd
-            .map(str::to_string)
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .map(|cwd| cwd.to_string_lossy().to_string())
-                    .unwrap_or_default()
-            });
+        let cwd = cwd.map(str::to_string).unwrap_or_else(|| {
+            std::env::current_dir()
+                .map(|cwd| cwd.to_string_lossy().to_string())
+                .unwrap_or_default()
+        });
         SessionManager::new_internal(
             cwd,
             session_dir.unwrap_or("").to_string(),
@@ -4866,9 +4945,9 @@ mod tests {
     fn assistant_message(model: &str, timestamp: i64) -> AgentMessage {
         let mut message = pi_ai::types::AssistantMessage {
             role: "assistant".to_string(),
-            content: vec![pi_ai::types::ContentBlock::Text(pi_ai::types::TextContent::new(
-                "hi",
-            ))],
+            content: vec![pi_ai::types::ContentBlock::Text(
+                pi_ai::types::TextContent::new("hi"),
+            )],
             api: "openai-completions".to_string(),
             provider: "openai".to_string(),
             model: model.to_string(),
@@ -4961,7 +5040,11 @@ mod tests {
             .unwrap();
         assert_eq!(manager.get_leaf_id().as_deref(), Some(second.as_str()));
         assert_eq!(
-            manager.get_entry(&second).unwrap().get("parentId").and_then(Value::as_str),
+            manager
+                .get_entry(&second)
+                .unwrap()
+                .get("parentId")
+                .and_then(Value::as_str),
             Some(first.as_str())
         );
 
@@ -4979,7 +5062,9 @@ mod tests {
         manager.append_message(user_message("first", 1)).unwrap();
         manager.append_thinking_level_change("high").unwrap();
         manager.append_model_change("openai", "gpt-5").unwrap();
-        manager.append_message(assistant_message("gpt-5", 2)).unwrap();
+        manager
+            .append_message(assistant_message("gpt-5", 2))
+            .unwrap();
 
         let context = manager.build_session_context(None);
         assert_eq!(context.messages.len(), 2);
@@ -5000,15 +5085,24 @@ mod tests {
         let mut manager = SessionManager::in_memory(Some("/work"), Some("")).unwrap();
         let first = manager.append_message(user_message("old", 1)).unwrap();
         let kept = manager.append_message(user_message("kept", 2)).unwrap();
-        manager.append_message(assistant_message("gpt-5", 3)).unwrap();
+        manager
+            .append_message(assistant_message("gpt-5", 3))
+            .unwrap();
         manager
             .append_compaction("summary text", &kept, 100.0, None, None, None, None, None)
             .unwrap();
         let tail = manager.append_message(user_message("new", 4)).unwrap();
 
         let context = manager.build_session_context(None);
-        let roles: Vec<&str> = context.messages.iter().map(|message| message.role()).collect();
-        assert_eq!(roles, vec!["compactionSummary", "user", "assistant", "user"]);
+        let roles: Vec<&str> = context
+            .messages
+            .iter()
+            .map(|message| message.role())
+            .collect();
+        assert_eq!(
+            roles,
+            vec!["compactionSummary", "user", "assistant", "user"]
+        );
         assert_ne!(first, kept);
         assert_eq!(manager.get_leaf_id().as_deref(), Some(tail.as_str()));
 
@@ -5046,7 +5140,9 @@ mod tests {
     fn labels_track_targets_and_replicate_into_a_branch() {
         let mut manager = SessionManager::in_memory(Some("/work"), Some("")).unwrap();
         let first = manager.append_message(user_message("one", 1)).unwrap();
-        manager.append_label_change(&first, Some("important")).unwrap();
+        manager
+            .append_label_change(&first, Some("important"))
+            .unwrap();
         assert_eq!(manager.get_label(&first).as_deref(), Some("important"));
         manager.append_label_change(&first, None).unwrap();
         assert!(manager.get_label(&first).is_none());
@@ -5078,7 +5174,9 @@ mod tests {
         assert!(!manager.has_user_content());
         manager.append_model_change("openai", "gpt-5").unwrap();
         manager.append_thinking_level_change("off").unwrap();
-        manager.append_service_tier_change(&Some(Some("default".to_string()))).unwrap();
+        manager
+            .append_service_tier_change(&Some(Some("default".to_string())))
+            .unwrap();
         assert!(!manager.has_user_content());
         manager.append_message(user_message("real", 1)).unwrap();
         assert!(manager.has_user_content());
@@ -5134,10 +5232,7 @@ mod tests {
             .append_child_usage_attribution(&assistant_id, &child, &aggregate, Some("spawn_task"))
             .unwrap();
         let entry = manager.get_entry(&assistant_id).unwrap();
-        assert_eq!(
-            entry["message"]["usage"]["input"].as_f64(),
-            Some(13.0)
-        );
+        assert_eq!(entry["message"]["usage"]["input"].as_f64(), Some(13.0));
         assert!(manager
             .append_child_usage_attribution("missing", &child, &aggregate, None)
             .is_err());
@@ -5222,7 +5317,10 @@ mod tests {
         assert_eq!(entries[0]["version"].as_i64(), Some(3));
         assert_eq!(entries[1]["message"]["role"], "custom");
         assert!(entries[2].get("firstKeptEntryIndex").is_none());
-        assert_eq!(entries[2]["firstKeptEntryId"].as_str(), Some(entries[1]["id"].as_str().unwrap()));
+        assert_eq!(
+            entries[2]["firstKeptEntryId"].as_str(),
+            Some(entries[1]["id"].as_str().unwrap())
+        );
         assert!(!migrate_to_current_version(&mut entries));
     }
 
@@ -5375,7 +5473,10 @@ mod tests {
         .unwrap();
         let entries = manager.get_entries();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[1].get("parentId").and_then(Value::as_str), Some("m1"));
+        assert_eq!(
+            entries[1].get("parentId").and_then(Value::as_str),
+            Some("m1")
+        );
         let header = manager.get_header().unwrap();
         assert_eq!(header.get("cwd").and_then(Value::as_str), Some("/target"));
         assert_eq!(
@@ -5398,7 +5499,9 @@ mod tests {
         let mut manager = SessionManager::create("/work", Some(&dir.to_string_lossy())).unwrap();
         manager.new_session(None).unwrap();
         let first = manager.append_message(user_message("one", 1)).unwrap();
-        let second = manager.append_message(assistant_message("gpt-5", 2)).unwrap();
+        let second = manager
+            .append_message(assistant_message("gpt-5", 2))
+            .unwrap();
         manager.append_label_change(&first, Some("keep")).unwrap();
         let new_file = manager.create_branched_session(&second).unwrap().unwrap();
         assert!(Path::new(&new_file).exists());
@@ -5410,8 +5513,8 @@ mod tests {
     #[test]
     fn record_git_state_if_changed_is_a_noop_outside_a_repo() {
         let dir = temp_dir();
-        let mut manager = SessionManager::create("/definitely/not/a/repo", Some(&dir.to_string_lossy()))
-            .unwrap();
+        let mut manager =
+            SessionManager::create("/definitely/not/a/repo", Some(&dir.to_string_lossy())).unwrap();
         assert_eq!(manager.record_git_state_if_changed().unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -118,7 +118,9 @@ impl SessionLease {
 }
 
 fn leases_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
-    let value = lookup(SESSION_LEASES_ENABLED_ENV).unwrap_or_default().to_lowercase();
+    let value = lookup(SESSION_LEASES_ENABLED_ENV)
+        .unwrap_or_default()
+        .to_lowercase();
     value == "1" || value == "true" || value == "yes"
 }
 
@@ -221,8 +223,14 @@ fn read_lease_owner(directory: &str) -> Result<LeaseOwnerState, String> {
     let valid = parsed.get("version").and_then(|v| v.as_i64()) == Some(1)
         && parsed.get("token").map(|v| v.is_string()).unwrap_or(false)
         && parsed.get("pid").map(|v| v.is_i64()).unwrap_or(false)
-        && parsed.get("sessionPath").map(|v| v.is_string()).unwrap_or(false)
-        && parsed.get("createdAt").map(|v| v.is_string()).unwrap_or(false);
+        && parsed
+            .get("sessionPath")
+            .map(|v| v.is_string())
+            .unwrap_or(false)
+        && parsed
+            .get("createdAt")
+            .map(|v| v.is_string())
+            .unwrap_or(false);
     if !valid {
         return Err(format!(
             "Corrupt session lease owner file: {owner_path_text} - {error_message_invalid()}",
@@ -289,7 +297,10 @@ pub fn get_windows_process_start_id(pid: i64, query: Option<&ProcessQuery>) -> O
     ];
     let default_query = run_process_query;
     let query = query.unwrap_or(&default_query);
-    let start_ticks = query("powershell.exe", &args, None).ok()?.trim().to_string();
+    let start_ticks = query("powershell.exe", &args, None)
+        .ok()?
+        .trim()
+        .to_string();
     if !start_ticks.is_empty() && start_ticks.bytes().all(|b| b.is_ascii_digit()) {
         Some(format!("win:{start_ticks}"))
     } else {
@@ -542,7 +553,11 @@ pub fn is_rename_target_contention(directory: &str, code: Option<&str>, platform
 }
 
 fn reclaim_stale_lease(directory: &str) -> bool {
-    let stale_path = format!("{directory}.stale-{}-{}", std::process::id(), Uuid::new_v4());
+    let stale_path = format!(
+        "{directory}.stale-{}-{}",
+        std::process::id(),
+        Uuid::new_v4()
+    );
     let mut attempt = 1usize;
     loop {
         match std::fs::rename(directory, &stale_path) {
@@ -553,7 +568,10 @@ fn reclaim_stale_lease(directory: &str) -> bool {
                     return true;
                 }
                 let transient = cfg!(windows)
-                    && matches!(code.as_deref(), Some("EBUSY") | Some("EPERM") | Some("EACCES"));
+                    && matches!(
+                        code.as_deref(),
+                        Some("EBUSY") | Some("EPERM") | Some("EACCES")
+                    );
                 if !transient || attempt >= 8 {
                     return false;
                 }
@@ -631,7 +649,11 @@ pub fn acquire_session_lease(
             std::fs::write(&owner_path, body).map_err(|error| error.to_string())?;
             match std::fs::rename(&candidate_directory, &directory) {
                 Ok(()) => {
-                    return Ok(Some(SessionLease::new(canonical_path.clone(), directory.clone(), token)));
+                    return Ok(Some(SessionLease::new(
+                        canonical_path.clone(),
+                        directory.clone(),
+                        token,
+                    )));
                 }
                 Err(error) => {
                     let _ = std::fs::remove_dir_all(&candidate_directory);
@@ -777,7 +799,12 @@ mod tests {
     #[test]
     fn lease_directory_is_a_sha256_lock_name() {
         let dir = lease_directory("/agent", "/sessions/a.jsonl");
-        assert!(dir.starts_with(Path::new("/agent").join("session-leases").to_string_lossy().as_ref()));
+        assert!(dir.starts_with(
+            Path::new("/agent")
+                .join("session-leases")
+                .to_string_lossy()
+                .as_ref()
+        ));
         assert!(dir.ends_with(".lock"));
         let other = lease_directory("/agent", "/sessions/b.jsonl");
         assert_ne!(dir, other);
@@ -829,10 +856,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().to_string_lossy().to_string();
         assert!(is_rename_target_contention(&dir, Some("EEXIST"), "linux"));
-        assert!(is_rename_target_contention(&dir, Some("ENOTEMPTY"), "linux"));
+        assert!(is_rename_target_contention(
+            &dir,
+            Some("ENOTEMPTY"),
+            "linux"
+        ));
         assert!(is_rename_target_contention(&dir, Some("EPERM"), "win32"));
         assert!(!is_rename_target_contention(&dir, Some("EPERM"), "linux"));
-        assert!(!is_rename_target_contention("/definitely/missing", Some("EPERM"), "win32"));
+        assert!(!is_rename_target_contention(
+            "/definitely/missing",
+            Some("EPERM"),
+            "win32"
+        ));
         assert!(!is_rename_target_contention(&dir, None, "win32"));
     }
 

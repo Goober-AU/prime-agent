@@ -514,7 +514,8 @@ pub fn validate_models_config_schema(value: &Value) -> Vec<String> {
         return errors;
     };
     for (provider_name, provider) in providers {
-        let path = provider_name.clone();
+        // typebox instancePath is "/providers/<name>" -> "providers.<name>".
+        let path = validation_path("providers", provider_name);
         let Some(provider) = provider.as_object() else {
             errors.push(format!("  - {}: Expected object", path));
             continue;
@@ -1309,8 +1310,9 @@ impl ModelRegistry {
 
 impl ModelRegistry {
     fn load_models(&mut self) {
-        let custom = match &self.models_json_path {
-            Some(path) => self.load_custom_models(&path.clone()),
+        let models_json_path = self.models_json_path.clone();
+        let custom = match models_json_path.as_deref() {
+            Some(path) => self.load_custom_models(path),
             None => empty_custom_models_result(None),
         };
         let CustomModelsResult {
@@ -1457,11 +1459,7 @@ impl ModelRegistry {
         // synchronously and reports schema errors through `loadError`.
         let schema_errors = validate_models_config_schema(&parsed);
         if !schema_errors.is_empty() {
-            let errors = if schema_errors.is_empty() {
-                "Unknown schema error".to_string()
-            } else {
-                schema_errors.join("\n")
-            };
+            let errors = schema_errors.join("\n");
             return empty_custom_models_result(Some(format!(
                 "Invalid models.json schema:\n{}\n\nFile: {}",
                 errors, models_json_path
@@ -3044,17 +3042,20 @@ mod tests {
         assert_eq!(errors, vec!["  - providers: Expected required property"]);
 
         let errors = validate_models_config_schema(&json!({"providers": {"custom": {"models": [{}]}}}));
-        assert_eq!(errors, vec!["  - custom.models.0.id: Expected required property"]);
+        assert_eq!(errors, vec!["  - providers.custom.models.0.id: Expected required property"]);
 
         let errors = validate_models_config_schema(&json!({
             "providers": {"custom": {"models": [{"id": "m", "input": ["audio"]}]}}
         }));
-        assert_eq!(errors, vec!["  - custom.models.0.input.0: Expected union"]);
+        assert_eq!(errors, vec!["  - providers.custom.models.0.input.0: Expected union"]);
 
         let errors = validate_models_config_schema(&json!({
             "providers": {"custom": {"modelOverrides": {"m": {"contextWindow": "big"}}}}
         }));
-        assert_eq!(errors, vec!["  - custom.modelOverrides.m.contextWindow: Expected number"]);
+        assert_eq!(
+            errors,
+            vec!["  - providers.custom.modelOverrides.m.contextWindow: Expected number"]
+        );
 
         assert!(validate_models_config_schema(&json!({
             "providers": {"custom": {"baseUrl": "https://x.test", "apiKey": "K", "api": "openai-completions", "models": [{"id": "m"}]}}
@@ -3268,7 +3269,7 @@ mod tests {
         assert_eq!(
             error,
             format!(
-                "Invalid models.json schema:\n  - custom: Expected required property\n\nFile: {}",
+                "Failed to load models.json: Provider custom: must specify \"baseUrl\", \"headers\", \"compat\", \"modelOverrides\", or \"models\".\n\nFile: {}",
                 dir.path().join("models.json").to_string_lossy()
             )
         );
@@ -3640,10 +3641,9 @@ mod tests {
             registry.private_prime_authorization_cache_path().as_deref(),
             Some(
                 dir.path()
-                    .join("PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE")
+                    .join(PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE)
                     .to_string_lossy()
-                    .replace("PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE", PRIVATE_PRIME_AUTHORIZATION_CACHE_FILE)
-                    .as_str()
+                    .as_ref()
             )
         );
         let in_memory = ModelRegistry::in_memory(in_memory_auth());
@@ -3831,7 +3831,19 @@ mod tests {
         std::fs::write(&path, "{}").unwrap();
         let mut storage = in_memory_auth();
         storage.set_runtime_api_key(PRIME_INFERENCE_PROVIDER_ID, "prime-key");
-        storage.set_prime_inference_team_selection(Some("team-1".to_string()), None);
+        storage.set(
+            PRIME_INFERENCE_PROVIDER_ID,
+            AuthCredential::ApiKey {
+                key: "prime-key".to_string(),
+                prime_team: Some(Some(crate::core::auth_storage::PrimeTeamCredential {
+                    team_id: "team-1".to_string(),
+                    name: "Team".to_string(),
+                    slug: None,
+                    role: None,
+                    created_at: None,
+                })),
+            },
+        );
         let mut registry = ModelRegistry::create(storage, Some(path.to_string_lossy().to_string()));
         registry.set_fetch_fn(Some(Arc::new(|request: HttpRequest| {
             Box::pin(async move {

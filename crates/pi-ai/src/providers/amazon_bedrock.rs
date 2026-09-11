@@ -24,8 +24,8 @@ use serde_json::{json, Map, Value};
 use crate::models::{calculate_cost, clamp_thinking_level};
 use crate::types::{
 	AssistantMessage, AssistantMessageEvent, ContentBlock, Context, ImageOrTextContent, Message, Model,
-	SimpleStreamOptions, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent, Tool, ToolCall,
-	ToolResultMessage, Usage, UserContent,
+	SimpleStreamOptions, StreamOptions, TextContent, ThinkingBudgets, ThinkingContent, Tool, ToolCall, Usage,
+	UserContent,
 };
 use crate::utils::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use crate::utils::json_parse::parse_streaming_json;
@@ -1953,8 +1953,8 @@ pub fn handle_content_block_delta(
 				index: Some(content_block_index),
 				partial_json: None,
 			});
+			// TS: `block = blocks[index]` - the new block is the one used below.
 			index = Some(output.content.len() - 1);
-			block_exists = true;
 			stream.push(AssistantMessageEvent::TextStart {
 				content_index: index.expect("created text block"),
 				partial: output.clone(),

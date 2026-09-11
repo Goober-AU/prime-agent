@@ -3488,7 +3488,8 @@ mod tests {
     fn symbol_and_attachment_contexts() {
         assert!(matches_symbol_context("@"));
         assert!(matches_symbol_context("hi @foo"));
-        assert!(matches_symbol_context("hi#bar"));
+        // `/(?:^|[\s])[@#][^\s]*$/` needs whitespace (or start) before the symbol.
+        assert!(!matches_symbol_context("hi#bar"));
         assert!(!matches_symbol_context("hi @foo bar"));
         assert!(matches_attachment_context("@"));
         assert!(matches_attachment_context("say @foo"));

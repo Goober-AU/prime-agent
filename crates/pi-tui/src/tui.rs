@@ -8,7 +8,7 @@ use crate::keybindings::get_keybindings;
 use crate::keys::{is_key_release, matches_key};
 use crate::mouse::{is_mouse_sequence, is_wheel_down, is_wheel_up, parse_sgr_mouse_event, MOUSE_BUTTON_LEFT};
 use crate::selection_metadata::TableCellSelectionRegion;
-use crate::terminal::Terminal;
+use crate::terminal::{Terminal, TerminalStopOptions};
 use crate::terminal_image::{delete_kitty_image, get_capabilities, is_image_line, set_cell_dimensions};
 use crate::utils::{
     extract_segments, normalize_terminal_output, slice_by_column, slice_with_width, strip_ansi,
@@ -107,8 +107,6 @@ pub fn is_focusable(component: Option<Rc<RefCell<dyn Component>>>) -> bool {
 /// This is a zero-width escape sequence that terminals ignore.
 pub const CURSOR_MARKER: &str = "\x1b_pi:c\x07";
 
-pub use crate::utils::visible_width;
-
 /// Anchor position for overlays
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OverlayAnchor {
@@ -175,7 +173,6 @@ fn is_termux_session() -> bool {
 /// describes the whole call.
 #[derive(Default, Clone)]
 pub struct OverlayOptions {
-    pub component: Option<Rc<RefCell<dyn Component>>>,
     pub width: Option<SizeValue>,
     pub min_width: Option<f64>,
     pub max_height: Option<SizeValue>,
@@ -550,7 +547,7 @@ impl TUI {
         if !enabled {
             self.terminal.hide_cursor();
         }
-        self.request_render(false);
+        self.request_render();
     }
 
     pub fn get_clear_on_shrink(&self) -> bool {
@@ -582,13 +579,18 @@ impl TUI {
         }
     }
 
+    /// Port of `this.tui.terminal.rows`.
+    pub fn terminal_rows(&self) -> usize {
+        self.terminal.rows()
+    }
+
     pub fn focused_component(&self) -> Option<Rc<RefCell<dyn Component>>> {
         self.focused_component.clone()
     }
 
     /// Show an overlay component with configurable positioning and sizing.
     /// Returns a handle to control the overlay's visibility.
-    pub fn show_overlay(&mut self, options: OverlayOptions) -> OverlayHandle {
+    pub fn show_overlay(&mut self, component: Box<dyn Component>, options: OverlayOptions) -> OverlayHandle {
         self.focus_order_counter += 1;
         let shared = Rc::new(OverlayShared {
             hidden: Cell::new(false),
@@ -598,10 +600,7 @@ impl TUI {
             unfocus_requested: Cell::new(false),
             focus_order: Cell::new(self.focus_order_counter),
         });
-        let component = match options.component.clone() {
-            Some(component) => component,
-            None => panic!("showOverlay requires a component"),
-        };
+        let component: Rc<RefCell<dyn Component>> = Rc::new(RefCell::new(component));
         let non_capturing = options.non_capturing;
         let entry = OverlayEntry {
             component: component.clone(),
@@ -619,7 +618,7 @@ impl TUI {
         }
         self.sync_fullscreen_mouse_tracking();
         self.terminal.hide_cursor();
-        self.request_render(false);
+        self.request_render();
 
         OverlayHandle { shared }
     }
@@ -710,7 +709,7 @@ impl TUI {
                 self.terminal.hide_cursor();
             }
             self.sync_fullscreen_mouse_tracking();
-            self.request_render(false);
+            self.request_render();
         }
     }
 
@@ -732,7 +731,7 @@ impl TUI {
             self.terminal.hide_cursor();
         }
         self.sync_fullscreen_mouse_tracking();
-        self.request_render(false);
+        self.request_render();
     }
 
     /// Check if there are any visible overlays
@@ -843,7 +842,7 @@ impl TUI {
         );
         self.terminal.hide_cursor();
         self.query_cell_size();
-        self.request_render(false);
+        self.request_render();
     }
 
     /// Deliver queued terminal input and resize notifications to the TUI.
@@ -853,7 +852,7 @@ impl TUI {
             self.handle_input(&data);
         }
         if PENDING_RESIZE.with(|flag| flag.replace(false)) {
-            self.request_render(false);
+            self.request_render();
         }
     }
 
@@ -919,7 +918,16 @@ impl TUI {
         });
     }
 
-    pub fn request_render(&mut self, force: bool) {
+    pub fn request_render(&mut self) {
+        self.request_render_internal(false);
+    }
+
+    /// Port of `requestRender(true)`: forces the next paint to clear and repaint.
+    pub fn request_render_forced(&mut self) {
+        self.request_render_internal(true);
+    }
+
+    fn request_render_internal(&mut self, force: bool) {
         if force {
             if let Some(fullscreen) = self.fullscreen.as_mut() {
                 fullscreen.viewport.reset();
@@ -949,7 +957,7 @@ impl TUI {
     /// scrollback untouched.
     pub fn request_render_preserving_viewport(&mut self) {
         self.preserve_viewport_on_next_render = true;
-        self.request_render(false);
+        self.request_render();
     }
 
     /// True while a render is queued; the owner loop consumes it with
@@ -1009,7 +1017,7 @@ impl TUI {
         self.terminal.enter_alt_screen();
         self.terminal.hide_cursor();
         self.sync_fullscreen_mouse_tracking();
-        self.request_render(false);
+        self.request_render();
     }
 
     /// Leave fullscreen. The inline differ resumes against the entry snapshot,
@@ -1050,7 +1058,7 @@ impl TUI {
             Some(fullscreen) => fullscreen.viewport.scroll_by(lines),
             None => return,
         }
-        self.request_render(false);
+        self.request_render();
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -1058,7 +1066,7 @@ impl TUI {
             Some(fullscreen) => fullscreen.viewport.scroll_to_top(),
             None => return,
         }
-        self.request_render(false);
+        self.request_render();
     }
 
     pub fn scroll_to_bottom(&mut self) {
@@ -1066,7 +1074,7 @@ impl TUI {
             Some(fullscreen) => fullscreen.viewport.scroll_to_bottom(),
             None => return,
         }
-        self.request_render(false);
+        self.request_render();
     }
 
     /// Scroll state of the fullscreen window, or null when not fullscreen.
@@ -1166,7 +1174,7 @@ impl TUI {
             self.stop_selection_auto_scroll();
             return None;
         }
-        self.request_render(false);
+        self.request_render();
         self.selection_auto_scroll_timer_active = true;
         Some(Self::SELECTION_AUTO_SCROLL_INTERVAL_MS)
     }
@@ -1253,7 +1261,7 @@ impl TUI {
                 return;
             }
             component.borrow_mut().handle_input(&data);
-            self.request_render(false);
+            self.request_render();
         }
     }
 
@@ -1304,14 +1312,14 @@ impl TUI {
                                 fullscreen.viewport.begin_frame_selection(row, col);
                             }
                         }
-                        self.request_render(false);
+                        self.request_render();
                     } else if event.button == MOUSE_BUTTON_LEFT && event.press && event.motion {
                         let (row, col) = (event.y as i64 - 1, event.x as i64 - 1);
                         if let Some(fullscreen) = self.fullscreen.as_mut() {
                             fullscreen.viewport.extend_active_selection(row, col);
                         }
                         self.update_selection_auto_scroll(row, col);
-                        self.request_render(false);
+                        self.request_render();
                     } else if !event.press {
                         let has_selection = self
                             .fullscreen
@@ -1327,7 +1335,7 @@ impl TUI {
                             if let Some(text) = text {
                                 self.copy_selection(&text);
                             }
-                            self.request_render(false);
+                            self.request_render();
                         } else {
                             self.stop_selection_auto_scroll();
                             if let Some(fullscreen) = self.fullscreen.as_mut() {
@@ -1355,13 +1363,13 @@ impl TUI {
                                 fullscreen.viewport.begin_selection(row, col);
                             }
                         }
-                        self.request_render(false);
+                        self.request_render();
                     } else if event.button == MOUSE_BUTTON_LEFT && event.press && event.motion {
                         let (row, col) = (event.y as i64 - 1, event.x as i64 - 1);
                         if let Some(fullscreen) = self.fullscreen.as_mut() {
                             fullscreen.viewport.extend_active_selection(row, col);
                         }
-                        self.request_render(false);
+                        self.request_render();
                     } else if !event.press {
                         let has_selection = self
                             .fullscreen
@@ -1376,7 +1384,7 @@ impl TUI {
                             if let Some(text) = text {
                                 self.copy_selection(&text);
                             }
-                            self.request_render(false);
+                            self.request_render();
                         } else {
                             if let Some(fullscreen) = self.fullscreen.as_mut() {
                                 fullscreen.viewport.clear_selection();
@@ -1461,7 +1469,7 @@ impl TUI {
         set_cell_dimensions(width_px as u32, height_px as u32);
         // Invalidate all components so images re-render with correct dimensions.
         self.invalidate();
-        self.request_render(false);
+        self.request_render();
         true
     }
 }

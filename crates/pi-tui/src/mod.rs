@@ -28,8 +28,8 @@ pub use crate::keybindings::{
     Keybindings, KeybindingsConfig, KeybindingsManager, TUI_KEYBINDINGS,
 };
 pub use crate::keys::{
-    decode_kitty_printable, is_key_release, is_key_repeat, is_kitty_protocol_active, matches_key, parse_key,
-    set_kitty_protocol_active, Key, KeyEventType, KeyId,
+    decode_kitty_printable, is_key_release, is_key_repeat, is_kitty_protocol_active, key, matches_key, parse_key,
+    set_kitty_protocol_active, KeyEventType, KeyId,
 };
 pub use crate::latex::latex_to_unicode;
 pub use crate::mouse::{
@@ -55,10 +55,10 @@ pub use crate::terminal_image::{
     ImageRenderOptions, TerminalCapabilities,
 };
 pub use crate::tui::{
-    is_focusable, visible_width, Component, Container, Focusable, FullscreenOptions, OverlayAnchor, OverlayHandle,
-    OverlayMargin, OverlayOptions, SizeValue, TuiStopOptions, CURSOR_MARKER, TUI,
+    is_focusable, Component, Container, Focusable, FullscreenOptions, OverlayAnchor, OverlayHandle, OverlayMargin,
+    OverlayOptions, SizeValue, TuiStopOptions, CURSOR_MARKER, TUI,
 };
-pub use crate::utils::{truncate_to_width, wrap_text_with_ansi};
+pub use crate::utils::{truncate_to_width, visible_width, wrap_text_with_ansi};
 
 #[cfg(test)]
 mod tests {

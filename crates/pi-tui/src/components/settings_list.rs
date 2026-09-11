@@ -420,9 +420,8 @@ mod tests {
             SettingsListOptions::default(),
         );
         let lines = list.render(20.0);
-        assert_eq!(lines[0], "  No settings available");
-        assert_eq!(lines[1], "");
-        assert_eq!(lines[2], "  Enter/Space to change · Esc to cancel");
+        // Search is disabled, so the hint line is omitted.
+        assert_eq!(lines, vec!["  No settings available".to_string()]);
     }
 
     #[test]

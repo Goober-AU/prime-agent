@@ -632,7 +632,8 @@ mod tests {
         input.set_value("ab".to_string());
         let lines = input.render(10.0);
         // Cursor at column 0 highlights "a"; marker absent while unfocused.
-        assert_eq!(lines, vec!["> \x1b[7ma\x1b[27mb    ".to_string()]);
+        // width 10 - prompt 2 = 8 available, 2 visible cells, 6 spaces of padding.
+        assert_eq!(lines, vec!["> \x1b[7ma\x1b[27mb      ".to_string()]);
     }
 
     #[test]
@@ -640,7 +641,8 @@ mod tests {
         let mut input = Input::new();
         input.set_focused(true);
         let lines = input.render(6.0);
-        assert_eq!(lines, vec!["> \x1b_pi:c\x07\x1b[7m \x1b[27m ".to_string()]);
+        // width 6 - prompt 2 = 4 available; the reverse-video space occupies 1 cell.
+        assert_eq!(lines, vec!["> \x1b_pi:c\x07\x1b[7m \x1b[27m   ".to_string()]);
     }
 
     #[test]

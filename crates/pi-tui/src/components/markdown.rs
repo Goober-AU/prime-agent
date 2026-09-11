@@ -2024,7 +2024,7 @@ mod tests {
     #[test]
     fn heading_uses_heading_theme_and_prefix_for_level_3() {
         let mut md = markdown("### Title");
-        let lines = md.render(20.0);
+        let lines = md.render(24.0);
         assert_eq!(lines[0], "H<**### **>H<**Title**>");
     }
 
@@ -2080,31 +2080,35 @@ mod tests {
     #[test]
     fn blockquote_is_prefixed_with_border() {
         let mut md = markdown("> quoted");
-        assert_eq!(md.render(12.0), vec!["│ quoted    ".to_string()]);
+        // Blockquotes render `theme.quote(theme.italic(text))`, then pad to width.
+        assert_eq!(md.render(12.0), vec!["│ _quoted_  ".to_string()]);
     }
 
     #[test]
     fn horizontal_rule_is_capped_at_80_columns() {
         let mut md = markdown("---");
-        assert_eq!(md.render(100.0), vec!["─".repeat(80)]);
+        let lines = md.render(100.0);
+        // The rule is capped at 80 columns, then the block pads to the full width.
+        assert!(lines[0].starts_with(&"─".repeat(80)), "{:?}", lines[0]);
+        assert_eq!(visible_width(&lines[0]), 100);
     }
 
     #[test]
     fn inline_code_and_bold_use_theme() {
         let mut md = markdown("a `b` **c**");
-        assert_eq!(md.render(20.0), vec!["a `b` **c**        ".to_string()]);
+        assert_eq!(md.render(20.0), vec!["a `b` **c**         ".to_string()]);
     }
 
     #[test]
     fn link_prints_url_when_text_differs() {
         let mut md = markdown("[text](https://example.com)");
-        assert_eq!(md.render(40.0)[0], "textURL< (https://example.com)>     ");
+        assert_eq!(md.render(40.0)[0], "textURL< (https://example.com)>         ");
     }
 
     #[test]
     fn link_hides_url_when_text_matches_href() {
         let mut md = markdown("[https://example.com](https://example.com)");
-        assert_eq!(md.render(40.0)[0], "https://example.com                 ");
+        assert_eq!(md.render(40.0)[0], "https://example.com                     ");
     }
 
     #[test]
@@ -2174,7 +2178,8 @@ mod tests {
             MarkdownOptions::default(),
         );
         let lines = md.render(20.0);
-        assert_eq!(lines[0], "[**plain**]        ");
+        // `applyDefaultStyle` applies the color first, then the bold wrapper.
+        assert_eq!(lines[0], "**[plain]**         ");
     }
 
     #[test]

@@ -21,8 +21,13 @@ pub struct AgentStatus {
     pub based_on_message_count: usize,
 }
 
+/// `sessionManager.appendAgentStatus` as the summarizer consumes it.
+pub trait AgentStatusWriter: Send + Sync {
+    fn append_agent_status(&self, status: &AgentStatus) -> Result<String, String>;
+}
+
 /// Minimal view of the live session held by an `AgentSessionRuntime`.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Clone, Default)]
 pub struct ActiveSessionRuntimeSession {
     pub session_id: String,
     pub session_name: Option<String>,
@@ -34,6 +39,59 @@ pub struct ActiveSessionRuntimeSession {
     pub messages_len: usize,
     pub has_running_rlm_children: bool,
     pub rlm_depth: Option<i64>,
+    /// Transcript visible to the model (daemon-session-summarizer reads it).
+    pub messages: Vec<pi_agent_core::types::AgentMessage>,
+    /// The in-progress assistant message of a streaming turn.
+    pub streaming_message: Option<pi_agent_core::types::AgentMessage>,
+    pub model_registry: Option<Arc<tokio::sync::Mutex<crate::core::model_registry::ModelRegistry>>>,
+    pub settings_manager: Option<Arc<crate::core::settings_manager::SettingsManager>>,
+    /// `sessionManager.getLeafId()`.
+    pub leaf_id: Option<String>,
+    /// `sessionManager.getLatestAgentStatus()`.
+    pub latest_agent_status: Option<AgentStatus>,
+    /// `sessionManager.appendAgentStatus(...)`.
+    pub agent_status_writer: Option<Arc<dyn AgentStatusWriter>>,
+}
+
+impl std::fmt::Debug for ActiveSessionRuntimeSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveSessionRuntimeSession")
+            .field("session_id", &self.session_id)
+            .field("session_name", &self.session_name)
+            .field("session_file", &self.session_file)
+            .field("is_session_active", &self.is_session_active)
+            .field("is_streaming", &self.is_streaming)
+            .field("is_compacting", &self.is_compacting)
+            .field("messages_len", &self.messages_len)
+            .field("has_running_rlm_children", &self.has_running_rlm_children)
+            .field("rlm_depth", &self.rlm_depth)
+            .field("messages", &self.messages.len())
+            .field("streaming_message", &self.streaming_message.is_some())
+            .field("model_registry", &self.model_registry.is_some())
+            .field("settings_manager", &self.settings_manager.is_some())
+            .field("leaf_id", &self.leaf_id)
+            .field("latest_agent_status", &self.latest_agent_status)
+            .field("agent_status_writer", &self.agent_status_writer.is_some())
+            .finish()
+    }
+}
+
+impl PartialEq for ActiveSessionRuntimeSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.session_name == other.session_name
+            && self.session_file == other.session_file
+            && self.is_session_active == other.is_session_active
+            && self.is_streaming == other.is_streaming
+            && self.is_compacting == other.is_compacting
+            && self.messages_len == other.messages_len
+            && self.has_running_rlm_children == other.has_running_rlm_children
+            && self.rlm_depth == other.rlm_depth
+            && self.messages == other.messages
+            && self.streaming_message == other.streaming_message
+            && self.leaf_id == other.leaf_id
+            && self.latest_agent_status == other.latest_agent_status
+    }
 }
 
 /// Runtime metadata (`AgentSessionRuntimeMetadata` in core/agent-session-runtime.ts).
@@ -50,7 +108,7 @@ pub struct AgentSessionRuntimeMetadata {
 }
 
 /// Minimal view of `core/agent-session-runtime.ts`'s `AgentSessionRuntime`.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct AgentSessionRuntime {
     pub session: ActiveSessionRuntimeSession,
     pub metadata: Option<AgentSessionRuntimeMetadata>,

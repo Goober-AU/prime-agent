@@ -97,104 +97,15 @@ pub type KeyId = String;
 /// `AbortSignal`.
 pub type AbortSignal = CancellationToken;
 
-/// blocked_on: needs core::event_bus::EventBus
-pub trait EventBus: Send + Sync {
-    fn emit(&self, channel: &str, data: Value);
-    /// Returns an unsubscribe function.
-    fn on(&self, channel: &str, handler: Arc<dyn Fn(Value) + Send + Sync>) -> Arc<dyn Fn() + Send + Sync>;
-}
-
-/// blocked_on: needs core::messages::CustomMessage
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CustomMessage {
-    pub role: String,
-    #[serde(rename = "customType")]
-    pub custom_type: String,
-    pub content: Value,
-    pub display: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<Value>,
-    pub timestamp: f64,
-}
-
-/// Concrete `EventBus` implementation.
+/// `EventBus` from `core/event-bus.ts`.
 ///
-/// Port of `core/event-bus.ts`'s `createEventBus`. That file belongs to another
-/// slice and is still empty in this workspace, so the minimal implementation the
-/// extension loader and runner need lives here as crate-internal plumbing.
-/// blocked_on: needs core::event_bus::{EventBus, createEventBus}
-#[derive(Default)]
-pub struct SimpleEventBus {
-    handlers: std::sync::Mutex<std::collections::HashMap<String, Vec<Arc<dyn Fn(Value) + Send + Sync>>>>,
-}
-
-impl SimpleEventBus {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// `emitter.emit(channel, data)`.
-    pub fn emit(&self, channel: &str, data: Value) {
-        let handlers = {
-            let guard = self
-                .handlers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.get(channel).cloned().unwrap_or_default()
-        };
-        for handler in handlers {
-            handler(data.clone());
-        }
-    }
-
-    /// `emitter.on(channel, handler)` - returns the unsubscribe function.
-    pub fn on(&self, channel: &str, handler: Arc<dyn Fn(Value) + Send + Sync>) -> Arc<dyn Fn() + Send + Sync> {
-        let key = channel.to_string();
-        {
-            let mut guard = self
-                .handlers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.entry(key.clone()).or_default().push(handler.clone());
-        }
-        let bus = self.handlers.clone();
-        Arc::new(move || {
-            let mut guard = bus.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(list) = guard.get_mut(&key) {
-                list.retain(|existing| !Arc::ptr_eq(existing, &handler));
-            }
-        })
-    }
-
-    /// `emitter.removeAllListeners()`.
-    pub fn clear(&self) {
-        let mut guard = self
-            .handlers
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.clear();
-    }
-}
-
-impl std::fmt::Debug for SimpleEventBus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SimpleEventBus").finish_non_exhaustive()
-    }
-}
-
-impl EventBus for SimpleEventBus {
-    fn emit(&self, channel: &str, data: Value) {
-        SimpleEventBus::emit(self, channel, data);
-    }
-
-    fn on(&self, channel: &str, handler: Arc<dyn Fn(Value) + Send + Sync>) -> Arc<dyn Fn() + Send + Sync> {
-        SimpleEventBus::on(self, channel, handler)
-    }
-}
+/// The concrete bus now lives in `core::event_bus` (another slice), so the
+/// extension layer re-exports it instead of keeping a local stand-in.
+pub use crate::core::event_bus::{create_event_bus as create_event_bus_impl, EventBus, EventBusImpl};
 
 /// `createEventBus()`.
 pub(crate) fn create_event_bus() -> Arc<dyn EventBus> {
-    Arc::new(SimpleEventBus::new())
+    Arc::new(EventBusImpl::new())
 }
 
 /// `Pick<CustomMessage, "customType" | "content" | "display" | "details">`.

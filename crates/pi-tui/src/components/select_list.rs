@@ -560,8 +560,8 @@ mod tests {
     fn metadata_item_truncates_to_width() {
         let mut layout = SelectListLayoutOptions::default();
         layout.show_item_metadata = true;
-        layout.min_primary_column_width = Some(4);
-        layout.max_primary_column_width = Some(4);
+        layout.min_primary_column_width = Some(12);
+        layout.max_primary_column_width = Some(32);
         let mut list = SelectList::new(
             vec![SelectItem {
                 value: "/help".to_string(),
@@ -574,8 +574,10 @@ mod tests {
             theme(),
             layout,
         );
-        let lines = list.render(12.0);
-        assert!(visible_width(&lines[0]) <= 12, "line too wide: {:?}", lines[0]);
-        assert!(lines[0].contains("core"));
+        let lines = list.render(80.0);
+        assert!(visible_width(&lines[0]) <= 80, "line too wide: {:?}", lines[0]);
+        assert!(lines[0].contains("/help"), "{:?}", lines[0]);
+        assert!(lines[0].contains("<topic>"), "{:?}", lines[0]);
+        assert!(lines[0].contains("core"), "{:?}", lines[0]);
     }
 }

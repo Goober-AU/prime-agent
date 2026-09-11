@@ -814,7 +814,10 @@ impl<TAction: Clone> ActionStore<TAction> {
                 .collect()
         });
         let mut removed: Vec<TAction> = Vec::new();
-        for policy in [DeliveryPolicy::NextTurnBoundary, DeliveryPolicy::WhenRunIdle] {
+        for policy in [
+            DeliveryPolicy::NextTurnBoundary,
+            DeliveryPolicy::WhenRunIdle,
+        ] {
             let list = self.list(policy);
             let mut index = 0usize;
             while index < list.len() {
@@ -838,7 +841,11 @@ impl<TAction: Clone> ActionStore<TAction> {
         &mut self,
         action: &mut TAction,
         proof: Option<RollbackProof>,
-        transition_with_proof: &dyn Fn(&mut TAction, ActionLifecycle, Option<RollbackProof>) -> Result<(), String>,
+        transition_with_proof: &dyn Fn(
+            &mut TAction,
+            ActionLifecycle,
+            Option<RollbackProof>,
+        ) -> Result<(), String>,
     ) -> Result<(), String> {
         let _ = &self.transition;
         transition_with_proof(action, ActionLifecycle::Queued, proof)
@@ -1059,7 +1066,11 @@ impl SessionActionStore {
         transition_session_action(action, ActionLifecycle::Queued, &transition)
     }
 
-    pub fn swap_queued(&mut self, left: &SessionAction, right: &SessionAction) -> Result<(), String> {
+    pub fn swap_queued(
+        &mut self,
+        left: &SessionAction,
+        right: &SessionAction,
+    ) -> Result<(), String> {
         self.inner.swap_queued(left, right)
     }
 
@@ -1103,7 +1114,10 @@ impl SessionActionStore {
             .collect()
     }
 
-    pub fn ticket_for(&self, action: &SessionAction) -> Result<Arc<ActionTicketController>, String> {
+    pub fn ticket_for(
+        &self,
+        action: &SessionAction,
+    ) -> Result<Arc<ActionTicketController>, String> {
         self.inner.ticket_for(action)
     }
 
@@ -1116,9 +1130,10 @@ impl SessionActionStore {
             .actions(None)
             .into_iter()
             .filter(|action| match &action.payload {
-                SessionActionPayload::Turn(turn) => turn.records.iter().any(|record| {
-                    messages_equal(&record.message, message)
-                }),
+                SessionActionPayload::Turn(turn) => turn
+                    .records
+                    .iter()
+                    .any(|record| messages_equal(&record.message, message)),
                 SessionActionPayload::SessionCommand(_) => false,
             })
             .collect()
@@ -1328,10 +1343,19 @@ mod tests {
     #[test]
     fn legal_transitions_are_enforced() {
         let mut action = turn_action("a", DeliveryPolicy::NextTurnBoundary, "one");
-        assert!(transition_session_action(&mut action, ActionLifecycle::Selected, &TransitionOptions::default()).is_ok());
+        assert!(transition_session_action(
+            &mut action,
+            ActionLifecycle::Selected,
+            &TransitionOptions::default()
+        )
+        .is_ok());
         assert_eq!(action.lifecycle.state(), ActionLifecycleState::Selected);
-        let error = transition_session_action(&mut action, ActionLifecycle::Completed, &TransitionOptions::default())
-            .unwrap_err();
+        let error = transition_session_action(
+            &mut action,
+            ActionLifecycle::Completed,
+            &TransitionOptions::default(),
+        )
+        .unwrap_err();
         assert_eq!(
             error,
             "Illegal session action lifecycle transition: selected -> completed"
@@ -1343,8 +1367,12 @@ mod tests {
         let mut action = turn_action("a", DeliveryPolicy::NextTurnBoundary, "one");
         action.lifecycle = ActionLifecycle::Committing;
 
-        let error = transition_session_action(&mut action, ActionLifecycle::Queued, &TransitionOptions::default())
-            .unwrap_err();
+        let error = transition_session_action(
+            &mut action,
+            ActionLifecycle::Queued,
+            &TransitionOptions::default(),
+        )
+        .unwrap_err();
         assert_eq!(
             error,
             "Committing session action rollback requires a settled dispatch and transcript proof"
@@ -1428,9 +1456,14 @@ mod tests {
         store
             .enqueue(turn_action("b", DeliveryPolicy::NextTurnBoundary, "two"))
             .unwrap();
-        let removed = store.remove(&|action: &SessionAction| action.id == "a", None).unwrap();
+        let removed = store
+            .remove(&|action: &SessionAction| action.id == "a", None)
+            .unwrap();
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].lifecycle.state(), ActionLifecycleState::Cancelled);
+        assert_eq!(
+            removed[0].lifecycle.state(),
+            ActionLifecycleState::Cancelled
+        );
         assert_eq!(store.owned_actions().len(), 1);
     }
 
@@ -1456,10 +1489,15 @@ mod tests {
         );
 
         let mut moved = a.clone();
-        store.move_queued(&mut moved, DeliveryPolicy::WhenRunIdle, 0).unwrap();
+        store
+            .move_queued(&mut moved, DeliveryPolicy::WhenRunIdle, 0)
+            .unwrap();
         let queued_idle = store.queued_actions(Some(DeliveryPolicy::WhenRunIdle));
         assert_eq!(
-            queued_idle.iter().map(|action| action.id.clone()).collect::<Vec<_>>(),
+            queued_idle
+                .iter()
+                .map(|action| action.id.clone())
+                .collect::<Vec<_>>(),
             vec!["a", "c"]
         );
 
@@ -1480,7 +1518,11 @@ mod tests {
             .enqueue(turn_action("a", DeliveryPolicy::NextTurnBoundary, "one"))
             .unwrap();
         store
-            .enqueue(command_action("cmd", DeliveryPolicy::NextTurnBoundary, "/compact"))
+            .enqueue(command_action(
+                "cmd",
+                DeliveryPolicy::NextTurnBoundary,
+                "/compact",
+            ))
             .unwrap();
         assert_eq!(
             store.queue_preview(DeliveryPolicy::NextTurnBoundary),
@@ -1538,10 +1580,26 @@ mod tests {
             has_registered_cron_job: false,
             last_activity_at: 0.0,
         };
-        assert!(!is_idle_eviction_threshold_met(&session, IdleEvictionMinutes::Off, 60_000.0));
-        assert!(!is_idle_eviction_threshold_met(&session, IdleEvictionMinutes::Minutes(0.0), 60_000.0));
-        assert!(!is_idle_eviction_threshold_met(&session, IdleEvictionMinutes::Minutes(1.0), 59_999.0));
-        assert!(is_idle_eviction_threshold_met(&session, IdleEvictionMinutes::Minutes(1.0), 60_000.0));
+        assert!(!is_idle_eviction_threshold_met(
+            &session,
+            IdleEvictionMinutes::Off,
+            60_000.0
+        ));
+        assert!(!is_idle_eviction_threshold_met(
+            &session,
+            IdleEvictionMinutes::Minutes(0.0),
+            60_000.0
+        ));
+        assert!(!is_idle_eviction_threshold_met(
+            &session,
+            IdleEvictionMinutes::Minutes(1.0),
+            59_999.0
+        ));
+        assert!(is_idle_eviction_threshold_met(
+            &session,
+            IdleEvictionMinutes::Minutes(1.0),
+            60_000.0
+        ));
 
         let passivation = SessionPassivationSnapshot {
             eviction: session.clone(),
@@ -1549,10 +1607,18 @@ mod tests {
             has_non_passive_descendants: false,
             is_hydrating: false,
         };
-        assert!(can_passivate_session(&passivation, IdleEvictionMinutes::Minutes(1.0), 60_000.0));
+        assert!(can_passivate_session(
+            &passivation,
+            IdleEvictionMinutes::Minutes(1.0),
+            60_000.0
+        ));
         let mut rooted = passivation.clone();
         rooted.has_parent = false;
-        assert!(!can_passivate_session(&rooted, IdleEvictionMinutes::Minutes(1.0), 60_000.0));
+        assert!(!can_passivate_session(
+            &rooted,
+            IdleEvictionMinutes::Minutes(1.0),
+            60_000.0
+        ));
 
         let worker = WorkerEvictionSnapshot {
             lifecycle: WorkerLifecycle::Ready,
@@ -1563,16 +1629,32 @@ mod tests {
             has_wake_blind_schedule: false,
             sessions: vec![session.clone()],
         };
-        assert!(can_evict_worker(&worker, IdleEvictionMinutes::Minutes(1.0), 60_000.0));
+        assert!(can_evict_worker(
+            &worker,
+            IdleEvictionMinutes::Minutes(1.0),
+            60_000.0
+        ));
         let mut busy = worker.clone();
         busy.has_owner_client = true;
-        assert!(!can_evict_worker(&busy, IdleEvictionMinutes::Minutes(1.0), 60_000.0));
+        assert!(!can_evict_worker(
+            &busy,
+            IdleEvictionMinutes::Minutes(1.0),
+            60_000.0
+        ));
         let mut empty = worker.clone();
         empty.sessions.clear();
-        assert!(!can_evict_worker(&empty, IdleEvictionMinutes::Minutes(1.0), 60_000.0));
+        assert!(!can_evict_worker(
+            &empty,
+            IdleEvictionMinutes::Minutes(1.0),
+            60_000.0
+        ));
         let mut starting = worker.clone();
         starting.lifecycle = WorkerLifecycle::Starting;
-        assert!(!can_evict_worker(&starting, IdleEvictionMinutes::Minutes(1.0), 60_000.0));
+        assert!(!can_evict_worker(
+            &starting,
+            IdleEvictionMinutes::Minutes(1.0),
+            60_000.0
+        ));
     }
 
     #[test]

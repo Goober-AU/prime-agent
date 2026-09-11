@@ -876,7 +876,7 @@ pub fn create_mcp_oauth_provider(config: McpOAuthConfig) -> OAuthProviderInterfa
             }
 
             // Race the local callback server against a manual paste.
-            let result: CallbackResult;
+            let mut result: CallbackResult;
             let mut manual_cancelled = false;
             let mut manual_error: Option<String> = None;
             if let Some(on_manual_code_input) = callbacks.on_manual_code_input.as_ref() {

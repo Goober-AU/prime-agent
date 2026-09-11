@@ -1007,7 +1007,7 @@ pub async fn process_responses_stream(
                         // Finalize in-place; `partialJson` is only a streaming scratch buffer
                         // and is never persisted into the block.
                         if let ContentBlock::ToolCall(tool_call) = &mut output.content[index] {
-                            tool_call.arguments = args;
+                            tool_call.arguments = arguments.clone();
                             tool_call.clone()
                         } else {
                             ToolCall::new(

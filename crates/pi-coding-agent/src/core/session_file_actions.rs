@@ -80,7 +80,11 @@ pub fn delete_session_artifacts(session_path: &str) {
         .file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default();
-    if basename.strip_suffix(".jsonl").unwrap_or(&basename).is_empty() {
+    if basename
+        .strip_suffix(".jsonl")
+        .unwrap_or(&basename)
+        .is_empty()
+    {
         return;
     }
     let _ = std::fs::remove_dir_all(get_session_artifact_path_for_file(session_path, None));

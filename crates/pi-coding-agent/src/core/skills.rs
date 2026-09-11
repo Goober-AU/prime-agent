@@ -7,7 +7,8 @@ use serde_json::Value;
 
 use crate::core::diagnostics::ResourceDiagnostic;
 use crate::core::source_info::{
-    create_synthetic_source_info, SourceInfo, SyntheticSourceInfoOptions, SOURCE_ORIGIN_TOP_LEVEL,
+    create_synthetic_source_info, SourceInfo, SyntheticSourceInfoOptions, SOURCE_SCOPE_PROJECT,
+    SOURCE_SCOPE_USER,
 };
 use crate::utils::frontmatter::parse_frontmatter;
 use crate::utils::paths::canonicalize_path;
@@ -53,16 +54,15 @@ impl IgnoreMatcher {
         }
     }
 
+    /// Last matching pattern wins, as in the `ignore` package.
     pub fn ignores(&self, path: &str) -> bool {
         let mut ignored = false;
         for rule in &self.rules {
-            let target = if rule.directory_only {
-                format!("{path}/")
+            let matched = if rule.directory_only {
+                path.ends_with('/') && rule.regex.is_match(path)
             } else {
-                path.to_string()
+                rule.regex.is_match(path)
             };
-            let matched = rule.regex.is_match(&target)
-                || (rule.directory_only && rule.regex.is_match(path) && path.ends_with('/'));
             if matched {
                 ignored = !rule.negated;
             }
@@ -76,7 +76,9 @@ fn compile_rule(pattern: &str) -> Option<IgnoreRule> {
     let body = if negated { &pattern[1..] } else { pattern };
     let directory_only = body.ends_with('/');
     let body = body.trim_end_matches('/');
-    let anchored = body.starts_with('/');
+    // A pattern that contains a slash (other than a trailing one) is anchored
+    // to the search root, as in gitignore.
+    let anchored = body.starts_with('/') || body.trim_end_matches('/').contains('/');
     let body = body.trim_start_matches('/');
     let mut expression = String::from("^");
     if !anchored {
@@ -289,9 +291,13 @@ impl<'de> Deserialize<'de> for Skill {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Skill, D::Error> {
         let value = Value::deserialize(deserializer)?;
         if value.get("kind").and_then(Value::as_str) == Some("python") {
-            serde_json::from_value(value).map(Skill::Python).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(Skill::Python)
+                .map_err(serde::de::Error::custom)
         } else {
-            serde_json::from_value(value).map(Skill::Markdown).map_err(serde::de::Error::custom)
+            serde_json::from_value(value)
+                .map(Skill::Markdown)
+                .map_err(serde::de::Error::custom)
         }
     }
 }
@@ -388,41 +394,40 @@ pub struct LoadSkillsFromDirOptions {
 }
 
 fn create_skill_source_info(file_path: &str, base_dir: &str, source: &str) -> SourceInfo {
+    // `origin` is left to the synthetic default, as in the TypeScript.
     match source {
         "user" => create_synthetic_source_info(
             file_path,
             &SyntheticSourceInfoOptions {
                 source: "local".to_string(),
-                scope: Some("user".to_string()),
-                origin: Some(SOURCE_ORIGIN_TOP_LEVEL.to_string()),
+                scope: Some(SOURCE_SCOPE_USER.to_string()),
                 base_dir: Some(base_dir.to_string()),
+                ..Default::default()
             },
         ),
         "project" => create_synthetic_source_info(
             file_path,
             &SyntheticSourceInfoOptions {
                 source: "local".to_string(),
-                scope: Some("project".to_string()),
-                origin: Some(SOURCE_ORIGIN_TOP_LEVEL.to_string()),
+                scope: Some(SOURCE_SCOPE_PROJECT.to_string()),
                 base_dir: Some(base_dir.to_string()),
+                ..Default::default()
             },
         ),
         "path" => create_synthetic_source_info(
             file_path,
             &SyntheticSourceInfoOptions {
                 source: "local".to_string(),
-                scope: None,
-                origin: Some(SOURCE_ORIGIN_TOP_LEVEL.to_string()),
                 base_dir: Some(base_dir.to_string()),
+                ..Default::default()
             },
         ),
         other => create_synthetic_source_info(
             file_path,
             &SyntheticSourceInfoOptions {
                 source: other.to_string(),
-                scope: None,
-                origin: Some(SOURCE_ORIGIN_TOP_LEVEL.to_string()),
                 base_dir: Some(base_dir.to_string()),
+                ..Default::default()
             },
         ),
     }
@@ -513,7 +518,7 @@ fn load_skills_from_dir_internal(
     dir: &str,
     source: &str,
     include_root_files: bool,
-    mut matcher: Option<IgnoreMatcher>,
+    matcher: Option<&mut IgnoreMatcher>,
     root_dir: Option<&str>,
 ) -> LoadSkillsResult {
     let mut skills: Vec<Skill> = Vec::new();
@@ -525,8 +530,17 @@ fn load_skills_from_dir_internal(
         };
     }
     let root = root_dir.unwrap_or(dir).to_string();
-    let mut matcher = matcher.take().unwrap_or_else(IgnoreMatcher::new);
-    add_ignore_rules(&mut matcher, Path::new(dir), Path::new(&root));
+    // One matcher is shared by the whole walk, exactly like the TypeScript
+    // passes a single `ig` down the recursion.
+    let mut owned_matcher;
+    let matcher: &mut IgnoreMatcher = match matcher {
+        Some(matcher) => matcher,
+        None => {
+            owned_matcher = IgnoreMatcher::new();
+            &mut owned_matcher
+        }
+    };
+    add_ignore_rules(matcher, Path::new(dir), Path::new(&root));
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
@@ -599,7 +613,7 @@ fn load_skills_from_dir_internal(
                 &full_path.to_string_lossy(),
                 source,
                 false,
-                Some(matcher.clone()),
+                Some(&mut *matcher),
                 Some(&root),
             );
             skills.extend(sub_result.skills);

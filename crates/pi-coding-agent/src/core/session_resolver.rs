@@ -129,13 +129,15 @@ pub async fn resolve_session_path(
     let mut combined = local_sessions.clone();
     combined.extend(all_sessions.iter().cloned());
     let suggestion = find_closest_session_id(selector, &combined);
-    Err(ResolveSessionError::NotFound(SessionSelectorNotFoundError {
-        error: SessionSelectorError {
-            message: format!("No session found matching '{selector}'"),
-            selector: selector.to_string(),
+    Err(ResolveSessionError::NotFound(
+        SessionSelectorNotFoundError {
+            error: SessionSelectorError {
+                message: format!("No session found matching '{selector}'"),
+                selector: selector.to_string(),
+            },
+            suggestion,
         },
-        suggestion,
-    }))
+    ))
 }
 
 pub fn find_closest_session_id(selector: &str, sessions: &[SessionInfo]) -> Option<String> {
@@ -166,7 +168,8 @@ pub fn find_closest_session_id(selector: &str, sessions: &[SessionInfo]) -> Opti
             let chars: Vec<char> = normalized_id.chars().collect();
             chars[chars.len().saturating_sub(length)..].iter().collect()
         };
-        let distance = edit_distance(&normalized_selector, &head).min(edit_distance(&normalized_selector, &tail));
+        let distance = edit_distance(&normalized_selector, &head)
+            .min(edit_distance(&normalized_selector, &tail));
         match &closest {
             None => {
                 closest = Some((id, distance));
@@ -190,7 +193,10 @@ pub fn find_closest_session_id(selector: &str, sessions: &[SessionInfo]) -> Opti
     }
 }
 
-fn resolve_exact_match(selector: &str, sessions: &[SessionInfo]) -> Result<Option<SessionInfo>, ResolveSessionError> {
+fn resolve_exact_match(
+    selector: &str,
+    sessions: &[SessionInfo],
+) -> Result<Option<SessionInfo>, ResolveSessionError> {
     let normalized_selector = normalize_session_id(selector);
     let matches: Vec<SessionInfo> = sessions
         .iter()
@@ -200,7 +206,10 @@ fn resolve_exact_match(selector: &str, sessions: &[SessionInfo]) -> Result<Optio
     resolve_unique_match(selector, matches)
 }
 
-fn resolve_partial_match(selector: &str, sessions: &[SessionInfo]) -> Result<Option<SessionInfo>, ResolveSessionError> {
+fn resolve_partial_match(
+    selector: &str,
+    sessions: &[SessionInfo],
+) -> Result<Option<SessionInfo>, ResolveSessionError> {
     let matches: Vec<SessionInfo> = sessions
         .iter()
         .filter(|session| matches_saved_session_selector(&session.id, selector))
@@ -225,13 +234,15 @@ fn resolve_unique_match(
             })
             .collect::<Vec<_>>()
             .join(", ");
-        return Err(ResolveSessionError::Ambiguous(SessionSelectorAmbiguousError {
-            error: SessionSelectorError {
-                message: format!("Ambiguous saved session \"{selector}\": matches {joined}"),
-                selector: selector.to_string(),
+        return Err(ResolveSessionError::Ambiguous(
+            SessionSelectorAmbiguousError {
+                error: SessionSelectorError {
+                    message: format!("Ambiguous saved session \"{selector}\": matches {joined}"),
+                    selector: selector.to_string(),
+                },
+                matches,
             },
-            matches,
-        }));
+        ));
     }
     Ok(matches.into_iter().next())
 }
@@ -297,10 +308,16 @@ mod tests {
     #[test]
     fn finds_closest_ids_only_when_unambiguous_and_close() {
         let sessions = vec![info("01924f7a1234", None), info("ffffffff9999", None)];
-        assert_eq!(find_closest_session_id("01924f7a1234", &sessions).as_deref(), Some("01924f7a1234"));
+        assert_eq!(
+            find_closest_session_id("01924f7a1234", &sessions).as_deref(),
+            Some("01924f7a1234")
+        );
         assert_eq!(find_closest_session_id("abc", &sessions), None);
         let tied = vec![info("aaaa", None), info("bbbb", None)];
-        assert_eq!(find_closest_session_id("aaaa", &tied), Some("aaaa".to_string()));
+        assert_eq!(
+            find_closest_session_id("aaaa", &tied),
+            Some("aaaa".to_string())
+        );
     }
 
     #[test]
@@ -322,13 +339,17 @@ mod tests {
     #[test]
     fn exact_match_prefers_normalized_ids() {
         let sessions = vec![info("01924F7A-1234", None)];
-        let matched = resolve_exact_match("01924f7a1234", &sessions).unwrap().unwrap();
+        let matched = resolve_exact_match("01924f7a1234", &sessions)
+            .unwrap()
+            .unwrap();
         assert_eq!(matched.id, "01924F7A-1234");
     }
 
     #[tokio::test]
     async fn path_like_selectors_skip_the_session_list() {
-        let resolved = resolve_session_path("./x.jsonl", "/work", None).await.unwrap();
+        let resolved = resolve_session_path("./x.jsonl", "/work", None)
+            .await
+            .unwrap();
         assert_eq!(
             resolved,
             ResolvedSession::Path {
