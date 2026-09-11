@@ -15,8 +15,7 @@ use futures::future::BoxFuture;
 
 use super::amazon_bedrock::{stream_bedrock, stream_simple_bedrock, BedrockOptions};
 use super::amazon_bedrock_responses::{
-	stream_bedrock_responses as stream_bedrock_responses_provider, stream_simple_bedrock_responses,
-	BedrockResponsesOptions,
+	stream_bedrock_responses_with_options, stream_simple_bedrock_responses_with_options, BedrockResponsesOptions,
 };
 use super::anthropic::{stream_anthropic as stream_anthropic_provider, stream_simple_anthropic, AnthropicOptions};
 use super::azure_openai_responses::{
@@ -169,29 +168,21 @@ fn compaction_api_guard(api: &str, check: fn(&Model) -> bool) -> Arc<dyn Fn(&Mod
 }
 
 /// TS: the `compact` wrapper that throws `Mismatched compaction api: ${model.api}`.
-fn compact_openai_responses_guarded<'a>(
-	model: &'a Model,
-	context: &'a Context,
-	options: Option<&'a CompactionOptions>,
-) -> BoxFuture<'a, Option<ProviderCompactionResult>> {
-	Box::pin(async move {
+fn compact_openai_responses_guarded() -> CompactFunction {
+	Arc::new(|model: &Model, context: &Context, options: Option<&CompactionOptions>| {
 		if model.api != "openai-responses" {
 			panic!("Mismatched compaction api: {}", model.api);
 		}
-		compact_openai_responses(model, context, options).await
+		compact_openai_responses(model, context, options)
 	})
 }
 
-fn compact_openai_codex_responses_guarded<'a>(
-	model: &'a Model,
-	context: &'a Context,
-	options: Option<&'a CompactionOptions>,
-) -> BoxFuture<'a, Option<ProviderCompactionResult>> {
-	Box::pin(async move {
+fn compact_openai_codex_responses_guarded() -> CompactFunction {
+	Arc::new(|model: &Model, context: &Context, options: Option<&CompactionOptions>| {
 		if model.api != "openai-codex-responses" {
 			panic!("Mismatched compaction api: {}", model.api);
 		}
-		compact_openai_codex_responses(model, context, options).await
+		compact_openai_codex_responses(model, context, options)
 	})
 }
 
@@ -206,10 +197,14 @@ fn load_bedrock_responses_module() -> LazyProviderModule {
 	LazyProviderModule {
 		compact: None,
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_bedrock_responses_provider(model, context, typed_options::<BedrockResponsesOptions>(options))
+			stream_bedrock_responses_with_options(model, context, typed_options::<BedrockResponsesOptions>(options))
 		}),
 		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_bedrock_responses(model, context, typed_options::<crate::types::SimpleStreamOptions>(options))
+			stream_simple_bedrock_responses_with_options(
+				model,
+				context,
+				typed_options::<crate::types::SimpleStreamOptions>(options),
+			)
 		}),
 	}
 }
@@ -353,7 +348,7 @@ fn load_mistral_provider_module() -> LazyProviderModule {
 
 fn load_openai_codex_responses_provider_module() -> LazyProviderModule {
 	LazyProviderModule {
-		compact: Some(Arc::new(compact_openai_codex_responses_guarded) as CompactFunction),
+		compact: Some(compact_openai_codex_responses_guarded()),
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_openai_codex_responses_provider(model, context, typed_options::<OpenAICodexResponsesOptions>(options))
 		}),
@@ -381,7 +376,7 @@ fn load_openai_completions_provider_module() -> LazyProviderModule {
 
 fn load_openai_responses_provider_module() -> LazyProviderModule {
 	LazyProviderModule {
-		compact: Some(Arc::new(compact_openai_responses_guarded) as CompactFunction),
+		compact: Some(compact_openai_responses_guarded()),
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_openai_responses_provider(model, context, typed_options::<OpenAIResponsesOptions>(options))
 		}),
@@ -532,7 +527,7 @@ pub fn register_built_in_api_providers() {
 		supports_compaction: Some(compaction_api_guard("openai-responses", supports_openai_compaction)),
 		stream: stream_openai_responses(),
 		stream_simple: stream_simple_openai_responses_lazy(),
-		compact: Some(Arc::new(compact_openai_responses_guarded) as CompactFunction),
+		compact: Some(compact_openai_responses_guarded()),
 	}, None);
 
 	register_api_provider(ApiProvider {
@@ -548,7 +543,7 @@ pub fn register_built_in_api_providers() {
 		supports_compaction: Some(compaction_api_guard("openai-codex-responses", supports_openai_compaction)),
 		stream: stream_openai_codex_responses(),
 		stream_simple: stream_simple_openai_codex_responses_lazy(),
-		compact: Some(Arc::new(compact_openai_codex_responses_guarded) as CompactFunction),
+		compact: Some(compact_openai_codex_responses_guarded()),
 	}, None);
 
 	register_api_provider(ApiProvider {
@@ -676,12 +671,9 @@ mod tests {
 	#[tokio::test]
 	async fn compaction_guard_reports_api_mismatch() {
 		let mismatched = model("openai-completions", "openai", "gpt-5");
-		let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-			let _ = compact_openai_responses_guarded(&mismatched, &context(), None);
-		}));
 		// The guard is evaluated inside the future, so run it on the runtime.
-		assert!(result.is_ok());
-		let future = compact_openai_responses_guarded(&mismatched, &context(), None);
+		let guard = compact_openai_responses_guarded();
+		let future = guard(&mismatched, &context(), None);
 		let joined = tokio::spawn(future).await;
 		assert!(joined.is_err(), "guard must panic with the mismatched api");
 	}

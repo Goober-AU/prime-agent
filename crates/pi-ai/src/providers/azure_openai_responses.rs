@@ -178,7 +178,7 @@ async fn run_azure_openai_responses(
 		.clone()
 		.or_else(|| get_env_api_key(&model.provider))
 		.unwrap_or_default();
-	let client = create_client(model, &api_key, options)?;
+	let client = create_client(model, &api_key, Some(options)).map_err(ResponsesStreamError::Message)?;
 	let mut params = build_params(model, context, Some(options), deployment_name);
 
 	if let Some(on_payload) = options.stream.on_payload.clone() {
@@ -511,4 +511,345 @@ fn build_params(
 	}
 
 	params
+}
+
+/// The TypeScript calls `client.responses.create(params, { signal, timeout }).withResponse()`.
+/// The Rust port builds the Azure request itself: the AzureOpenAI SDK prefixes `/deployments/<model>`
+/// for the deployment endpoints and appends `?api-version=<version>`, and authenticates with
+/// the `api-key` header.
+async fn send_request(
+	client: &AzureClient,
+	params: &Map<String, Value>,
+	options: &AzureOpenAIResponsesOptions,
+) -> Result<reqwest::Response, ResponsesStreamError> {
+	let base_url = client.base_url.trim_end_matches('/');
+	let model = params.get("model").and_then(Value::as_str).unwrap_or_default();
+	// `_deployments_endpoints` in the OpenAI Azure SDK does not list `/responses`, so the SDK
+	// does not insert the deployment path for this route.
+	let url = format!("{base_url}/responses?api-version={}", client.api_version);
+
+	let mut headers = reqwest::header::HeaderMap::new();
+	for (key, value) in client.default_headers.iter() {
+		if let (Ok(name), Ok(header_value)) = (
+			reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+			reqwest::header::HeaderValue::from_str(value),
+		) {
+			headers.insert(name, header_value);
+		}
+	}
+	if !headers.contains_key("api-key") {
+		if let Ok(value) = reqwest::header::HeaderValue::from_str(&client.api_key) {
+			headers.insert(reqwest::header::HeaderName::from_static("api-key"), value);
+		}
+	}
+	let _ = model;
+
+	let mut request = reqwest::Client::new()
+		.post(&url)
+		.headers(headers)
+		.json(&Value::Object(params.clone()));
+	if let Some(timeout_ms) = options.stream.timeout_ms {
+		request = request.timeout(Duration::from_millis(timeout_ms.max(0.0) as u64));
+	}
+
+	let send = request.send();
+	let response = match options.stream.signal.as_ref() {
+		Some(signal) => tokio::select! {
+			_ = signal.cancelled() => return Err(ResponsesStreamError::Message("Request was aborted".to_string())),
+			result = send => result,
+		},
+		None => send.await,
+	};
+	let response = response.map_err(|error| ResponsesStreamError::Message(error.to_string()))?;
+	if !response.status().is_success() {
+		let status = response.status();
+		let text = response.text().await.unwrap_or_default();
+		return Err(ResponsesStreamError::Message(format!("{}: {}", status.as_u16(), text)));
+	}
+	Ok(response)
+}
+
+/// Re-exported alias so `register_builtins.rs` can name the api without a type import.
+pub type AzureOpenAIResponsesStreamFunction = StreamFunction;
+
+/// Kept so the module references the same `Api` alias the TypeScript module does.
+pub fn _api_marker(_api: &Api) {}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::types::{InputModality, Message, Tool, UserContent, UserMessage};
+
+	fn model(provider: &str, id: &str, base_url: &str) -> Model {
+		Model {
+			id: id.to_string(),
+			provider: provider.to_string(),
+			api: "azure-openai-responses".to_string(),
+			base_url: base_url.to_string(),
+			input: vec![InputModality::Text],
+			..Default::default()
+		}
+	}
+
+	fn context() -> Context {
+		Context {
+			system_prompt: None,
+			messages: vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			tools: None,
+		}
+	}
+
+	#[test]
+	fn parse_deployment_name_map_matches_typescript() {
+		let map = parse_deployment_name_map(Some(" gpt-4=deploy-a , broken , =x , gpt-5 = deploy-b "));
+		assert_eq!(map.get("gpt-4").map(String::as_str), Some("deploy-a"));
+		assert_eq!(map.get("gpt-5").map(String::as_str), Some("deploy-b"));
+		assert_eq!(map.len(), 2);
+		assert!(parse_deployment_name_map(None).is_empty());
+		assert!(parse_deployment_name_map(Some("")).is_empty());
+	}
+
+	#[test]
+	fn resolve_deployment_name_prefers_option_then_env_then_model() {
+		std::env::set_var("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", "model-1=deploy-env");
+		let model = model("azure-openai-responses", "model-1", "https://example.openai.azure.com");
+		assert_eq!(resolve_deployment_name(&model, None), "deploy-env");
+
+		let options = AzureOpenAIResponsesOptions {
+			azure_deployment_name: Some("explicit".to_string()),
+			..Default::default()
+		};
+		assert_eq!(resolve_deployment_name(&model, Some(&options)), "explicit");
+
+		let other = model("azure-openai-responses", "unknown-model", "https://example.openai.azure.com");
+		assert_eq!(resolve_deployment_name(&other, None), "unknown-model");
+		std::env::remove_var("AZURE_OPENAI_DEPLOYMENT_NAME_MAP");
+	}
+
+	#[test]
+	fn normalize_azure_base_url_rewrites_azure_hosts() {
+		assert_eq!(
+			normalize_azure_base_url("https://res.openai.azure.com").unwrap(),
+			"https://res.openai.azure.com/openai/v1"
+		);
+		assert_eq!(
+			normalize_azure_base_url("https://res.openai.azure.com/").unwrap(),
+			"https://res.openai.azure.com/openai/v1"
+		);
+		assert_eq!(
+			normalize_azure_base_url("https://res.openai.azure.com/openai").unwrap(),
+			"https://res.openai.azure.com/openai/v1"
+		);
+		assert_eq!(
+			normalize_azure_base_url("https://res.cognitiveservices.azure.com/openai/v1/").unwrap(),
+			"https://res.cognitiveservices.azure.com/openai/v1"
+		);
+	}
+
+	#[test]
+	fn normalize_azure_base_url_keeps_custom_paths_and_rejects_invalid() {
+		assert_eq!(
+			normalize_azure_base_url("https://gateway.example.com/azure-openai/v1").unwrap(),
+			"https://gateway.example.com/azure-openai/v1"
+		);
+		assert_eq!(
+			normalize_azure_base_url("https://res.openai.azure.com/custom").unwrap(),
+			"https://res.openai.azure.com/custom"
+		);
+		assert_eq!(
+			normalize_azure_base_url("not a url").unwrap_err(),
+			"Invalid Azure OpenAI base URL: not a url"
+		);
+	}
+
+	#[test]
+	fn build_default_base_url_matches_typescript() {
+		assert_eq!(
+			build_default_base_url("my-resource"),
+			"https://my-resource.openai.azure.com/openai/v1"
+		);
+	}
+
+	#[test]
+	fn resolve_azure_config_precedence() {
+		std::env::remove_var("AZURE_OPENAI_BASE_URL");
+		std::env::remove_var("AZURE_OPENAI_RESOURCE_NAME");
+		std::env::remove_var("AZURE_OPENAI_API_VERSION");
+
+		let model = model("azure-openai-responses", "m", "https://model.openai.azure.com");
+		let (base_url, api_version) = resolve_azure_config(&model, None).unwrap();
+		assert_eq!(base_url, "https://model.openai.azure.com/openai/v1");
+		assert_eq!(api_version, DEFAULT_AZURE_API_VERSION);
+
+		let options = AzureOpenAIResponsesOptions {
+			azure_resource_name: Some("res".to_string()),
+			azure_api_version: Some("2024-10-21".to_string()),
+			..Default::default()
+		};
+		let (base_url, api_version) = resolve_azure_config(&model, Some(&options)).unwrap();
+		assert_eq!(base_url, "https://res.openai.azure.com/openai/v1");
+		assert_eq!(api_version, "2024-10-21");
+
+		let options = AzureOpenAIResponsesOptions {
+			azure_base_url: Some("  https://explicit.example.com/v1/  ".to_string()),
+			..Default::default()
+		};
+		let (base_url, _) = resolve_azure_config(&model, Some(&options)).unwrap();
+		assert_eq!(base_url, "https://explicit.example.com/v1");
+	}
+
+	#[test]
+	fn resolve_azure_config_errors_without_any_base_url() {
+		std::env::remove_var("AZURE_OPENAI_BASE_URL");
+		std::env::remove_var("AZURE_OPENAI_RESOURCE_NAME");
+		let model = model("azure-openai-responses", "m", "");
+		let error = resolve_azure_config(&model, None).unwrap_err();
+		assert_eq!(
+			error,
+			"Azure OpenAI base URL is required. Set AZURE_OPENAI_BASE_URL or AZURE_OPENAI_RESOURCE_NAME, or pass azureBaseUrl, azureResourceName, or model.baseUrl."
+		);
+	}
+
+	#[test]
+	fn create_client_requires_api_key() {
+		std::env::remove_var("AZURE_OPENAI_API_KEY");
+		let model = model("azure-openai-responses", "m", "https://res.openai.azure.com");
+		let error = create_client(&model, "", None).unwrap_err();
+		assert_eq!(
+			error,
+			"Azure OpenAI API key is required. Set AZURE_OPENAI_API_KEY environment variable or pass it as an argument."
+		);
+	}
+
+	#[test]
+	fn create_client_merges_model_and_option_headers() {
+		let mut model = model("azure-openai-responses", "m", "https://res.openai.azure.com");
+		let mut model_headers = IndexMap::new();
+		model_headers.insert("X-Model".to_string(), "1".to_string());
+		model.headers = Some(model_headers);
+		let mut option_headers = IndexMap::new();
+		option_headers.insert("X-Option".to_string(), "2".to_string());
+		let options = AzureOpenAIResponsesOptions {
+			stream: StreamOptions {
+				headers: Some(option_headers),
+				..Default::default()
+			},
+			..Default::default()
+		};
+		let client = create_client(&model, "key", Some(&options)).unwrap();
+		assert_eq!(client.api_key, "key");
+		assert_eq!(client.base_url, "https://res.openai.azure.com/openai/v1");
+		assert_eq!(client.api_version, "v1");
+		assert_eq!(client.default_headers.get("X-Model").map(String::as_str), Some("1"));
+		assert_eq!(client.default_headers.get("X-Option").map(String::as_str), Some("2"));
+	}
+
+	#[test]
+	fn build_params_matches_typescript_defaults() {
+		let model = model("azure-openai-responses", "m", "https://res.openai.azure.com");
+		let params = build_params(&model, &context(), None, "deployment-x");
+		assert_eq!(params.get("model").and_then(Value::as_str), Some("deployment-x"));
+		assert_eq!(params.get("stream").and_then(Value::as_bool), Some(true));
+		assert!(params.get("input").and_then(Value::as_array).is_some());
+		// `prompt_cache_key`, `max_output_tokens` and `temperature` are omitted when unset.
+		assert!(!params.contains_key("prompt_cache_key"));
+		assert!(!params.contains_key("max_output_tokens"));
+		assert!(!params.contains_key("temperature"));
+		assert!(!params.contains_key("tools"));
+		assert!(!params.contains_key("reasoning"));
+	}
+
+	#[test]
+	fn build_params_includes_session_tokens_temperature_and_tools() {
+		let model = model("azure-openai-responses", "m", "https://res.openai.azure.com");
+		let mut context = context();
+		context.tools = Some(vec![Tool {
+			name: "read".to_string(),
+			description: "read".to_string(),
+			parameters: serde_json::json!({"type": "object"}),
+		}]);
+		let options = AzureOpenAIResponsesOptions {
+			stream: StreamOptions {
+				session_id: Some("session-1".to_string()),
+				max_tokens: Some(512.0),
+				temperature: Some(0.25),
+				..Default::default()
+			},
+			..Default::default()
+		};
+		let params = build_params(&model, &context, Some(&options), "m");
+		assert_eq!(params.get("prompt_cache_key").and_then(Value::as_str), Some("session-1"));
+		assert_eq!(params.get("max_output_tokens").and_then(Value::as_f64), Some(512.0));
+		assert_eq!(params.get("temperature").and_then(Value::as_f64), Some(0.25));
+		let tools = params.get("tools").and_then(Value::as_array).expect("tools");
+		assert_eq!(tools.len(), 1);
+		assert_eq!(tools[0].get("type").and_then(Value::as_str), Some("function"));
+		assert_eq!(tools[0].get("name").and_then(Value::as_str), Some("read"));
+		assert_eq!(tools[0].get("strict").and_then(Value::as_bool), Some(false));
+	}
+
+	#[test]
+	fn build_params_reasoning_branches() {
+		let mut model = model("azure-openai-responses", "m", "https://res.openai.azure.com");
+		model.reasoning = true;
+		let params = build_params(&model, &context(), None, "m");
+		let reasoning = params.get("reasoning").expect("reasoning");
+		assert_eq!(reasoning.get("effort").and_then(Value::as_str), Some("none"));
+		assert!(!params.contains_key("include"));
+
+		let options = AzureOpenAIResponsesOptions {
+			reasoning_effort: Some("high".to_string()),
+			reasoning_summary: Some(Some("concise".to_string())),
+			..Default::default()
+		};
+		let params = build_params(&model, &context(), Some(&options), "m");
+		let reasoning = params.get("reasoning").expect("reasoning");
+		assert_eq!(reasoning.get("effort").and_then(Value::as_str), Some("high"));
+		assert_eq!(reasoning.get("summary").and_then(Value::as_str), Some("concise"));
+		assert_eq!(
+			params.get("include").and_then(Value::as_array).map(|values| values.len()),
+			Some(1)
+		);
+	}
+
+	#[test]
+	fn build_params_uses_thinking_level_map_for_effort() {
+		let mut model = model("azure-openai-responses", "m", "https://res.openai.azure.com");
+		model.reasoning = true;
+		model.thinking_level_map = Some(
+			[("high".to_string(), Some("high-mapped".to_string()))]
+				.into_iter()
+				.collect(),
+		);
+		let options = AzureOpenAIResponsesOptions {
+			reasoning_effort: Some("high".to_string()),
+			..Default::default()
+		};
+		let params = build_params(&model, &context(), Some(&options), "m");
+		let reasoning = params.get("reasoning").expect("reasoning");
+		assert_eq!(reasoning.get("effort").and_then(Value::as_str), Some("high-mapped"));
+		// No summary requested -> the TS default "auto".
+		assert_eq!(reasoning.get("summary").and_then(Value::as_str), Some("auto"));
+	}
+
+	#[test]
+	fn from_base_keeps_non_serialisable_fields() {
+		let base = StreamOptions {
+			temperature: Some(0.5),
+			signal: Some(tokio_util::sync::CancellationToken::new()),
+			..Default::default()
+		};
+		let options = AzureOpenAIResponsesOptions::from_base(&base);
+		assert_eq!(options.stream.temperature, Some(0.5));
+		assert!(options.stream.signal.is_some());
+		assert!(options.azure_base_url.is_none());
+	}
+
+	#[test]
+	fn azure_tool_call_providers_matches_typescript_set() {
+		for provider in ["openai", "openai-codex", "opencode", "azure-openai-responses"] {
+			assert!(azure_tool_call_providers(provider), "{provider}");
+		}
+		assert!(!azure_tool_call_providers("anthropic"));
+	}
 }

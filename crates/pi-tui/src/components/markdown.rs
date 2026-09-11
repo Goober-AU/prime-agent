@@ -107,11 +107,12 @@ fn match_block_math(src: &str) -> Option<(String, String)> {
             break;
         }
     }
-    if !after.is_empty() && !after.starts_with('\n') {
-        return None;
-    }
+    let trailing_newline = if after.starts_with('\n') { "\n" } else { "" };
 
-    Some((format!("{indent}{raw_body}{trailing}"), text.trim().to_string()))
+    Some((
+        format!("{indent}{raw_body}{trailing}{trailing_newline}"),
+        text.trim().to_string(),
+    ))
 }
 
 /// Port of `INLINE_MATH_PATTERNS`.
@@ -283,7 +284,68 @@ pub fn lex(text: &str) -> LexResult {
     for event in parser {
         builder.handle(event);
     }
-    builder.finish(text)
+    let mut result = builder.finish(text);
+    fill_table_raw(&mut result.tokens, text);
+    result
+}
+
+/// Port of `token.raw` for tables. `marked` exposes the matched source text;
+/// `pulldown-cmark` does not, so the port re-reads the table block from the source
+/// in document order.
+fn fill_table_raw(tokens: &mut [Token], source: &str) {
+    let raws = collect_table_raw_blocks(source);
+    let mut index = 0usize;
+    for token in tokens.iter_mut() {
+        if let Token::Table { raw, .. } = token {
+            if let Some(block) = raws.get(index) {
+                *raw = block.clone();
+            }
+            index += 1;
+        }
+    }
+}
+
+/// Collects raw markdown table blocks: a header line containing `|` followed by a
+/// delimiter row of `-`, `:`, `|` and spaces.
+fn collect_table_raw_blocks(source: &str) -> Vec<String> {
+    let lines: Vec<&str> = source.split('\n').collect();
+    let mut blocks: Vec<String> = Vec::new();
+    let mut index = 0usize;
+    while index + 1 < lines.len() {
+        let header = lines[index];
+        let delimiter = lines[index + 1];
+        if is_table_header_line(header) && is_table_delimiter_line(delimiter) {
+            let mut block: Vec<&str> = vec![header, delimiter];
+            let mut next = index + 2;
+            while next < lines.len() && is_table_row_line(lines[next]) {
+                block.push(lines[next]);
+                next += 1;
+            }
+            blocks.push(block.join("\n"));
+            index = next;
+            continue;
+        }
+        index += 1;
+    }
+    blocks
+}
+
+fn is_table_header_line(line: &str) -> bool {
+    line.contains('|') && !line.trim().is_empty()
+}
+
+fn is_table_delimiter_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || !trimmed.contains('-') {
+        return false;
+    }
+    trimmed
+        .chars()
+        .all(|ch| ch == '-' || ch == ':' || ch == '|' || ch == ' ')
+}
+
+fn is_table_row_line(line: &str) -> bool {
+    line.contains('|') && !line.trim().is_empty()
 }
 
 enum FrameKind {
@@ -298,10 +360,10 @@ enum FrameKind {
         header: Vec<Vec<Token>>,
         rows: Vec<Vec<Vec<Token>>>,
         raw: String,
-        in_head: bool,
-        current_row: Vec<Vec<Token>>,
-        cell: Vec<Token>,
     },
+    TableHead,
+    TableRow,
+    TableCell,
     Strong,
     Em,
     Link { href: String, text: String },
@@ -315,7 +377,6 @@ struct Frame {
 struct TokenBuilder {
     stack: Vec<Frame>,
     use_math: bool,
-    table_start: Option<usize>,
 }
 
 impl TokenBuilder {
@@ -326,7 +387,6 @@ impl TokenBuilder {
                 tokens: Vec::new(),
             }],
             use_math,
-            table_start: None,
         }
     }
 
@@ -384,47 +444,14 @@ impl TokenBuilder {
                 items: Vec::new(),
             },
             Tag::Item => FrameKind::Item,
-            Tag::Table(_) => {
-                self.table_start = Some(0);
-                FrameKind::Table {
-                    header: Vec::new(),
-                    rows: Vec::new(),
-                    raw: String::new(),
-                    in_head: false,
-                    current_row: Vec::new(),
-                    cell: Vec::new(),
-                }
-            }
-            Tag::TableHead => {
-                if let Some(Frame {
-                    kind: FrameKind::Table { in_head, .. },
-                    ..
-                }) = self.stack.last_mut()
-                {
-                    *in_head = true;
-                }
-                return;
-            }
-            Tag::TableRow => {
-                if let Some(Frame {
-                    kind: FrameKind::Table { current_row, .. },
-                    ..
-                }) = self.stack.last_mut()
-                {
-                    current_row.clear();
-                }
-                return;
-            }
-            Tag::TableCell => {
-                if let Some(Frame {
-                    kind: FrameKind::Table { cell, .. },
-                    ..
-                }) = self.stack.last_mut()
-                {
-                    cell.clear();
-                }
-                return;
-            }
+            Tag::Table(_) => FrameKind::Table {
+                header: Vec::new(),
+                rows: Vec::new(),
+                raw: String::new(),
+            },
+            Tag::TableHead => FrameKind::TableHead,
+            Tag::TableRow => FrameKind::TableRow,
+            Tag::TableCell => FrameKind::TableCell,
             Tag::Emphasis => FrameKind::Em,
             Tag::Strong => FrameKind::Strong,
             Tag::Link { dest_url, .. } => FrameKind::Link {
@@ -449,37 +476,31 @@ impl TokenBuilder {
 
     fn end(&mut self, tag: TagEnd) {
         match tag {
-            TagEnd::TableHead => {
+            TagEnd::TableHead | TagEnd::TableRow => {
+                let frame = match self.stack.pop() {
+                    Some(frame) => frame,
+                    None => return,
+                };
+                let cells = cells_from_row(&frame.tokens);
                 if let Some(Frame {
-                    kind: FrameKind::Table { header, in_head, current_row, .. },
+                    kind: FrameKind::Table { header, rows, .. },
                     ..
                 }) = self.stack.last_mut()
                 {
-                    *header = std::mem::take(current_row);
-                    *in_head = false;
-                }
-                return;
-            }
-            TagEnd::TableRow => {
-                if let Some(Frame {
-                    kind: FrameKind::Table { rows, current_row, .. },
-                    ..
-                }) = self.stack.last_mut()
-                {
-                    let row = std::mem::take(current_row);
-                    rows.push(row);
+                    if tag == TagEnd::TableHead {
+                        *header = cells;
+                    } else {
+                        rows.push(cells);
+                    }
                 }
                 return;
             }
             TagEnd::TableCell => {
-                if let Some(Frame {
-                    kind: FrameKind::Table { current_row, cell, .. },
-                    ..
-                }) = self.stack.last_mut()
-                {
-                    let cell_tokens = std::mem::take(cell);
-                    current_row.push(cell_tokens);
-                }
+                let frame = match self.stack.pop() {
+                    Some(frame) => frame,
+                    None => return,
+                };
+                self.push_token(Token::Paragraph { tokens: frame.tokens });
                 return;
             }
             _ => {}
@@ -502,7 +523,11 @@ impl TokenBuilder {
                 depth,
                 tokens: frame.tokens,
             },
-            FrameKind::CodeBlock { lang, text } => Token::Code { text, lang },
+            FrameKind::CodeBlock { lang, text } => Token::Code {
+                // `marked` reports fenced code content without the trailing newline.
+                text: text.strip_suffix('\n').map(|t| t.to_string()).unwrap_or(text),
+                lang,
+            },
             FrameKind::Item => {
                 if let Some(Frame {
                     kind: FrameKind::List { items, .. },
@@ -527,8 +552,9 @@ impl TokenBuilder {
                 header,
                 rows,
                 raw,
-                ..
             } => Token::Table { header, rows, raw },
+            // Table scaffolding frames are consumed by their own `TagEnd` arms.
+            FrameKind::TableHead | FrameKind::TableRow | FrameKind::TableCell => return,
             FrameKind::Strong => Token::Strong { tokens: frame.tokens },
             FrameKind::Em => Token::Em { tokens: frame.tokens },
             FrameKind::Link { href, .. } => {
@@ -627,6 +653,18 @@ impl TokenBuilder {
         }
         LexResult { tokens, links }
     }
+}
+
+/// Port of `token.header[i].tokens` / `row[i].tokens`: each table cell frame wraps
+/// its inline tokens in a paragraph token.
+fn cells_from_row(tokens: &[Token]) -> Vec<Vec<Token>> {
+    tokens
+        .iter()
+        .map(|token| match token {
+            Token::Paragraph { tokens } => tokens.clone(),
+            other => vec![other.clone()],
+        })
+        .collect()
 }
 
 fn flush_text(pending: &mut String, push: &mut impl FnMut(Token)) {

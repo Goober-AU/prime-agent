@@ -273,10 +273,11 @@ pub fn stream_bedrock_with_options(
 	let model = model.clone();
 	let context = context.clone();
 	let options = options.unwrap_or_default();
+	let producer = stream.clone();
 	let out = stream.clone();
 
 	// TS: `(async () => { try { ... } catch (error) { ... } })();`
-	out.spawn(async move {
+	producer.spawn(async move {
 		let mut output = AssistantMessage {
 			role: "assistant".to_string(),
 			content: Vec::new(),
@@ -938,6 +939,10 @@ pub fn create_image_block(mime_type: &str, data: &str) -> Result<Value, Provider
 }
 
 /// TS: `convertMessages(context, model, cacheRetention)`.
+///
+/// NOTE: the TypeScript `default: throw new Error("Unknown user content type")`,
+/// `"Unknown assistant content type"` and `"Unknown message role"` branches are unreachable in
+/// Rust because the message/content unions are closed enums.
 pub fn convert_messages(
 	context: &Context,
 	model: &Model,
@@ -1248,6 +1253,9 @@ fn thinking_budget_for(budgets: &ThinkingBudgets, level: &str) -> Option<f64> {
 // SigV4 (the SDK signed the request; the port signs it here)
 // ---------------------------------------------------------------------------
 
+/// `SignatureV4` is constructed with `service` = "bedrock" for the ConverseStream API.
+const BEDROCK_SIGNING_SERVICE: &str = "bedrock";
+
 /// `x-amz-content-sha256` (the SDK sets it because `applyChecksum` defaults to true).
 const SHA256_HEADER: &str = "x-amz-content-sha256";
 const AMZ_DATE_HEADER: &str = "x-amz-date";
@@ -1413,8 +1421,34 @@ pub struct SignedRequestHeaders {
 }
 
 /// Sign a request exactly like `SignatureV4.signRequest` does.
+/// Sign a Bedrock request (the provider's `SignatureV4({ service: "bedrock" })`).
 #[allow(clippy::too_many_arguments)]
 pub fn sign_request(
+	method: &str,
+	path: &str,
+	query: &[(String, String)],
+	headers: &IndexMap<String, String>,
+	body: &str,
+	region: &str,
+	credentials: &AwsCredentials,
+	signing_date_ms: i64,
+) -> SignedRequestHeaders {
+	sign_request_for_service(
+		method,
+		path,
+		query,
+		headers,
+		body,
+		region,
+		BEDROCK_SIGNING_SERVICE,
+		credentials,
+		signing_date_ms,
+	)
+}
+
+/// The generic `SignatureV4.signRequest` port (`service` is the signer's service name).
+#[allow(clippy::too_many_arguments)]
+pub fn sign_request_for_service(
 	method: &str,
 	path: &str,
 	query: &[(String, String)],
@@ -1738,7 +1772,8 @@ pub struct ConverseStreamCommandInput {
 }
 
 impl ConverseStreamCommandInput {
-	/// The JSON body the SDK sends: only the members that are present.
+	/// The command input as the TypeScript hands it to `onPayload` (and as the SDK receives it):
+	/// every present member, `modelId` included.
 	pub fn to_json(&self) -> Value {
 		let mut body = Map::new();
 		body.insert("modelId".to_string(), Value::String(self.model_id.clone()));
@@ -1765,9 +1800,26 @@ impl ConverseStreamCommandInput {
 		}
 		Value::Object(body)
 	}
+
+	/// The JSON body the SDK actually sends.
+	///
+	/// `modelId` is an `httpLabel` member of `ConverseStreamRequest`, so the SDK serializes it
+	/// into the URI (`/model/{modelId}/converse-stream`) and leaves it out of the body.
+	pub fn to_wire_json(&self) -> Value {
+		let mut body = match self.to_json() {
+			Value::Object(body) => body,
+			other => return other,
+		};
+		body.shift_remove("modelId");
+		Value::Object(body)
+	}
 }
 
 /// TS: the `commandInput` object literal in `streamBedrock`.
+///
+/// NOTE: the TypeScript lets `@aws-sdk/client-bedrock-runtime` apply the ConverseStream input
+/// defaults. The port keeps the fields the TS object literal carries and only the SDK defaults
+/// this provider can observe through its own options.
 pub fn build_command_input(
 	context: &Context,
 	model: &Model,
@@ -2149,7 +2201,7 @@ async fn run_bedrock_stream(
 	let region = config.region.clone().unwrap_or_else(|| "us-east-1".to_string());
 	let endpoint = resolve_endpoint(&config, &region);
 	let path = converse_stream_path(&command_input.model_id);
-	let body = command_input.to_json().to_string();
+	let body = command_input.to_wire_json().to_string();
 
 	let mut headers: IndexMap<String, String> = IndexMap::new();
 	headers.insert("content-type".to_string(), "application/json".to_string());
@@ -2162,7 +2214,6 @@ async fn run_bedrock_stream(
 			Some(credentials) => credentials,
 			None => resolve_aws_credentials(options)?,
 		};
-		let service = "bedrock";
 		let signed = sign_request(
 			"POST",
 			&path,
@@ -2170,7 +2221,6 @@ async fn run_bedrock_stream(
 			&headers,
 			&body,
 			&region,
-			service,
 			&credentials,
 			now_ms(),
 		);
@@ -2898,6 +2948,20 @@ mod tests {
 		assert_eq!(body["system"].as_array().unwrap().len(), 2);
 		assert!(body.get("toolConfig").is_none());
 
+		// The wire body drops `modelId` (it is an httpLabel member of the request).
+		let wire = input.to_wire_json();
+		let wire_keys: Vec<&String> = wire.as_object().unwrap().keys().collect();
+		assert_eq!(
+			wire_keys,
+			vec![
+				"messages",
+				"system",
+				"inferenceConfig",
+				"additionalModelRequestFields",
+				"requestMetadata"
+			]
+		);
+
 		// Fable 5 drops temperature.
 		let fable = model("global.anthropic.claude-fable-5", "Claude Fable 5");
 		let input = build_command_input(&context, &fable, &options, "short").unwrap();
@@ -2934,7 +2998,7 @@ mod tests {
 		let signing_date = chrono::DateTime::parse_from_rfc3339("2015-08-30T12:36:00Z")
 			.unwrap()
 			.timestamp_millis();
-		let signed = sign_request(
+		let signed = sign_request_for_service(
 			"GET",
 			"/",
 			&query,
@@ -2978,7 +3042,6 @@ mod tests {
 			&headers,
 			body,
 			"us-east-1",
-			"bedrock",
 			&credentials,
 			0,
 		);

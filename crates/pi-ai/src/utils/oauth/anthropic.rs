@@ -257,7 +257,7 @@ async fn exchange_authorization_code(
 /// Login with Anthropic OAuth (authorization code + PKCE).
 pub async fn login_anthropic(options: AnthropicLoginOptions) -> Result<OAuthCredentials, String> {
     let (verifier, challenge) = generate_pkce().await;
-    let mut server = start_callback_server(&verifier).await?;
+    let server = start_callback_server(&verifier).await?;
 
     let mut code: Option<String> = None;
     let mut state: Option<String> = None;

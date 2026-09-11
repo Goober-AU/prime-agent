@@ -1,5 +1,5 @@
-//! Generated from node_modules/get-east-asian-width/lookup-data.js (Unicode data
-//! used by packages/tui/src/utils.ts through the eastAsianWidth() helper).
+// Generated from node_modules/get-east-asian-width/lookup-data.js (Unicode data
+// used by packages/tui/src/utils.ts through the eastAsianWidth() helper).
 
 pub const AMBIGUOUS_MINIMAL_CODE_POINT: u32 = 161;
 pub const AMBIGUOUS_MAXIMUM_CODE_POINT: u32 = 1114109;

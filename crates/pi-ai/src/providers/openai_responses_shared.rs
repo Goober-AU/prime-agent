@@ -991,6 +991,10 @@ pub async fn process_responses_stream(
                         }
                     }
                 };
+                let arguments = match args {
+                    Value::Object(map) => map,
+                    _ => Map::new(),
+                };
 
                 let tool_call: ToolCall = match current_block.take() {
                     Some(CurrentBlock::ToolCall { index, .. }) => {
@@ -1007,7 +1011,7 @@ pub async fn process_responses_stream(
                                     get_str(&item, "id").unwrap_or_default()
                                 ),
                                 get_str(&item, "name").unwrap_or_default(),
-                                args,
+                                arguments.clone(),
                             )
                         }
                     }
@@ -1018,7 +1022,7 @@ pub async fn process_responses_stream(
                             get_str(&item, "id").unwrap_or_default()
                         ),
                         get_str(&item, "name").unwrap_or_default(),
-                        args,
+                        arguments,
                     ),
                 };
 

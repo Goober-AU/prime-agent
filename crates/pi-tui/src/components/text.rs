@@ -146,7 +146,7 @@ mod tests {
         let mut text = Text::new(String::new(), 1, 1, None);
         assert_eq!(text.render(10.0), Vec::<String>::new());
         let mut whitespace = Text::new("   ".to_string(), 1, 1, None);
-        assert_eq!(whitespace.render(10), Vec::<String>::new());
+        assert_eq!(whitespace.render(10.0), Vec::<String>::new());
     }
 
     #[test]

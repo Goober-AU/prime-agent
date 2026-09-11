@@ -146,16 +146,21 @@ fn find_markers(text: &str, prefix: &str) -> Vec<(usize, usize, i64)> {
         let mut end: Option<usize> = None;
         if text[cursor..].starts_with(']') {
             end = Some(cursor + 1);
-        } else if text[cursor..].starts_with(" +") {
-            cursor += 2;
+        } else if text[cursor..].starts_with(' ') {
+            // `( (\+\d+ lines|\d+ chars))?` - a space, then either "+N lines" or "N chars".
+            cursor += 1;
+            let has_plus = text[cursor..].starts_with('+');
+            if has_plus {
+                cursor += 1;
+            }
             let number_start = cursor;
             while cursor < text.len() && text.as_bytes()[cursor].is_ascii_digit() {
                 cursor += 1;
             }
             if cursor > number_start {
-                if text[cursor..].starts_with(" lines]") {
+                if has_plus && text[cursor..].starts_with(" lines]") {
                     end = Some(cursor + 7);
-                } else if text[cursor..].starts_with(" chars]") {
+                } else if !has_plus && text[cursor..].starts_with(" chars]") {
                     end = Some(cursor + 7);
                 }
             }
@@ -1136,16 +1141,21 @@ fn replace_paste_marker(text: &str, paste_id: i64, content: &str) -> String {
         let mut end: Option<usize> = None;
         if text[cursor..].starts_with(']') {
             end = Some(cursor + 1);
-        } else if text[cursor..].starts_with(" +") {
-            cursor += 2;
+        } else if text[cursor..].starts_with(' ') {
+            // `( (\+\d+ lines|\d+ chars))?` - a space, then either "+N lines" or "N chars".
+            cursor += 1;
+            let has_plus = text[cursor..].starts_with('+');
+            if has_plus {
+                cursor += 1;
+            }
             let number_start = cursor;
             while cursor < text.len() && text.as_bytes()[cursor].is_ascii_digit() {
                 cursor += 1;
             }
             if cursor > number_start {
-                if text[cursor..].starts_with(" lines]") {
+                if has_plus && text[cursor..].starts_with(" lines]") {
                     end = Some(cursor + 7);
-                } else if text[cursor..].starts_with(" chars]") {
+                } else if !has_plus && text[cursor..].starts_with(" chars]") {
                     end = Some(cursor + 7);
                 }
             }
@@ -1174,15 +1184,16 @@ fn is_autocomplete_word_char(char: &str) -> bool {
 
 /// Port of `/(?:^|[\s])[@#][^\s]*$/`.
 fn matches_symbol_context(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut index = bytes.len();
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = chars.len();
     while index > 0 {
         index -= 1;
-        match bytes[index] {
-            b'@' | b'#' => {
-                return index == 0 || bytes[index - 1].is_ascii_whitespace();
+        match chars[index] {
+            // `[^\s]*` may be empty, so the `@`/`#` itself can be the last character.
+            '@' | '#' => {
+                return index == 0 || chars[index - 1].is_whitespace();
             }
-            b if b.is_ascii_whitespace() => return false,
+            ch if ch.is_whitespace() => return false,
             _ => {}
         }
     }
@@ -1191,23 +1202,20 @@ fn matches_symbol_context(text: &str) -> bool {
 
 /// Port of `/(?:^|[ \t])(?:@(?:"[^"]*|[^\s]*)|#[^\s]*)$/`.
 fn matches_attachment_context(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    let mut index = bytes.len();
-    let mut quoted = false;
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = chars.len();
     while index > 0 {
         index -= 1;
-        let byte = bytes[index];
-        if byte == b'"' {
-            quoted = !quoted;
-            continue;
+        let ch = chars[index];
+        if ch == '#' && index > 0 && chars[index - 1] == '@' {
+            // `@(?:"[^"]*|[^\s]*)`: after an `@` the rest is `[^\s]*`, so the
+            // `#` is part of the same token and never its own match.
+            return false;
         }
-        if byte == b'@' || byte == b'#' {
-            if quoted && byte == b'#' {
-                return false;
-            }
-            return index == 0 || bytes[index - 1] == b' ' || bytes[index - 1] == b'\t';
+        if ch == '@' || ch == '#' {
+            return index == 0 || chars[index - 1] == ' ' || chars[index - 1] == '\t';
         }
-        if byte.is_ascii_whitespace() {
+        if ch.is_whitespace() {
             return false;
         }
     }
@@ -2565,6 +2573,7 @@ impl Editor {
 
     /// Port of the debounce timer firing. Call from the TUI tick while autocomplete
     /// debounce is pending; a no-op otherwise.
+    #[allow(dead_code)]
     pub fn poll_autocomplete(&mut self) {
         let pending = match &self.pending_autocomplete {
             Some(pending) if pending.due <= std::time::Instant::now() => pending.clone(),

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::types::{Api, Context, Model, SimpleStreamOptions, Usage};
+use crate::types::{Api, Model, SimpleStreamOptions, Usage};
 
 /// An opaque provider checkpoint; replay the entire window without rewriting its items.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

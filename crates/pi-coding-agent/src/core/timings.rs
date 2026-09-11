@@ -57,9 +57,10 @@ pub fn time(label: &str) {
     }
     let now = now_ms();
     if let Ok(mut guard) = state().lock() {
+        let last_time = guard.last_time;
         guard.timings.push(TimingEntry {
             label: label.to_string(),
-            ms: now - guard.last_time,
+            ms: now - last_time,
         });
         guard.last_time = now;
     }

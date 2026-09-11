@@ -245,6 +245,13 @@ pub fn fuzzy_match(query: &str, text: &str) -> MatchResult {
     if swapped_query.is_empty() {
         return primary_match;
     }
+    let swapped_match = match_query(&swapped_query);
+    if !swapped_match.matches {
+        return primary_match;
+    }
+    MatchResult { matches: true, score: swapped_match.score + 5.0 }
+}
+
 /// `alphaNumericMatch` swaps letters+digits to digits+letters; `numericAlphaMatch`
 /// swaps digits+letters to letters+digits; anything else has no swapped query.
 fn swapped_query_of(value: &str) -> Option<String> {

@@ -521,7 +521,7 @@ impl SettingsStorage for FileSettingsStorage {
             None
         };
         let mut next = update(current.as_deref());
-        if let Some(next_value) = next {
+        if next.is_some() {
             if !Path::new(&dir).exists() {
                 let _ = std::fs::create_dir_all(&dir);
             }
@@ -2738,8 +2738,8 @@ mod extra_tests {
         manager.set_idle_eviction_minutes(IdleEvictionMinutes::Minutes(0.0));
     }
 
-    #[test]
-    fn load_from_storage_treats_missing_and_blank_files_as_empty() {
+    #[tokio::test]
+    async fn load_from_storage_treats_missing_and_blank_files_as_empty() {
         let temp = TempDir::new();
         let agent_dir = temp.child("agent");
         let project_dir = temp.child("project");

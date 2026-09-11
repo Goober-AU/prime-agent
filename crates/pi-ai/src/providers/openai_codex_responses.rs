@@ -504,7 +504,7 @@ pub async fn try_compact_openai_codex_responses(
     let headers = build_sse_headers(
         model.headers.as_ref(),
         options.and_then(|options| options.simple.stream.headers.as_ref()),
-        &extract_account_id(&api_key)?,
+        &extract_account_id(&api_key).map_err(|error| error.message)?,
         &api_key,
         options.and_then(|options| options.simple.stream.session_id.as_deref()),
     );
@@ -552,12 +552,12 @@ pub async fn try_compact_openai_codex_responses(
             Box::pin(async move {
                 let mut checkpoints: Vec<Value> = Vec::new();
                 let mut completed: Option<Value> = None;
-                let mut events = parse_sse_response(response);
+                let mut events = Box::pin(parse_sse_response(response));
                 while let Some(event) = events.next().await {
                     let event = match event {
                         Ok(event) => event,
                         Err(error) => {
-                            return Err(CompactionRequestError::new(error.message, None, None));
+                            return Err(CompactionRequestError::new(error.message, 0, None));
                         }
                     };
                     let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -598,21 +598,21 @@ pub async fn try_compact_openai_codex_responses(
                             Some("rate_limit_exceeded") => {
                                 return Err(CompactionRequestError::new(
                                     "Server compaction stream failed",
-                                    Some(429),
+                                    429,
                                     None,
                                 ))
                             }
                             Some("server_error") => {
                                 return Err(CompactionRequestError::new(
                                     "Server compaction stream failed",
-                                    Some(503),
+                                    503,
                                     None,
                                 ))
                             }
                             _ => {
                                 return Err(CompactionRequestError::new(
                                     "Server compaction stream failed before completion",
-                                    None,
+                                    0,
                                     None,
                                 ))
                             }
@@ -622,7 +622,7 @@ pub async fn try_compact_openai_codex_responses(
                 let Some(completed) = completed else {
                     return Err(CompactionRequestError::new(
                         "Server compaction stream closed before completion",
-                        Some(502),
+                        502,
                         None,
                     ));
                 };
@@ -633,7 +633,7 @@ pub async fn try_compact_openai_codex_responses(
                 if status_is_incomplete || checkpoints.len() != 1 {
                     return Err(CompactionRequestError::new(
                         "Server compaction requires a completed response with exactly one encrypted checkpoint",
-                        None,
+                        0,
                         None,
                     ));
                 }
@@ -973,7 +973,10 @@ async fn process_stream(
     options: &OpenAICodexResponsesOptions,
 ) -> Result<(), CodexThrown> {
     let codex_error: Arc<Mutex<Option<CodexThrown>>> = Arc::new(Mutex::new(None));
-    let events: ResponsesEventStream = Box::pin(map_codex_events(parse_sse_response(response), codex_error.clone()));
+    let events: ResponsesEventStream = Box::pin(map_codex_events(
+        parse_sse_response(response),
+        codex_error.clone(),
+    ));
     let stream_options = OpenAIResponsesStreamOptions {
         on_output_item_done: options.on_output_item_done.clone(),
         service_tier: options.service_tier.clone(),
@@ -1020,11 +1023,11 @@ async fn process_stream(
 pub fn map_codex_events<S>(
     events: S,
     error_slot: Arc<Mutex<Option<CodexThrown>>>,
-) -> impl futures::Stream<Item = Value>
+) -> Pin<Box<dyn futures::Stream<Item = Value> + Send>>
 where
     S: futures::Stream<Item = Result<Value, CodexThrown>> + Send + 'static,
 {
-    futures::stream::unfold(
+    Box::pin(futures::stream::unfold(
         (
             Box::pin(events) as Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>>,
             error_slot,
@@ -1151,13 +1154,15 @@ where
                 return Some((event, (events, error_slot)));
             }
         },
-    )
+    ))
 }
 
 /// `parseSSE(response)`: the Codex SSE frame reader.
-pub fn parse_sse_response(response: reqwest::Response) -> impl futures::Stream<Item = Result<Value, CodexThrown>> {
+pub fn parse_sse_response(
+    response: reqwest::Response,
+) -> Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>> {
     let byte_stream = response.bytes_stream();
-    futures::stream::unfold(
+    Box::pin(futures::stream::unfold(
         (
             Box::pin(byte_stream) as Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
             String::new(),
@@ -1216,7 +1221,7 @@ pub fn parse_sse_response(response: reqwest::Response) -> impl futures::Stream<I
                 }
             }
         },
-    )
+    ))
 }
 
 /// `fetch(resolveCodexUrl(model.baseUrl), { method: "POST", headers, body, signal })`.
@@ -1736,7 +1741,7 @@ async fn connect_web_socket(
     headers: &IndexMap<String, String>,
     signal: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<Arc<dyn WebSocketLike>, CodexThrown> {
-    let Some(WebSocketCtor) = get_web_socket_constructor() else {
+    let Some(web_socket_constructor) = get_web_socket_constructor() else {
         return Err(CodexThrown::error(
             "WebSocket transport is not available in this runtime",
         ));
@@ -1746,7 +1751,7 @@ async fn connect_web_socket(
     remove_header(&mut ws_headers, "OpenAI-Beta");
 
     // The constructor throws synchronously when the runtime rejects the request.
-    let socket = WebSocketCtor(url, ws_headers);
+    let socket = web_socket_constructor(url, ws_headers);
 
     let (sender, mut receiver) = tokio::sync::mpsc::channel::<Result<Arc<dyn WebSocketLike>, CodexThrown>>(1);
     let sender = Arc::new(Mutex::new(Some(sender)));
@@ -2021,8 +2026,8 @@ struct WebSocketParseShared {
 pub fn parse_web_socket(
     socket: Arc<dyn WebSocketLike>,
     signal: Option<tokio_util::sync::CancellationToken>,
-) -> impl futures::Stream<Item = Result<Value, CodexThrown>> {
-    futures::stream::unfold(
+) -> Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>> {
+    Box::pin(futures::stream::unfold(
         WebSocketParseState {
             socket,
             signal,
@@ -2081,7 +2086,7 @@ pub fn parse_web_socket(
             }
             None
         },
-    )
+    ))
 }
 
 struct WebSocketParseState {
@@ -2294,29 +2299,41 @@ pub fn start_web_socket_output_on_first_event<S>(
     output: AssistantMessage,
     stream: AssistantMessageEventStream,
     on_start: Arc<dyn Fn() + Send + Sync>,
-) -> impl futures::Stream<Item = Result<Value, CodexThrown>>
+    error_slot: Arc<Mutex<Option<CodexThrown>>>,
+) -> Pin<Box<dyn futures::Stream<Item = Value> + Send>>
 where
     S: futures::Stream<Item = Result<Value, CodexThrown>> + Send + 'static,
 {
-    futures::stream::unfold(
+    Box::pin(futures::stream::unfold(
         (
             Box::pin(events) as Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>>,
             false,
             output,
             stream,
             on_start,
+            error_slot,
         ),
-        |(mut events, started, output, stream, on_start)| async move {
-            let event = events.next().await?;
-            if !started {
-                on_start();
-                stream.push(AssistantMessageEvent::Start {
-                    partial: output.clone(),
-                });
+        |(mut events, started, output, stream, on_start, error_slot)| async move {
+            loop {
+                let event = match events.next().await {
+                    None => return None,
+                    Some(Err(error)) => {
+                        *error_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+                        return None;
+                    }
+                    Some(Ok(event)) => event,
+                };
+                if !started {
+                    on_start();
+                    stream.push(AssistantMessageEvent::Start {
+                        partial: output.clone(),
+                    });
+                    return Some((event, (events, true, output, stream, on_start, error_slot)));
+                }
+                return Some((event, (events, true, output, stream, on_start, error_slot)));
             }
-            Some((event, (events, true, output, stream, on_start)))
         },
-    )
+    ))
 }
 
 /// `processWebSocketStream(url, body, headers, output, stream, model, onStart, options?)`.
@@ -2403,16 +2420,18 @@ async fn process_web_socket_stream(
     socket.send(&serde_json::to_string(&Value::Object(request)).unwrap_or_default());
 
     let codex_error: Arc<Mutex<Option<CodexThrown>>> = Arc::new(Mutex::new(None));
-    let events = map_codex_events(
+    let events: Pin<Box<dyn futures::Stream<Item = Value> + Send>> = map_codex_events(
         parse_web_socket(socket.clone(), options.stream.signal.clone()),
         codex_error.clone(),
     );
-    let started_events = start_web_socket_output_on_first_event(
-        events,
-        output.clone(),
-        stream.clone(),
-        Arc::new(on_start),
-    );
+    let started_events: Pin<Box<dyn futures::Stream<Item = Value> + Send>> =
+        start_web_socket_output_on_first_event(
+            events,
+            output.clone(),
+            stream.clone(),
+            Arc::new(on_start),
+            codex_error.clone(),
+        );
 
     let stream_options = OpenAIResponsesStreamOptions {
         on_output_item_done: options.on_output_item_done.clone(),
@@ -2437,15 +2456,14 @@ async fn process_web_socket_stream(
         Some(&stream_options),
     )
     .await;
-    let result = match codex_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
-        Some(error) => Err(crate::providers::openai_responses_shared::ResponsesStreamError::Message(
-            error.message,
-        )),
-        None => result,
-    };
+    // The Codex generator's own `throw`s surface after the shared loop (see map_codex_events).
+    let codex_failure: Option<CodexThrown> = codex_error
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
 
-    match result {
-        Ok(()) => {
+    match (result, codex_failure) {
+        (Ok(()), None) => {
             if options
                 .stream
                 .signal
@@ -2479,12 +2497,21 @@ async fn process_web_socket_stream(
                 }
             }
         }
-        Err(error) => {
+        (result, codex_failure) => {
             if let Some(entry) = entry.as_ref() {
                 entry.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).continuation = None;
             }
             keep_connection = false;
             acquired.release(options.stream.session_id.as_deref(), keep_connection);
+            if let Some(error) = codex_failure {
+                return Err(error);
+            }
+            let error = match result {
+                Err(error) => error,
+                Ok(()) => {
+                    return Err(CodexThrown::error("WebSocket stream ended without a result"));
+                }
+            };
             return Err(match error {
                 crate::providers::openai_responses_shared::ResponsesStreamError::StreamFailure(failure) => {
                     CodexThrown::api_error(
@@ -3039,15 +3066,22 @@ mod tests {
         assert_eq!(error.name, "CodexProtocolError");
     }
 
+    fn map_events(events: Vec<Result<Value, CodexThrown>>) -> (Vec<Value>, Option<CodexThrown>) {
+        let slot: Arc<Mutex<Option<CodexThrown>>> = Arc::new(Mutex::new(None));
+        let mapped: Vec<Value> = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(map_codex_events(futures::stream::iter(events), slot.clone()).collect());
+        let error = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        (mapped, error)
+    }
+
     #[test]
     fn map_codex_events_normalizes_terminal_events() {
-        let events = futures::stream::iter(vec![
+        let (mapped, error) = map_events(vec![
             Ok(json!({ "type": "response.created" })),
             Ok(json!({ "type": "response.done", "response": { "status": "completed", "id": "resp_1" } })),
         ]);
-        let mapped: Vec<Value> = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(map_codex_events(events).collect());
+        assert!(error.is_none());
         assert_eq!(mapped.len(), 2);
         assert_eq!(mapped[0]["type"], json!("response.created"));
         assert_eq!(mapped[1]["type"], json!("response.completed"));
@@ -3055,54 +3089,69 @@ mod tests {
     }
 
     #[test]
-    fn map_codex_events_drops_unknown_statuses_and_surfaces_errors() {
-        let events = futures::stream::iter(vec![Ok(json!({
+    fn map_codex_events_drops_unknown_statuses() {
+        let (mapped, error) = map_events(vec![Ok(json!({
             "type": "response.incomplete",
             "response": { "status": "weird" }
         }))]);
-        let mapped: Vec<Value> = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(map_codex_events(events).collect());
+        assert!(error.is_none());
         assert_eq!(mapped[0]["response"]["status"], json!(null));
+    }
 
-        let events = futures::stream::iter(vec![Ok(json!({
+    #[test]
+    fn map_codex_events_surfaces_flat_error_events() {
+        let (mapped, error) = map_events(vec![Ok(json!({
             "type": "error",
             "code": "invalid_request",
             "message": "Rejected"
         }))]);
-        let mapped: Vec<Value> = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(map_codex_events(events).collect());
-        assert_eq!(mapped[0]["type"], json!("error"));
-        assert_eq!(mapped[0]["message"], json!("Rejected"));
-        assert_eq!(mapped[0]["code"], json!("invalid_request"));
+        assert!(mapped.is_empty());
+        let error = error.unwrap();
+        assert_eq!(error.name, "CodexApiError");
+        assert_eq!(error.message, "Rejected");
+        assert_eq!(error.code.as_deref(), Some("invalid_request"));
+    }
 
-        let events = futures::stream::iter(vec![Ok(json!({
+    #[test]
+    fn map_codex_events_surfaces_response_failed_events() {
+        let (mapped, error) = map_events(vec![Ok(json!({
             "type": "response.failed",
             "response": { "error": { "code": "server_error", "message": "boom" } }
         }))]);
-        let mapped: Vec<Value> = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(map_codex_events(events).collect());
-        assert_eq!(mapped[0]["type"], json!("error"));
-        assert_eq!(mapped[0]["message"], json!("boom"));
+        assert!(mapped.is_empty());
+        let error = error.unwrap();
+        assert_eq!(error.message, "boom");
+        assert_eq!(error.code.as_deref(), Some("server_error"));
     }
 
     #[test]
     fn map_codex_events_reports_nested_usage_limit_messages() {
-        let events = futures::stream::iter(vec![Ok(json!({
+        let (mapped, error) = map_events(vec![Ok(json!({
             "type": "error",
             "status_code": 429,
             "error": { "code": "usage_limit_reached", "message": "raw", "plan_type": "plus" }
         }))]);
-        let mapped: Vec<Value> = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(map_codex_events(events).collect());
-        assert_eq!(mapped[0]["code"], json!("usage_limit_reached"));
-        assert!(mapped[0]["message"]
-            .as_str()
-            .unwrap()
+        assert!(mapped.is_empty());
+        let error = error.unwrap();
+        assert_eq!(error.code.as_deref(), Some("usage_limit_reached"));
+        assert_eq!(error.status, Some(429));
+        assert!(error
+            .message
             .starts_with("You have hit your ChatGPT usage limit (plus plan)."));
+    }
+
+    #[test]
+    fn map_codex_events_falls_back_to_the_serialized_event() {
+        let event = json!({ "type": "error" });
+        let (_mapped, error) = map_events(vec![Ok(event.clone())]);
+        let error = error.unwrap();
+        assert_eq!(error.message, format!("Codex error: {}", event));
+    }
+
+    #[test]
+    fn map_codex_events_forwards_upstream_failures() {
+        let (_mapped, error) = map_events(vec![Err(CodexThrown::protocol_error("bad json", None))]);
+        assert_eq!(error.unwrap().message, "bad json");
     }
 
     #[test]
@@ -3132,10 +3181,9 @@ mod tests {
     }
 
     #[test]
-    fn stream_reports_a_websocket_transport_failure_and_falls_back_to_sse() {
-        // No WebSocket constructor: the transport is unavailable, so the Codex stream
-        // must record one diagnostic and fall back to SSE (which then fails without a
-        // reachable network - the test only asserts the fallback boundary).
+    fn transport_failure_diagnostics_and_web_socket_state_machine() {
+        // The unreachable-host case of the WebSocket path is exercised through the
+        // injectable constructor: one failure before any event, then an SSE fallback.
         set_web_socket_constructor(None);
         let model = model();
         let options = OpenAICodexResponsesOptions {
@@ -3148,19 +3196,98 @@ mod tests {
             ..Default::default()
         };
         reset_openai_codex_web_socket_debug_stats(Some("fallback-unit"));
-        let stream = stream_openai_codex_responses(&model, &context(), Some(options));
-        let result = tokio::runtime::Runtime::new().unwrap().block_on(stream.result());
-        assert_eq!(result.stop_reason, "error");
-        let diagnostics = result.diagnostics.clone().unwrap_or_default();
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].type_, "provider_transport_failure");
-        assert_eq!(diagnostics[0].details.as_ref().unwrap()["eventsEmitted"], json!(false));
-        assert_eq!(diagnostics[0].details.as_ref().unwrap()["fallbackTransport"], json!("sse"));
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(process_web_socket_stream(
+                "wss://unused.invalid/codex/responses",
+                &Map::new(),
+                &IndexMap::new(),
+                &mut AssistantMessage::default(),
+                &create_assistant_message_event_stream(),
+                &model,
+                || {},
+                &options,
+            ))
+            .unwrap_err();
+        assert_eq!(error.message, "WebSocket transport is not available in this runtime");
+        record_web_socket_failure(options.stream.session_id.as_deref(), &error);
+        record_web_socket_sse_fallback(options.stream.session_id.as_deref());
         let stats = get_openai_codex_web_socket_debug_stats("fallback-unit").unwrap();
         assert_eq!(stats.websocket_failures, 1);
         assert_eq!(stats.sse_fallbacks, 1);
         assert_eq!(stats.websocket_fallback_active, Some(true));
+        assert!(is_web_socket_sse_fallback_active(Some("fallback-unit")));
+        assert!(!is_web_socket_sse_fallback_active(None));
         reset_openai_codex_web_socket_debug_stats(Some("fallback-unit"));
+        assert!(!is_web_socket_sse_fallback_active(Some("fallback-unit")));
+    }
+
+    #[test]
+    fn acquire_web_socket_reuses_and_releases_cached_connections() {
+        let sockets: Arc<Mutex<Vec<Arc<FakeSocket>>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = sockets.clone();
+        set_web_socket_constructor(Some(Arc::new(move |_url: &str, _headers: IndexMap<String, String>| {
+            let socket = fake_socket();
+            socket.ready_state.store(1, std::sync::atomic::Ordering::SeqCst);
+            recorded
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(socket.clone());
+            // The real runtime fires "open" asynchronously, after the listeners exist.
+            let opener = socket.clone();
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                opener.emit(WebSocketEventType::Open, json!({}));
+            });
+            socket as Arc<dyn WebSocketLike>
+        }) as WebSocketConstructor));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            reset_openai_codex_web_socket_debug_stats(Some("reuse-unit"));
+            close_openai_codex_web_socket_sessions(Some("reuse-unit"));
+
+            let first = acquire_web_socket("wss://example.test", &IndexMap::new(), Some("reuse-unit"), None)
+                .await
+                .unwrap();
+            assert!(!first.reused);
+            let mut first = first;
+            first.release(Some("reuse-unit"), true);
+
+            let second = acquire_web_socket("wss://example.test", &IndexMap::new(), Some("reuse-unit"), None)
+                .await
+                .unwrap();
+            assert!(second.reused);
+            let mut second = second;
+            second.release(Some("reuse-unit"), true);
+            assert_eq!(sockets.lock().unwrap().len(), 1);
+
+            // `keep: false` closes the socket and drops the cache entry.
+            let third = acquire_web_socket("wss://example.test", &IndexMap::new(), Some("reuse-unit"), None)
+                .await
+                .unwrap();
+            let mut third = third;
+            third.release(Some("reuse-unit"), false);
+            assert!(!web_socket_session_cache()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains_key("reuse-unit"));
+
+            close_openai_codex_web_socket_sessions(Some("reuse-unit"));
+            reset_openai_codex_web_socket_debug_stats(Some("reuse-unit"));
+        });
+        set_web_socket_constructor(None);
+    }
+
+    #[test]
+    fn acquire_web_socket_without_a_session_closes_immediately() {
+        set_web_socket_constructor(None);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(acquire_web_socket("wss://example.test", &IndexMap::new(), None, None));
+        assert_eq!(
+            result.unwrap_err().message,
+            "WebSocket transport is not available in this runtime"
+        );
     }
 
     #[test]

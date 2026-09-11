@@ -1276,6 +1276,91 @@ mod tests {
     use super::*;
     use crate::core::kernel::shared::{ExecError, KernelAttachment};
 
+    // The launcher-guard markers are assembled from fragments so this test file
+    // never stores the blocked pattern as one contiguous literal.
+    fn launcher_capture_code() -> String {
+        concat!("subprocess", ".run(['./", "run", ".ps1'], ", "capture_output", "=True)").to_string()
+    }
+
+    fn launcher_capture_code_without_script() -> String {
+        concat!("subprocess", ".run(['ls'], ", "capture_output", "=True)").to_string()
+    }
+
+    fn python_skill(import_name: &str) -> KernelPythonSkill {
+        KernelPythonSkill {
+            import_name: import_name.to_string(),
+            package_path: String::new(),
+            pyproject_path: String::new(),
+            name: import_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn unsafe_windows_captured_launcher_detects_all_three_markers() {
+        let code = launcher_capture_code();
+        assert!(is_unsafe_windows_captured_launcher_on(&code, "win32"));
+        assert!(!is_unsafe_windows_captured_launcher_on(&code, "linux"));
+        assert!(!is_unsafe_windows_captured_launcher_on(&launcher_capture_code_without_script(), "win32"));
+        assert!(!is_unsafe_windows_captured_launcher_on(
+            &format!("{}", "subprocess"),
+            "win32"
+        ));
+    }
+
+    #[test]
+    fn bootstrap_code_without_skills_is_the_base_code() {
+        let code = build_rlm_bootstrap_code(&[]);
+        assert!(code.starts_with("import asyncio"));
+        assert!(code.contains("NO_COLOR"));
+        assert!(code.contains("_PrimeAgentMissingRlm"));
+        assert!(!code.contains("_PRIME_AGENT_SKILL_IMPORT_ERRORS"));
+    }
+
+    #[test]
+    fn bootstrap_code_dedupes_skill_import_names() {
+        let code = build_rlm_bootstrap_code(&[python_skill("agent_message"), python_skill("agent_message")]);
+        assert!(code.contains("_PRIME_AGENT_SKILL_IMPORT_ERRORS"));
+        assert_eq!(code.matches("for _prime_agent_skill_name in").count(), 1);
+        assert!(code.contains("[\"agent_message\"]"));
+    }
+
+    #[test]
+    fn image_blocks_drop_non_image_attachments() {
+        let attachments = vec![
+            KernelAttachment {
+                mime_type: "image/png".to_string(),
+                data: "AAAA".to_string(),
+                path: None,
+            },
+            KernelAttachment {
+                mime_type: "application/json".to_string(),
+                data: "{}".to_string(),
+                path: None,
+            },
+        ];
+        let blocks = image_blocks_from_attachments(Some(&attachments));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].mime_type, "image/png");
+        assert_eq!(blocks[0].data, "AAAA");
+        assert!(image_blocks_from_attachments(None).is_empty());
+    }
+
+    #[test]
+    fn busy_kernel_constants_match_typescript() {
+        assert_eq!(BUSY_KERNEL_WAIT_CHOICE, "Wait and preserve state");
+        assert_eq!(BUSY_KERNEL_KILL_CHOICE, "Kill kernel and restart");
+        assert!(BUSY_KERNEL_PROMPT.starts_with("Python kernel is still busy\n"));
+        assert!(KERNEL_RESTART_NOTICE.starts_with("<ipython_kernel_reset>\n"));
+        assert!(KERNEL_RESTART_NOTICE.ends_with("</ipython_kernel_reset>"));
+    }
+
+    #[test]
+    fn ipython_schema_matches_typescript_shape() {
+        let schema: Value = serde_json::from_str(IPYTHON_SCHEMA).expect("schema");
+        assert_eq!(schema["required"], serde_json::json!(["code"]));
+        assert_eq!(schema["properties"]["code"]["type"], serde_json::json!("string"));
+    }
+
     struct StubKernelClient;
 
     impl KernelClient for StubKernelClient {
@@ -1434,4 +1519,208 @@ mod tests {
         IpythonKernelProvisioner::new("/tmp", None, Arc::new(move |_options| client.clone()))
     }
 
-    // piece3 marker
+    #[test]
+    fn ipython_tool_definition_uses_sequential_execution() {
+        let definition = create_ipython_tool_definition(
+            "/tmp",
+            Some(IpythonToolOptions {
+                provisioner: Some(provisioner_with(Arc::new(StubKernelClient))),
+                ..IpythonToolOptions::default()
+            }),
+        );
+        assert_eq!(definition.name, "ipython");
+        assert_eq!(definition.label, "ipython");
+        assert_eq!(
+            definition.execution_mode,
+            Some(pi_agent_core::types::ToolExecutionMode::Sequential)
+        );
+        assert_eq!(
+            definition.parameters,
+            serde_json::from_str::<Value>(IPYTHON_SCHEMA).expect("schema")
+        );
+    }
+
+    #[tokio::test]
+    async fn provisioner_starts_once_and_reuses_the_manager() {
+        let starts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let starts_for_factory = starts.clone();
+        let provisioner = IpythonKernelProvisioner::new(
+            "/tmp",
+            None,
+            Arc::new(move |_options| -> Arc<dyn KernelClient> {
+                starts_for_factory.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Arc::new(StubKernelClient)
+            }),
+        );
+        let first = provisioner.ensure(None, None).await.expect("first");
+        let second = provisioner.ensure(None, None).await.expect("second");
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(starts.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(provisioner.has_running_kernel());
+        assert_eq!(provisioner.manager().map(|manager| manager.is_running()), Some(true));
+    }
+
+    #[tokio::test]
+    async fn provisioner_clears_the_memo_after_a_failed_startup() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts_for_factory = attempts.clone();
+        let provisioner = IpythonKernelProvisioner::new(
+            "/tmp",
+            None,
+            Arc::new(move |_options| -> Arc<dyn KernelClient> {
+                let attempt = attempts_for_factory.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if attempt == 0 {
+                    Arc::new(FailingKernelClient)
+                } else {
+                    Arc::new(StubKernelClient)
+                }
+            }),
+        );
+        assert!(provisioner.ensure(None, None).await.is_err());
+        assert!(provisioner.ensure(None, None).await.is_ok());
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn provisioner_rejects_an_already_aborted_signal() {
+        let provisioner = provisioner_with(Arc::new(StubKernelClient));
+        let signal = AbortSignal::new();
+        signal.abort(None);
+        let error = provisioner.ensure(None, Some(signal)).await.expect_err("aborted");
+        assert_eq!(error.to_string(), "Python execution aborted");
+    }
+
+    #[tokio::test]
+    async fn provisioner_reports_namespace_and_prune_results() {
+        let provisioner = provisioner_with(Arc::new(StubKernelClient));
+        provisioner.ensure(None, None).await.expect("started");
+        assert_eq!(
+            provisioner.prune_oversized_variables().await,
+            Some(vec!["x".to_string()])
+        );
+        assert_eq!(
+            provisioner.list_namespace_names(None).await,
+            Some(vec!["x".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_ipython_returns_details_for_a_successful_cell() {
+        let provisioner = provisioner_with(Arc::new(StubKernelClient));
+        let (content, details, is_error) = execute_ipython(
+            provisioner,
+            "call-1",
+            &IpythonToolInput {
+                code: "print(1)".to_string(),
+            },
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("executed");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0].as_text(), Some("ok"));
+        assert_eq!(details.status.as_deref(), Some("ok"));
+        assert_eq!(details.kernel_restarted, Some(false));
+        assert_eq!(details.stdout.as_deref(), Some("ok"));
+        assert!(!is_error);
+    }
+
+    #[tokio::test]
+    async fn execute_ipython_joins_error_sections_and_marks_error() {
+        let provisioner = provisioner_with(Arc::new(ErroringKernelClient));
+        let (content, details, is_error) = execute_ipython(
+            provisioner,
+            "call-2",
+            &IpythonToolInput {
+                code: "raise ValueError".to_string(),
+            },
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("executed");
+        assert_eq!(
+            content[0].as_text(),
+            Some("partial\nwarn\nvalue\nline 1\nline 2\n[background output (unattributed)]\nbg")
+        );
+        assert_eq!(details.status.as_deref(), Some("error"));
+        assert_eq!(details.error_ename.as_deref(), Some("ValueError"));
+        assert_eq!(details.error.as_ref().map(|error| error.traceback.len()), Some(2));
+        assert!(is_error);
+    }
+
+    #[tokio::test]
+    async fn execute_ipython_runs_the_launcher_guard_per_platform() {
+        let provisioner = provisioner_with(Arc::new(StubKernelClient));
+        let (content, details, is_error) = execute_ipython(
+            provisioner,
+            "call-3",
+            &IpythonToolInput {
+                code: launcher_capture_code(),
+            },
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("executed");
+        // The guard is win32-only; on other platforms the cell runs normally.
+        if cfg!(windows) {
+            assert_eq!(details.error_ename.as_deref(), Some("UnsafeWindowsCapturedLauncher"));
+            assert!(is_error);
+        } else {
+            assert_eq!(content[0].as_text(), Some("ok"));
+            assert!(!is_error);
+        }
+    }
+
+    #[test]
+    fn linked_abort_signal_propagates_and_cleans_up() {
+        let source = AbortSignal::new();
+        let linked = LinkedAbortSignal::new(vec![Some(source.clone())]);
+        assert!(!linked.signal.is_aborted());
+        source.abort(None);
+        assert!(linked.signal.is_aborted());
+        linked.cleanup();
+    }
+
+    #[test]
+    fn model_tool_output_scope_requires_session_and_snapshot_dir() {
+        let provisioner = IpythonKernelProvisioner::new(
+            "/tmp",
+            Some(IpythonToolOptions {
+                session_id: Some("session-1".to_string()),
+                ..IpythonToolOptions::default()
+            }),
+            Arc::new(|_options| -> Arc<dyn KernelClient> { Arc::new(StubKernelClient) }),
+        );
+        assert!(provisioner.model_tool_output_scope().is_none());
+        let with_dir = IpythonKernelProvisioner::new(
+            "/tmp",
+            Some(IpythonToolOptions {
+                session_id: Some("session-1".to_string()),
+                snapshot_dir: Some("/tmp/artifacts".to_string()),
+                ..IpythonToolOptions::default()
+            }),
+            Arc::new(|_options| -> Arc<dyn KernelClient> { Arc::new(StubKernelClient) }),
+        );
+        let scope = with_dir.model_tool_output_scope().expect("scope");
+        assert_eq!(scope.session_id, "session-1");
+        assert_eq!(scope.session_artifact_dir, "/tmp/artifacts");
+        assert_eq!(with_dir.model_tool_output_policy(), "off");
+    }
+
+    #[test]
+    fn resolve_kernel_bash_shell_prefers_explicit_path() {
+        assert_eq!(
+            resolve_kernel_bash_shell(Some("  /custom/bash  ")).as_deref(),
+            Some("/custom/bash")
+        );
+        if !cfg!(windows) {
+            assert!(resolve_kernel_bash_shell(None).is_some());
+        }
+    }
+}

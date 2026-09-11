@@ -5,7 +5,6 @@
 //! locally, keeping the SDK's wire shape, header merge order and error text.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use futures::StreamExt;
 use indexmap::IndexMap;
@@ -83,7 +82,7 @@ fn get_cache_control(model: &Model, cache_retention: Option<&CacheRetention>) ->
 			cache_control: None,
 		};
 	}
-	let ttl = if retention == "long" && get_anthropic_compat(model).supports_long_cache_retention.unwrap_or(true) {
+	let ttl = if retention == "long" && get_anthropic_compat(model).supports_long_cache_retention {
 		Some("1h".to_string())
 	} else {
 		None
@@ -1036,15 +1035,20 @@ async fn run_stream_anthropic(
 			let delta_index = number_or_zero(event.get("index")) as i64;
 			match event.pointer("/delta/type").and_then(Value::as_str) {
 				Some("text_delta") => {
-					let found = find_block_index(&blocks, delta_index);
-					if let Some(index) = found {
-						if let AnthropicBlock::Text { text, .. } = &mut blocks[index] {
-							let delta = event
-								.pointer("/delta/text")
-								.and_then(Value::as_str)
-								.unwrap_or_default()
-								.to_string();
-							text.push_str(&delta);
+					if let Some(index) = find_block_index(&blocks, delta_index) {
+						let delta = event
+							.pointer("/delta/text")
+							.and_then(Value::as_str)
+							.unwrap_or_default()
+							.to_string();
+						let applied = match &mut blocks[index] {
+							AnthropicBlock::Text { text, .. } => {
+								text.push_str(&delta);
+								true
+							}
+							_ => false,
+						};
+						if applied {
 							sync_output_content(output, &blocks);
 							out.push(AssistantMessageEvent::TextDelta {
 								content_index: index,
@@ -1055,15 +1059,20 @@ async fn run_stream_anthropic(
 					}
 				}
 				Some("thinking_delta") => {
-					let found = find_block_index(&blocks, delta_index);
-					if let Some(index) = found {
-						if let AnthropicBlock::Thinking { thinking, .. } = &mut blocks[index] {
-							let delta = event
-								.pointer("/delta/thinking")
-								.and_then(Value::as_str)
-								.unwrap_or_default()
-								.to_string();
-							thinking.push_str(&delta);
+					if let Some(index) = find_block_index(&blocks, delta_index) {
+						let delta = event
+							.pointer("/delta/thinking")
+							.and_then(Value::as_str)
+							.unwrap_or_default()
+							.to_string();
+						let applied = match &mut blocks[index] {
+							AnthropicBlock::Thinking { thinking, .. } => {
+								thinking.push_str(&delta);
+								true
+							}
+							_ => false,
+						};
+						if applied {
 							sync_output_content(output, &blocks);
 							out.push(AssistantMessageEvent::ThinkingDelta {
 								content_index: index,
@@ -1074,24 +1083,28 @@ async fn run_stream_anthropic(
 					}
 				}
 				Some("input_json_delta") => {
-					let found = find_block_index(&blocks, delta_index);
-					if let Some(index) = found {
-						if let AnthropicBlock::ToolCall {
-							tool_call,
-							partial_json,
-							..
-						} = &mut blocks[index]
-						{
-							let delta = event
-								.pointer("/delta/partial_json")
-								.and_then(Value::as_str)
-								.unwrap_or_default()
-								.to_string();
-							partial_json.push_str(&delta);
-							tool_call.arguments = match parse_streaming_json(Some(partial_json)) {
-								Value::Object(object) => object,
-								_ => Map::new(),
-							};
+					if let Some(index) = find_block_index(&blocks, delta_index) {
+						let delta = event
+							.pointer("/delta/partial_json")
+							.and_then(Value::as_str)
+							.unwrap_or_default()
+							.to_string();
+						let applied = match &mut blocks[index] {
+							AnthropicBlock::ToolCall {
+								tool_call,
+								partial_json,
+								..
+							} => {
+								partial_json.push_str(&delta);
+								tool_call.arguments = match parse_streaming_json(Some(partial_json.as_str())) {
+									Value::Object(object) => object,
+									_ => Map::new(),
+								};
+								true
+							}
+							_ => false,
+						};
+						if applied {
 							sync_output_content(output, &blocks);
 							out.push(AssistantMessageEvent::ToolCallDelta {
 								content_index: index,
@@ -1102,18 +1115,22 @@ async fn run_stream_anthropic(
 					}
 				}
 				Some("signature_delta") => {
-					let found = find_block_index(&blocks, delta_index);
-					if let Some(index) = found {
-						if let AnthropicBlock::Thinking {
-							thinking_signature, ..
-						} = &mut blocks[index]
-						{
-							let delta = event
-								.pointer("/delta/signature")
-								.and_then(Value::as_str)
-								.unwrap_or_default()
-								.to_string();
-							thinking_signature.push_str(&delta);
+					if let Some(index) = find_block_index(&blocks, delta_index) {
+						let delta = event
+							.pointer("/delta/signature")
+							.and_then(Value::as_str)
+							.unwrap_or_default()
+							.to_string();
+						let applied = match &mut blocks[index] {
+							AnthropicBlock::Thinking {
+								thinking_signature, ..
+							} => {
+								thinking_signature.push_str(&delta);
+								true
+							}
+							_ => false,
+						};
+						if applied {
 							sync_output_content(output, &blocks);
 						}
 					}
@@ -1126,30 +1143,37 @@ async fn run_stream_anthropic(
 			if let Some(index) = found {
 				// The TypeScript deletes the scratch `index` here; the port simply
 				// stops using it for the block.
-				match blocks[index].clone() {
+				match &blocks[index] {
 					AnthropicBlock::Text { text, .. } => {
 						out.push(AssistantMessageEvent::TextEnd {
 							content_index: index,
-							content: text,
+							content: text.clone(),
 							partial: output.clone(),
 						});
 					}
 					AnthropicBlock::Thinking { thinking, .. } => {
 						out.push(AssistantMessageEvent::ThinkingEnd {
 							content_index: index,
-							content: thinking,
+							content: thinking.clone(),
 							partial: output.clone(),
 						});
 					}
-					AnthropicBlock::ToolCall { mut tool_call, partial_json, .. } => {
-						tool_call.arguments = match parse_streaming_json(Some(&partial_json)) {
+					AnthropicBlock::ToolCall { partial_json, .. } => {
+						let mut tool_call = match &blocks[index] {
+							AnthropicBlock::ToolCall { tool_call, .. } => tool_call.clone(),
+							_ => unreachable!(),
+						};
+						tool_call.arguments = match parse_streaming_json(Some(partial_json.as_str())) {
 							Value::Object(object) => object,
 							_ => Map::new(),
 						};
 						// Finalize in-place and strip the scratch buffer so replay only
 						// carries parsed arguments.
-						if let AnthropicBlock::ToolCall { tool_call: stored, partial_json: scratch, .. } =
-							&mut blocks[index]
+						if let AnthropicBlock::ToolCall {
+							tool_call: stored,
+							partial_json: scratch,
+							..
+						} = &mut blocks[index]
 						{
 							*stored = tool_call.clone();
 							scratch.clear();
@@ -1360,16 +1384,13 @@ pub fn stream_simple_anthropic(
 		options.thinking_budgets.as_ref(),
 	);
 
-	stream_anthropic(
-		model,
-		context,
-		Some(AnthropicOptions {
-			max_tokens: Some(adjusted.max_tokens),
-			thinking_enabled: Some(true),
-			thinking_budget_tokens: Some(adjusted.thinking_budget),
-			..AnthropicOptions::from_base(&base)
-		}),
-	)
+	let mut options = AnthropicOptions {
+		thinking_enabled: Some(true),
+		thinking_budget_tokens: Some(adjusted.thinking_budget),
+		..AnthropicOptions::from_base(&base)
+	};
+	options.stream.max_tokens = Some(adjusted.max_tokens);
+	stream_anthropic(model, context, Some(options))
 }
 
 /// TS: `isOAuthToken(apiKey)`.
@@ -2902,12 +2923,18 @@ mod tests {
 	#[test]
 	fn convert_messages_skips_empty_content_and_merges_tool_results() {
 		let model = model("anthropic", "claude-sonnet-4-5");
-		let mut assistant = AssistantMessage::default();
-		assistant.content = vec![ContentBlock::Text(TextContent::new("   "))];
+		let mut empty_assistant = AssistantMessage::default();
+		empty_assistant.content = vec![ContentBlock::Text(TextContent::new("   "))];
+		let mut calling_assistant = AssistantMessage::default();
+		calling_assistant.content = vec![
+			ContentBlock::ToolCall(ToolCall::new("call_1", "read", Map::new())),
+			ContentBlock::ToolCall(ToolCall::new("call_2", "read", Map::new())),
+		];
 		let messages = vec![
 			Message::user(UserMessage::new(UserContent::Text("   ".to_string()), 1)),
 			Message::user(UserMessage::new(UserContent::Text("real".to_string()), 2)),
-			Message::assistant(assistant),
+			Message::assistant(empty_assistant),
+			Message::assistant(calling_assistant),
 			Message::tool_result(ToolResultMessage::new(
 				"call_1",
 				"read",
@@ -2924,7 +2951,8 @@ mod tests {
 			)),
 		];
 		let params = convert_messages(&messages, &model, false, None).unwrap();
-		assert_eq!(params.len(), 2);
+		assert_eq!(params.len(), 3);
+		assert_eq!(params[1]["content"][0]["type"], Value::String("tool_use".to_string()));
 		assert_eq!(params[0]["content"], Value::String("real".to_string()));
 		assert_eq!(params[1]["role"], Value::String("user".to_string()));
 		assert_eq!(params[1]["content"].as_array().unwrap().len(), 2);

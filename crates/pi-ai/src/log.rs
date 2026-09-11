@@ -63,11 +63,17 @@ fn emit(level: LogLevel, component: &str, msg: &str, fields: Option<Map<String, 
     entry.insert("msg".to_string(), Value::String(msg.to_string()));
     let entry = Value::Object(entry);
 
+    let mut sink_handled = false;
     if let Ok(guard) = sink_slot().lock() {
         if let Some(sink) = guard.as_ref() {
-            sink(&entry);
-            return;
+            // Broken sink: fall through to the console fallback.
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(&entry))).is_ok() {
+                sink_handled = true;
+            }
         }
+    }
+    if sink_handled {
+        return;
     }
 
     if level == LOG_LEVEL_WARN || level == LOG_LEVEL_ERROR {

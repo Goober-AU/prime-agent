@@ -367,17 +367,22 @@ impl MemoryStore {
 		F: FnOnce() -> Result<T, String>,
 	{
 		std::fs::create_dir_all(&self.dir).map_err(|error| error.to_string())?;
-		let _lock = super::acquire_lock(
-			&self.dir,
-			super::MemoryLockRetries {
-				stale_ms: 30_000,
-				retries: 30,
-				min_timeout_ms: 20,
-				max_timeout_ms: 200,
-			},
-		)
-		.await?;
-		operation()
+		// The lock is held for the duration of the synchronous body: acquire,
+		// run, then release, which is what `lockSync(dir)` wrapping gives the TS.
+		let result = {
+			let _lock = super::acquire_lock(
+				&self.dir,
+				super::MemoryLockRetries {
+					stale_ms: 30_000,
+					retries: 30,
+					min_timeout_ms: 20,
+					max_timeout_ms: 200,
+				},
+			)
+			.await?;
+			operation()
+		};
+		result
 	}
 
 	/// `exclusive` with an async body: the directory lock is held across awaits,

@@ -3134,3 +3134,887 @@ impl AgentConnection for DaemonAgentConnection {
         })
     }
 }
+
+impl DaemonAgentConnection {
+    fn prompt_with_admission_cancellation(
+        &self,
+        type_: &'static str,
+        message: &str,
+        options: Option<AgentConnectionPromptOptions>,
+    ) -> BoxFuture<Result<(), String>> {
+        let active_session_id = self.active_session_id();
+        let message = message.to_string();
+        Box::pin(async move {
+            let mut fields: Vec<(&str, Value)> = vec![
+                ("activeSessionId", Value::String(active_session_id)),
+                ("message", Value::String(message)),
+            ];
+            if let Some(options) = &options {
+                if let Some(images) = &options.images {
+                    fields.push(("images", serde_json::to_value(images).unwrap_or(Value::Null)));
+                }
+                if let Some(streaming_behavior) = &options.streaming_behavior {
+                    fields.push(("streamingBehavior", Value::String(streaming_behavior.clone())));
+                }
+                if let Some(queue_if_busy) = options.queue_if_busy {
+                    fields.push(("queueIfBusy", Value::Bool(queue_if_busy)));
+                }
+                if let Some(source) = &options.source {
+                    fields.push(("source", Value::String(source.clone())));
+                }
+            }
+            let command = command_body(type_, fields);
+            self.request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
+                .await
+                .map(|_| ())
+        })
+    }
+}
+
+impl AgentConnection for DaemonAgentConnection {
+    fn prompt(&self, message: &str, options: Option<AgentConnectionPromptOptions>) -> BoxFuture<Result<(), String>> {
+        self.prompt_with_admission_cancellation("prompt", message, options)
+    }
+
+    fn prompt_and_wait(
+        &self,
+        message: &str,
+        options: Option<AgentConnectionPromptOptions>,
+    ) -> BoxFuture<Result<(), String>> {
+        self.prompt_with_admission_cancellation("prompt_and_wait", message, options)
+    }
+
+    fn start_side_question(
+        &self,
+        id: &str,
+        question: &str,
+        previous_turns: Option<Vec<AgentConnectionSideQuestionTurn>>,
+    ) -> BoxFuture<Result<(), String>> {
+        let has_turns = previous_turns.as_ref().map(|turns| !turns.is_empty()).unwrap_or(false);
+        if has_turns && !self.client.supports_server_capability("side_question_transcript") {
+            // An older daemon would silently ignore previousTurns and answer the
+            // follow-up without the side-conversation context; fail loudly instead.
+            return Box::pin(async {
+                Err("the daemon is running an older build without side-conversation follow-ups; restart the daemon and try again".to_string())
+            });
+        }
+        let command = command_body(
+            "start_side_question",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("sideQuestionId", Value::String(id.to_string())),
+                ("question", Value::String(question.to_string())),
+                (
+                    "previousTurns",
+                    match previous_turns {
+                        Some(turns) => serde_json::to_value(turns).unwrap_or(Value::Null),
+                        None => Value::Null,
+                    },
+                ),
+            ],
+        );
+        Box::pin(async move {
+            self.active_side_question_ids.lock().unwrap().insert(id.to_string());
+            match self.request_ok(command).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    self.active_side_question_ids.lock().unwrap().remove(id);
+                    if is_unknown_daemon_command_error(&error, "start_side_question") {
+                        Err("the daemon is running an older build; restart the daemon and try again".to_string())
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+        })
+    }
+
+    fn abort_side_question(&self, id: &str) -> BoxFuture<Result<bool, String>> {
+        let id = id.to_string();
+        Box::pin(async move { self.abort_side_question_inner(&id).await })
+    }
+
+    fn steer(&self, message: &str, images: Option<Vec<ImageContent>>) -> BoxFuture<Result<(), String>> {
+        let command = command_body(
+            "steer",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("message", Value::String(message.to_string())),
+                (
+                    "images",
+                    match images {
+                        Some(images) => serde_json::to_value(images).unwrap_or(Value::Null),
+                        None => Value::Null,
+                    },
+                ),
+            ],
+        );
+        Box::pin(async move { self.request_ok(command).await })
+    }
+
+    fn follow_up(&self, message: &str, images: Option<Vec<ImageContent>>) -> BoxFuture<Result<(), String>> {
+        let command = command_body(
+            "follow_up",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("message", Value::String(message.to_string())),
+                (
+                    "images",
+                    match images {
+                        Some(images) => serde_json::to_value(images).unwrap_or(Value::Null),
+                        None => Value::Null,
+                    },
+                ),
+            ],
+        );
+        Box::pin(async move { self.request_ok(command).await })
+    }
+
+    fn abort(&self) -> BoxFuture<Result<(), String>> {
+        let command = command_body(
+            "abort",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move { self.request_ok(command).await })
+    }
+
+    fn cancel_rlm_child(&self, child_id: &str) -> BoxFuture<Result<bool, String>> {
+        let command = command_body(
+            "cancel_rlm_child",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("childId", Value::String(child_id.to_string())),
+            ],
+        );
+        Box::pin(async move {
+            match self.request_data(command, None).await {
+                Ok(data) => Ok(data.get("cancelled").and_then(Value::as_bool).unwrap_or(false)),
+                Err(error) => {
+                    if is_unknown_daemon_command_error(&error, "cancel_rlm_child") {
+                        Err("the daemon is running an older build; restart the daemon and try again".to_string())
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+        })
+    }
+
+    fn wait_for_idle(&self) -> BoxFuture<Result<(), String>> {
+        let command = command_body(
+            "wait_for_idle",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move {
+            self.request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
+                .await
+                .map(|_| ())
+        })
+    }
+
+    fn wait_for_headless_completion(
+        &self,
+        options: Option<AgentConnectionHeadlessCompletionOptions>,
+    ) -> BoxFuture<Result<AgentAutonomousStatus, String>> {
+        let wait_for_rlm_quiescence = options
+            .as_ref()
+            .and_then(|options| options.wait_for_rlm_quiescence)
+            .unwrap_or(false);
+        if wait_for_rlm_quiescence && !self.client.supports_server_capability("rlm_quiescence_barrier") {
+            return Box::pin(async {
+                Err("the daemon is running an older build without RLM quiescence barriers; restart the daemon and try again".to_string())
+            });
+        }
+        let mut fields = vec![("activeSessionId", Value::String(self.active_session_id()))];
+        if wait_for_rlm_quiescence {
+            fields.push(("waitForRlmQuiescence", Value::Bool(true)));
+        }
+        let command = command_body("wait_for_headless_completion", fields);
+        Box::pin(async move {
+            let data = self
+                .request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
+                .await?;
+            serde_json::from_value(data)
+                .map_err(|error| format!("Daemon returned an invalid autonomous status: {error}"))
+        })
+    }
+
+    fn execute_bash(
+        &self,
+        command: &str,
+        options: Option<AgentConnectionExecuteBashOptions>,
+    ) -> BoxFuture<Result<(), String>> {
+        let transient = options.as_ref().and_then(|options| options.transient).unwrap_or(false);
+        if transient && !self.client.supports_server_capability("transient_bash") {
+            // An older daemon would record the run into the session, leaking the
+            // side conversation into the main transcript; fail loudly instead.
+            return Box::pin(async {
+                Err("the daemon is running an older build without side-conversation bash; restart the daemon and try again".to_string())
+            });
+        }
+        let mut fields = vec![
+            ("activeSessionId", Value::String(self.active_session_id())),
+            ("command", Value::String(command.to_string())),
+        ];
+        if let Some(options) = &options {
+            if let Some(exclude_from_context) = options.exclude_from_context {
+                fields.push(("excludeFromContext", Value::Bool(exclude_from_context)));
+            }
+            if let Some(transient) = options.transient {
+                fields.push(("transient", Value::Bool(transient)));
+            }
+            if let Some(run_id) = &options.run_id {
+                fields.push(("runId", Value::String(run_id.clone())));
+            }
+        }
+        let request = command_body("execute_bash", fields);
+        Box::pin(async move {
+            match self.request_ok(request).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    if is_unknown_daemon_command_error(&error, "execute_bash") {
+                        Err("the daemon is running an older build; restart the daemon and try again".to_string())
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+        })
+    }
+
+    fn execute_bash_and_wait(&self, command: &str) -> BoxFuture<Result<Value, String>> {
+        let request = command_body(
+            "execute_bash_and_wait",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("command", Value::String(command.to_string())),
+            ],
+        );
+        Box::pin(async move {
+            self.request_data(request, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
+                .await
+        })
+    }
+
+    fn abort_bash(&self) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "abort_bash",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move {
+            match self.request_ok(request).await {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    if is_unknown_daemon_command_error(&error, "abort_bash") {
+                        Err("the daemon is running an older build; restart the daemon and try again".to_string())
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
+        })
+    }
+
+    fn set_model(&self, provider: &str, model_id: &str) -> BoxFuture<Result<AgentConnectionModel, String>> {
+        let request = command_body(
+            "set_model",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("provider", Value::String(provider.to_string())),
+                ("modelId", Value::String(model_id.to_string())),
+            ],
+        );
+        Box::pin(async move {
+            let data = self.request_data(request, None).await?;
+            serde_json::from_value(data).map_err(|error| format!("Daemon returned an invalid model: {error}"))
+        })
+    }
+
+    fn cycle_model(
+        &self,
+        direction: Option<&str>,
+    ) -> BoxFuture<Result<Option<AgentConnectionModelCycleResult>, String>> {
+        let request = command_body(
+            "cycle_model",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("direction", optional_string(direction)),
+            ],
+        );
+        Box::pin(async move {
+            let data = self.request_data(request, None).await?;
+            if data.is_null() {
+                return Ok(None);
+            }
+            serde_json::from_value(data)
+                .map(Some)
+                .map_err(|error| format!("Daemon returned an invalid model cycle result: {error}"))
+        })
+    }
+
+    fn set_scoped_models(&self, scoped_models: Vec<AgentConnectionScopedModel>) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_scoped_models",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                (
+                    "scopedModels",
+                    serde_json::to_value(scoped_models).unwrap_or(Value::Null),
+                ),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn set_thinking_level(&self, level: ThinkingLevel) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_thinking_level",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("level", Value::String(level.as_str().to_string())),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn set_service_tier(&self, service_tier: ServiceTier) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_service_tier",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("serviceTier", Value::String(service_tier.clone())),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn cycle_thinking_level(&self) -> BoxFuture<Result<Option<ThinkingLevel>, String>> {
+        let request = command_body(
+            "cycle_thinking_level",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move {
+            let data = self.request_data(request, None).await?;
+            if data.is_null() {
+                return Ok(None);
+            }
+            let level = data
+                .get("level")
+                .and_then(Value::as_str)
+                .and_then(thinking_level_from_str);
+            Ok(level)
+        })
+    }
+
+    fn set_transport(&self, transport: Transport) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_transport",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("transport", Value::String(transport)),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn set_steering_mode(&self, mode: &str) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_steering_mode",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("mode", Value::String(mode.to_string())),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn set_follow_up_mode(&self, mode: &str) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_follow_up_mode",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("mode", Value::String(mode.to_string())),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn set_auto_compaction_enabled(&self, enabled: bool) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_auto_compaction",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("enabled", Value::Bool(enabled)),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn set_auto_retry_enabled(&self, enabled: bool) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_auto_retry",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("enabled", Value::Bool(enabled)),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn compact(&self, custom_instructions: Option<&str>) -> BoxFuture<Result<Value, String>> {
+        let request = command_body(
+            "compact",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("customInstructions", optional_string(custom_instructions)),
+            ],
+        );
+        Box::pin(async move { self.request_data(request, None).await })
+    }
+
+    fn refine(&self, options: Value) -> BoxFuture<Result<Value, String>> {
+        let mut fields = vec![("activeSessionId", Value::String(self.active_session_id()))];
+        if let Some(instructions) = options.get("instructions").and_then(Value::as_str) {
+            fields.push(("instructions", Value::String(instructions.to_string())));
+        }
+        if let Some(rollback_id) = options.get("rollbackId").and_then(Value::as_str) {
+            fields.push(("rollbackId", Value::String(rollback_id.to_string())));
+        }
+        if let Some(global) = options.get("global").and_then(Value::as_bool) {
+            fields.push(("global", Value::Bool(global)));
+        }
+        let request = command_body("refine", fields);
+        Box::pin(async move { self.request_data(request, Some(DAEMON_REFINE_REQUEST_TIMEOUT_MS)).await })
+    }
+
+    fn abort_compaction(&self) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "abort_compaction",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn abort_branch_summary(&self) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "abort_branch_summary",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn abort_retry(&self) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "abort_retry",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn reload(&self) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "reload",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn new_session(&self, options: Option<AgentConnectionNewSessionOptions>) -> BoxFuture<Result<bool, String>> {
+        let parent_session = options.and_then(|options| options.parent_session);
+        let request = command_body(
+            "new_session",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                (
+                    "parentSession",
+                    match parent_session {
+                        Some(parent) => Value::String(parent),
+                        None => Value::Null,
+                    },
+                ),
+            ],
+        );
+        Box::pin(async move {
+            let data = self.request_data(request, None).await?;
+            Ok(data.get("cancelled").and_then(Value::as_bool).unwrap_or(false))
+        })
+    }
+
+    fn switch_session(
+        &self,
+        session_path: &str,
+        options: Option<AgentConnectionSwitchSessionOptions>,
+    ) -> BoxFuture<Result<bool, String>> {
+        let source_active_session_id = self.active_session_id();
+        let cwd_override = options.and_then(|options| options.cwd_override);
+        let request = command_body(
+            "switch_session",
+            vec![
+                ("activeSessionId", Value::String(source_active_session_id.clone())),
+                ("sessionPath", Value::String(session_path.to_string())),
+                ("cwdOverride", optional_string(cwd_override.as_deref())),
+            ],
+        );
+        Box::pin(async move {
+            match self.request_data(request, None).await {
+                Ok(data) => Ok(data.get("cancelled").and_then(Value::as_bool).unwrap_or(false)),
+                Err(error) => {
+                    // `SessionAlreadyActiveError` (core/session-lease.ts) carries the
+                    // active session id; without that slice the port surfaces the error.
+                    Err(error)
+                }
+            }
+        })
+    }
+
+    fn fork(&self, entry_id: &str, options: Option<AgentConnectionForkOptions>) -> BoxFuture<Result<Value, String>> {
+        let position = options.and_then(|options| options.position);
+        let request = command_body(
+            "fork",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("entryId", Value::String(entry_id.to_string())),
+                ("position", optional_string(position.as_deref())),
+            ],
+        );
+        Box::pin(async move { self.request_data(request, None).await })
+    }
+
+    fn navigate_tree(
+        &self,
+        target_id: &str,
+        options: Option<AgentConnectionNavigateTreeOptions>,
+    ) -> BoxFuture<Result<AgentConnectionNavigateTreeResult, String>> {
+        let mut fields = vec![
+            ("activeSessionId", Value::String(self.active_session_id())),
+            ("targetId", Value::String(target_id.to_string())),
+        ];
+        if let Some(options) = &options {
+            if let Some(summarize) = options.summarize {
+                fields.push(("summarize", Value::Bool(summarize)));
+            }
+            if let Some(custom_instructions) = &options.custom_instructions {
+                fields.push(("customInstructions", Value::String(custom_instructions.clone())));
+            }
+            if let Some(replace_instructions) = options.replace_instructions {
+                fields.push(("replaceInstructions", Value::Bool(replace_instructions)));
+            }
+            if let Some(label) = &options.label {
+                fields.push(("label", Value::String(label.clone())));
+            }
+        }
+        let request = command_body("navigate_tree", fields);
+        Box::pin(async move {
+            let data = self.request_data(request, None).await?;
+            serde_json::from_value(data)
+                .map_err(|error| format!("Daemon returned an invalid navigate-tree result: {error}"))
+        })
+    }
+
+    fn import_from_jsonl(&self, input_path: &str, cwd_override: Option<&str>) -> BoxFuture<Result<bool, String>> {
+        let request = command_body(
+            "import_jsonl",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("inputPath", Value::String(input_path.to_string())),
+                ("cwdOverride", optional_string(cwd_override)),
+            ],
+        );
+        Box::pin(async move {
+            let data = self.request_data(request, None).await?;
+            Ok(data.get("cancelled").and_then(Value::as_bool).unwrap_or(false))
+        })
+    }
+
+    fn export_to_html(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>> {
+        let request = command_body(
+            "export_html",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("outputPath", optional_string(output_path)),
+            ],
+        );
+        Box::pin(async move {
+            let data = self.request_data(request, None).await?;
+            Ok(data.get("path").and_then(Value::as_str).unwrap_or_default().to_string())
+        })
+    }
+
+    fn export_to_jsonl(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>> {
+        let request = command_body(
+            "export_jsonl",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("outputPath", optional_string(output_path)),
+            ],
+        );
+        Box::pin(async move {
+            let data = self.request_data(request, None).await?;
+            Ok(data.get("path").and_then(Value::as_str).unwrap_or_default().to_string())
+        })
+    }
+
+    fn set_session_name(&self, name: &str) -> BoxFuture<Result<(), String>> {
+        let request = command_body(
+            "set_session_name",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("name", Value::String(name.to_string())),
+            ],
+        );
+        Box::pin(async move { self.request_ok(request).await })
+    }
+
+    fn get_rlm_max_depth_status(&self) -> BoxFuture<Result<Value, String>> {
+        let request = command_body(
+            "get_rlm_max_depth_status",
+            vec![("activeSessionId", Value::String(self.active_session_id()))],
+        );
+        Box::pin(async move { self.request_data(request, None).await })
+    }
+
+    fn set_rlm_max_depth(&self, max_depth: f64, options: Option<Value>) -> BoxFuture<Result<Value, String>> {
+        let global = options.as_ref().and_then(|options| options.get("global")).and_then(Value::as_bool);
+        let request = command_body(
+            "set_rlm_max_depth",
+            vec![
+                ("activeSessionId", Value::String(self.active_session_id())),
+                ("maxDepth", json!(max_depth)),
+                ("global", optional_bool(global)),
+            ],
+        );
+        Box::pin(async move { self.request_data(request, None).await })
+    }
+
+    fn rename_saved_session(&self, session_path: &str, name: &str) -> BoxFuture<Result<(), String>> {
+        // `renameDaemonSavedSession(...)` lives in
+        // modes/daemon/saved-session-catalog.ts (another slice).
+        let _ = (session_path, name);
+        Box::pin(async {
+            Err("renameSavedSession requires modes/daemon/saved-session-catalog.ts (not ported in this slice)".to_string())
+        })
+    }
+
+    fn delete_saved_session(&self, session_path: &str) -> BoxFuture<Result<Value, String>> {
+        // `deleteDaemonSavedSession(...)` lives in
+        // modes/daemon/saved-session-catalog.ts (another slice).
+        let _ = session_path;
+        Box::pin(async {
+            Err("deleteSavedSession requires modes/daemon/saved-session-catalog.ts (not ported in this slice)".to_string())
+        })
+    }
+
+    fn watch_session(
+        &self,
+        active_session_id: &str,
+    ) -> BoxFuture<Result<Option<Box<dyn AgentConnectionSessionWatcher>>, String>> {
+        // A second connection on the shared client; each one filters to its own
+        // session id. attach() rejects for an unknown/exited session - treat that
+        // as unreachable.
+        let client = self.client.control_plane_transport();
+        let options = DaemonAgentConnectionOptions {
+            close_client_on_dispose: false,
+            direct_transport: false,
+            ..Default::default()
+        };
+        let active_session_id = active_session_id.to_string();
+        Box::pin(async move {
+            match DaemonAgentConnection::attach(client, active_session_id, options).await {
+                Ok(connection) => Ok(Some(Box::new(DaemonWatcherConnection { connection })
+                    as Box<dyn AgentConnectionSessionWatcher>)),
+                Err(_) => Ok(None),
+            }
+        })
+    }
+
+    fn dispose(&self) -> BoxFuture<Result<(), String>> {
+        Box::pin(async move {
+            self.dispose_inner().await;
+            Ok(())
+        })
+    }
+}
+
+/// `AgentConnectionSessionWatcher` backed by a second `DaemonAgentConnection`.
+struct DaemonWatcherConnection {
+    connection: Arc<DaemonAgentConnection>,
+}
+
+impl AgentConnectionSessionWatcher for DaemonWatcherConnection {
+    fn get_messages(&self) -> BoxFuture<Vec<AgentMessage>> {
+        let connection = self.connection.clone();
+        Box::pin(async move {
+            connection
+                .get_messages()
+                .await
+                .unwrap_or_default()
+        })
+    }
+
+    fn get_commands(&self) -> BoxFuture<Vec<AgentConnectionSlashCommand>> {
+        let connection = self.connection.clone();
+        Box::pin(async move {
+            connection
+                .get_commands()
+                .await
+                .unwrap_or_default()
+        })
+    }
+
+    fn subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync> {
+        self.connection.subscribe(listener)
+    }
+
+    fn get_tool_definition(&self, name: &str) -> BoxFuture<Option<AgentConnectionToolDefinition>> {
+        let connection = self.connection.clone();
+        let name = name.to_string();
+        Box::pin(async move { connection.get_tool_definition(&name).await.unwrap_or(None) })
+    }
+
+    fn close(&self) -> BoxFuture<()> {
+        let connection = self.connection.clone();
+        Box::pin(async move {
+            let _ = connection.dispose().await;
+        })
+    }
+}
+
+/// `thinkingLevel` narrowing used by `cycleThinkingLevel`.
+fn thinking_level_from_str(value: &str) -> Option<ThinkingLevel> {
+    match value {
+        "off" => Some(ThinkingLevel::Off),
+        "minimal" => Some(ThinkingLevel::Minimal),
+        "low" => Some(ThinkingLevel::Low),
+        "medium" => Some(ThinkingLevel::Medium),
+        "high" => Some(ThinkingLevel::High),
+        "xhigh" => Some(ThinkingLevel::Xhigh),
+        "max" => Some(ThinkingLevel::Max),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flat_node(id: &str, parent: Option<&str>, timestamp: &str) -> AgentConnectionSessionTreeFlatNode {
+        AgentConnectionSessionTreeFlatNode {
+            entry: AgentConnectionSessionEntry::Custom {
+                id: id.to_string(),
+                parent_id: parent.map(str::to_string),
+                timestamp: timestamp.to_string(),
+                custom_type: "x".to_string(),
+                data: None,
+            },
+            label: None,
+            label_timestamp: None,
+        }
+    }
+
+    #[test]
+    fn builds_a_tree_and_sorts_siblings_by_timestamp() {
+        let nodes = vec![
+            flat_node("b", Some("a"), "2026-01-01T00:00:02.000Z"),
+            flat_node("a", None, "2026-01-01T00:00:01.000Z"),
+            flat_node("c", Some("a"), "2026-01-01T00:00:01.500Z"),
+        ];
+        let tree = build_session_tree_from_flat_nodes(&nodes);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].entry.id(), "a");
+        let children: Vec<&str> = tree[0].children.iter().map(|child| child.entry.id()).collect();
+        assert_eq!(children, vec!["c", "b"]);
+    }
+
+    #[test]
+    fn self_parent_entries_become_roots() {
+        let nodes = vec![flat_node("root", Some("root"), "2026-01-01T00:00:01.000Z")];
+        let tree = build_session_tree_from_flat_nodes(&nodes);
+        assert_eq!(tree.len(), 1);
+        assert!(tree[0].children.is_empty());
+    }
+
+    #[test]
+    fn max_event_sequence_keeps_the_larger_value() {
+        assert_eq!(max_event_sequence(None, Some(3)), Some(3));
+        assert_eq!(max_event_sequence(Some(5), None), Some(5));
+        assert_eq!(max_event_sequence(Some(5), Some(3)), Some(5));
+        assert_eq!(max_event_sequence(Some(5), Some(9)), Some(9));
+    }
+
+    #[test]
+    fn invalidates_cached_snapshot_matches_the_switch() {
+        assert!(!invalidates_cached_snapshot("get_messages"));
+        assert!(!invalidates_cached_snapshot("attach"));
+        assert!(invalidates_cached_snapshot("set_model"));
+        assert!(invalidates_cached_snapshot("abort"));
+    }
+
+    #[test]
+    fn format_error_sentence_adds_a_period() {
+        assert_eq!(format_error_sentence("boom"), "boom.");
+        assert_eq!(format_error_sentence("boom!"), "boom!");
+        assert_eq!(format_error_sentence("   "), "Unknown daemon error.");
+    }
+
+    #[test]
+    fn map_daemon_snapshot_rejects_invalid_history() {
+        let mut snapshot = DaemonSessionSnapshot::default();
+        snapshot.history = Some(AgentConnectionHistoryWindow {
+            version: 1.0,
+            generation: "g".to_string(),
+            representation: "r".to_string(),
+            tip_entry_id: None,
+            total_message_count: 3.0,
+            start_index: 0.0,
+            entry_ids: vec!["a".to_string()],
+            has_older: false,
+            order: "chronological".to_string(),
+        });
+        let error = map_daemon_session_snapshot(&snapshot, None).unwrap_err();
+        assert_eq!(error, "Daemon returned an invalid recent-first history snapshot");
+    }
+
+    #[test]
+    fn map_daemon_snapshot_accepts_valid_history() {
+        let mut snapshot = DaemonSessionSnapshot::default();
+        snapshot.history = Some(AgentConnectionHistoryWindow {
+            version: 1.0,
+            generation: "g".to_string(),
+            representation: "r".to_string(),
+            tip_entry_id: None,
+            total_message_count: 0.0,
+            start_index: 0.0,
+            entry_ids: Vec::new(),
+            has_older: false,
+            order: "chronological".to_string(),
+        });
+        assert!(map_daemon_session_snapshot(&snapshot, None).is_ok());
+    }
+
+    #[test]
+    fn read_session_summaries_validates_shape() {
+        assert!(read_session_summaries(&json!({"sessions": []})).is_ok());
+        assert_eq!(
+            read_session_summaries(&json!({})).unwrap_err(),
+            "Daemon returned an invalid session list response"
+        );
+    }
+
+    #[test]
+    fn unknown_command_detection_is_exact() {
+        assert!(is_unknown_daemon_command_error(
+            "unknown command: abort_bash",
+            "abort_bash"
+        ));
+        assert!(!is_unknown_daemon_command_error(
+            "unknown command: abort_bash",
+            "execute_bash"
+        ));
+    }
+
+    #[test]
+    fn thinking_levels_parse_like_the_union() {
+        assert_eq!(thinking_level_from_str("xhigh"), Some(ThinkingLevel::Xhigh));
+        assert_eq!(thinking_level_from_str("bogus"), None);
+    }
+}

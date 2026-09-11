@@ -2062,16 +2062,32 @@ pub async fn review_auto_refine(request: ReviewAutoRefineRequest<'_>) -> Result<
 }
 
 pub async fn refine_harness(
-	request: PlanRefinementRequest<'_>,
+	messages: &[AgentMessage],
+	state: &mut HarnessState,
+	history: &[RefinementResult],
+	model: RefineModel,
+	api_key: &str,
+	options: RefineOptions,
+	headers: Option<HashMap<String, String>>,
+	thinking_level: Option<String>,
+	complete: CompletionFn,
 ) -> Result<RefinementResult, RefinementFailureError> {
-	let global = request.options.global.unwrap_or(false);
-	let state_pointer: *const HarnessState = request.state;
-	let plan = plan_refinement(request).await?;
+	let global = options.global.unwrap_or(false);
+	let plan = plan_refinement(PlanRefinementRequest {
+		messages,
+		state,
+		history,
+		model,
+		api_key: api_key.to_string(),
+		options,
+		headers,
+		thinking_level,
+		complete,
+	})
+	.await?;
 	let scope = plan
 		.rollback_scope
 		.unwrap_or(if global { HarnessScope::Global } else { HarnessScope::Local });
-	// `plan_refinement` never mutates state, so the caller-owned state is still valid.
-	let state = unsafe { &mut *(state_pointer as *mut HarnessState) };
 	Ok(apply_refinement_proposal(
 		state,
 		&plan.proposal,

@@ -117,6 +117,86 @@ pub struct CustomMessage {
     pub timestamp: f64,
 }
 
+/// Concrete `EventBus` implementation.
+///
+/// Port of `core/event-bus.ts`'s `createEventBus`. That file belongs to another
+/// slice and is still empty in this workspace, so the minimal implementation the
+/// extension loader and runner need lives here as crate-internal plumbing.
+/// blocked_on: needs core::event_bus::{EventBus, createEventBus}
+#[derive(Default)]
+pub struct SimpleEventBus {
+    handlers: std::sync::Mutex<std::collections::HashMap<String, Vec<Arc<dyn Fn(Value) + Send + Sync>>>>,
+}
+
+impl SimpleEventBus {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `emitter.emit(channel, data)`.
+    pub fn emit(&self, channel: &str, data: Value) {
+        let handlers = {
+            let guard = self
+                .handlers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.get(channel).cloned().unwrap_or_default()
+        };
+        for handler in handlers {
+            handler(data.clone());
+        }
+    }
+
+    /// `emitter.on(channel, handler)` - returns the unsubscribe function.
+    pub fn on(&self, channel: &str, handler: Arc<dyn Fn(Value) + Send + Sync>) -> Arc<dyn Fn() + Send + Sync> {
+        let key = channel.to_string();
+        {
+            let mut guard = self
+                .handlers
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.entry(key.clone()).or_default().push(handler.clone());
+        }
+        let bus = self.handlers.clone();
+        Arc::new(move || {
+            let mut guard = bus.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(list) = guard.get_mut(&key) {
+                list.retain(|existing| !Arc::ptr_eq(existing, &handler));
+            }
+        })
+    }
+
+    /// `emitter.removeAllListeners()`.
+    pub fn clear(&self) {
+        let mut guard = self
+            .handlers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.clear();
+    }
+}
+
+impl std::fmt::Debug for SimpleEventBus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SimpleEventBus").finish_non_exhaustive()
+    }
+}
+
+impl EventBus for SimpleEventBus {
+    fn emit(&self, channel: &str, data: Value) {
+        SimpleEventBus::emit(self, channel, data);
+    }
+
+    fn on(&self, channel: &str, handler: Arc<dyn Fn(Value) + Send + Sync>) -> Arc<dyn Fn() + Send + Sync> {
+        SimpleEventBus::on(self, channel, handler)
+    }
+}
+
+/// `createEventBus()`.
+pub(crate) fn create_event_bus() -> Arc<dyn EventBus> {
+    Arc::new(SimpleEventBus::new())
+}
+
 /// `Pick<CustomMessage, "customType" | "content" | "display" | "details">`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomMessagePayload {
@@ -761,9 +841,7 @@ pub struct ToolDefinition {
             + Sync,
     >,
     /// Custom rendering for tool call display.
-    pub render_call: Option<
-        Arc<dyn Fn(Value, Theme, ToolRenderContext) -> Arc<dyn Component> + Send + Sync>,
-    >,
+    pub render_call: Option<Arc<dyn Fn(Value, Theme, ToolRenderContext) -> Arc<dyn Component> + Send + Sync>>,
     /// Custom rendering for tool result display.
     pub render_result: Option<
         Arc<
@@ -1762,20 +1840,37 @@ pub struct ProviderModelCost {
     pub cache_write: f64,
 }
 
-/// `ExtensionRuntimeState`.
+/// `ExtensionRuntimeState` - the shared state created by the loader, used
+/// during registration and runtime.
+///
+/// The TypeScript object holds action methods that are replaced by
+/// `bindCore()`. Rust keeps the same slots as `Option`s: calling one before the
+/// bind throws the TypeScript "Extension runtime not initialized." error.
 pub struct ExtensionRuntimeState {
-    pub flag_values: HashMap<String, Value>,
+    pub flag_values: indexmap::IndexMap<String, Value>,
     /// Extra env vars merged over process.env for pi.exec() subprocesses.
     pub get_exec_env: Option<Arc<dyn Fn() -> Option<Map<String, Value>> + Send + Sync>>,
     /// Provider registrations queued during extension loading.
     pub pending_provider_registrations: Vec<PendingProviderRegistration>,
-    /// Throws when this extension instance is stale after runtime replacement.
-    pub assert_active: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
-    /// Marks this extension instance as stale after runtime replacement or reload.
-    pub invalidate: Arc<dyn Fn(Option<String>) + Send + Sync>,
-    /// Register or unregister a provider.
-    pub register_provider: Arc<dyn Fn(String, ProviderConfig, Option<String>) + Send + Sync>,
-    pub unregister_provider: Arc<dyn Fn(String, Option<String>) + Send + Sync>,
+    /// Stale-instance message set by `invalidate()`.
+    pub stale_message: Option<String>,
+    /// Action implementations installed by `runner.bindCore()`.
+    pub actions: Option<ExtensionActions>,
+    /// Provider action overrides installed by `runner.bindCore()`.
+    pub provider_actions: Option<ProviderActions>,
+}
+
+impl Default for ExtensionRuntimeState {
+    fn default() -> Self {
+        Self {
+            flag_values: indexmap::IndexMap::new(),
+            get_exec_env: None,
+            pending_provider_registrations: Vec::new(),
+            stale_message: None,
+            actions: None,
+            provider_actions: None,
+        }
+    }
 }
 
 impl std::fmt::Debug for ExtensionRuntimeState {
@@ -1786,20 +1881,229 @@ impl std::fmt::Debug for ExtensionRuntimeState {
     }
 }
 
-/// `{ name; config; extensionPath }` queued during extension loading.
-#[derive(Clone)]
-pub struct PendingProviderRegistration {
-    pub name: String,
-    pub config: ProviderConfig,
-    pub extension_path: String,
+/// `{ registerProvider?; unregisterProvider? }` passed to `bindCore()`.
+#[derive(Clone, Default)]
+pub struct ProviderActions {
+    pub register_provider: Option<Arc<dyn Fn(String, ProviderConfig) + Send + Sync>>,
+    pub unregister_provider: Option<Arc<dyn Fn(String) + Send + Sync>>,
 }
 
-impl std::fmt::Debug for PendingProviderRegistration {
+impl std::fmt::Debug for ProviderActions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PendingProviderRegistration")
-            .field("name", &self.name)
-            .field("extension_path", &self.extension_path)
-            .finish_non_exhaustive()
+        f.debug_struct("ProviderActions").finish_non_exhaustive()
+    }
+}
+
+/// The message thrown when an action is called before `bindCore()`.
+pub const EXTENSION_RUNTIME_NOT_INITIALIZED: &str =
+    "Extension runtime not initialized. Action methods cannot be called during extension loading.";
+
+/// The default stale-instance message used by `invalidate()`.
+pub const EXTENSION_RUNTIME_STALE_MESSAGE: &str =
+    "This extension ctx is stale after session replacement or reload. Do not use a captured pi or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().";
+
+/// Full runtime = state + actions. Created by the loader with throwing action
+/// stubs, completed by `runner.initialize()`.
+#[derive(Clone)]
+pub struct ExtensionRuntime {
+    pub state: Arc<std::sync::Mutex<ExtensionRuntimeState>>,
+}
+
+impl std::fmt::Debug for ExtensionRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExtensionRuntime").finish_non_exhaustive()
+    }
+}
+
+impl ExtensionRuntime {
+    pub fn new(state: ExtensionRuntimeState) -> Self {
+        Self {
+            state: Arc::new(std::sync::Mutex::new(state)),
+        }
+    }
+
+    fn with_state<T>(&self, f: impl FnOnce(&mut ExtensionRuntimeState) -> T) -> T {
+        let mut guard = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f(&mut guard)
+    }
+
+    /// `runtime.assertActive()`.
+    pub fn assert_active(&self) -> Result<(), String> {
+        self.with_state(|state| match &state.stale_message {
+            Some(message) => Err(message.clone()),
+            None => Ok(()),
+        })
+    }
+
+    /// `runtime.invalidate(message)`.
+    pub fn invalidate(&self, message: Option<String>) {
+        self.with_state(|state| {
+            if state.stale_message.is_none() {
+                state.stale_message = Some(message.unwrap_or_else(|| EXTENSION_RUNTIME_STALE_MESSAGE.to_string()));
+            }
+        });
+    }
+
+    pub fn flag_values_get(&self, name: &str) -> Option<Value> {
+        self.with_state(|state| state.flag_values.get(name).cloned())
+    }
+
+    pub fn flag_values_set(&self, name: &str, value: Value) {
+        self.with_state(|state| {
+            state.flag_values.insert(name.to_string(), value);
+        });
+    }
+
+    pub fn flag_values_has(&self, name: &str) -> bool {
+        self.with_state(|state| state.flag_values.contains_key(name))
+    }
+
+    pub fn flag_values_snapshot(&self) -> indexmap::IndexMap<String, Value> {
+        self.with_state(|state| state.flag_values.clone())
+    }
+
+    pub fn get_exec_env(&self) -> Option<Map<String, Value>> {
+        let getter = self.with_state(|state| state.get_exec_env.clone())?;
+        getter()
+    }
+
+    /// `runtime.registerProvider(name, config, extensionPath)`.
+    pub fn register_provider(&self, name: &str, config: ProviderConfig, extension_path: Option<&str>) {
+        let direct = self.with_state(|state| state.provider_actions.clone());
+        if let Some(actions) = direct {
+            if let Some(register) = actions.register_provider {
+                register(name.to_string(), config);
+                return;
+            }
+        }
+        self.with_state(|state| {
+            state.pending_provider_registrations.push(PendingProviderRegistration {
+                name: name.to_string(),
+                config,
+                extension_path: extension_path.unwrap_or("<unknown>").to_string(),
+            });
+        });
+    }
+
+    /// `runtime.unregisterProvider(name, extensionPath)`.
+    pub fn unregister_provider(&self, name: &str, extension_path: Option<&str>) {
+        let direct = self.with_state(|state| state.provider_actions.clone());
+        if let Some(actions) = direct {
+            if let Some(unregister) = actions.unregister_provider {
+                unregister(name.to_string());
+                return;
+            }
+        }
+        self.with_state(|state| {
+            state
+                .pending_provider_registrations
+                .retain(|registration| registration.name != name);
+            let _ = extension_path;
+        });
+    }
+
+    /// Take the queued provider registrations (used by `bindCore()`).
+    pub fn take_pending_provider_registrations(&self) -> Vec<PendingProviderRegistration> {
+        self.with_state(|state| std::mem::take(&mut state.pending_provider_registrations))
+    }
+
+    /// Read the installed action implementations.
+    pub fn actions(&self) -> Option<ExtensionActions> {
+        self.with_state(|state| state.actions.clone())
+    }
+
+    fn require_actions(&self) -> Result<ExtensionActions, String> {
+        self.actions().ok_or_else(|| EXTENSION_RUNTIME_NOT_INITIALIZED.to_string())
+    }
+
+    pub fn send_message(
+        &self,
+        message: CustomMessagePayload,
+        options: Option<SendMessageOptions>,
+    ) -> Result<(), String> {
+        let actions = self.require_actions()?;
+        (actions.send_message)(message, options);
+        Ok(())
+    }
+
+    pub fn send_user_message(&self, content: Value, options: Option<SendUserMessageOptions>) -> Result<(), String> {
+        let actions = self.require_actions()?;
+        (actions.send_user_message)(content, options);
+        Ok(())
+    }
+
+    pub fn append_entry(&self, custom_type: &str, data: Option<Value>) -> Result<(), String> {
+        let actions = self.require_actions()?;
+        (actions.append_entry)(custom_type.to_string(), data);
+        Ok(())
+    }
+
+    pub fn set_session_name(
+        &self,
+        name: String,
+    ) -> Result<Pin<Box<dyn std::future::Future<Output = ()> + Send>>, String> {
+        let actions = self.require_actions()?;
+        Ok((actions.set_session_name)(name))
+    }
+
+    pub fn get_session_name(&self) -> Result<Option<String>, String> {
+        let actions = self.require_actions()?;
+        Ok((actions.get_session_name)())
+    }
+
+    pub fn set_label(&self, entry_id: String, label: Option<String>) -> Result<(), String> {
+        let actions = self.require_actions()?;
+        (actions.set_label)(entry_id, label);
+        Ok(())
+    }
+
+    pub fn get_active_tools(&self) -> Result<Vec<String>, String> {
+        let actions = self.require_actions()?;
+        Ok((actions.get_active_tools)())
+    }
+
+    pub fn get_all_tools(&self) -> Result<Vec<ToolInfo>, String> {
+        let actions = self.require_actions()?;
+        Ok((actions.get_all_tools)())
+    }
+
+    pub fn set_active_tools(&self, tool_names: Vec<String>) -> Result<(), String> {
+        let actions = self.require_actions()?;
+        (actions.set_active_tools)(tool_names);
+        Ok(())
+    }
+
+    pub fn refresh_tools(&self) {
+        if let Some(actions) = self.actions() {
+            (actions.refresh_tools)();
+        }
+    }
+
+    pub fn get_commands(&self) -> Result<Vec<SlashCommandInfo>, String> {
+        let actions = self.require_actions()?;
+        Ok((actions.get_commands)())
+    }
+
+    /// `runtime.setModel(model)` - rejects with "Extension runtime not initialized".
+    pub fn set_model(&self, model: pi_ai::types::Model) -> Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send>> {
+        match self.actions() {
+            Some(actions) => (actions.set_model)(model),
+            None => Box::pin(async { Err("Extension runtime not initialized".to_string()) }),
+        }
+    }
+
+    pub fn get_thinking_level(&self) -> Result<ThinkingLevel, String> {
+        let actions = self.require_actions()?;
+        Ok((actions.get_thinking_level)())
+    }
+
+    pub fn set_thinking_level(&self, level: ThinkingLevel) -> Result<(), String> {
+        let actions = self.require_actions()?;
+        (actions.set_thinking_level)(level);
+        Ok(())
     }
 }
 
@@ -1865,30 +2169,21 @@ impl std::fmt::Debug for ExtensionCommandContextActions {
     }
 }
 
-/// Full runtime = state + actions.
-#[derive(Clone)]
-pub struct ExtensionRuntime {
-    pub state: Arc<std::sync::Mutex<ExtensionRuntimeState>>,
-    pub actions: Arc<std::sync::Mutex<Option<ExtensionActions>>>,
-}
-
-impl std::fmt::Debug for ExtensionRuntime {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ExtensionRuntime").finish_non_exhaustive()
-    }
-}
-
 /// Loaded extension with all registered items.
+///
+/// The TypeScript extension object is a single mutable identity that the
+/// `ExtensionAPI` keeps writing to after the factory returns, so the port keeps
+/// it behind an `Arc<Mutex<_>>`.
 pub struct Extension {
     pub path: String,
     pub resolved_path: String,
     pub source_info: SourceInfo,
-    pub handlers: HashMap<String, Vec<ExtensionHandler>>,
-    pub tools: HashMap<String, RegisteredTool>,
-    pub message_renderers: HashMap<String, MessageRenderer>,
-    pub commands: HashMap<String, RegisteredCommand>,
-    pub flags: HashMap<String, ExtensionFlag>,
-    pub shortcuts: HashMap<KeyId, ExtensionShortcut>,
+    pub handlers: std::collections::HashMap<String, Vec<ExtensionHandler>>,
+    pub tools: std::collections::HashMap<String, RegisteredTool>,
+    pub message_renderers: std::collections::HashMap<String, MessageRenderer>,
+    pub commands: std::collections::HashMap<String, RegisteredCommand>,
+    pub flags: std::collections::HashMap<String, ExtensionFlag>,
+    pub shortcuts: std::collections::HashMap<KeyId, ExtensionShortcut>,
 }
 
 impl std::fmt::Debug for Extension {
@@ -1900,9 +2195,12 @@ impl std::fmt::Debug for Extension {
     }
 }
 
+/// Shared handle to one loaded extension.
+pub type SharedExtension = Arc<std::sync::Mutex<Extension>>;
+
 /// Result of loading extensions.
 pub struct LoadExtensionsResult {
-    pub extensions: Vec<Extension>,
+    pub extensions: Vec<SharedExtension>,
     pub errors: Vec<LoadExtensionError>,
     /// Shared runtime - actions are throwing stubs until `runner.initialize()`.
     pub runtime: ExtensionRuntime,

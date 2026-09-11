@@ -1152,12 +1152,41 @@ pub struct AnthropicMessagesCompat {
 }
 
 /// `TApi extends "openai-completions" ? OpenAICompletionsCompat : ...`
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// The TypeScript picks the compat shape from the model's `api` value, so the
+/// Rust port sniffs the incoming keys instead of relying on `untagged`, which
+/// would always match `OpenAICompletionsCompat` first (every field is optional).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Compat {
     Completions(OpenAICompletionsCompat),
     Responses(OpenAIResponsesCompat),
     Anthropic(AnthropicMessagesCompat),
+}
+
+impl<'de> Deserialize<'de> for Compat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let Some(object) = value.as_object() else {
+            return Err(serde::de::Error::custom("expected a compat object"));
+        };
+        if object.contains_key("supportsEagerToolInputStreaming") {
+            return serde_json::from_value(value)
+                .map(Compat::Anthropic)
+                .map_err(serde::de::Error::custom);
+        }
+        if object.contains_key("sendSessionIdHeader") {
+            return serde_json::from_value(value)
+                .map(Compat::Responses)
+                .map_err(serde::de::Error::custom);
+        }
+        serde_json::from_value(value)
+            .map(Compat::Completions)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 impl Compat {

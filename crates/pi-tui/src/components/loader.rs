@@ -194,17 +194,18 @@ mod tests {
 
     #[test]
     fn indicator_options_are_normalized() {
-        let mut frames = DEFAULT_FRAMES.iter().map(|f| (*f).to_string()).collect::<Vec<_>>();
-        let mut interval_ms = DEFAULT_INTERVAL_MS;
-        let mut verbatim = false;
-
-        let indicator = LoaderIndicatorOptions {
+        let indicator = Some(LoaderIndicatorOptions {
             frames: Some(vec!["x".to_string()]),
             interval_ms: Some(0),
-        };
-        verbatim = indicator.is_some();
-        frames = indicator.frames.clone().unwrap();
-        interval_ms = match indicator.interval_ms {
+        });
+        // `setIndicator` treats a present indicator as verbatim and keeps the
+        // default interval when `intervalMs` is not positive.
+        let verbatim = indicator.is_some();
+        let frames = indicator
+            .as_ref()
+            .and_then(|i| i.frames.clone())
+            .unwrap_or_else(|| DEFAULT_FRAMES.iter().map(|f| (*f).to_string()).collect());
+        let interval_ms = match indicator.as_ref().and_then(|i| i.interval_ms) {
             Some(value) if value > 0 => value,
             _ => DEFAULT_INTERVAL_MS,
         };

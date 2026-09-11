@@ -519,7 +519,7 @@ mod tests {
             done: SubmenuDone,
         }
         impl Component for Choice {
-            fn render(&mut self, _width: usize) -> Vec<String> {
+            fn render(&mut self, _width: f64) -> Vec<String> {
                 vec!["submenu".to_string()]
             }
             fn handle_input(&mut self, data: &str) {

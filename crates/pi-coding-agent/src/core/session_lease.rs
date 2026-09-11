@@ -5,6 +5,8 @@
 //! (utils/child-process.ts). They are private plumbing inside this module and are
 //! recorded in blocked_on.
 
+#![allow(clippy::too_many_arguments)]
+
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;

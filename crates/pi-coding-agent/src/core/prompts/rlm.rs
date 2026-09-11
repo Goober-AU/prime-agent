@@ -13,6 +13,9 @@ pub struct RlmPromptOptions {
 	pub active_tools: Option<Vec<String>>,
 }
 
+/// The `'''` literal used by the `edit` skill guidance line.
+const TRIPLE_QUOTE: &str = "'''";
+
 const LONG_RUNNING_WORK_PROMPT: &str = "For slow or independently completing work, use a nonblocking control loop: start the work, record its handle or output location, then end your turn. A `bash()` handle left running beyond its creating cell sends a completion follow-up; when it arrives, inspect the saved handle and continue.\nWhen delegation is available and useful, assign independent substantive tasks to separate workers. Start independent workers without waiting for each one sequentially, and let them run in parallel.\nDo not keep the turn open by polling with `time.sleep()` or shell `sleep`, and do not replace polling with a long blocking `await`. Await only the short operation needed to start work or inspect a result that is already available; otherwise end the turn.";
 
 const USER_PROGRESS_PROMPT: &str = "As the user-facing root agent, when work follows a plan, uses many subagents, or spans multiple turns, proactively give regular concise progress updates so the user does not have to ask. State the current plan, what has completed, any blockers, the proposed fixes, and the next actions. Lead with user-visible outcomes rather than internal process or gate names. Mention internal details only when they explain a blocker or decision. Send an update at meaningful milestones and before ending a turn while work is still running. Do not repeat unchanged status or interrupt short work with unnecessary updates.";
@@ -134,8 +137,8 @@ pub fn build_rlm_prompt(options: &RlmPromptOptions) -> String {
 		}
 		if has_ipython && installed_skills.iter().any(|skill| skill == "edit") {
 			skill_lines.push(format!(
-				"For targeted existing-file edits, prefer the pre-imported async `edit` skill from the REPL: `old = {tq}...{tq}; new = {tq}...{tq}; await edit(path=\"pkg/file.py\", old_str=old, new_str=new)`. Use exact old/new strings; if the text contains triple double quotes, use triple single-quoted variables or build `old`/`new` from inspected file slices.",
-				tq = TRIPLE_QUOTE
+				"For targeted existing-file edits, prefer the pre-imported async `edit` skill from the REPL: `old = {}...{}; new = {}...{}; await edit(path=\"pkg/file.py\", old_str=old, new_str=new)`. Use exact old/new strings; if the text contains triple double quotes, use triple single-quoted variables or build `old`/`new` from inspected file slices.",
+				TRIPLE_QUOTE, TRIPLE_QUOTE, TRIPLE_QUOTE, TRIPLE_QUOTE
 			));
 		}
 	}

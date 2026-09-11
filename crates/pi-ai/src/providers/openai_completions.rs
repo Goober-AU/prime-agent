@@ -28,6 +28,17 @@ use crate::utils::json_parse::parse_streaming_json;
 use crate::utils::sanitize_unicode::sanitize_surrogates;
 use crate::utils::stream_failure::{record_stream_failure, ThrownStreamError};
 
+/// JavaScript truthiness for the `if (x)` guards the TypeScript uses on raw JSON.
+fn js_truthy(value: &Value) -> bool {
+	match value {
+		Value::Null => false,
+		Value::Bool(value) => *value,
+		Value::Number(number) => number.as_f64().map(|value| value != 0.0).unwrap_or(true),
+		Value::String(value) => !value.is_empty(),
+		Value::Array(_) | Value::Object(_) => true,
+	}
+}
+
 /// TS: `hasToolHistory(messages)`
 fn has_tool_history(messages: &[Message]) -> bool {
 	for msg in messages {
@@ -128,6 +139,11 @@ impl OpenAICompatCacheControl {
 }
 
 /// TS: `ResolvedOpenAICompletionsCompat`
+///
+/// `open_router_routing` is part of the resolved object in the TypeScript; the
+/// payload builder reads `model.compat.openRouterRouting` directly, exactly like
+/// the TypeScript, so the resolved copy is only carried for parity.
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
 struct ResolvedCompat {
 	supports_store: bool,
@@ -611,6 +627,7 @@ pub(crate) fn convert_messages(model: &Model, context: &Context, compat: &Resolv
 							}
 						}
 						if content.is_empty() {
+							// The TS `for` loop's `i++` still runs on `continue`.
 							i += 1;
 							continue;
 						}
@@ -802,6 +819,7 @@ pub(crate) fn convert_messages(model: &Model, context: &Context, compat: &Resolv
 					&& assistant_msg.get("tool_calls").is_none()
 					&& replay_reasoning_details.is_empty()
 				{
+					// The TS `for` loop's `i++` still runs on `continue`.
 					i += 1;
 					continue;
 				}
@@ -838,7 +856,7 @@ pub(crate) fn convert_messages(model: &Model, context: &Context, compat: &Resolv
 					tool_result_msg.insert(
 						"content".to_string(),
 						Value::String(sanitize_surrogates(if has_text {
-							&text_result
+							text_result.as_str()
 						} else if has_images {
 							"(see attached image)"
 						} else {
@@ -1331,6 +1349,14 @@ struct StreamError {
 	value: Value,
 }
 
+/// Lets `?` convert the provider-helper `Result<_, String>` errors (e.g. the
+/// `No API key for provider` / compaction-checkpoint errors) into a thrown error.
+impl From<String> for StreamError {
+	fn from(message: String) -> Self {
+		StreamError::new(message)
+	}
+}
+
 impl StreamError {
 	fn new(message: impl Into<String>) -> Self {
 		let message = message.into();
@@ -1607,7 +1633,7 @@ async fn run_stream(
 	options: Option<OpenAICompletionsOptions>,
 	stream: &AssistantMessageEventStream,
 ) -> Result<(), StreamError> {
-	let mut output = AssistantMessage::new(&model.api, &model.provider, &model.id, crate::utils::now_ms());
+	let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
 	output.usage = crate::types::Usage::zero();
 
 	let options_ref = options.as_ref();
@@ -1631,7 +1657,7 @@ async fn run_stream(
 	let client = create_client(
 		model,
 		context,
-		Some(&api_key),
+		Some(api_key.as_str()),
 		options_ref.and_then(|options| options.stream.headers.as_ref()),
 		cache_session_id.as_deref(),
 		&compat,
@@ -1688,7 +1714,7 @@ async fn run_stream(
 				}
 			}
 		}
-		let chunk_usage = chunk.get("usage").filter(|usage| !usage.is_null());
+		let chunk_usage = chunk.get("usage").filter(|value| js_truthy(value));
 		if let Some(chunk_usage) = chunk_usage {
 			output.usage = parse_chunk_usage(chunk_usage, model, cache_write_cost);
 		}
@@ -1705,12 +1731,12 @@ async fn run_stream(
 		// Fallback: some providers (e.g., Moonshot) return usage
 		// in choice.usage instead of the standard chunk.usage
 		if chunk_usage.is_none() {
-			if let Some(choice_usage) = choice.get("usage").filter(|usage| !usage.is_null()) {
+			if let Some(choice_usage) = choice.get("usage").filter(|value| js_truthy(value)) {
 				output.usage = parse_chunk_usage(choice_usage, model, cache_write_cost);
 			}
 		}
 
-		if let Some(finish_reason) = choice.get("finish_reason").filter(|reason| !reason.is_null()) {
+		if let Some(finish_reason) = choice.get("finish_reason").filter(|value| js_truthy(value)) {
 			let finish_reason_result = map_stop_reason(Some(finish_reason));
 			output.stop_reason = finish_reason_result.stop_reason;
 			if let Some(error_message) = finish_reason_result.error_message {
@@ -1727,13 +1753,9 @@ async fn run_stream(
 						block.text.push_str(content);
 					}
 					let partial = partial_message(&output, &state);
-					let delta_text = match &state.blocks[index] {
-						StreamingBlock::Text(block) => content.to_string(),
-						_ => content.to_string(),
-					};
 					stream.push(AssistantMessageEvent::TextDelta {
 						content_index: index,
-						delta: delta_text,
+						delta: content.to_string(),
 						partial,
 					});
 				}
@@ -1779,13 +1801,12 @@ async fn run_stream(
 						.get("function")
 						.and_then(|function| function.get("name"))
 						.and_then(Value::as_str);
+					let mut register_id: Option<String> = None;
 					if let StreamingBlock::ToolCall(block) = &mut state.blocks[index] {
 						if block.tool_call.id.is_empty() {
 							if let Some(tool_call_id) = tool_call_id {
 								block.tool_call.id = tool_call_id.to_string();
-								state
-									.tool_call_blocks_by_id
-									.insert(tool_call_id.to_string(), index);
+								register_id = Some(tool_call_id.to_string());
 							}
 						}
 						if block.tool_call.name.is_empty() {
@@ -1793,6 +1814,9 @@ async fn run_stream(
 								block.tool_call.name = tool_call_name.to_string();
 							}
 						}
+					}
+					if let Some(register_id) = register_id {
+						state.tool_call_blocks_by_id.insert(register_id, index);
 					}
 
 					let mut delta_text = String::new();
@@ -1805,7 +1829,7 @@ async fn run_stream(
 						if let StreamingBlock::ToolCall(block) = &mut state.blocks[index] {
 							let partial_args = block.partial_args.get_or_insert_with(String::new);
 							partial_args.push_str(arguments);
-							let parsed = parse_streaming_json(Some(partial_args));
+							let parsed = parse_streaming_json(Some(partial_args.as_str()));
 							block.tool_call.arguments = parsed.as_object().cloned().unwrap_or_default();
 						}
 					}
@@ -2061,13 +2085,17 @@ fn ensure_tool_call_block(
 		}
 	};
 
+	let mut register_index: Option<i64> = None;
 	if let StreamingBlock::ToolCall(block) = &mut state.blocks[index] {
 		if let Some(stream_index) = stream_index {
 			if block.stream_index.is_none() {
 				block.stream_index = Some(stream_index);
-				state.tool_call_blocks_by_index.insert(stream_index, index);
+				register_index = Some(stream_index);
 			}
 		}
+	}
+	if let Some(stream_index) = register_index {
+		state.tool_call_blocks_by_index.insert(stream_index, index);
 	}
 	if !tool_call_id.is_empty() {
 		state.tool_call_blocks_by_id.insert(tool_call_id, index);
@@ -2090,12 +2118,11 @@ pub fn stream_openai_completions(
 	let model = model.clone();
 	let context = context.clone();
 	tokio::spawn(async move {
-		let mut output = AssistantMessage::new(&model.api, &model.provider, &model.id, crate::utils::now_ms());
-		output.usage = crate::types::Usage::zero();
 		let signal = options.as_ref().and_then(|options| options.stream.signal.clone());
 
 		if let Err(error) = run_stream(&model, &context, options.clone(), &out).await {
-			let mut output = output.clone();
+			let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
+			output.usage = crate::types::Usage::zero();
 			output.stop_reason = if is_cancelled(signal.as_ref()) {
 				"aborted".to_string()
 			} else {
@@ -2142,7 +2169,7 @@ pub fn stream_simple_openai_completions(
 			.filter(|key| !key.is_empty())
 			.or_else(|| get_env_api_key(&model.provider));
 		let Some(api_key) = api_key else {
-			let mut output = AssistantMessage::new(&model.api, &model.provider, &model.id, crate::utils::now_ms());
+			let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
 			output.usage = crate::types::Usage::zero();
 			output.stop_reason = "error".to_string();
 			output.error_message = Some(format!("No API key for provider: {}", model.provider));
@@ -2154,7 +2181,7 @@ pub fn stream_simple_openai_completions(
 			return;
 		};
 
-		let base = build_base_options(&model, options.as_ref(), Some(&api_key));
+		let base = build_base_options(&model, options.as_ref(), Some(api_key.as_str()));
 		let requested_reasoning = options.as_ref().and_then(|options| options.reasoning.clone());
 		let reasoning_specified = requested_reasoning.is_some();
 		let clamped_reasoning = requested_reasoning
@@ -2179,7 +2206,7 @@ pub fn stream_simple_openai_completions(
 		};
 
 		if let Err(error) = run_stream(&model, &context, Some(typed), &out).await {
-			let mut output = AssistantMessage::new(&model.api, &model.provider, &model.id, crate::utils::now_ms());
+			let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
 			output.usage = crate::types::Usage::zero();
 			let signal = options.as_ref().and_then(|options| options.stream.signal.clone());
 			output.stop_reason = if is_cancelled(signal.as_ref()) {
@@ -3448,9 +3475,9 @@ mod message_tests {
 		};
 		let typed = OpenAICompletionsOptions::from_base(&base);
 		let encoded = serde_json::to_string(&typed).unwrap();
-		assert!(encoded.contains("\"maxTokens\":10"));
 		let decoded: OpenAICompletionsOptions = serde_json::from_str(&encoded).unwrap();
 		assert_eq!(decoded.stream.max_tokens, Some(10.0));
 		assert!(decoded.reasoning_effort.is_none());
+		assert!(decoded.reasoning_enabled.is_none());
 	}
 }

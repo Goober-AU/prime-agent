@@ -189,7 +189,7 @@ mod tests {
     struct Lines(Vec<String>);
 
     impl Component for Lines {
-        fn render(&mut self, _width: usize) -> Vec<String> {
+        fn render(&mut self, _width: f64) -> Vec<String> {
             self.0.clone()
         }
         fn invalidate(&mut self) {}

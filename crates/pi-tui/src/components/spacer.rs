@@ -45,6 +45,6 @@ mod tests {
         assert_eq!(spacer.render(10.0), vec!["", "", ""]);
         spacer.set_lines(0);
         assert_eq!(spacer.render(10.0), Vec::<String>::new());
-        assert_eq!(Spacer::default().render(1), vec![""]);
+        assert_eq!(Spacer::default().render(1.0), vec![""]);
     }
 }
