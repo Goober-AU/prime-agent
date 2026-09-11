@@ -1,0 +1,77 @@
+{
+ "slice": "ca-interactive-a",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/interactive/agent-activity.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/agent_activity.rs",
+   "loc": 135
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/auth-flows.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/auth_flows.rs",
+   "loc": 877
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/feature-hints.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/feature_hints.rs",
+   "loc": 137
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/heartbeat-scope.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/heartbeat_scope.rs",
+   "loc": 31
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/image-markers.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/image_markers.rs",
+   "loc": 80
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/interactive-mode-services.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode_services.rs",
+   "loc": 116
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode.rs",
+   "loc": 10352
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/onboarding.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/onboarding.rs",
+   "loc": 45
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/prompt-stash-state.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/prompt_stash_state.rs",
+   "loc": 38
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/queue-selection.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/queue_selection.rs",
+   "loc": 91
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/resume-hint.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/resume_hint.rs",
+   "loc": 15
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/theme/code-highlighter.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/theme/code_highlighter.rs",
+   "loc": 7
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/theme/theme.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/theme/theme.rs",
+   "loc": 1365
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/theme/working-icon.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/theme/working_icon.rs",
+   "loc": 21
+  }
+ ],
+ "loc": 13310
+}

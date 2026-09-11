@@ -1,0 +1,22 @@
+{
+ "slice": "ai-mcp",
+ "crate": "pi-ai",
+ "files": [
+  {
+   "src": "packages/ai/src/mcp/catalog.ts",
+   "rust": "crates/pi-ai/src/mcp/catalog.rs",
+   "loc": 53
+  },
+  {
+   "src": "packages/ai/src/mcp/index.ts",
+   "rust": "crates/pi-ai/src/mcp/mod.rs",
+   "loc": 4
+  },
+  {
+   "src": "packages/ai/src/mcp/oauth.ts",
+   "rust": "crates/pi-ai/src/mcp/oauth.rs",
+   "loc": 583
+  }
+ ],
+ "loc": 640
+}

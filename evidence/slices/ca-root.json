@@ -1,0 +1,47 @@
+{
+ "slice": "ca-root",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/cli-main.ts",
+   "rust": "crates/pi-coding-agent/src/cli_main_entry.rs",
+   "loc": 46
+  },
+  {
+   "src": "packages/coding-agent/src/cli.ts",
+   "rust": "crates/pi-coding-agent/src/cli_entry.rs",
+   "loc": 15
+  },
+  {
+   "src": "packages/coding-agent/src/config.ts",
+   "rust": "crates/pi-coding-agent/src/config.rs",
+   "loc": 634
+  },
+  {
+   "src": "packages/coding-agent/src/index.ts",
+   "rust": "crates/pi-coding-agent/src/mod.rs",
+   "loc": 418
+  },
+  {
+   "src": "packages/coding-agent/src/main.ts",
+   "rust": "crates/pi-coding-agent/src/main_entry.rs",
+   "loc": 1780
+  },
+  {
+   "src": "packages/coding-agent/src/migrations.ts",
+   "rust": "crates/pi-coding-agent/src/migrations.rs",
+   "loc": 449
+  },
+  {
+   "src": "packages/coding-agent/src/package-manager-cli.ts",
+   "rust": "crates/pi-coding-agent/src/package_manager_cli.rs",
+   "loc": 1630
+  },
+  {
+   "src": "packages/coding-agent/src/postinstall.ts",
+   "rust": "crates/pi-coding-agent/src/postinstall.rs",
+   "loc": 32
+  }
+ ],
+ "loc": 5004
+}

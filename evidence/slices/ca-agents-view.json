@@ -1,0 +1,27 @@
+{
+ "slice": "ca-agents-view",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/agents-view/agents-view-mode.ts",
+   "rust": "crates/pi-coding-agent/src/modes/agents_view/agents_view_mode.rs",
+   "loc": 3003
+  },
+  {
+   "src": "packages/coding-agent/src/modes/agents-view/agents-view-state.ts",
+   "rust": "crates/pi-coding-agent/src/modes/agents_view/agents_view_state.rs",
+   "loc": 1156
+  },
+  {
+   "src": "packages/coding-agent/src/modes/agents-view/roster-store.ts",
+   "rust": "crates/pi-coding-agent/src/modes/agents_view/roster_store.rs",
+   "loc": 131
+  },
+  {
+   "src": "packages/coding-agent/src/modes/agents-view/session-view-search.ts",
+   "rust": "crates/pi-coding-agent/src/modes/agents_view/session_view_search.rs",
+   "loc": 142
+  }
+ ],
+ "loc": 4432
+}

@@ -1,0 +1,182 @@
+{
+ "slice": "ai-core",
+ "crate": "pi-ai",
+ "files": [
+  {
+   "src": "packages/ai/src/api-registry.ts",
+   "rust": "crates/pi-ai/src/api_registry.rs",
+   "loc": 112
+  },
+  {
+   "src": "packages/ai/src/bedrock-provider.ts",
+   "rust": "crates/pi-ai/src/bedrock_provider.rs",
+   "loc": 9
+  },
+  {
+   "src": "packages/ai/src/cache-pricing.ts",
+   "rust": "crates/pi-ai/src/cache_pricing.rs",
+   "loc": 63
+  },
+  {
+   "src": "packages/ai/src/cli.ts",
+   "rust": "crates/pi-ai/src/cli_entry.rs",
+   "loc": 133
+  },
+  {
+   "src": "packages/ai/src/compaction.ts",
+   "rust": "crates/pi-ai/src/compaction.rs",
+   "loc": 66
+  },
+  {
+   "src": "packages/ai/src/copilot-client-version.ts",
+   "rust": "crates/pi-ai/src/copilot_client_version.rs",
+   "loc": 13
+  },
+  {
+   "src": "packages/ai/src/env-api-keys.ts",
+   "rust": "crates/pi-ai/src/env_api_keys.rs",
+   "loc": 221
+  },
+  {
+   "src": "packages/ai/src/index.ts",
+   "rust": "crates/pi-ai/src/mod.rs",
+   "loc": 47
+  },
+  {
+   "src": "packages/ai/src/log.ts",
+   "rust": "crates/pi-ai/src/log.rs",
+   "loc": 88
+  },
+  {
+   "src": "packages/ai/src/mcp.ts",
+   "rust": "crates/pi-ai/src/mcp_api.rs",
+   "loc": 1
+  },
+  {
+   "src": "packages/ai/src/models.generated.ts",
+   "rust": "crates/pi-ai/src/models_generated.rs",
+   "loc": 22884
+  },
+  {
+   "src": "packages/ai/src/models.ts",
+   "rust": "crates/pi-ai/src/models.rs",
+   "loc": 123
+  },
+  {
+   "src": "packages/ai/src/oauth.ts",
+   "rust": "crates/pi-ai/src/oauth_api.rs",
+   "loc": 1
+  },
+  {
+   "src": "packages/ai/src/openrouter-reasoning.ts",
+   "rust": "crates/pi-ai/src/openrouter_reasoning.rs",
+   "loc": 67
+  },
+  {
+   "src": "packages/ai/src/prime-inference-model-catalog.ts",
+   "rust": "crates/pi-ai/src/prime_inference_model_catalog.rs",
+   "loc": 93
+  },
+  {
+   "src": "packages/ai/src/session-resources.ts",
+   "rust": "crates/pi-ai/src/session_resources.rs",
+   "loc": 24
+  },
+  {
+   "src": "packages/ai/src/stream.ts",
+   "rust": "crates/pi-ai/src/stream.rs",
+   "loc": 74
+  },
+  {
+   "src": "packages/ai/src/types.ts",
+   "rust": "crates/pi-ai/src/types.rs",
+   "loc": 501
+  },
+  {
+   "src": "packages/ai/src/utils/diagnostics.ts",
+   "rust": "crates/pi-ai/src/utils/diagnostics.rs",
+   "loc": 45
+  },
+  {
+   "src": "packages/ai/src/utils/event-stream.ts",
+   "rust": "crates/pi-ai/src/utils/event_stream.rs",
+   "loc": 84
+  },
+  {
+   "src": "packages/ai/src/utils/hash.ts",
+   "rust": "crates/pi-ai/src/utils/hash.rs",
+   "loc": 12
+  },
+  {
+   "src": "packages/ai/src/utils/headers.ts",
+   "rust": "crates/pi-ai/src/utils/headers.rs",
+   "loc": 7
+  },
+  {
+   "src": "packages/ai/src/utils/json-parse.ts",
+   "rust": "crates/pi-ai/src/utils/json_parse.rs",
+   "loc": 124
+  },
+  {
+   "src": "packages/ai/src/utils/oauth/anthropic.ts",
+   "rust": "crates/pi-ai/src/utils/oauth/anthropic.rs",
+   "loc": 402
+  },
+  {
+   "src": "packages/ai/src/utils/oauth/github-copilot.ts",
+   "rust": "crates/pi-ai/src/utils/oauth/github_copilot.rs",
+   "loc": 378
+  },
+  {
+   "src": "packages/ai/src/utils/oauth/index.ts",
+   "rust": "crates/pi-ai/src/utils/oauth/mod.rs",
+   "loc": 128
+  },
+  {
+   "src": "packages/ai/src/utils/oauth/oauth-page.ts",
+   "rust": "crates/pi-ai/src/utils/oauth/oauth_page.rs",
+   "loc": 115
+  },
+  {
+   "src": "packages/ai/src/utils/oauth/openai-codex.ts",
+   "rust": "crates/pi-ai/src/utils/oauth/openai_codex.rs",
+   "loc": 458
+  },
+  {
+   "src": "packages/ai/src/utils/oauth/pkce.ts",
+   "rust": "crates/pi-ai/src/utils/oauth/pkce.rs",
+   "loc": 29
+  },
+  {
+   "src": "packages/ai/src/utils/oauth/types.ts",
+   "rust": "crates/pi-ai/src/utils/oauth/types.rs",
+   "loc": 71
+  },
+  {
+   "src": "packages/ai/src/utils/overflow.ts",
+   "rust": "crates/pi-ai/src/utils/overflow.rs",
+   "loc": 147
+  },
+  {
+   "src": "packages/ai/src/utils/sanitize-unicode.ts",
+   "rust": "crates/pi-ai/src/utils/sanitize_unicode.rs",
+   "loc": 25
+  },
+  {
+   "src": "packages/ai/src/utils/stream-failure.ts",
+   "rust": "crates/pi-ai/src/utils/stream_failure.rs",
+   "loc": 271
+  },
+  {
+   "src": "packages/ai/src/utils/typebox-helpers.ts",
+   "rust": "crates/pi-ai/src/utils/typebox_helpers.rs",
+   "loc": 24
+  },
+  {
+   "src": "packages/ai/src/utils/validation.ts",
+   "rust": "crates/pi-ai/src/utils/validation.rs",
+   "loc": 324
+  }
+ ],
+ "loc": 27164
+}

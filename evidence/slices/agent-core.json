@@ -1,0 +1,37 @@
+{
+ "slice": "agent-core",
+ "crate": "pi-agent-core",
+ "files": [
+  {
+   "src": "packages/agent/src/agent-loop.ts",
+   "rust": "crates/pi-agent-core/src/agent_loop.rs",
+   "loc": 1287
+  },
+  {
+   "src": "packages/agent/src/agent.ts",
+   "rust": "crates/pi-agent-core/src/agent.rs",
+   "loc": 605
+  },
+  {
+   "src": "packages/agent/src/index.ts",
+   "rust": "crates/pi-agent-core/src/mod.rs",
+   "loc": 5
+  },
+  {
+   "src": "packages/agent/src/performance-metrics.ts",
+   "rust": "crates/pi-agent-core/src/performance_metrics.rs",
+   "loc": 187
+  },
+  {
+   "src": "packages/agent/src/proxy.ts",
+   "rust": "crates/pi-agent-core/src/proxy.rs",
+   "loc": 348
+  },
+  {
+   "src": "packages/agent/src/types.ts",
+   "rust": "crates/pi-agent-core/src/types.rs",
+   "loc": 409
+  }
+ ],
+ "loc": 2841
+}

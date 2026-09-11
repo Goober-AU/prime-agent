@@ -1,0 +1,132 @@
+{
+ "slice": "ca-utils",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/utils/atomic-file.ts",
+   "rust": "crates/pi-coding-agent/src/utils/atomic_file.rs",
+   "loc": 298
+  },
+  {
+   "src": "packages/coding-agent/src/utils/changelog.ts",
+   "rust": "crates/pi-coding-agent/src/utils/changelog.rs",
+   "loc": 99
+  },
+  {
+   "src": "packages/coding-agent/src/utils/child-process.ts",
+   "rust": "crates/pi-coding-agent/src/utils/child_process.rs",
+   "loc": 281
+  },
+  {
+   "src": "packages/coding-agent/src/utils/clipboard-image.ts",
+   "rust": "crates/pi-coding-agent/src/utils/clipboard_image.rs",
+   "loc": 285
+  },
+  {
+   "src": "packages/coding-agent/src/utils/clipboard-native.ts",
+   "rust": "crates/pi-coding-agent/src/utils/clipboard_native.rs",
+   "loc": 22
+  },
+  {
+   "src": "packages/coding-agent/src/utils/clipboard.ts",
+   "rust": "crates/pi-coding-agent/src/utils/clipboard.rs",
+   "loc": 127
+  },
+  {
+   "src": "packages/coding-agent/src/utils/daemon-socket-path.ts",
+   "rust": "crates/pi-coding-agent/src/utils/daemon_socket_path.rs",
+   "loc": 9
+  },
+  {
+   "src": "packages/coding-agent/src/utils/dir-lock.ts",
+   "rust": "crates/pi-coding-agent/src/utils/dir_lock.rs",
+   "loc": 207
+  },
+  {
+   "src": "packages/coding-agent/src/utils/exif-orientation.ts",
+   "rust": "crates/pi-coding-agent/src/utils/exif_orientation.rs",
+   "loc": 184
+  },
+  {
+   "src": "packages/coding-agent/src/utils/file-lines.ts",
+   "rust": "crates/pi-coding-agent/src/utils/file_lines.rs",
+   "loc": 102
+  },
+  {
+   "src": "packages/coding-agent/src/utils/frontmatter.ts",
+   "rust": "crates/pi-coding-agent/src/utils/frontmatter.rs",
+   "loc": 43
+  },
+  {
+   "src": "packages/coding-agent/src/utils/fs-watch.ts",
+   "rust": "crates/pi-coding-agent/src/utils/fs_watch.rs",
+   "loc": 30
+  },
+  {
+   "src": "packages/coding-agent/src/utils/git.ts",
+   "rust": "crates/pi-coding-agent/src/utils/git.rs",
+   "loc": 272
+  },
+  {
+   "src": "packages/coding-agent/src/utils/image-convert.ts",
+   "rust": "crates/pi-coding-agent/src/utils/image_convert.rs",
+   "loc": 41
+  },
+  {
+   "src": "packages/coding-agent/src/utils/image-resize.ts",
+   "rust": "crates/pi-coding-agent/src/utils/image_resize.rs",
+   "loc": 176
+  },
+  {
+   "src": "packages/coding-agent/src/utils/mime.ts",
+   "rust": "crates/pi-coding-agent/src/utils/mime.rs",
+   "loc": 30
+  },
+  {
+   "src": "packages/coding-agent/src/utils/paths.ts",
+   "rust": "crates/pi-coding-agent/src/utils/paths.rs",
+   "loc": 57
+  },
+  {
+   "src": "packages/coding-agent/src/utils/photon.ts",
+   "rust": "crates/pi-coding-agent/src/utils/photon.rs",
+   "loc": 139
+  },
+  {
+   "src": "packages/coding-agent/src/utils/pi-user-agent.ts",
+   "rust": "crates/pi-coding-agent/src/utils/pi_user_agent.rs",
+   "loc": 4
+  },
+  {
+   "src": "packages/coding-agent/src/utils/semaphore.ts",
+   "rust": "crates/pi-coding-agent/src/utils/semaphore.rs",
+   "loc": 63
+  },
+  {
+   "src": "packages/coding-agent/src/utils/shell.ts",
+   "rust": "crates/pi-coding-agent/src/utils/shell.rs",
+   "loc": 252
+  },
+  {
+   "src": "packages/coding-agent/src/utils/sleep.ts",
+   "rust": "crates/pi-coding-agent/src/utils/sleep.rs",
+   "loc": 18
+  },
+  {
+   "src": "packages/coding-agent/src/utils/tools-manager.ts",
+   "rust": "crates/pi-coding-agent/src/utils/tools_manager.rs",
+   "loc": 384
+  },
+  {
+   "src": "packages/coding-agent/src/utils/update-source.ts",
+   "rust": "crates/pi-coding-agent/src/utils/update_source.rs",
+   "loc": 3
+  },
+  {
+   "src": "packages/coding-agent/src/utils/version-check.ts",
+   "rust": "crates/pi-coding-agent/src/utils/version_check.rs",
+   "loc": 178
+  }
+ ],
+ "loc": 3304
+}

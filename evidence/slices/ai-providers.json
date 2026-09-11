@@ -1,0 +1,112 @@
+{
+ "slice": "ai-providers",
+ "crate": "pi-ai",
+ "files": [
+  {
+   "src": "packages/ai/src/providers/amazon-bedrock-responses.ts",
+   "rust": "crates/pi-ai/src/providers/amazon_bedrock_responses.rs",
+   "loc": 144
+  },
+  {
+   "src": "packages/ai/src/providers/amazon-bedrock.ts",
+   "rust": "crates/pi-ai/src/providers/amazon_bedrock.rs",
+   "loc": 968
+  },
+  {
+   "src": "packages/ai/src/providers/anthropic.ts",
+   "rust": "crates/pi-ai/src/providers/anthropic.rs",
+   "loc": 1288
+  },
+  {
+   "src": "packages/ai/src/providers/azure-openai-responses.ts",
+   "rust": "crates/pi-ai/src/providers/azure_openai_responses.rs",
+   "loc": 284
+  },
+  {
+   "src": "packages/ai/src/providers/bedrock-responses-client.ts",
+   "rust": "crates/pi-ai/src/providers/bedrock_responses_client.rs",
+   "loc": 106
+  },
+  {
+   "src": "packages/ai/src/providers/cloudflare.ts",
+   "rust": "crates/pi-ai/src/providers/cloudflare.rs",
+   "loc": 32
+  },
+  {
+   "src": "packages/ai/src/providers/faux.ts",
+   "rust": "crates/pi-ai/src/providers/faux.rs",
+   "loc": 499
+  },
+  {
+   "src": "packages/ai/src/providers/github-copilot-headers.ts",
+   "rust": "crates/pi-ai/src/providers/github_copilot_headers.rs",
+   "loc": 34
+  },
+  {
+   "src": "packages/ai/src/providers/google-shared.ts",
+   "rust": "crates/pi-ai/src/providers/google_shared.rs",
+   "loc": 340
+  },
+  {
+   "src": "packages/ai/src/providers/google-vertex.ts",
+   "rust": "crates/pi-ai/src/providers/google_vertex.rs",
+   "loc": 543
+  },
+  {
+   "src": "packages/ai/src/providers/google.ts",
+   "rust": "crates/pi-ai/src/providers/google.rs",
+   "loc": 469
+  },
+  {
+   "src": "packages/ai/src/providers/mistral.ts",
+   "rust": "crates/pi-ai/src/providers/mistral.rs",
+   "loc": 634
+  },
+  {
+   "src": "packages/ai/src/providers/openai-codex-responses.ts",
+   "rust": "crates/pi-ai/src/providers/openai_codex_responses.rs",
+   "loc": 1388
+  },
+  {
+   "src": "packages/ai/src/providers/openai-compaction.ts",
+   "rust": "crates/pi-ai/src/providers/openai_compaction.rs",
+   "loc": 229
+  },
+  {
+   "src": "packages/ai/src/providers/openai-completions.ts",
+   "rust": "crates/pi-ai/src/providers/openai_completions.rs",
+   "loc": 1254
+  },
+  {
+   "src": "packages/ai/src/providers/openai-responses-shared.ts",
+   "rust": "crates/pi-ai/src/providers/openai_responses_shared.rs",
+   "loc": 576
+  },
+  {
+   "src": "packages/ai/src/providers/openai-responses.ts",
+   "rust": "crates/pi-ai/src/providers/openai_responses.rs",
+   "loc": 335
+  },
+  {
+   "src": "packages/ai/src/providers/opencode-headers.ts",
+   "rust": "crates/pi-ai/src/providers/opencode_headers.rs",
+   "loc": 16
+  },
+  {
+   "src": "packages/ai/src/providers/register-builtins.ts",
+   "rust": "crates/pi-ai/src/providers/register_builtins.rs",
+   "loc": 454
+  },
+  {
+   "src": "packages/ai/src/providers/simple-options.ts",
+   "rust": "crates/pi-ai/src/providers/simple_options.rs",
+   "loc": 49
+  },
+  {
+   "src": "packages/ai/src/providers/transform-messages.ts",
+   "rust": "crates/pi-ai/src/providers/transform_messages.rs",
+   "loc": 219
+  }
+ ],
+ "loc": 9861
+}

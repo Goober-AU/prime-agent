@@ -1,0 +1,62 @@
+{
+ "slice": "ca-models",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/agent-traces.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_traces.rs",
+   "loc": 1170
+  },
+  {
+   "src": "packages/coding-agent/src/core/auth-guidance.ts",
+   "rust": "crates/pi-coding-agent/src/core/auth_guidance.rs",
+   "loc": 61
+  },
+  {
+   "src": "packages/coding-agent/src/core/auth-storage.ts",
+   "rust": "crates/pi-coding-agent/src/core/auth_storage.rs",
+   "loc": 1177
+  },
+  {
+   "src": "packages/coding-agent/src/core/model-registry.ts",
+   "rust": "crates/pi-coding-agent/src/core/model_registry.rs",
+   "loc": 1803
+  },
+  {
+   "src": "packages/coding-agent/src/core/model-resolver.ts",
+   "rust": "crates/pi-coding-agent/src/core/model_resolver.rs",
+   "loc": 639
+  },
+  {
+   "src": "packages/coding-agent/src/core/model-tool-output-policy.ts",
+   "rust": "crates/pi-coding-agent/src/core/model_tool_output_policy.rs",
+   "loc": 283
+  },
+  {
+   "src": "packages/coding-agent/src/core/prime-inference-auth.ts",
+   "rust": "crates/pi-coding-agent/src/core/prime_inference_auth.rs",
+   "loc": 736
+  },
+  {
+   "src": "packages/coding-agent/src/core/prime-inference-model-catalog.ts",
+   "rust": "crates/pi-coding-agent/src/core/prime_inference_model_catalog.rs",
+   "loc": 170
+  },
+  {
+   "src": "packages/coding-agent/src/core/prime-inference-model-selection.ts",
+   "rust": "crates/pi-coding-agent/src/core/prime_inference_model_selection.rs",
+   "loc": 34
+  },
+  {
+   "src": "packages/coding-agent/src/core/prime-inference-models.ts",
+   "rust": "crates/pi-coding-agent/src/core/prime_inference_models.rs",
+   "loc": 88
+  },
+  {
+   "src": "packages/coding-agent/src/core/provider-display-names.ts",
+   "rust": "crates/pi-coding-agent/src/core/provider_display_names.rs",
+   "loc": 33
+  }
+ ],
+ "loc": 6194
+}

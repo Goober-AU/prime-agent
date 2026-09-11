@@ -1,0 +1,97 @@
+{
+ "slice": "ca-cli",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/cli/args.ts",
+   "rust": "crates/pi-coding-agent/src/cli/args.rs",
+   "loc": 346
+  },
+  {
+   "src": "packages/coding-agent/src/cli/command-registry.ts",
+   "rust": "crates/pi-coding-agent/src/cli/command_registry.rs",
+   "loc": 378
+  },
+  {
+   "src": "packages/coding-agent/src/cli/config-selector.ts",
+   "rust": "crates/pi-coding-agent/src/cli/config_selector.rs",
+   "loc": 46
+  },
+  {
+   "src": "packages/coding-agent/src/cli/daemon-command.ts",
+   "rust": "crates/pi-coding-agent/src/cli/daemon_command.rs",
+   "loc": 1688
+  },
+  {
+   "src": "packages/coding-agent/src/cli/daemon-launch.ts",
+   "rust": "crates/pi-coding-agent/src/cli/daemon_launch.rs",
+   "loc": 607
+  },
+  {
+   "src": "packages/coding-agent/src/cli/daemon-list-format.ts",
+   "rust": "crates/pi-coding-agent/src/cli/daemon_list_format.rs",
+   "loc": 125
+  },
+  {
+   "src": "packages/coding-agent/src/cli/daemon-ps-format.ts",
+   "rust": "crates/pi-coding-agent/src/cli/daemon_ps_format.rs",
+   "loc": 90
+  },
+  {
+   "src": "packages/coding-agent/src/cli/daemon-ps.ts",
+   "rust": "crates/pi-coding-agent/src/cli/daemon_ps.rs",
+   "loc": 1286
+  },
+  {
+   "src": "packages/coding-agent/src/cli/daemon-stop-confirm.ts",
+   "rust": "crates/pi-coding-agent/src/cli/daemon_stop_confirm.rs",
+   "loc": 76
+  },
+  {
+   "src": "packages/coding-agent/src/cli/daemon-update-restart.ts",
+   "rust": "crates/pi-coding-agent/src/cli/daemon_update_restart.rs",
+   "loc": 602
+  },
+  {
+   "src": "packages/coding-agent/src/cli/file-processor.ts",
+   "rust": "crates/pi-coding-agent/src/cli/file_processor.rs",
+   "loc": 87
+  },
+  {
+   "src": "packages/coding-agent/src/cli/initial-message.ts",
+   "rust": "crates/pi-coding-agent/src/cli/initial_message.rs",
+   "loc": 43
+  },
+  {
+   "src": "packages/coding-agent/src/cli/list-models.ts",
+   "rust": "crates/pi-coding-agent/src/cli/list_models.rs",
+   "loc": 96
+  },
+  {
+   "src": "packages/coding-agent/src/cli/node-version-check.ts",
+   "rust": "crates/pi-coding-agent/src/cli/node_version_check.rs",
+   "loc": 59
+  },
+  {
+   "src": "packages/coding-agent/src/cli/owned-session-worker.ts",
+   "rust": "crates/pi-coding-agent/src/cli/owned_session_worker.rs",
+   "loc": 533
+  },
+  {
+   "src": "packages/coding-agent/src/cli/public-command.ts",
+   "rust": "crates/pi-coding-agent/src/cli/public_command.rs",
+   "loc": 447
+  },
+  {
+   "src": "packages/coding-agent/src/cli/session-resolver.ts",
+   "rust": "crates/pi-coding-agent/src/cli/session_resolver.rs",
+   "loc": 1
+  },
+  {
+   "src": "packages/coding-agent/src/cli/subprocess-launch.ts",
+   "rust": "crates/pi-coding-agent/src/cli/subprocess_launch.rs",
+   "loc": 61
+  }
+ ],
+ "loc": 6571
+}

@@ -1,0 +1,87 @@
+{
+ "slice": "ca-session-core",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/agent-session-config.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_session_config.rs",
+   "loc": 157
+  },
+  {
+   "src": "packages/coding-agent/src/core/agent-session-runtime.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_session_runtime.rs",
+   "loc": 774
+  },
+  {
+   "src": "packages/coding-agent/src/core/agent-session-services.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_session_services.rs",
+   "loc": 287
+  },
+  {
+   "src": "packages/coding-agent/src/core/agent-session.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_session.rs",
+   "loc": 13194
+  },
+  {
+   "src": "packages/coding-agent/src/core/autonomous.ts",
+   "rust": "crates/pi-coding-agent/src/core/autonomous.rs",
+   "loc": 592
+  },
+  {
+   "src": "packages/coding-agent/src/core/cron-jobs.ts",
+   "rust": "crates/pi-coding-agent/src/core/cron_jobs.rs",
+   "loc": 1719
+  },
+  {
+   "src": "packages/coding-agent/src/core/index.ts",
+   "rust": "crates/pi-coding-agent/src/core/mod.rs",
+   "loc": 84
+  },
+  {
+   "src": "packages/coding-agent/src/core/legacy-rlm-continuation.ts",
+   "rust": "crates/pi-coding-agent/src/core/legacy_rlm_continuation.rs",
+   "loc": 115
+  },
+  {
+   "src": "packages/coding-agent/src/core/new-session-command.ts",
+   "rust": "crates/pi-coding-agent/src/core/new_session_command.rs",
+   "loc": 54
+  },
+  {
+   "src": "packages/coding-agent/src/core/prompt-admission.ts",
+   "rust": "crates/pi-coding-agent/src/core/prompt_admission.rs",
+   "loc": 42
+  },
+  {
+   "src": "packages/coding-agent/src/core/provider-retry.ts",
+   "rust": "crates/pi-coding-agent/src/core/provider_retry.rs",
+   "loc": 226
+  },
+  {
+   "src": "packages/coding-agent/src/core/resolve-config-value.ts",
+   "rust": "crates/pi-coding-agent/src/core/resolve_config_value.rs",
+   "loc": 142
+  },
+  {
+   "src": "packages/coding-agent/src/core/rlm-continuation.ts",
+   "rust": "crates/pi-coding-agent/src/core/rlm_continuation.rs",
+   "loc": 169
+  },
+  {
+   "src": "packages/coding-agent/src/core/rlm-runtime.ts",
+   "rust": "crates/pi-coding-agent/src/core/rlm_runtime.rs",
+   "loc": 320
+  },
+  {
+   "src": "packages/coding-agent/src/core/sdk.ts",
+   "rust": "crates/pi-coding-agent/src/core/sdk.rs",
+   "loc": 465
+  },
+  {
+   "src": "packages/coding-agent/src/core/side-question.ts",
+   "rust": "crates/pi-coding-agent/src/core/side_question.rs",
+   "loc": 187
+  }
+ ],
+ "loc": 18527
+}

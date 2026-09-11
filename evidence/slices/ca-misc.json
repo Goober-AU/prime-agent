@@ -1,0 +1,72 @@
+{
+ "slice": "ca-misc",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/themes/optimus-logo-data.ts",
+   "rust": "crates/pi-coding-agent/src/themes/optimus_logo_data.rs",
+   "loc": 401
+  },
+  {
+   "src": "packages/coding-agent/src/themes/optimus-logo.ts",
+   "rust": "crates/pi-coding-agent/src/themes/optimus_logo.rs",
+   "loc": 53
+  },
+  {
+   "src": "packages/coding-agent/src/themes/prime-logo.ts",
+   "rust": "crates/pi-coding-agent/src/themes/prime_logo.rs",
+   "loc": 18
+  },
+  {
+   "src": "packages/coding-agent/src/bun/cli.ts",
+   "rust": "crates/pi-coding-agent/src/bun/cli.rs",
+   "loc": 12
+  },
+  {
+   "src": "packages/coding-agent/src/bun/register-bedrock.ts",
+   "rust": "crates/pi-coding-agent/src/bun/register_bedrock.rs",
+   "loc": 4
+  },
+  {
+   "src": "packages/coding-agent/src/bun/restore-sandbox-env.ts",
+   "rust": "crates/pi-coding-agent/src/bun/restore_sandbox_env.rs",
+   "loc": 32
+  },
+  {
+   "src": "packages/coding-agent/src/core/export-html/ansi-to-html.ts",
+   "rust": "crates/pi-coding-agent/src/core/export_html/ansi_to_html.rs",
+   "loc": 230
+  },
+  {
+   "src": "packages/coding-agent/src/core/export-html/index.ts",
+   "rust": "crates/pi-coding-agent/src/core/export_html/mod.rs",
+   "loc": 301
+  },
+  {
+   "src": "packages/coding-agent/src/core/export-html/tool-renderer.ts",
+   "rust": "crates/pi-coding-agent/src/core/export_html/tool_renderer.rs",
+   "loc": 167
+  },
+  {
+   "src": "packages/coding-agent/src/core/bash-executor.ts",
+   "rust": "crates/pi-coding-agent/src/core/bash_executor.rs",
+   "loc": 114
+  },
+  {
+   "src": "packages/coding-agent/src/core/exec.ts",
+   "rust": "crates/pi-coding-agent/src/core/exec.rs",
+   "loc": 130
+  },
+  {
+   "src": "packages/coding-agent/src/core/orphan-process-journal.ts",
+   "rust": "crates/pi-coding-agent/src/core/orphan_process_journal.rs",
+   "loc": 176
+  },
+  {
+   "src": "packages/coding-agent/src/core/package-manager.ts",
+   "rust": "crates/pi-coding-agent/src/core/package_manager.rs",
+   "loc": 2443
+  }
+ ],
+ "loc": 4081
+}

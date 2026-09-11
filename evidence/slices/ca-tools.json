@@ -1,0 +1,77 @@
+{
+ "slice": "ca-tools",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/tools/acp-mcp.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/acp_mcp.rs",
+   "loc": 99
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/bash.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/bash.rs",
+   "loc": 455
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/code-preview.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/code_preview.rs",
+   "loc": 539
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/edit-diff.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/edit_diff.rs",
+   "loc": 424
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/edit.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/edit.rs",
+   "loc": 533
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/file-mutation-queue.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/file_mutation_queue.rs",
+   "loc": 39
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/index.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/mod.rs",
+   "loc": 57
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/ipython-cell-code.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/ipython_cell_code.rs",
+   "loc": 13
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/ipython.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/ipython.rs",
+   "loc": 810
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/output-accumulator.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/output_accumulator.rs",
+   "loc": 261
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/path-utils.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/path_utils.rs",
+   "loc": 90
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/render-utils.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/render_utils.rs",
+   "loc": 68
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/tool-definition-wrapper.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/tool_definition_wrapper.rs",
+   "loc": 45
+  },
+  {
+   "src": "packages/coding-agent/src/core/tools/truncate.ts",
+   "rust": "crates/pi-coding-agent/src/core/tools/truncate.rs",
+   "loc": 258
+  }
+ ],
+ "loc": 3691
+}

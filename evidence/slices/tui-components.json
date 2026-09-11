@@ -1,0 +1,67 @@
+{
+ "slice": "tui-components",
+ "crate": "pi-tui",
+ "files": [
+  {
+   "src": "packages/tui/src/components/box.ts",
+   "rust": "crates/pi-tui/src/components/box.rs",
+   "loc": 150
+  },
+  {
+   "src": "packages/tui/src/components/cancellable-loader.ts",
+   "rust": "crates/pi-tui/src/components/cancellable_loader.rs",
+   "loc": 40
+  },
+  {
+   "src": "packages/tui/src/components/editor.ts",
+   "rust": "crates/pi-tui/src/components/editor.rs",
+   "loc": 2410
+  },
+  {
+   "src": "packages/tui/src/components/image.ts",
+   "rust": "crates/pi-tui/src/components/image.rs",
+   "loc": 135
+  },
+  {
+   "src": "packages/tui/src/components/input.ts",
+   "rust": "crates/pi-tui/src/components/input.rs",
+   "loc": 462
+  },
+  {
+   "src": "packages/tui/src/components/loader.ts",
+   "rust": "crates/pi-tui/src/components/loader.rs",
+   "loc": 84
+  },
+  {
+   "src": "packages/tui/src/components/markdown.ts",
+   "rust": "crates/pi-tui/src/components/markdown.rs",
+   "loc": 979
+  },
+  {
+   "src": "packages/tui/src/components/select-list.ts",
+   "rust": "crates/pi-tui/src/components/select_list.rs",
+   "loc": 296
+  },
+  {
+   "src": "packages/tui/src/components/settings-list.ts",
+   "rust": "crates/pi-tui/src/components/settings_list.rs",
+   "loc": 235
+  },
+  {
+   "src": "packages/tui/src/components/spacer.ts",
+   "rust": "crates/pi-tui/src/components/spacer.rs",
+   "loc": 26
+  },
+  {
+   "src": "packages/tui/src/components/text.ts",
+   "rust": "crates/pi-tui/src/components/text.rs",
+   "loc": 94
+  },
+  {
+   "src": "packages/tui/src/components/truncated-text.ts",
+   "rust": "crates/pi-tui/src/components/truncated_text.rs",
+   "loc": 59
+  }
+ ],
+ "loc": 4970
+}

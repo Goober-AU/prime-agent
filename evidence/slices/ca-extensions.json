@@ -1,0 +1,87 @@
+{
+ "slice": "ca-extensions",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/herdr-agent-state.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/herdr_agent_state.rs",
+   "loc": 471
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/memory.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/memory.rs",
+   "loc": 314
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/telegram.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/telegram.rs",
+   "loc": 163
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/bundled-modules.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/bundled_modules.rs",
+   "loc": 39
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/index.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/mod.rs",
+   "loc": 148
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/loader.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/loader.rs",
+   "loc": 593
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/runner.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/runner.rs",
+   "loc": 1074
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/types.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/types.rs",
+   "loc": 1434
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/wrapper.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/wrapper.rs",
+   "loc": 38
+  },
+  {
+   "src": "packages/coding-agent/src/core/mcp/acp-mcp-types.ts",
+   "rust": "crates/pi-coding-agent/src/core/mcp/acp_mcp_types.rs",
+   "loc": 15
+  },
+  {
+   "src": "packages/coding-agent/src/core/mcp/mcp-command.ts",
+   "rust": "crates/pi-coding-agent/src/core/mcp/mcp_command.rs",
+   "loc": 235
+  },
+  {
+   "src": "packages/coding-agent/src/core/mcp/mcp-manager.ts",
+   "rust": "crates/pi-coding-agent/src/core/mcp/mcp_manager.rs",
+   "loc": 249
+  },
+  {
+   "src": "packages/coding-agent/src/core/prompt-templates.ts",
+   "rust": "crates/pi-coding-agent/src/core/prompt_templates.rs",
+   "loc": 286
+  },
+  {
+   "src": "packages/coding-agent/src/core/resource-loader.ts",
+   "rust": "crates/pi-coding-agent/src/core/resource_loader.rs",
+   "loc": 938
+  },
+  {
+   "src": "packages/coding-agent/src/core/slash-commands.ts",
+   "rust": "crates/pi-coding-agent/src/core/slash_commands.rs",
+   "loc": 281
+  },
+  {
+   "src": "packages/coding-agent/src/core/system-prompt.ts",
+   "rust": "crates/pi-coding-agent/src/core/system_prompt.rs",
+   "loc": 211
+  }
+ ],
+ "loc": 6489
+}

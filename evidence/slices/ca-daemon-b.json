@@ -1,0 +1,132 @@
+{
+ "slice": "ca-daemon-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/daemon/active-session-state.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/active_session_state.rs",
+   "loc": 142
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/agent-roster.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/agent_roster.rs",
+   "loc": 234
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/command-recovery-journal.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/command_recovery_journal.rs",
+   "loc": 208
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/compact-session-stream.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/compact_session_stream.rs",
+   "loc": 213
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-catalog-entry.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_catalog_entry.rs",
+   "loc": 7
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-catalog-process.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_catalog_process.rs",
+   "loc": 484
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-client-env.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_client_env.rs",
+   "loc": 97
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-client.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_client.rs",
+   "loc": 750
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-extension-binding.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_extension_binding.rs",
+   "loc": 254
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-routed-client.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_routed_client.rs",
+   "loc": 275
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-session-id.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_session_id.rs",
+   "loc": 1
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-session-list.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_session_list.rs",
+   "loc": 466
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-session-summarizer.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_session_summarizer.rs",
+   "loc": 427
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-socket.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_socket.rs",
+   "loc": 332
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-supervisor-ownership.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_supervisor_ownership.rs",
+   "loc": 961
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-worker-client.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_worker_client.rs",
+   "loc": 354
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-worker-protocol.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_worker_protocol.rs",
+   "loc": 280
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/heartbeat-catalog.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/heartbeat_catalog.rs",
+   "loc": 25
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/mutation-drain-latch.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/mutation_drain_latch.rs",
+   "loc": 37
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/rlm-ledger.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/rlm_ledger.rs",
+   "loc": 823
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/rlm-subagent-display.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/rlm_subagent_display.rs",
+   "loc": 100
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/saved-session-catalog.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/saved_session_catalog.rs",
+   "loc": 77
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/saved-session-info.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/saved_session_info.rs",
+   "loc": 41
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/snapshot-transcript-cache.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/snapshot_transcript_cache.rs",
+   "loc": 290
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/worker-recovery-journal.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/worker_recovery_journal.rs",
+   "loc": 114
+  }
+ ],
+ "loc": 6992
+}

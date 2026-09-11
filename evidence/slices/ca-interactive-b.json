@@ -1,0 +1,302 @@
+{
+ "slice": "ca-interactive-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/agent-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/agent_message.rs",
+   "loc": 111
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/armin.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/armin.rs",
+   "loc": 382
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/assistant-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/assistant_message.rs",
+   "loc": 388
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/bash-execution.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/bash_execution.rs",
+   "loc": 211
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/bordered-loader.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/bordered_loader.rs",
+   "loc": 67
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/branch-summary-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/branch_summary_message.rs",
+   "loc": 56
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/centered-overlay.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/centered_overlay.rs",
+   "loc": 125
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/collapsible-error.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/collapsible_error.rs",
+   "loc": 125
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/compaction-outcome-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/compaction_outcome_message.rs",
+   "loc": 27
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/compaction-summary-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/compaction_summary_message.rs",
+   "loc": 47
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/config-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/config_selector.rs",
+   "loc": 603
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/configuration-menu.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/configuration_menu.rs",
+   "loc": 258
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/context-tree-format.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/context_tree_format.rs",
+   "loc": 200
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/conversation-components.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/conversation_components.rs",
+   "loc": 182
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/countdown-timer.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/countdown_timer.rs",
+   "loc": 34
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/custom-editor.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_editor.rs",
+   "loc": 332
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/custom-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_message.rs",
+   "loc": 88
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/daxnuts.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/daxnuts.rs",
+   "loc": 164
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/diff.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/diff.rs",
+   "loc": 294
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/dynamic-border.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/dynamic_border.rs",
+   "loc": 25
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/earendil-announcement.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/earendil_announcement.rs",
+   "loc": 53
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/edit-summary.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/edit_summary.rs",
+   "loc": 135
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/expandable-custom-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/expandable_custom_message.rs",
+   "loc": 33
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/extension-editor.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_editor.rs",
+   "loc": 133
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/extension-input.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_input.rs",
+   "loc": 87
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/extension-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_selector.rs",
+   "loc": 172
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/feature-hint.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/feature_hint.rs",
+   "loc": 46
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/footer.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/footer.rs",
+   "loc": 42
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/heartbeat-manager.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/heartbeat_manager.rs",
+   "loc": 326
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/index.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/mod.rs",
+   "loc": 51
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/injected-prompt-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/injected_prompt_message.rs",
+   "loc": 180
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/ipython-cell.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/ipython_cell.rs",
+   "loc": 774
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/keybinding_hints.rs",
+   "loc": 76
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/login-dialog.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/login_dialog.rs",
+   "loc": 418
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/menu-panel.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/menu_panel.rs",
+   "loc": 433
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/mermaid.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/mermaid.rs",
+   "loc": 77
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/modal-back.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/modal_back.rs",
+   "loc": 31
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/model-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs",
+   "loc": 601
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/oauth-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/oauth_selector.rs",
+   "loc": 416
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/prime-onboarding-splash.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_onboarding_splash.rs",
+   "loc": 379
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/prime-team-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_team_selector.rs",
+   "loc": 203
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/prompt-highlight.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/prompt_highlight.rs",
+   "loc": 199
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/refinement-outcome-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/refinement_outcome_message.rs",
+   "loc": 117
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/scoped-models-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/scoped_models_selector.rs",
+   "loc": 336
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/settings-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/settings_selector.rs",
+   "loc": 526
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/show-images-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/show_images_selector.rs",
+   "loc": 43
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/side-question.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/side_question.rs",
+   "loc": 152
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/skill-invocation-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/skill_invocation_message.rs",
+   "loc": 36
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/slash-command-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/slash_command_message.rs",
+   "loc": 47
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/slash-command-result-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/slash_command_result_message.rs",
+   "loc": 15
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/subagent-summary-line.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/subagent_summary_line.rs",
+   "loc": 161
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/theme-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/theme_selector.rs",
+   "loc": 59
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/thinking-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/thinking_selector.rs",
+   "loc": 68
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/tool-execution.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_execution.rs",
+   "loc": 534
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/tool-panel.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_panel.rs",
+   "loc": 93
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/tree-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/tree_selector.rs",
+   "loc": 1238
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/user-message-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/user_message_selector.rs",
+   "loc": 125
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/user-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/user_message.rs",
+   "loc": 72
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/visual-truncate.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/visual_truncate.rs",
+   "loc": 50
+  }
+ ],
+ "loc": 12256
+}
