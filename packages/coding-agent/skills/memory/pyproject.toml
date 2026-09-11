@@ -1,0 +1,13 @@
+[project]
+name = "prime-memory"
+version = "0.1.0"
+description = "Scoped Prime project memory over the Python host bridge"
+requires-python = ">=3.10"
+dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/memory"]

@@ -25,6 +25,7 @@ import {
 	snapshotPathIn,
 	snapshotStateExistsIn,
 } from "../kernel/state-snapshot.js";
+import { createMemoryHostHandlers } from "../memory/service.js";
 import {
 	MODEL_TOOL_OUTPUT_MIN_BYTES,
 	type ModelToolOutputArtifactV1,
@@ -525,7 +526,15 @@ export class IpythonKernelProvisioner {
 					...(commandPrefix ? { PRIME_AGENT_BASH_COMMAND_PREFIX: commandPrefix } : {}),
 				},
 				sessionId: this.options?.sessionId,
-				hostHandlers: this.options?.hostHandlers,
+				hostHandlers: {
+					...createMemoryHostHandlers(
+						this.cwd,
+						this.options?.env?.PRIME_AGENT_CODING_AGENT_DIR,
+						snapshotDir,
+						this.options?.hostHandlers?.["model.info"],
+					),
+					...this.options?.hostHandlers,
+				},
 				pythonSkills: this.options?.pythonSkills,
 				performanceMetrics: this.options?.performanceMetrics,
 				// Only persistent sessions (which have an artifact dir) get a revivable snapshot.
