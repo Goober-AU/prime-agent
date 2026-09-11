@@ -45,6 +45,7 @@ export {
 	shouldCompact,
 } from "./core/compaction/index.js";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.js";
+export { createMemoryExtension } from "./core/extensions/builtin/memory.js";
 // Extension system
 export type {
 	AgentEndEvent,
@@ -140,6 +141,9 @@ export {
 } from "./core/extensions/index.js";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.js";
+export type { MemorySource } from "./core/memory/evidence.js";
+export { MemoryService } from "./core/memory/service.js";
+export type { MemorySettings } from "./core/memory/store.js";
 export { convertToLlm } from "./core/messages.js";
 export { ModelRegistry } from "./core/model-registry.js";
 export type {
