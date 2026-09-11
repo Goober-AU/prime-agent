@@ -11,9 +11,9 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | Status | Files |
 |---|---|
 | blocked | 10 |
-| not started | 124 |
+| not started | 120 |
 | partial | 5 |
-| ported | 49 |
+| ported | 53 |
 | written (unreported) | 224 |
 | **total** | **412** |
 
@@ -45,7 +45,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/ai/src/oauth.ts` | `crates/pi-ai/src/oauth_api.rs` | pi-ai | 1 | 5 | written (unreported) | no |
 | `packages/ai/src/openrouter-reasoning.ts` | `crates/pi-ai/src/openrouter_reasoning.rs` | pi-ai | 67 | 176 | written (unreported) | no |
 | `packages/ai/src/prime-inference-model-catalog.ts` | `crates/pi-ai/src/prime_inference_model_catalog.rs` | pi-ai | 93 | 271 | written (unreported) | no |
-| `packages/ai/src/providers/amazon-bedrock-responses.ts` | `crates/pi-ai/src/providers/amazon_bedrock_responses.rs` | pi-ai | 144 | 653 | ported | no |
+| `packages/ai/src/providers/amazon-bedrock-responses.ts` | `crates/pi-ai/src/providers/amazon_bedrock_responses.rs` | pi-ai | 144 | 664 | ported | no |
 | `packages/ai/src/providers/amazon-bedrock.ts` | `crates/pi-ai/src/providers/amazon_bedrock.rs` | pi-ai | 968 | 3436 | ported | no |
 | `packages/ai/src/providers/anthropic.ts` | `crates/pi-ai/src/providers/anthropic.rs` | pi-ai | 1288 | 3313 | ported | no |
 | `packages/ai/src/providers/azure-openai-responses.ts` | `crates/pi-ai/src/providers/azure_openai_responses.rs` | pi-ai | 284 | 855 | ported | no |
@@ -53,10 +53,10 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/ai/src/providers/cloudflare.ts` | `crates/pi-ai/src/providers/cloudflare.rs` | pi-ai | 32 | 144 | ported | no |
 | `packages/ai/src/providers/faux.ts` | `crates/pi-ai/src/providers/faux.rs` | pi-ai | 499 | 1232 | written (unreported) | no |
 | `packages/ai/src/providers/github-copilot-headers.ts` | `crates/pi-ai/src/providers/github_copilot_headers.rs` | pi-ai | 34 | 116 | ported | no |
-| `packages/ai/src/providers/google-shared.ts` | `crates/pi-ai/src/providers/google_shared.rs` | pi-ai | 340 | 882 | written (unreported) | no |
-| `packages/ai/src/providers/google-vertex.ts` | `crates/pi-ai/src/providers/google_vertex.rs` | pi-ai | 543 | 1734 | written (unreported) | no |
-| `packages/ai/src/providers/google.ts` | `crates/pi-ai/src/providers/google.rs` | pi-ai | 469 | 1494 | written (unreported) | no |
-| `packages/ai/src/providers/mistral.ts` | `crates/pi-ai/src/providers/mistral.rs` | pi-ai | 634 | 1385 | written (unreported) | no |
+| `packages/ai/src/providers/google-shared.ts` | `crates/pi-ai/src/providers/google_shared.rs` | pi-ai | 340 | 882 | ported | no |
+| `packages/ai/src/providers/google-vertex.ts` | `crates/pi-ai/src/providers/google_vertex.rs` | pi-ai | 543 | 1734 | ported | no |
+| `packages/ai/src/providers/google.ts` | `crates/pi-ai/src/providers/google.rs` | pi-ai | 469 | 1494 | ported | no |
+| `packages/ai/src/providers/mistral.ts` | `crates/pi-ai/src/providers/mistral.rs` | pi-ai | 634 | 1761 | ported | no |
 | `packages/ai/src/providers/openai-codex-responses.ts` | `crates/pi-ai/src/providers/openai_codex_responses.rs` | pi-ai | 1388 | 3394 | ported | no |
 | `packages/ai/src/providers/openai-compaction.ts` | `crates/pi-ai/src/providers/openai_compaction.rs` | pi-ai | 229 | 624 | written (unreported) | no |
 | `packages/ai/src/providers/openai-completions.ts` | `crates/pi-ai/src/providers/openai_completions.rs` | pi-ai | 1254 | 3483 | ported | no |
@@ -126,7 +126,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/coding-agent/src/core/compaction/compaction.ts` | `crates/pi-coding-agent/src/core/compaction/compaction.rs` | pi-coding-agent | 1031 | 1556 | written (unreported) | no |
 | `packages/coding-agent/src/core/compaction/index.ts` | `crates/pi-coding-agent/src/core/compaction/mod.rs` | pi-coding-agent | 7 | 4 | written (unreported) | no |
 | `packages/coding-agent/src/core/compaction/utils.ts` | `crates/pi-coding-agent/src/core/compaction/utils.rs` | pi-coding-agent | 149 | 298 | written (unreported) | no |
-| `packages/coding-agent/src/core/context-tree.ts` | `crates/pi-coding-agent/src/core/context_tree.rs` | pi-coding-agent | 321 | 543 | written (unreported) | no |
+| `packages/coding-agent/src/core/context-tree.ts` | `crates/pi-coding-agent/src/core/context_tree.rs` | pi-coding-agent | 321 | 863 | written (unreported) | no |
 | `packages/coding-agent/src/core/cron-jobs.ts` | `crates/pi-coding-agent/src/core/cron_jobs.rs` | pi-coding-agent | 1719 | 0 | not started | no |
 | `packages/coding-agent/src/core/defaults.ts` | `crates/pi-coding-agent/src/core/defaults.rs` | pi-coding-agent | 3 | 4 | ported | no |
 | `packages/coding-agent/src/core/diagnostics.ts` | `crates/pi-coding-agent/src/core/diagnostics.rs` | pi-coding-agent | 15 | 83 | ported | no |
@@ -145,7 +145,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/coding-agent/src/core/extensions/runner.ts` | `crates/pi-coding-agent/src/core/extensions/runner.rs` | pi-coding-agent | 1074 | 2407 | written (unreported) | no |
 | `packages/coding-agent/src/core/extensions/types.ts` | `crates/pi-coding-agent/src/core/extensions/types.rs` | pi-coding-agent | 1434 | 2461 | written (unreported) | no |
 | `packages/coding-agent/src/core/extensions/wrapper.ts` | `crates/pi-coding-agent/src/core/extensions/wrapper.rs` | pi-coding-agent | 38 | 104 | written (unreported) | no |
-| `packages/coding-agent/src/core/footer-data-provider.ts` | `crates/pi-coding-agent/src/core/footer_data_provider.rs` | pi-coding-agent | 312 | 0 | not started | no |
+| `packages/coding-agent/src/core/footer-data-provider.ts` | `crates/pi-coding-agent/src/core/footer_data_provider.rs` | pi-coding-agent | 312 | 215 | written (unreported) | no |
 | `packages/coding-agent/src/core/goals.ts` | `crates/pi-coding-agent/src/core/goals.rs` | pi-coding-agent | 290 | 558 | written (unreported) | no |
 | `packages/coding-agent/src/core/index.ts` | `crates/pi-coding-agent/src/core/mod.rs` | pi-coding-agent | 84 | 77 | written (unreported) | no |
 | `packages/coding-agent/src/core/kernel/boot-gate.ts` | `crates/pi-coding-agent/src/core/kernel/boot_gate.rs` | pi-coding-agent | 34 | 337 | ported | no |
@@ -170,7 +170,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/coding-agent/src/core/memory/sharing.ts` | `crates/pi-coding-agent/src/core/memory/sharing.rs` | pi-coding-agent | 155 | 502 | written (unreported) | no |
 | `packages/coding-agent/src/core/memory/store.ts` | `crates/pi-coding-agent/src/core/memory/store.rs` | pi-coding-agent | 331 | 1140 | written (unreported) | no |
 | `packages/coding-agent/src/core/messages.ts` | `crates/pi-coding-agent/src/core/messages.rs` | pi-coding-agent | 685 | 1227 | written (unreported) | no |
-| `packages/coding-agent/src/core/model-registry.ts` | `crates/pi-coding-agent/src/core/model_registry.rs` | pi-coding-agent | 1803 | 1300 | written (unreported) | no |
+| `packages/coding-agent/src/core/model-registry.ts` | `crates/pi-coding-agent/src/core/model_registry.rs` | pi-coding-agent | 1803 | 2228 | written (unreported) | no |
 | `packages/coding-agent/src/core/model-resolver.ts` | `crates/pi-coding-agent/src/core/model_resolver.rs` | pi-coding-agent | 639 | 866 | written (unreported) | no |
 | `packages/coding-agent/src/core/model-tool-output-policy.ts` | `crates/pi-coding-agent/src/core/model_tool_output_policy.rs` | pi-coding-agent | 283 | 698 | written (unreported) | no |
 | `packages/coding-agent/src/core/new-session-command.ts` | `crates/pi-coding-agent/src/core/new_session_command.rs` | pi-coding-agent | 54 | 0 | not started | no |
@@ -196,13 +196,13 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/coding-agent/src/core/rlm-max-depth.ts` | `crates/pi-coding-agent/src/core/rlm_max_depth.rs` | pi-coding-agent | 13 | 55 | ported | no |
 | `packages/coding-agent/src/core/rlm-runtime.ts` | `crates/pi-coding-agent/src/core/rlm_runtime.rs` | pi-coding-agent | 320 | 0 | not started | no |
 | `packages/coding-agent/src/core/sdk.ts` | `crates/pi-coding-agent/src/core/sdk.rs` | pi-coding-agent | 465 | 0 | not started | no |
-| `packages/coding-agent/src/core/semantic-edges.ts` | `crates/pi-coding-agent/src/core/semantic_edges.rs` | pi-coding-agent | 579 | 0 | not started | no |
-| `packages/coding-agent/src/core/session-action-store.ts` | `crates/pi-coding-agent/src/core/session_action_store.rs` | pi-coding-agent | 435 | 1569 | written (unreported) | no |
+| `packages/coding-agent/src/core/semantic-edges.ts` | `crates/pi-coding-agent/src/core/semantic_edges.rs` | pi-coding-agent | 579 | 1051 | written (unreported) | no |
+| `packages/coding-agent/src/core/session-action-store.ts` | `crates/pi-coding-agent/src/core/session_action_store.rs` | pi-coding-agent | 435 | 1606 | written (unreported) | no |
 | `packages/coding-agent/src/core/session-cwd.ts` | `crates/pi-coding-agent/src/core/session_cwd.rs` | pi-coding-agent | 59 | 137 | written (unreported) | no |
 | `packages/coding-agent/src/core/session-file-actions.ts` | `crates/pi-coding-agent/src/core/session_file_actions.rs` | pi-coding-agent | 74 | 210 | written (unreported) | no |
 | `packages/coding-agent/src/core/session-id.ts` | `crates/pi-coding-agent/src/core/session_id.rs` | pi-coding-agent | 34 | 88 | written (unreported) | no |
 | `packages/coding-agent/src/core/session-import-errors.ts` | `crates/pi-coding-agent/src/core/session_import_errors.rs` | pi-coding-agent | 9 | 35 | written (unreported) | no |
-| `packages/coding-agent/src/core/session-lease.ts` | `crates/pi-coding-agent/src/core/session_lease.rs` | pi-coding-agent | 359 | 864 | written (unreported) | no |
+| `packages/coding-agent/src/core/session-lease.ts` | `crates/pi-coding-agent/src/core/session_lease.rs` | pi-coding-agent | 359 | 882 | written (unreported) | no |
 | `packages/coding-agent/src/core/session-manager.ts` | `crates/pi-coding-agent/src/core/session_manager.rs` | pi-coding-agent | 2761 | 5530 | written (unreported) | no |
 | `packages/coding-agent/src/core/session-resolver.ts` | `crates/pi-coding-agent/src/core/session_resolver.rs` | pi-coding-agent | 147 | 345 | written (unreported) | no |
 | `packages/coding-agent/src/core/session-stats.ts` | `crates/pi-coding-agent/src/core/session_stats.rs` | pi-coding-agent | 20 | 77 | written (unreported) | no |
@@ -222,7 +222,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/coding-agent/src/core/tools/edit-diff.ts` | `crates/pi-coding-agent/src/core/tools/edit_diff.rs` | pi-coding-agent | 424 | 890 | written (unreported) | no |
 | `packages/coding-agent/src/core/tools/edit.ts` | `crates/pi-coding-agent/src/core/tools/edit.rs` | pi-coding-agent | 533 | 1053 | written (unreported) | no |
 | `packages/coding-agent/src/core/tools/file-mutation-queue.ts` | `crates/pi-coding-agent/src/core/tools/file_mutation_queue.rs` | pi-coding-agent | 39 | 120 | written (unreported) | no |
-| `packages/coding-agent/src/core/tools/index.ts` | `crates/pi-coding-agent/src/core/tools/mod.rs` | pi-coding-agent | 57 | 226 | written (unreported) | no |
+| `packages/coding-agent/src/core/tools/index.ts` | `crates/pi-coding-agent/src/core/tools/mod.rs` | pi-coding-agent | 57 | 244 | written (unreported) | no |
 | `packages/coding-agent/src/core/tools/ipython-cell-code.ts` | `crates/pi-coding-agent/src/core/tools/ipython_cell_code.rs` | pi-coding-agent | 13 | 52 | written (unreported) | no |
 | `packages/coding-agent/src/core/tools/ipython.ts` | `crates/pi-coding-agent/src/core/tools/ipython.rs` | pi-coding-agent | 810 | 1727 | written (unreported) | no |
 | `packages/coding-agent/src/core/tools/output-accumulator.ts` | `crates/pi-coding-agent/src/core/tools/output_accumulator.rs` | pi-coding-agent | 261 | 487 | written (unreported) | no |
@@ -236,7 +236,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/coding-agent/src/main.ts` | `crates/pi-coding-agent/src/main_entry.rs` | pi-coding-agent | 1780 | 0 | not started | no |
 | `packages/coding-agent/src/migrations.ts` | `crates/pi-coding-agent/src/migrations.rs` | pi-coding-agent | 449 | 0 | not started | no |
 | `packages/coding-agent/src/modes/acp/acp-events.ts` | `crates/pi-coding-agent/src/modes/acp/acp_events.rs` | pi-coding-agent | 323 | 566 | written (unreported) | no |
-| `packages/coding-agent/src/modes/acp/acp-mcp.ts` | `crates/pi-coding-agent/src/modes/acp/acp_mcp.rs` | pi-coding-agent | 95 | 343 | written (unreported) | no |
+| `packages/coding-agent/src/modes/acp/acp-mcp.ts` | `crates/pi-coding-agent/src/modes/acp/acp_mcp.rs` | pi-coding-agent | 95 | 275 | written (unreported) | no |
 | `packages/coding-agent/src/modes/acp/acp-meta.ts` | `crates/pi-coding-agent/src/modes/acp/acp_meta.rs` | pi-coding-agent | 132 | 257 | written (unreported) | no |
 | `packages/coding-agent/src/modes/acp/acp-mode.ts` | `crates/pi-coding-agent/src/modes/acp/acp_mode.rs` | pi-coding-agent | 1109 | 0 | not started | no |
 | `packages/coding-agent/src/modes/acp/acp-stop-reason.ts` | `crates/pi-coding-agent/src/modes/acp/acp_stop_reason.rs` | pi-coding-agent | 29 | 96 | written (unreported) | no |
@@ -250,7 +250,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/coding-agent/src/modes/agents-view/agents-view-mode.ts` | `crates/pi-coding-agent/src/modes/agents_view/agents_view_mode.rs` | pi-coding-agent | 3003 | 6017 | written (unreported) | no |
 | `packages/coding-agent/src/modes/agents-view/agents-view-state.ts` | `crates/pi-coding-agent/src/modes/agents_view/agents_view_state.rs` | pi-coding-agent | 1156 | 2501 | written (unreported) | no |
 | `packages/coding-agent/src/modes/agents-view/roster-store.ts` | `crates/pi-coding-agent/src/modes/agents_view/roster_store.rs` | pi-coding-agent | 131 | 723 | written (unreported) | no |
-| `packages/coding-agent/src/modes/agents-view/session-view-search.ts` | `crates/pi-coding-agent/src/modes/agents_view/session_view_search.rs` | pi-coding-agent | 142 | 355 | written (unreported) | no |
+| `packages/coding-agent/src/modes/agents-view/session-view-search.ts` | `crates/pi-coding-agent/src/modes/agents_view/session_view_search.rs` | pi-coding-agent | 142 | 354 | written (unreported) | no |
 | `packages/coding-agent/src/modes/daemon/active-session-state.ts` | `crates/pi-coding-agent/src/modes/daemon/active_session_state.rs` | pi-coding-agent | 142 | 386 | written (unreported) | no |
 | `packages/coding-agent/src/modes/daemon/agent-roster.ts` | `crates/pi-coding-agent/src/modes/daemon/agent_roster.rs` | pi-coding-agent | 234 | 739 | written (unreported) | no |
 | `packages/coding-agent/src/modes/daemon/command-recovery-journal.ts` | `crates/pi-coding-agent/src/modes/daemon/command_recovery_journal.rs` | pi-coding-agent | 208 | 435 | written (unreported) | no |
@@ -275,7 +275,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/coding-agent/src/modes/daemon/daemon-worker-protocol.ts` | `crates/pi-coding-agent/src/modes/daemon/daemon_worker_protocol.rs` | pi-coding-agent | 280 | 505 | written (unreported) | no |
 | `packages/coding-agent/src/modes/daemon/heartbeat-catalog.ts` | `crates/pi-coding-agent/src/modes/daemon/heartbeat_catalog.rs` | pi-coding-agent | 25 | 173 | written (unreported) | no |
 | `packages/coding-agent/src/modes/daemon/mutation-drain-latch.ts` | `crates/pi-coding-agent/src/modes/daemon/mutation_drain_latch.rs` | pi-coding-agent | 37 | 110 | written (unreported) | no |
-| `packages/coding-agent/src/modes/daemon/rlm-ledger.ts` | `crates/pi-coding-agent/src/modes/daemon/rlm_ledger.rs` | pi-coding-agent | 823 | 0 | not started | no |
+| `packages/coding-agent/src/modes/daemon/rlm-ledger.ts` | `crates/pi-coding-agent/src/modes/daemon/rlm_ledger.rs` | pi-coding-agent | 823 | 1124 | written (unreported) | no |
 | `packages/coding-agent/src/modes/daemon/rlm-subagent-display.ts` | `crates/pi-coding-agent/src/modes/daemon/rlm_subagent_display.rs` | pi-coding-agent | 100 | 248 | written (unreported) | no |
 | `packages/coding-agent/src/modes/daemon/saved-session-catalog.ts` | `crates/pi-coding-agent/src/modes/daemon/saved_session_catalog.rs` | pi-coding-agent | 77 | 315 | written (unreported) | no |
 | `packages/coding-agent/src/modes/daemon/saved-session-info.ts` | `crates/pi-coding-agent/src/modes/daemon/saved_session_info.rs` | pi-coding-agent | 41 | 171 | written (unreported) | no |
@@ -417,7 +417,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/tui/src/editor-component.ts` | `crates/pi-tui/src/editor_component.rs` | pi-tui | 68 | 177 | written (unreported) | no |
 | `packages/tui/src/fullscreen.ts` | `crates/pi-tui/src/fullscreen.rs` | pi-tui | 715 | 1134 | written (unreported) | no |
 | `packages/tui/src/fuzzy.ts` | `crates/pi-tui/src/fuzzy.rs` | pi-tui | 146 | 226 | written (unreported) | no |
-| `packages/tui/src/index.ts` | `crates/pi-tui/src/mod.rs` | pi-tui | 136 | 0 | not started | no |
+| `packages/tui/src/index.ts` | `crates/pi-tui/src/mod.rs` | pi-tui | 136 | 74 | written (unreported) | no |
 | `packages/tui/src/keybindings.ts` | `crates/pi-tui/src/keybindings.rs` | pi-tui | 296 | 416 | written (unreported) | no |
 | `packages/tui/src/keys.ts` | `crates/pi-tui/src/keys.rs` | pi-tui | 1381 | 1381 | written (unreported) | no |
 | `packages/tui/src/kill-ring.ts` | `crates/pi-tui/src/kill_ring.rs` | pi-tui | 44 | 86 | written (unreported) | no |
@@ -430,7 +430,7 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 | `packages/tui/src/terminal-colors.ts` | `crates/pi-tui/src/terminal_colors.rs` | pi-tui | 206 | 374 | written (unreported) | no |
 | `packages/tui/src/terminal-image.ts` | `crates/pi-tui/src/terminal_image.rs` | pi-tui | 423 | 591 | written (unreported) | no |
 | `packages/tui/src/terminal.ts` | `crates/pi-tui/src/terminal.rs` | pi-tui | 614 | 713 | written (unreported) | no |
-| `packages/tui/src/tui.ts` | `crates/pi-tui/src/tui.rs` | pi-tui | 1992 | 3072 | written (unreported) | no |
+| `packages/tui/src/tui.ts` | `crates/pi-tui/src/tui.rs` | pi-tui | 1992 | 3167 | written (unreported) | no |
 | `packages/tui/src/undo-stack.ts` | `crates/pi-tui/src/undo_stack.rs` | pi-tui | 27 | 67 | written (unreported) | no |
 | `packages/tui/src/utils.ts` | `crates/pi-tui/src/utils.rs` | pi-tui | 1382 | 1936 | written (unreported) | no |
 
@@ -470,6 +470,13 @@ The mapping is 1:1: `packages/<pkg>/src/<a>/<b>.ts` -> `crates/<crate>/src/<a>/<
 - tests: `not run`
 - blocked_on: None. Mechanical interface notes for the lead: BedrockOptions/BedrockResponsesOptions expose from_base(base: &StreamOptions) -> Self; amazon_bedrock_responses.rs calls create_bedrock_responses_client(model, Some(&options.auth_options())) and BedrockResponsesClient::send_responses(&Map<String,Value>, Option<&BedrockResponsesAuthOptions>).
 - honest summary: All three assigned files are written with real behaviour: no stubs, no todo!(). amazon_bedrock.rs is a complete port of the 968-line TypeScript including a local SigV4 signer (verified against the published AWS SigV4 test vectors) and a local AWS event-stream decoder, because the AWS SDKs are not available in Rust; the credential chain covers the environment variables and static aws profiles but deliberately does not make STS/SSO/IMDS network calls (documented with NOTE comments). amazon-bedrock-responses.ts and bedrock-responses-client.ts are ported against the shared openai_responses_shared helpers (convert_responses_messages/process_responses_stream) and reuse the same signer. Cargo was not run (lead builds); the only likely build friction is mechanical naming/type alignment with the slices that own those helpers.
+
+### ai-providers-google-mistral
+
+- build: `not run (lead builds)`
+- tests: `not run`
+- blocked_on: none
+- honest summary: All four assigned files are written in full at the exact paths; no stubs or todo!() bodies. The Google providers build the @google/genai Mldev/Vertex payloads and the SDK's SSE parse loop locally with reqwest, and Mistral reproduces the @mistralai/mistralai outbound JSON (snake_case remaps), the Bearer auth header and the streaming chunk -> event mapping with the short_hash tool-call id derivation. Two mechanical fixes the lead reported (create_client Option<&str>, Value::Object wrapping of the request body) are applied. NOTE: Vertex OAuth (Application Default Credentials) is not implemented - the TS delegates it to google-auth-library; the port uses an explicit Authorization header or GOOGLE_VERTEX_ACCESS_TOKEN and names the gap in a code comment.
 
 ### ai-providers-openai-completions
 

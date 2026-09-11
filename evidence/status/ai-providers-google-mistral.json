@@ -1,0 +1,36 @@
+{
+  "slice": "ai-providers-google-mistral",
+  "files": [
+    {
+      "src": "packages/ai/src/providers/google-shared.ts",
+      "rust": "crates/pi-ai/src/providers/google_shared.rs",
+      "status": "ported",
+      "functions_mapped": 14,
+      "notes": "get_google_thinking_budget, is_thinking_part, retain_thought_signature, requires_tool_call_id, convert_messages (Result-returning because transformMessages can throw), convert_tools, map_tool_choice, map_stop_reason (Result for the TS exhaustive throw), JSON_SCHEMA_META_DECLARATIONS, plus the local helpers (isValidThoughtSignature/resolveThoughtSignature/sanitizeForOpenApi/supportsMultimodalFunctionResponse)."
+    },
+    {
+      "src": "packages/ai/src/providers/google.ts",
+      "rust": "crates/pi-ai/src/providers/google.rs",
+      "status": "ported",
+      "functions_mapped": 16,
+      "notes": "stream_google/stream_simple_google/GoogleOptions (+from_base), create_client, build_params, getDisabledThinkingConfig, getThinkingLevel, isGemini3Pro/Flash/Gemma4, send_request/throwErrorIfNotOK, generateContentParametersToMldev + the SDK part/config transforms, local SSE reader (ApiClient.processStreamResponse semantics), toolCallCounter."
+    },
+    {
+      "src": "packages/ai/src/providers/google-vertex.ts",
+      "rust": "crates/pi-ai/src/providers/google_vertex.rs",
+      "status": "ported",
+      "functions_mapped": 22,
+      "notes": "stream_google_vertex/stream_simple_google_vertex/GoogleVertexOptions (+from_base), createClient/createClientWithApiKey, buildHttpOptions, resolveCustomBaseUrl, baseUrlIncludesApiVersion, resolveApiKey/isPlaceholderApiKey, resolveProject, resolveLocation, buildParams, THINKING_LEVEL_MAP, getGemini3ThinkingLevel, Vertex URL derivation (project/location prefix, ResourceScope.COLLECTION) and API-key vs Authorization header rules."
+    },
+    {
+      "src": "packages/ai/src/providers/mistral.ts",
+      "rust": "crates/pi-ai/src/providers/mistral.rs",
+      "status": "ported",
+      "functions_mapped": 20,
+      "notes": "stream_mistral/stream_simple_mistral/MistralOptions (+from_base), createOutput, createMistralToolCallIdNormalizer/deriveMistralToolCallId (short_hash), formatMistralError, truncateErrorText, safeJsonStringify, buildRequestOptions (x-affinity), buildChatPayload + SDK snake_case remaps, toChatMessages, toFunctionTools, stripSymbolKeys, buildToolResultText, consumeChatStream (tool-call scratch buffer kept beside the block), mapChatStopReason, mapToolChoice, usesReasoningEffort/usesPromptModeReasoning/mapReasoningEffort, local SSE EventStream reader."
+    }
+  ],
+  "build": "not run (lead builds)",
+  "blocked_on": "",
+  "honest_summary": "All four assigned files are written in full at the exact paths; no stubs or todo!() bodies. The Google providers build the @google/genai Mldev/Vertex payloads and the SDK's SSE parse loop locally with reqwest, and Mistral reproduces the @mistralai/mistralai outbound JSON (snake_case remaps), the Bearer auth header and the streaming chunk -> event mapping with the short_hash tool-call id derivation. Two mechanical fixes the lead reported (create_client Option<&str>, Value::Object wrapping of the request body) are applied. NOTE: Vertex OAuth (Application Default Credentials) is not implemented - the TS delegates it to google-auth-library; the port uses an explicit Authorization header or GOOGLE_VERTEX_ACCESS_TOKEN and names the gap in a code comment."
+}
