@@ -32,5 +32,21 @@
   ],
   "build": "not run (lead builds)",
   "blocked_on": "openai_compaction.rs is now on disk (lead). Post-build fixes I applied to my files: (1) BoxFuture has no lifetime parameter -> BoxFuture<Result<Value, CompactionRequestError>>; (2) parse_sse_response / map_codex_events / parse_web_socket / start_web_socket_output_on_first_event now return Pin<Box<dyn Stream<..> + Send>> so the Unfold combinator is Unpin and the Item types line up with ResponsesEventStream; (3) process_web_socket_stream takes on_start: Arc<dyn Fn() + Send + Sync> (was an impl-Fn parameter that could not outlive the async body); (4) openai_responses_shared.rs: parse_streaming_json returns Value, so ToolCall::new now receives match args { Value::Object(map) => map, _ => Map::new() }.",
-  "honest_summary": "openai_responses_shared.rs, openai_responses.rs and openai_codex_responses.rs are complete 1:1 ports with unit tests (parsing, serialisation, ordering, error mapping, thresholds, header building, defaults, cached-context delta, fallback diagnostics) and no real network calls. azure_openai_responses.rs is the lead's file, not mine. The one real functional gap is the WebSocket transport in the Codex provider: no WebSocket crate exists in the workspace, so the socket is injectable and defaults to 'unavailable', reproducing the TypeScript's no-WebSocket runtime path exactly (same error message, same reconnect/fallback bookkeeping) and landing on SSE. I applied the lead's reported compile fixes but did not run cargo, so the files are still compiler-unverified by me."
+  "honest_summary": "openai_responses_shared.rs, openai_responses.rs and openai_codex_responses.rs are complete 1:1 ports with unit tests (parsing, serialisation, ordering, error mapping, thresholds, header building, defaults, cached-context delta, fallback diagnostics) and no real network calls. azure_openai_responses.rs is the lead's file, not mine. The one real functional gap is the WebSocket transport in the Codex provider: no WebSocket crate exists in the workspace, so the socket is injectable and defaults to 'unavailable', reproducing the TypeScript's no-WebSocket runtime path exactly (same error message, same reconnect/fallback bookkeeping) and landing on SSE. I applied the lead's reported compile fixes but did not run cargo, so the files are still compiler-unverified by me.",
+  "build_status": {
+    "check": "cargo check -p pi-ai (read-only, run by me at the lead's request)",
+    "openai_responses_shared.rs": "clean - 0 errors, 0 warnings",
+    "openai_responses.rs": "clean - 0 errors, 0 warnings",
+    "openai_codex_responses.rs": "clean - 0 errors, 0 warnings",
+    "remaining_crate_error": "crates/pi-ai/src/mcp/oauth.rs:936 E0384 (not my file)",
+    "fixes_i_applied": [
+      "BoxFuture<Result<Value, CompactionRequestError>> (BoxFuture has no lifetime parameter)",
+      "parse_sse_response / map_codex_events / parse_web_socket / start_web_socket_output_on_first_event return Pin<Box<dyn Stream<..> + Send>> (Unfold is not Unpin; Item types line up)",
+      "process_web_socket_stream takes on_start: Arc<dyn Fn() + Send + Sync>",
+      "start_web_socket_output_on_first_event takes S: Stream<Item = Value>",
+      "parse_web_socket scopes the MutexGuard so it is not held across the await (future must be Send)",
+      "fn as_arguments(Value) -> Map<String, Value> used at the three ToolCall.arguments sites",
+      "five js_display uses wrapped as map(|value| js_display(Some(value)))"
+    ]
+  }
 }

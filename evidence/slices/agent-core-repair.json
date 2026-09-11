@@ -1,0 +1,38 @@
+{
+ "slice": "agent-core-repair",
+ "crate": "pi-agent-core",
+ "files": [
+  {
+   "src": "packages/agent/src/agent-loop.ts",
+   "rust": "crates/pi-agent-core/src/agent_loop.rs",
+   "loc": 1287
+  },
+  {
+   "src": "packages/agent/src/agent.ts",
+   "rust": "crates/pi-agent-core/src/agent.rs",
+   "loc": 605
+  },
+  {
+   "src": "packages/agent/src/proxy.ts",
+   "rust": "crates/pi-agent-core/src/proxy.rs",
+   "loc": 348
+  },
+  {
+   "src": "packages/agent/src/performance-metrics.ts",
+   "rust": "crates/pi-agent-core/src/performance_metrics.rs",
+   "loc": 187
+  },
+  {
+   "src": "packages/agent/src/types.ts",
+   "rust": "crates/pi-agent-core/src/types.rs",
+   "loc": 409
+  },
+  {
+   "src": "packages/agent/src/index.ts",
+   "rust": "crates/pi-agent-core/src/mod.rs",
+   "loc": 5
+  }
+ ],
+ "note": "REPAIR slice. All files are written; agent_loop.rs has 60 compile errors, performance_metrics.rs 7, types.rs 1. Fix them in place against the TypeScript reference, then ONE cargo check + ONE cargo test for pi-agent-core.",
+ "loc": 2841
+}
