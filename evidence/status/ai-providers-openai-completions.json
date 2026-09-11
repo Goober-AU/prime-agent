@@ -1,0 +1,15 @@
+{
+  "slice": "ai-providers-openai-completions",
+  "files": [
+    {
+      "src": "packages/ai/src/providers/openai-completions.ts",
+      "rust": "crates/pi-ai/src/providers/openai_completions.rs",
+      "status": "ported",
+      "functions_mapped": 26,
+      "notes": "1:1 port; no todo!/stub bodies. Exports stream_openai_completions, stream_simple_openai_completions, OpenAICompletionsOptions (+ from_base), and pub(crate) convert_messages/parse_chunk_usage used by tests and other slices. Covers base-URL auto-detection (zai/moonshot/cerebras/xai/chutes/deepseek/opencode/cloudflare/prime-inference), OpenAICompletionsCompat defaults + getCompat overrides, developer-vs-system role, all six thinkingFormat variants, max_tokens vs max_completion_tokens, requiresToolResultName, requiresAssistantAfterToolResult bridge, thinking-as-text, reasoning_content replay, stream_options.include_usage, Anthropic cache_control markers (system/last tool/last message, 1h ttl), OpenRouter provider routing + Vercel gateway providerOptions, zai tool_stream, supportsStrictMode, session-affinity headers, long cache retention (prompt_cache_key/prompt_cache_retention), responseId/responseModel, reasoning_details merge + reasoning.encrypted thoughtSignature, tool-call id normalization, and the full SSE loop emitting identical event order. NOTE (SDK gap): the `openai` SDK client is replaced by reqwest + a local SSE parser (LineDecoder/SSEDecoder semantics ported). The SDK's implicit request headers (X-Stainless-*, OpenAI-Organization, User-Agent) are not reproduced; every header the TS sets explicitly is. maxRetries:0 is honoured (no retry). NOTE: convert_messages uses try_transform_messages and surfaces the 'rebuild context from the session transcript' error through the stream catch path. Build fix applied after the lead's cargo check: impl From<String> for StreamError and `.filter(|value| js_truthy(value))`."
+    }
+  ],
+  "build": "not run (lead builds); lead-reported cargo errors fixed: From<String> for StreamError, js_truthy filter closure",
+  "blocked_on": "none",
+  "honest_summary": "openai_completions.rs is a complete 1:1 port of the 1254-line TypeScript provider, including compat detection, payload building, the Anthropic cache-control markers, usage/stop-reason mapping and the SSE parse loop, with 60 network-free unit tests. The one deliberate substitution is transport: the openai SDK is replaced by reqwest plus a local SSE parser that mirrors the SDK's LineDecoder/SSEDecoder, so the SDK's implicit Stainless headers are absent while every explicitly-set header is preserved. I did not run cargo (per the lead's instruction), so this file is unverified at the compiler level."
+}
