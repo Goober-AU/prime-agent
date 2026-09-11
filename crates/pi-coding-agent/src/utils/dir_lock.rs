@@ -85,8 +85,8 @@ fn identity_from_metadata(metadata: &std::fs::Metadata) -> StatIdentity {
 
 #[cfg(windows)]
 fn identity_from_metadata(metadata: &std::fs::Metadata) -> StatIdentity {
-    // Windows has no stable dev/inode pair in std; the file size plus the
-    // creation time is the strongest identity available here.
+    // Windows has no stable dev/inode pair in std; the creation time is the
+    // strongest identity available here, and a zero identity means "held".
     use std::time::UNIX_EPOCH;
     let created = metadata
         .created()
@@ -101,7 +101,10 @@ fn identity_from_metadata(metadata: &std::fs::Metadata) -> StatIdentity {
     }
 }
 
-pub fn try_acquire_dir_lock<F, Fut>(lock_path: &str, owner_alive: F) -> impl Future<Output = std::io::Result<DirLockAttempt>>
+pub fn try_acquire_dir_lock<F, Fut>(
+    lock_path: &str,
+    owner_alive: F,
+) -> impl Future<Output = std::io::Result<DirLockAttempt>>
 where
     F: Fn(Option<i32>) -> Fut + Copy,
     Fut: Future<Output = bool>,
@@ -127,7 +130,7 @@ where
 
     write_owner_file(&temp_path, std::process::id())?;
 
-    let result = (|| async {
+    let result = async {
         match link_onto(&temp_path, lock_path) {
             Ok(()) => return Ok(DirLockAttempt::Acquired),
             Err(link_error) => {
@@ -135,17 +138,7 @@ where
                 let mut candidate_swept = false;
                 let mut rechecked_nlink: Option<u64> = None;
                 match std::fs::metadata(&temp_path) {
-                    Ok(metadata) => {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::MetadataExt;
-                            rechecked_nlink = Some(metadata.nlink());
-                        }
-                        #[cfg(not(unix))]
-                        {
-                            rechecked_nlink = Some(1);
-                        }
-                    }
+                    Ok(metadata) => rechecked_nlink = Some(link_count(&metadata)),
                     Err(stat_error) => {
                         // Only a definite ENOENT means the candidate was swept.
                         if stat_error.kind() != std::io::ErrorKind::NotFound {
@@ -177,12 +170,24 @@ where
         }
 
         judge_and_reclaim(lock_path, owner_alive, captured, &token).await
-    })()
+    }
     .await;
 
     // Cleanup only: a leaked candidate must never mask a settled acquisition.
     let _ = std::fs::remove_file(&temp_path);
     result
+}
+
+#[cfg(unix)]
+fn link_count(metadata: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink()
+}
+
+#[cfg(not(unix))]
+fn link_count(_metadata: &std::fs::Metadata) -> u64 {
+    // NTFS does not expose POSIX link counts; the EEXIST path is the only signal.
+    1
 }
 
 fn is_already_exists(error: &std::io::Error) -> bool {
@@ -202,12 +207,6 @@ fn write_owner_file(temp_path: &str, pid: u32) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
-fn link_onto(from: &str, to: &str) -> std::io::Result<()> {
-    std::fs::hard_link(from, to)
-}
-
-#[cfg(windows)]
 fn link_onto(from: &str, to: &str) -> std::io::Result<()> {
     std::fs::hard_link(from, to)
 }
@@ -227,9 +226,9 @@ where
         // A transient read failure may hide a LIVE lock: never judge it stale.
         return Ok(DirLockAttempt::Held);
     }
-    let owner_pid = match judged {
+    let owner_pid = match &judged {
         OwnerRead::Absent => None,
-        OwnerRead::Content(content) => strict_pid(Some(&content)),
+        OwnerRead::Content(content) => strict_pid(Some(content)),
         OwnerRead::Unreadable => unreachable!(),
     };
     if owner_alive(owner_pid).await {
@@ -356,12 +355,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn treats_an_unreadable_owner_as_held() {
+    async fn treats_a_legacy_directory_lock_as_held() {
         let dir = temp_dir();
         let lock = dir.join("session.lock");
         std::fs::create_dir_all(&lock).unwrap();
-        // A legacy directory lock without a pid file reads as "absent"; a missing
-        // path reads as ENOENT. Unreadable is exercised through strict_pid here.
         let attempt = try_acquire_dir_lock(lock.to_str().unwrap(), |_| async { false })
             .await
             .unwrap();
@@ -386,8 +383,11 @@ mod tests {
         let old = dir.join("session.lock.candidate-old");
         std::fs::write(&fresh, "1\n").unwrap();
         std::fs::write(&old, "1\n").unwrap();
-        let old_time = std::time::SystemTime::now() - std::time::Duration::from_millis(CANDIDATE_SWEEP_AGE_MS as u64 + 1000);
-        filetime_set(&old, old_time);
+        let old_time = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(CANDIDATE_SWEEP_AGE_MS as u64 + 1000);
+        if let Ok(file) = std::fs::File::options().write(true).open(&old) {
+            let _ = file.set_times(std::fs::FileTimes::new().set_modified(old_time));
+        }
 
         let attempt = try_acquire_dir_lock(lock.to_str().unwrap(), |_| async { false })
             .await
@@ -395,12 +395,5 @@ mod tests {
         assert_eq!(attempt, DirLockAttempt::Acquired);
         assert!(fresh.exists());
         assert!(!old.exists());
-    }
-
-    /// Backdates a file's mtime using `File::set_times` when the std API allows it.
-    fn filetime_set(path: &Path, time: std::time::SystemTime) {
-        if let Ok(file) = std::fs::File::options().write(true).open(path) {
-            let _ = file.set_times(std::fs::FileTimes::new().set_modified(time));
-        }
     }
 }

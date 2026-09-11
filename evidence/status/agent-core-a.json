@@ -1,0 +1,30 @@
+{
+ "slice": "agent-core-a",
+ "files": [
+  {
+   "src": "packages/agent/src/types.ts",
+   "rust": "crates/pi-agent-core/src/types.rs",
+   "status": "partial",
+   "functions_mapped": 18,
+   "notes": "first worker wrote ~737 lines then hit its output limit; second worker (agent-core-a) failed at admission/recovery; file is uncompiled"
+  },
+  {
+   "src": "packages/agent/src/performance-metrics.ts",
+   "rust": "crates/pi-agent-core/src/performance_metrics.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "not written"
+  },
+  {
+   "src": "packages/agent/src/index.ts",
+   "rust": "crates/pi-agent-core/src/mod.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "not written"
+  }
+ ],
+ "build": "not run",
+ "tests": "not run",
+ "blocked_on": "repeated worker output-limit failures; pi-ai types.rs exists now but is uncompiled",
+ "honest_summary": "Only types.ts has content and it is uncompiled. Needs a fresh worker with the chunked-write brief."
+}

@@ -1,0 +1,18 @@
+{
+ "slice": "ca-kernel-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/kernel/repl-manager.ts",
+   "rust": "crates/pi-coding-agent/src/core/kernel/repl_manager.rs",
+   "loc": 1913
+  },
+  {
+   "src": "packages/coding-agent/src/core/kernel/bootstrap-cli.ts",
+   "rust": "crates/pi-coding-agent/src/core/kernel/bootstrap_cli.rs",
+   "loc": 13
+  }
+ ],
+ "note": "bootstrap.rs/boot_gate.rs/shared.rs/state_snapshot.rs were written by the previous worker (uncompiled). Finish repl_manager.rs and bootstrap_cli.rs, then run ONE cargo check + ONE cargo test for pi-coding-agent.",
+ "loc": 1926
+}

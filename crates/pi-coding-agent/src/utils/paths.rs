@@ -28,7 +28,9 @@ pub fn is_local_path(value: &str) -> bool {
     let trimmed = value.trim();
     // Known non-local prefixes
     const NON_LOCAL_PREFIXES: [&str; 6] = ["npm:", "git:", "github:", "http:", "https:", "ssh:"];
-    !NON_LOCAL_PREFIXES.iter().any(|prefix| trimmed.starts_with(prefix))
+    !NON_LOCAL_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn resolve_path(value: &str) -> String {
@@ -69,11 +71,7 @@ fn normalize_lexically(path: &Path) -> String {
                 prefix.push_str(&prefix_component.as_os_str().to_string_lossy());
             }
             Component::RootDir => {
-                if prefix.is_empty() {
-                    prefix.push(separator());
-                } else {
-                    prefix.push(separator());
-                }
+                prefix.push(separator());
             }
             Component::CurDir => {}
             Component::ParentDir => {
@@ -118,6 +116,32 @@ fn split_parts(value: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(|part| part.to_string())
         .collect()
+}
+
+/// Node's `path.resolve` for an absolute-or-relative path, without filesystem access.
+/// Used by the agents-view port (`resolve(canonicalizePath(path))`).
+pub fn resolve_absolute(value: &str) -> String {
+    resolve_path(value)
+}
+
+/// Node's `path.resolve` for an already-absolute path (same lexical result).
+pub fn normalize_absolute(path: &Path) -> String {
+    normalize_lexically(path)
+}
+
+/// Node's `path.basename`.
+pub fn basename(value: &str) -> String {
+    let trimmed = value.trim_end_matches(['/', '\\']);
+    match trimmed.rsplit(['/', '\\']).next() {
+        Some(part) if !part.is_empty() => part.to_string(),
+        _ => {
+            if value == "/" || value == "\\" {
+                value.to_string()
+            } else {
+                String::new()
+            }
+        }
+    }
 }
 
 pub fn get_cwd_relative_path(file_path: &str, cwd: &str) -> Option<String> {

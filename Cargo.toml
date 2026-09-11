@@ -4,7 +4,7 @@ members = [
     "crates/pi-ai",
     "crates/pi-agent-core",
     "crates/pi-tui",
-    "crates/pi-coding-agent", ".port-env/depcheck/t",
+    "crates/pi-coding-agent",
 ]
 
 [workspace.package]
@@ -62,6 +62,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 infer = "0.19"
 zip = "2"
 sha2 = "0.10"
+rsa = { version = "0.9", features = ["sha2", "pem"] }
 base64 = "0.22"
 flate2 = "1"
 # cli / process

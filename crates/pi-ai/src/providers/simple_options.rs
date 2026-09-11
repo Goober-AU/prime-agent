@@ -11,6 +11,7 @@ pub fn build_base_options(model: &Model, options: Option<&SimpleStreamOptions>, 
 		.and_then(|o| o.stream.max_tokens)
 		.or_else(|| if model.max_tokens > 0.0 { Some(model.max_tokens.min(32000.0)) } else { None });
 	base.signal = options.and_then(|o| o.stream.signal.clone());
+	// TS: `apiKey || options?.apiKey`
 	base.api_key = match api_key {
 		Some(key) if !key.is_empty() => Some(key.to_string()),
 		_ => options.and_then(|o| o.stream.api_key.clone()),
@@ -110,6 +111,17 @@ mod tests {
 		}
 	}
 
+	fn model_with_thinking_map() -> Model {
+		Model {
+			thinking_level_map: Some(
+				[("high".to_string(), Some("high-value".to_string())), ("max".to_string(), None)]
+					.into_iter()
+					.collect(),
+			),
+			..Default::default()
+		}
+	}
+
 	#[test]
 	fn base_options_clamps_max_tokens_to_32000() {
 		let model = model_with_max_tokens(100_000.0);
@@ -179,12 +191,7 @@ mod tests {
 
 	#[test]
 	fn thinking_level_map_distinguishes_absent_from_null() {
-		let mut model = Model::default();
-		model.thinking_level_map = Some(
-			[("high".to_string(), Some("high-value".to_string())), ("max".to_string(), None)]
-				.into_iter()
-				.collect(),
-		);
+		let model = model_with_thinking_map();
 		assert_eq!(thinking_level_mapped(&model, &"high".to_string()), Some(Some("high-value".to_string())));
 		assert_eq!(thinking_level_mapped(&model, &"max".to_string()), Some(None));
 		assert_eq!(thinking_level_mapped(&model, &"low".to_string()), None);

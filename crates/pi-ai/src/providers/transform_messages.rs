@@ -5,14 +5,6 @@ use crate::types::{
 	ToolResultMessage, UserContent,
 };
 
-/// TS: `Date.now()`
-fn now_ms() -> i64 {
-	std::time::SystemTime::now()
-		.duration_since(std::time::UNIX_EPOCH)
-		.map(|d| d.as_millis() as i64)
-		.unwrap_or(0)
-}
-
 const NON_VISION_USER_IMAGE_PLACEHOLDER: &str = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER: &str = "(tool image omitted: model does not support images)";
 
@@ -70,23 +62,39 @@ fn downgrade_unsupported_images(messages: Vec<Message>, model: &Model) -> Vec<Me
 /// Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
 ///
 /// TS: `transformMessages(messages, model, normalizeToolCallId?)`
+///
+/// The TypeScript throws when a user message carries a compaction checkpoint for another model.
+/// Provider code must use [`try_transform_messages`] and route the error through its own catch
+/// block; this wrapper keeps the throwing shape for direct callers.
 pub fn transform_messages(
 	messages: Vec<Message>,
 	model: &Model,
 	normalize_tool_call_id: Option<&dyn Fn(&str, &Model, &AssistantMessage) -> String>,
 ) -> Vec<Message> {
+	match try_transform_messages(messages, model, normalize_tool_call_id) {
+		Ok(messages) => messages,
+		Err(error) => panic!("{error}"),
+	}
+}
+
+/// [`transform_messages`] with the TypeScript `throw` turned into `Err`.
+pub fn try_transform_messages(
+	messages: Vec<Message>,
+	model: &Model,
+	normalize_tool_call_id: Option<&dyn Fn(&str, &Model, &AssistantMessage) -> String>,
+) -> Result<Vec<Message>, String> {
 	use std::collections::HashMap;
 
 	let mut tool_call_id_map: HashMap<String, String> = HashMap::new();
 	let image_aware_messages = downgrade_unsupported_images(messages, model);
 
-	let transformed: Vec<Message> = image_aware_messages
-		.into_iter()
-		.map(|msg| match msg {
+	let mut transformed: Vec<Message> = Vec::with_capacity(image_aware_messages.len());
+	for msg in image_aware_messages {
+		let msg = match msg {
 			Message::User(user) => {
 				if let Some(provider_context) = &user.provider_context {
 					if !compaction_matches_model(provider_context, model) {
-						panic!("Compaction checkpoint belongs to another model or provider; rebuild context from the session transcript");
+						return Err("Compaction checkpoint belongs to another model or provider; rebuild context from the session transcript".to_string());
 					}
 				}
 				Message::User(user)
@@ -162,8 +170,9 @@ pub fn transform_messages(
 					..assistant_msg
 				})
 			}
-		})
-		.collect();
+		};
+		transformed.push(msg);
+	}
 
 	// This preserves thinking signatures and satisfies API requirements
 	let mut result: Vec<Message> = Vec::new();
@@ -183,7 +192,7 @@ pub fn transform_messages(
 						tc.name.clone(),
 						vec![ImageOrTextContent::Text(TextContent::new("No result provided"))],
 						true,
-						now_ms(),
+						crate::utils::now_ms(),
 					)));
 				}
 			}
@@ -237,7 +246,7 @@ pub fn transform_messages(
 
 	insert_synthetic_tool_results(&mut result, &mut pending_tool_calls, &mut existing_tool_result_ids);
 
-	result
+	Ok(result)
 }
 
 #[cfg(test)]

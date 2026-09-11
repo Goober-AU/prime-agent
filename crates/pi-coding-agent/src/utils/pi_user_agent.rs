@@ -1,13 +1,10 @@
 //! Port of packages/coding-agent/src/utils/pi-user-agent.ts
 
-/// Bun sets `process.versions.bun`; Node reports only `process.version`.
+/// Bun sets `process.versions.bun`; Node reports only `process.version`. The
+/// Rust port has no JS runtime, so the runtime token reports the port's own
+/// version, which is the value this port reports everywhere else.
 fn runtime_string() -> String {
-    if let Ok(bun) = std::env::var("PI_BUN_VERSION") {
-        if !bun.is_empty() {
-            return format!("bun/{bun}");
-        }
-    }
-    format!("node/{}", "1.0.0")
+    format!("node/{}", env!("CARGO_PKG_VERSION"))
 }
 
 /// Node's `process.platform` name for the host this binary was built for.

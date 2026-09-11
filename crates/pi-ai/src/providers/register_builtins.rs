@@ -76,17 +76,89 @@ fn bedrock_responses_module_override() -> &'static RwLock<Option<BedrockResponse
 
 /// Convert base `StreamOptions` into a provider-specific options struct.
 ///
-/// The TypeScript casts the options object; the Rust port round-trips it through serde so the
-/// provider sees exactly the same fields (`undefined` stays `None`).
+/// The TypeScript passes `StreamOptions & Record<string, unknown>` and the provider reads the
+/// fields it knows. The Rust port keeps the base options object itself (so `signal`,
+/// `on_payload`, `on_response` and `on_usage_observation`, which are not serialisable, survive)
+/// and lets the provider add its own defaults.
+trait FromBaseOptions: Sized {
+	fn from_base_options(base: &StreamOptions) -> Self;
+}
+
+impl FromBaseOptions for AnthropicOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		AnthropicOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for OpenAICompletionsOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		OpenAICompletionsOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for OpenAIResponsesOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		OpenAIResponsesOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for AzureOpenAIResponsesOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		AzureOpenAIResponsesOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for OpenAICodexResponsesOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		OpenAICodexResponsesOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for BedrockOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		BedrockOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for BedrockResponsesOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		BedrockResponsesOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for GoogleOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		GoogleOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for GoogleVertexOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		GoogleVertexOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for MistralOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		MistralOptions::from_base(base)
+	}
+}
+
+impl FromBaseOptions for crate::types::SimpleStreamOptions {
+	fn from_base_options(base: &StreamOptions) -> Self {
+		crate::types::SimpleStreamOptions {
+			stream: base.clone(),
+			reasoning: None,
+			thinking_budgets: None,
+		}
+	}
+}
+
 fn typed_options<T>(options: Option<&StreamOptions>) -> Option<T>
 where
-	T: serde::de::DeserializeOwned,
+	T: FromBaseOptions,
 {
-	let options = options?;
-	match serde_json::to_value(options) {
-		Ok(value) => serde_json::from_value::<T>(value).ok(),
-		Err(_) => None,
-	}
+	options.map(T::from_base_options)
 }
 
 /// TS: `supportsCompaction` guard used by `registerApiProvider` for the responses apis.
@@ -103,7 +175,7 @@ fn compact_openai_responses_guarded<'a>(
 ) -> BoxFuture<'a, Option<ProviderCompactionResult>> {
 	Box::pin(async move {
 		if model.api != "openai-responses" {
-			return None;
+			panic!("Mismatched compaction api: {}", model.api);
 		}
 		compact_openai_responses(model, context, options).await
 	})
@@ -116,7 +188,7 @@ fn compact_openai_codex_responses_guarded<'a>(
 ) -> BoxFuture<'a, Option<ProviderCompactionResult>> {
 	Box::pin(async move {
 		if model.api != "openai-codex-responses" {
-			return None;
+			panic!("Mismatched compaction api: {}", model.api);
 		}
 		compact_openai_codex_responses(model, context, options).await
 	})
@@ -429,16 +501,14 @@ pub fn register_built_in_api_providers() {
 		stream_simple: stream_simple_bedrock_responses_lazy(),
 		compact: None,
 		supports_compaction: None,
-		source_id: None,
-	});
+	}, None);
 	register_api_provider(ApiProvider {
 		api: "anthropic-messages".to_string(),
 		stream: stream_anthropic(),
 		stream_simple: stream_simple_anthropic_lazy(),
 		compact: None,
 		supports_compaction: None,
-		source_id: None,
-	});
+	}, None);
 
 	register_api_provider(ApiProvider {
 		api: "openai-completions".to_string(),
@@ -446,8 +516,7 @@ pub fn register_built_in_api_providers() {
 		stream_simple: stream_simple_openai_completions_lazy(),
 		compact: None,
 		supports_compaction: None,
-		source_id: None,
-	});
+	}, None);
 
 	register_api_provider(ApiProvider {
 		api: "mistral-conversations".to_string(),
@@ -455,8 +524,7 @@ pub fn register_built_in_api_providers() {
 		stream_simple: stream_simple_mistral_lazy(),
 		compact: None,
 		supports_compaction: None,
-		source_id: None,
-	});
+	}, None);
 
 	register_api_provider(ApiProvider {
 		api: "openai-responses".to_string(),
@@ -464,8 +532,7 @@ pub fn register_built_in_api_providers() {
 		stream: stream_openai_responses(),
 		stream_simple: stream_simple_openai_responses_lazy(),
 		compact: Some(Arc::new(compact_openai_responses_guarded) as CompactFunction),
-		source_id: None,
-	});
+	}, None);
 
 	register_api_provider(ApiProvider {
 		api: "azure-openai-responses".to_string(),
@@ -473,8 +540,7 @@ pub fn register_built_in_api_providers() {
 		stream_simple: stream_simple_azure_openai_responses_lazy(),
 		compact: None,
 		supports_compaction: None,
-		source_id: None,
-	});
+	}, None);
 
 	register_api_provider(ApiProvider {
 		api: "openai-codex-responses".to_string(),
@@ -482,8 +548,7 @@ pub fn register_built_in_api_providers() {
 		stream: stream_openai_codex_responses(),
 		stream_simple: stream_simple_openai_codex_responses_lazy(),
 		compact: Some(Arc::new(compact_openai_codex_responses_guarded) as CompactFunction),
-		source_id: None,
-	});
+	}, None);
 
 	register_api_provider(ApiProvider {
 		api: "google-generative-ai".to_string(),
@@ -491,8 +556,7 @@ pub fn register_built_in_api_providers() {
 		stream_simple: stream_simple_google_lazy(),
 		compact: None,
 		supports_compaction: None,
-		source_id: None,
-	});
+	}, None);
 
 	register_api_provider(ApiProvider {
 		api: "google-vertex".to_string(),
@@ -500,8 +564,7 @@ pub fn register_built_in_api_providers() {
 		stream_simple: stream_simple_google_vertex_lazy(),
 		compact: None,
 		supports_compaction: None,
-		source_id: None,
-	});
+	}, None);
 
 	register_api_provider(ApiProvider {
 		api: "bedrock-converse-stream".to_string(),
@@ -509,8 +572,7 @@ pub fn register_built_in_api_providers() {
 		stream_simple: stream_simple_bedrock_lazy(),
 		compact: None,
 		supports_compaction: None,
-		source_id: None,
-	});
+	}, None);
 }
 
 /// TS: `resetApiProviders()`
@@ -623,15 +685,22 @@ mod tests {
 	}
 
 	#[test]
-	fn typed_options_round_trip_preserves_fields() {
+	fn typed_options_keeps_base_options_including_abort_signal() {
 		let mut options = StreamOptions::default();
 		options.temperature = Some(0.5);
 		options.max_tokens = Some(1234.0);
 		options.api_key = Some("key".to_string());
+		options.signal = Some(tokio_util::sync::CancellationToken::new());
 		let typed = typed_options::<AnthropicOptions>(Some(&options)).expect("typed options");
 		assert_eq!(typed.stream.temperature, Some(0.5));
 		assert_eq!(typed.stream.max_tokens, Some(1234.0));
 		assert_eq!(typed.stream.api_key.as_deref(), Some("key"));
+		// `signal` is not serialisable, so it must survive by cloning the base options.
+		assert!(typed.stream.signal.is_some());
+		let simple = typed_options::<crate::types::SimpleStreamOptions>(Some(&options)).expect("simple options");
+		assert_eq!(simple.stream.temperature, Some(0.5));
+		assert!(simple.reasoning.is_none());
+		assert!(simple.thinking_budgets.is_none());
 		assert!(typed_options::<AnthropicOptions>(None).is_none());
 	}
 

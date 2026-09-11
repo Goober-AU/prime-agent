@@ -72,14 +72,57 @@ pub fn fuzzy_match(query: &str, text: &str) -> FuzzyMatch {
             };
         }
 
-        score += (text_chars.len() - query_chars.len()) as f64 * 0.01;
+        if normalized_query == text_lower {
+            score -= 100.0;
+        }
+
         FuzzyMatch {
             matches: true,
             score,
         }
     };
 
-    match_query(&query_lower)
+    let primary_match = match_query(&query_lower);
+    if primary_match.matches {
+        return primary_match;
+    }
+
+    // Numbers and letters are often typed in either order ("3d" vs "d3").
+    let swapped_query = swap_alpha_numeric(&query_lower);
+    let swapped_query = match swapped_query {
+        Some(q) => q,
+        None => return primary_match,
+    };
+
+    let swapped_match = match_query(&swapped_query);
+    if !swapped_match.matches {
+        return primary_match;
+    }
+
+    FuzzyMatch {
+        matches: true,
+        score: swapped_match.score + 5.0,
+    }
+}
+
+/// Port of the `/^(?<letters>[a-z]+)(?<digits>[0-9]+)$/` and
+/// `/^(?<digits>[0-9]+)(?<letters>[a-z]+)$/` swap.
+fn swap_alpha_numeric(query_lower: &str) -> Option<String> {
+    let digits = query_lower.chars().take_while(|c| c.is_ascii_digit()).count();
+    let letters = query_lower.chars().take_while(|c| c.is_ascii_lowercase()).count();
+
+    if letters > 0 && letters == query_lower.len() {
+        return None;
+    }
+    if letters > 0 && query_lower[letters..].chars().all(|c| c.is_ascii_digit()) {
+        let (l, d) = query_lower.split_at(letters);
+        return Some(format!("{d}{l}"));
+    }
+    if digits > 0 && query_lower[digits..].chars().all(|c| c.is_ascii_lowercase()) {
+        let (d, l) = query_lower.split_at(digits);
+        return Some(format!("{l}{d}"));
+    }
+    None
 }
 
 /// An item paired with its match score.

@@ -183,7 +183,12 @@ impl FauxState {
 
 /// TS: `FauxResponseFactory`
 pub type FauxResponseFactory = Arc<
-	dyn Fn(&Context, Option<&StreamOptions>, &FauxState, &Model) -> BoxFuture<'static, AssistantMessage>
+	dyn for<'a> Fn(
+			&'a Context,
+			Option<&'a StreamOptions>,
+			&'a FauxState,
+			&'a Model,
+		) -> BoxFuture<'a, AssistantMessage>
 		+ Send
 		+ Sync,
 >;
@@ -411,22 +416,26 @@ fn with_usage_estimate(
 }
 
 /// TS: `splitStringByTokenSize(text, minTokenSize, maxTokenSize)`
+///
+/// JavaScript slices by UTF-16 code units; the Rust port slices by `char` while counting UTF-16
+/// units, so a surrogate pair is never split (that matches `String.prototype.slice` behaviour on
+/// well-formed text and avoids invalid UTF-8).
 fn split_string_by_token_size(text: &str, min_token_size: f64, max_token_size: f64) -> Vec<String> {
 	let mut chunks: Vec<String> = Vec::new();
-	let units: Vec<u16> = text.encode_utf16().collect();
+	let chars: Vec<char> = text.chars().collect();
 	let mut index = 0usize;
-	while index < units.len() {
-		let token_size =
-			min_token_size + (random_f64() * (max_token_size - min_token_size + 1.0)).floor();
+	while index < chars.len() {
+		let token_size = min_token_size + (random_f64() * (max_token_size - min_token_size + 1.0)).floor();
 		let char_size = ((token_size * 4.0) as usize).max(1);
-		let end = (index + char_size).min(units.len());
-		// Never split a surrogate pair: back off to the previous complete char boundary.
-		let mut boundary = end;
-		while boundary > index && (0xDC00..=0xDFFF).contains(&units[boundary - 1]) && boundary >= 2 && !(0xD800..=0xDBFF).contains(&units[boundary - 2]) {
-			boundary -= 1;
+		let mut taken = 0usize;
+		let mut units = 0usize;
+		while index + taken < chars.len() && units < char_size {
+			units += chars[index + taken].len_utf16();
+			taken += 1;
 		}
-		chunks.push(String::from_utf16_lossy(&units[index..boundary]));
-		index = boundary.max(index + 1);
+		let taken = taken.max(1);
+		chunks.push(chars[index..index + taken].iter().collect());
+		index += taken;
 	}
 	if chunks.is_empty() {
 		chunks.push(String::new());
@@ -808,14 +817,16 @@ pub fn register_faux_provider(options: Option<RegisterFauxProviderOptions>) -> F
 		})
 	};
 
-	register_api_provider(ApiProvider {
-		api: api.clone(),
-		stream,
-		stream_simple: simple_stream,
-		compact: None,
-		supports_compaction: None,
-		source_id: Some(source_id.clone()),
-	});
+	register_api_provider(
+		ApiProvider {
+			api: api.clone(),
+			stream,
+			stream_simple: simple_stream,
+			compact: None,
+			supports_compaction: None,
+		},
+		Some(source_id.clone()),
+	);
 
 	FauxProviderRegistration {
 		api,
@@ -951,6 +962,16 @@ mod tests {
 	}
 
 	#[test]
+	fn faux_provider_options_keep_provider_defaults() {
+		let options = RegisterFauxProviderOptions::default();
+		assert!(options.api.is_none());
+		assert!(options.provider.is_none());
+		assert!(options.models.is_none());
+		assert!(options.tokens_per_second.is_none());
+		assert!(options.token_size.is_none());
+	}
+
+	#[test]
 	fn with_usage_estimate_without_session_uses_full_prompt() {
 		let context = Context {
 			system_prompt: Some("x".repeat(40)),
@@ -1082,7 +1103,7 @@ mod tests {
 		))]);
 		assert_eq!(registration.get_pending_response_count(), 2);
 
-		let stream = crate::api_registry::get_api_provider(&registration.api, "faux").expect("registered");
+		let stream = crate::api_registry::get_api_provider(&registration.api).expect("registered");
 		let context = Context::default();
 		let out = (stream.stream)(&model, &context, None);
 		let mut events = Vec::new();
@@ -1097,7 +1118,52 @@ mod tests {
 		assert_eq!(registration.get_pending_response_count(), 1);
 
 		registration.unregister();
-		assert!(crate::api_registry::get_api_provider(&registration.api, "faux").is_none());
+		assert!(crate::api_registry::get_api_provider(&registration.api).is_none());
+	}
+
+	#[tokio::test]
+	async fn register_faux_provider_uses_explicit_models_and_api() {
+		let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+			api: Some("faux-api".to_string()),
+			provider: Some("faux-provider".to_string()),
+			models: Some(vec![
+				FauxModelDefinition {
+					id: "small".to_string(),
+					name: None,
+					reasoning: None,
+					input: Some(vec!["text".to_string()]),
+					cost: None,
+					context_window: None,
+					max_tokens: None,
+				},
+				FauxModelDefinition {
+					id: "big".to_string(),
+					name: Some("Big".to_string()),
+					reasoning: Some(true),
+					input: None,
+					cost: None,
+					context_window: Some(200000.0),
+					max_tokens: Some(4096.0),
+				},
+			]),
+			..Default::default()
+		}));
+		assert_eq!(registration.api, "faux-api");
+		assert_eq!(registration.models.len(), 2);
+		let first = registration.get_model();
+		assert_eq!(first.id, "small");
+		// `name ?? id`
+		assert_eq!(first.name, "small");
+		assert_eq!(first.context_window, 128000.0);
+		assert_eq!(first.max_tokens, 16384.0);
+		let second = registration.get_model_by_id("big").expect("big model");
+		assert_eq!(second.name, "Big");
+		assert!(second.reasoning);
+		assert_eq!(second.context_window, 200000.0);
+		assert_eq!(second.max_tokens, 4096.0);
+		assert!(crate::api_registry::get_api_provider("faux-api").is_some());
+		registration.unregister();
+		assert!(crate::api_registry::get_api_provider("faux-api").is_none());
 	}
 
 	#[tokio::test]
@@ -1107,7 +1173,7 @@ mod tests {
 			..Default::default()
 		}));
 		let model = registration.get_model();
-		let stream = crate::api_registry::get_api_provider(&registration.api, "faux-test-empty").expect("registered");
+		let stream = crate::api_registry::get_api_provider(&registration.api).expect("registered");
 		let out = (stream.stream)(&model, &Context::default(), None);
 		let mut events = Vec::new();
 		while let Some(event) = out.next().await {
@@ -1138,7 +1204,7 @@ mod tests {
 			FauxAssistantContent::Text("abcdefgh".to_string()),
 			None,
 		))]);
-		let stream = crate::api_registry::get_api_provider(&registration.api, "faux-test-deltas").expect("registered");
+		let stream = crate::api_registry::get_api_provider(&registration.api).expect("registered");
 		let out = (stream.stream)(&model, &Context::default(), None);
 		let mut kinds: Vec<&'static str> = Vec::new();
 		let mut delta_text = String::new();

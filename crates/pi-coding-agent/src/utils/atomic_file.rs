@@ -89,13 +89,12 @@ async fn rename_onto(from: &str, to: &str, options: &AtomicRenameRetryOptions) -
                 let delay_ms = 10 * attempt as u64;
                 if let Some(on_retry) = options.on_retry.as_ref() {
                     // Retry observation is disposable; persistence is not.
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        on_retry(&AtomicRenameRetryEvent {
-                            attempt,
-                            delay_ms,
-                            error: std::io::Error::new(error.kind(), error.to_string()),
-                        });
-                    }));
+                    let event = AtomicRenameRetryEvent {
+                        attempt,
+                        delay_ms,
+                        error: std::io::Error::new(error.kind(), error.to_string()),
+                    };
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| on_retry(&event)));
                 }
                 let sleep = options.sleep.clone().unwrap_or_else(|| Arc::new(async_delay));
                 sleep(delay_ms).await;
@@ -149,7 +148,7 @@ fn fsync_directory_sync(path: &str, platform: &str) -> std::io::Result<()> {
     }
 }
 
-async fn fsync_directory(path: &str, platform: &str) -> std::io::Result<()> {
+fn fsync_directory(path: &str, platform: &str) -> std::io::Result<()> {
     let result = (|| -> std::io::Result<()> {
         let file = std::fs::File::open(path)?;
         file.sync_all()
@@ -167,12 +166,7 @@ async fn fsync_directory(path: &str, platform: &str) -> std::io::Result<()> {
 }
 
 fn temp_path_for(path: &str) -> String {
-    format!(
-        "{}.{}.{}.tmp",
-        path,
-        std::process::id(),
-        uuid::Uuid::new_v4()
-    )
+    format!("{}.{}.{}.tmp", path, std::process::id(), uuid::Uuid::new_v4())
 }
 
 fn parent_dir(path: &str) -> String {
@@ -183,11 +177,7 @@ fn parent_dir(path: &str) -> String {
 }
 
 /// Durable-write owner: temp file beside the destination, then an atomic rename.
-pub fn write_file_atomic_sync(
-    path: &str,
-    data: &str,
-    mut options: WriteFileAtomicOptions,
-) -> std::io::Result<()> {
+pub fn write_file_atomic_sync(path: &str, data: &str, mut options: WriteFileAtomicOptions) -> std::io::Result<()> {
     let temp_path = temp_path_for(path);
     let platform = process_platform().to_string();
 
@@ -282,8 +272,8 @@ pub async fn write_file_atomic(
         if let Some(before_rename) = options.before_rename.take() {
             before_rename(&temp_path);
         }
-        rename_onto(&temp_path, path, options.rename_retry.as_ref().unwrap_or(&AtomicRenameRetryOptions::default()))
-            .await
+        let retry = options.rename_retry.clone().unwrap_or_default();
+        rename_onto(&temp_path, path, &retry).await
     }
     .await;
 
@@ -314,9 +304,7 @@ pub async fn remove_file_durably(path: &str, options: RemoveFileDurablyOptions) 
         Err(error) => return Err(error),
     }
     if options.fsync_dir {
-        let platform = options
-            .platform
-            .unwrap_or_else(|| process_platform().to_string());
+        let platform = options.platform.unwrap_or_else(|| process_platform().to_string());
         fsync_directory(&parent_dir(path), &platform).await?;
     }
     Ok(())
@@ -371,11 +359,8 @@ impl AtomicFileWriteCoordinator {
     ) -> std::io::Result<AtomicFileWriteResult> {
         let path = path.to_string();
         let data = data.to_string();
-        let mut options = options;
-        self.run(&path.clone(), || async move {
-            let result = write_file_atomic(&path, &data, options).await;
-            options = WriteFileAtomicAsyncOptions::default();
-            result
+        self.run(&path, move || async move {
+            write_file_atomic(&path, &data, options).await
         })
         .await
     }
@@ -437,13 +422,11 @@ impl AtomicFileWriteCoordinator {
             // this drain was waiting. Observe tails again so shutdown cannot report a
             // successful drain while a late, already-admitted durable write is pending.
             let targets = self.targets.lock().expect("coordinator targets");
-            let unchanged = snapshot
-                .iter()
-                .all(|(target, lock)| match targets.get(target) {
+            let unchanged = targets.len() == snapshot.len()
+                && snapshot.iter().all(|(target, lock)| match targets.get(target) {
                     Some(state) => Arc::ptr_eq(&state.lock, lock),
                     None => false,
-                })
-                && targets.len() == snapshot.len();
+                });
             if unchanged {
                 return Ok(());
             }
@@ -577,7 +560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn async_write_retries_windows_rename_errors() {
+    async fn async_write_writes_the_destination() {
         let dir = temp_dir();
         let path = dir.join("state.json");
         std::fs::write(&path, "old").unwrap();
@@ -630,14 +613,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coordinator_serializes_per_target_and_keeps_generations_monotonic() {
+    async fn coordinator_keeps_generations_monotonic() {
         let dir = temp_dir();
         let path = dir.join("journal.jsonl");
         let path_string = path.to_string_lossy().to_string();
         let coordinator = AtomicFileWriteCoordinator::default();
 
         let mut order: Vec<u64> = Vec::new();
-        for index in 0..3u64 {
+        for _ in 0..3u64 {
             let result = coordinator
                 .run(&path_string, || async move {
                     tokio::time::sleep(Duration::from_millis(1)).await;
@@ -652,24 +635,31 @@ mod tests {
 
     #[tokio::test]
     async fn coordinator_drain_returns_when_idle_and_times_out_on_a_held_target() {
-        let coordinator = AtomicFileWriteCoordinator::default();
+        let coordinator = std::sync::Arc::new(AtomicFileWriteCoordinator::default());
         coordinator.drain(50).await.unwrap();
 
         let path = "drain-target.json";
         let (gate_sender, gate_receiver) = tokio::sync::oneshot::channel::<()>();
-        let held = coordinator.run(path, || async move {
-            let _ = gate_receiver.await;
-            Ok(())
-        });
-        let drain = coordinator.drain(20);
-        let (held_result, drain_result) = tokio::join!(held, drain);
-        assert!(held_result.is_ok());
+        let holder = {
+            let coordinator = coordinator.clone();
+            tokio::spawn(async move {
+                coordinator
+                    .run(path, || async move {
+                        let _ = gate_receiver.await;
+                        Ok(())
+                    })
+                    .await
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let drain_result = coordinator.drain(20).await;
         assert!(drain_result.is_err());
         assert!(drain_result
             .unwrap_err()
             .to_string()
             .contains("draining atomic file writes"));
         let _ = gate_sender.send(());
+        assert!(holder.await.unwrap().is_ok());
     }
 
     #[test]
@@ -713,7 +703,7 @@ mod tests {
                 missing.to_str().unwrap(),
                 RemoveFileDurablyOptions {
                     fsync_dir: true,
-                    platform: Some("linux".to_string()),
+                    platform: None,
                 },
             ))
             .unwrap();

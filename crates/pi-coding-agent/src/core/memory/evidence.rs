@@ -55,6 +55,10 @@ pub enum AgentMessage {
 		#[serde(default)]
 		content: Value,
 		#[serde(default)]
+		display: bool,
+		#[serde(default)]
+		details: Option<Value>,
+		#[serde(default)]
 		timestamp: f64,
 	},
 	#[serde(rename = "compactionSummary")]

@@ -58,15 +58,16 @@ impl Semaphore {
         self.state.lock().expect("semaphore state").waiters.len()
     }
 
-    fn aborted_error(signal: Option<&CancellationToken>) -> SemaphoreError {
-        let _ = signal;
+    fn aborted_error() -> SemaphoreError {
+        // `signal.reason ?? new Error("aborted")`: a cancelled token has no
+        // reason payload, so the TypeScript default text is used.
         SemaphoreError::Aborted("aborted".to_string())
     }
 
     async fn acquire(&self, signal: Option<&CancellationToken>) -> Result<(), SemaphoreError> {
         if let Some(signal) = signal {
             if signal.is_cancelled() {
-                return Err(Self::aborted_error(Some(signal)));
+                return Err(Self::aborted_error());
             }
         }
 
@@ -115,7 +116,7 @@ impl Semaphore {
                         self.release();
                     }
                 }
-                Err(Self::aborted_error(Some(signal)))
+                Err(Self::aborted_error())
             }
         }
     }

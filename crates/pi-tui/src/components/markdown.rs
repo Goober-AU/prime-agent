@@ -1132,3 +1132,1025 @@ impl Markdown {
         }
     }
 }
+
+impl Markdown {
+    fn render_inline_tokens(&mut self, tokens: &[Token], style_context: Option<&InlineStyleContext>) -> String {
+        let mut result = String::new();
+        let resolved = match style_context {
+            Some(context) => context.clone(),
+            None => self.get_default_inline_style_context(),
+        };
+        let apply_text = Rc::clone(&resolved.apply_text);
+        let style_prefix = resolved.style_prefix.clone();
+
+        for token in tokens {
+            match token {
+                Token::Text { text, tokens } => {
+                    if let Some(inner) = tokens {
+                        if !inner.is_empty() {
+                            result.push_str(&self.render_inline_tokens(inner, Some(&resolved)));
+                        } else {
+                            result.push_str(&apply_text_with_newlines(&apply_text, text));
+                        }
+                    } else {
+                        result.push_str(&apply_text_with_newlines(&apply_text, text));
+                    }
+                }
+
+                Token::Paragraph { tokens } => {
+                    result.push_str(&self.render_inline_tokens(tokens, Some(&resolved)));
+                }
+
+                Token::Strong { tokens } => {
+                    let bold_content = self.render_inline_tokens(tokens, Some(&resolved));
+                    result.push_str(&(self.theme.bold)(&bold_content));
+                    result.push_str(&style_prefix);
+                }
+
+                Token::Em { tokens } => {
+                    let italic_content = self.render_inline_tokens(tokens, Some(&resolved));
+                    result.push_str(&(self.theme.italic)(&italic_content));
+                    result.push_str(&style_prefix);
+                }
+
+                Token::Del { tokens } => {
+                    let del_content = self.render_inline_tokens(tokens, Some(&resolved));
+                    result.push_str(&(self.theme.strikethrough)(&del_content));
+                    result.push_str(&style_prefix);
+                }
+
+                Token::Codespan { text } => {
+                    result.push_str(&(self.theme.code)(text));
+                    result.push_str(&style_prefix);
+                }
+
+                Token::InlineMath(math) => {
+                    let math_style = self
+                        .theme
+                        .math
+                        .clone()
+                        .unwrap_or_else(|| Rc::clone(&self.theme.code));
+                    let converted = collapse_math_whitespace(&latex_to_unicode(&math.text));
+                    result.push_str(&math_style(&converted));
+                    result.push_str(&style_prefix);
+                }
+
+                Token::Link {
+                    href,
+                    text,
+                    tokens,
+                } => {
+                    let link_text = self.render_inline_tokens(tokens, Some(&resolved));
+                    let styled_link = (self.theme.link)(&(self.theme.underline)(&link_text));
+                    if get_capabilities().hyperlinks {
+                        // A Windows drive letter is a file path, not a URL scheme.
+                        let target = replace_windows_drive(href);
+                        let resolved_href = if !target.starts_with('#')
+                            && (self.options.base_url.is_some() || target != *href)
+                        {
+                            match &self.options.base_url {
+                                Some(base) => resolve_url(&target, base),
+                                None => None,
+                            }
+                        } else {
+                            None
+                        };
+                        let href_final = resolved_href.unwrap_or(target);
+                        // OSC 8: render as a clickable hyperlink. The URL is not printed inline,
+                        // so we always show only the link text regardless of whether it matches href.
+                        result.push_str(&hyperlink(&styled_link, &href_final));
+                        result.push_str(&style_prefix);
+                    } else {
+                        // Compare raw token.text (not styled) against href for the equality check.
+                        // For mailto: links strip the prefix (autolinked emails use text="foo@bar.com"
+                        // but href="mailto:foo@bar.com").
+                        let href_for_comparison = match href.strip_prefix("mailto:") {
+                            Some(rest) => rest.to_string(),
+                            None => href.clone(),
+                        };
+                        if *text == *href || *text == href_for_comparison {
+                            result.push_str(&styled_link);
+                            result.push_str(&style_prefix);
+                        } else {
+                            result.push_str(&styled_link);
+                            result.push_str(&(self.theme.link_url)(&format!(" ({href})")));
+                            result.push_str(&style_prefix);
+                        }
+                    }
+                }
+
+                Token::Br => {
+                    result.push('\n');
+                }
+
+                Token::Html { raw } => {
+                    result.push_str(&apply_text_with_newlines(&apply_text, raw));
+                }
+
+                other => {
+                    if let Token::Text { text, .. } = other {
+                        result.push_str(&apply_text_with_newlines(&apply_text, text));
+                    }
+                }
+            }
+        }
+
+        while !style_prefix.is_empty() && result.ends_with(&style_prefix) {
+            result.truncate(result.len() - style_prefix.len());
+        }
+
+        result
+    }
+
+    /// Render a list with proper nesting support
+    fn render_list(
+        &mut self,
+        ordered: bool,
+        start: usize,
+        items: &[Vec<Token>],
+        depth: usize,
+        style_context: Option<&InlineStyleContext>,
+    ) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let indent = "  ".repeat(depth);
+        let start_number = start;
+
+        for (i, item) in items.iter().enumerate() {
+            let bullet = if ordered {
+                format!("{}. ", start_number + i)
+            } else {
+                "- ".to_string()
+            };
+
+            let item_lines = self.render_list_item(item, depth, style_context);
+
+            if !item_lines.is_empty() {
+                // A nested list will start with indent (spaces) followed by cyan bullet
+                let first_line = item_lines[0].clone();
+                let is_nested_list = is_nested_list_line(&first_line);
+
+                if is_nested_list {
+                    lines.push(first_line);
+                } else {
+                    lines.push(format!("{indent}{}{first_line}", (self.theme.list_bullet)(&bullet)));
+                }
+
+                for line in item_lines.iter().skip(1) {
+                    if is_nested_list_line(line) {
+                        lines.push(line.clone());
+                    } else {
+                        lines.push(format!("{indent}  {line}"));
+                    }
+                }
+            } else {
+                lines.push(format!("{indent}{}", (self.theme.list_bullet)(&bullet)));
+            }
+        }
+
+        lines
+    }
+
+    /// Render list item tokens, handling nested lists
+    /// Returns lines WITHOUT the parent indent (renderList will add it)
+    fn render_list_item(
+        &mut self,
+        tokens: &[Token],
+        parent_depth: usize,
+        style_context: Option<&InlineStyleContext>,
+    ) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+
+        for token in tokens {
+            match token {
+                Token::List {
+                    ordered,
+                    start,
+                    items,
+                } => {
+                    // Nested list - render with one additional indent level
+                    // These lines will have their own indent, so we just add them as-is
+                    lines.extend(self.render_list(*ordered, *start, items, parent_depth + 1, style_context));
+                }
+                Token::Text { text, tokens } => {
+                    // Text content (may have inline tokens)
+                    let rendered = match tokens {
+                        Some(inner) if !inner.is_empty() => {
+                            self.render_inline_tokens(inner, style_context)
+                        }
+                        _ => text.clone(),
+                    };
+                    lines.push(rendered);
+                }
+                Token::Paragraph { tokens } => {
+                    // Paragraph in list item
+                    lines.push(self.render_inline_tokens(tokens, style_context));
+                }
+                Token::Code { text, lang } => {
+                    // Code block in list item
+                    lines.extend(self.render_code_block(text, lang.as_deref()));
+                }
+                Token::BlockMath(math) => {
+                    // Display math in list item
+                    lines.extend(self.render_math_block(math));
+                }
+                other => {
+                    // Other token types - try to render as inline
+                    let text = self.render_inline_tokens(std::slice::from_ref(other), style_context);
+                    if !text.is_empty() {
+                        lines.push(text);
+                    }
+                }
+            }
+        }
+
+        lines
+    }
+
+    fn render_code_block(&mut self, text: &str, lang: Option<&str>) -> Vec<String> {
+        let indent = self
+            .theme
+            .code_block_indent
+            .clone()
+            .unwrap_or_else(|| "  ".to_string());
+        let rendered_code_lines = match &self.theme.highlight_code {
+            Some(highlight_code) => highlight_code(text, lang),
+            None => text
+                .split('\n')
+                .map(|code_line| (self.theme.code_block)(code_line))
+                .collect(),
+        };
+        let code_lines = if rendered_code_lines.is_empty() {
+            vec![(self.theme.code_block)("")]
+        } else {
+            rendered_code_lines
+        };
+
+        code_lines
+            .into_iter()
+            .map(|code_line| format!("{indent}{code_line}"))
+            .collect()
+    }
+
+    /// Render display math: converted to Unicode, indented like a code block.
+    fn render_math_block(&mut self, token: &MathToken) -> Vec<String> {
+        let indent = self
+            .theme
+            .code_block_indent
+            .clone()
+            .unwrap_or_else(|| "  ".to_string());
+        let style = self
+            .theme
+            .math_block
+            .clone()
+            .unwrap_or_else(|| Rc::clone(&self.theme.code_block));
+        let math_lines: Vec<String> = latex_to_unicode(&token.text)
+            .split('\n')
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
+        math_lines
+            .into_iter()
+            .map(|line| format!("{indent}{}", style(&line)))
+            .collect()
+    }
+
+    /// Get the visible width of the longest word in a string.
+    fn get_longest_word_width(text: &str, max_width: Option<usize>) -> usize {
+        let words: Vec<&str> = text.split_whitespace().filter(|word| !word.is_empty()).collect();
+        let mut longest = 0usize;
+        for word in words {
+            longest = longest.max(visible_width(word));
+        }
+        match max_width {
+            None => longest,
+            Some(max_width) => longest.min(max_width),
+        }
+    }
+
+    /// Wrap a table cell to fit into a column.
+    ///
+    /// Delegates to wrapTextWithAnsi() so ANSI codes + long tokens are handled
+    /// consistently with the rest of the renderer.
+    fn wrap_cell_text(text: &str, max_width: usize) -> Vec<String> {
+        wrap_text_with_ansi(text, max_width.max(1))
+    }
+
+    /// Render a table with width-aware cell wrapping.
+    /// Cells that don't fit are wrapped to multiple lines.
+    fn render_table(
+        &mut self,
+        header: &[Vec<Token>],
+        rows: &[Vec<Vec<Token>>],
+        raw: &str,
+        available_width: usize,
+        next_token_type: Option<&str>,
+        style_context: Option<&InlineStyleContext>,
+    ) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        let num_cols = header.len();
+
+        if num_cols == 0 {
+            return lines;
+        }
+
+        // = 2 + (n-1) * 3 + 2 = 3n + 1
+        let border_overhead = 3 * num_cols + 1;
+        if available_width <= border_overhead || available_width - border_overhead < num_cols {
+            // Too narrow to render a stable table. Fall back to raw markdown.
+            let mut fallback_lines = if !raw.is_empty() {
+                wrap_text_with_ansi(raw, available_width)
+            } else {
+                Vec::new()
+            };
+            if next_token_type.is_some() && next_token_type != Some("space") {
+                fallback_lines.push(String::new());
+            }
+            return fallback_lines;
+        }
+        let available_for_cells = available_width - border_overhead;
+
+        let max_unbroken_word_width = 30;
+
+        let mut natural_widths: Vec<usize> = vec![0; num_cols];
+        let mut min_word_widths: Vec<usize> = vec![0; num_cols];
+        for i in 0..num_cols {
+            let header_text = self.render_inline_tokens(&header[i], style_context);
+            natural_widths[i] = visible_width(&header_text);
+            min_word_widths[i] = Self::get_longest_word_width(&header_text, Some(max_unbroken_word_width)).max(1);
+        }
+        for row in rows {
+            for (i, cell) in row.iter().enumerate() {
+                if i >= num_cols {
+                    continue;
+                }
+                let cell_text = self.render_inline_tokens(cell, style_context);
+                natural_widths[i] = natural_widths[i].max(visible_width(&cell_text));
+                min_word_widths[i] = min_word_widths[i].max(Self::get_longest_word_width(
+                    &cell_text,
+                    Some(max_unbroken_word_width),
+                ));
+            }
+        }
+
+        let mut min_column_widths = min_word_widths.clone();
+        let mut min_cells_width: usize = min_column_widths.iter().sum();
+
+        if min_cells_width > available_for_cells {
+            min_column_widths = vec![1; num_cols];
+            let remaining = available_for_cells.saturating_sub(num_cols);
+
+            if remaining > 0 {
+                let total_weight: usize = min_word_widths
+                    .iter()
+                    .map(|width| width.saturating_sub(1))
+                    .sum();
+                let growth: Vec<usize> = min_word_widths
+                    .iter()
+                    .map(|width| {
+                        let weight = width.saturating_sub(1);
+                        if total_weight > 0 {
+                            (weight * remaining) / total_weight
+                        } else {
+                            0
+                        }
+                    })
+                    .collect();
+
+                for i in 0..num_cols {
+                    min_column_widths[i] += growth.get(i).copied().unwrap_or(0);
+                }
+
+                let allocated: usize = growth.iter().sum();
+                let mut leftover = remaining.saturating_sub(allocated);
+                let mut i = 0;
+                while leftover > 0 && i < num_cols {
+                    min_column_widths[i] += 1;
+                    leftover -= 1;
+                    i += 1;
+                }
+            }
+
+            min_cells_width = min_column_widths.iter().sum();
+        }
+
+        let total_natural_width: usize = natural_widths.iter().sum::<usize>() + border_overhead;
+        let mut column_widths: Vec<usize>;
+
+        if total_natural_width <= available_width {
+            column_widths = natural_widths
+                .iter()
+                .enumerate()
+                .map(|(index, width)| (*width).max(min_column_widths[index]))
+                .collect();
+        } else {
+            let total_grow_potential: usize = natural_widths
+                .iter()
+                .enumerate()
+                .map(|(index, width)| width.saturating_sub(min_column_widths[index]))
+                .sum();
+            let extra_width = available_for_cells.saturating_sub(min_cells_width);
+            column_widths = min_column_widths
+                .iter()
+                .enumerate()
+                .map(|(index, min_width)| {
+                    let natural_width = natural_widths[index];
+                    let min_width_delta = natural_width.saturating_sub(*min_width);
+                    let mut grow = 0;
+                    if total_grow_potential > 0 {
+                        grow = (min_width_delta * extra_width) / total_grow_potential;
+                    }
+                    min_width + grow
+                })
+                .collect();
+
+            // Adjust for rounding errors - distribute remaining space
+            let allocated: usize = column_widths.iter().sum();
+            let mut remaining = available_for_cells.saturating_sub(allocated);
+            while remaining > 0 {
+                let mut grew = false;
+                for i in 0..num_cols {
+                    if remaining == 0 {
+                        break;
+                    }
+                    if column_widths[i] < natural_widths[i] {
+                        column_widths[i] += 1;
+                        remaining -= 1;
+                        grew = true;
+                    }
+                }
+                if !grew {
+                    break;
+                }
+            }
+        }
+
+        let top_border_cells: Vec<String> = column_widths.iter().map(|w| "─".repeat(*w)).collect();
+        lines.push(mark_table_start(&format!("┌─{}─┐", top_border_cells.join("─┬─"))));
+
+        let header_cells: Vec<(Vec<String>, String)> = header
+            .iter()
+            .enumerate()
+            .map(|(i, cell)| {
+                let text = self.render_inline_tokens(cell, style_context);
+                (
+                    Self::wrap_cell_text(&text, column_widths[i]),
+                    strip_ansi(&text),
+                )
+            })
+            .collect();
+        let header_line_count = header_cells
+            .iter()
+            .map(|(cell_lines, _)| cell_lines.len())
+            .max()
+            .unwrap_or(0);
+
+        for line_idx in 0..header_line_count {
+            let row_parts: Vec<String> = header_cells
+                .iter()
+                .enumerate()
+                .map(|(col_idx, (cell_lines, content))| {
+                    let text = cell_lines.get(line_idx).cloned().unwrap_or_default();
+                    let padded = format!(
+                        "{text}{}",
+                        " ".repeat(column_widths[col_idx].saturating_sub(visible_width(&text)))
+                    );
+                    mark_table_cell(&(self.theme.bold)(&padded), 0, col_idx, line_idx, content)
+                })
+                .collect();
+            lines.push(format!("│ {} │", row_parts.join(" │ ")));
+        }
+
+        let separator_cells: Vec<String> = column_widths.iter().map(|w| "─".repeat(*w)).collect();
+        let separator_line = format!("├─{}─┤", separator_cells.join("─┼─"));
+        lines.push(separator_line.clone());
+
+        for (row_index, row) in rows.iter().enumerate() {
+            let row_cells: Vec<(Vec<String>, String)> = row
+                .iter()
+                .enumerate()
+                .map(|(i, cell)| {
+                    let text = self.render_inline_tokens(cell, style_context);
+                    let width = column_widths.get(i).copied().unwrap_or(1);
+                    (Self::wrap_cell_text(&text, width), strip_ansi(&text))
+                })
+                .collect();
+            let row_line_count = row_cells
+                .iter()
+                .map(|(cell_lines, _)| cell_lines.len())
+                .max()
+                .unwrap_or(0);
+
+            for line_idx in 0..row_line_count {
+                let row_parts: Vec<String> = row_cells
+                    .iter()
+                    .enumerate()
+                    .map(|(col_idx, (cell_lines, content))| {
+                        let text = cell_lines.get(line_idx).cloned().unwrap_or_default();
+                        let width = column_widths.get(col_idx).copied().unwrap_or(1);
+                        let padded = format!("{text}{}", " ".repeat(width.saturating_sub(visible_width(&text))));
+                        mark_table_cell(&padded, row_index + 1, col_idx, line_idx, content)
+                    })
+                    .collect();
+                lines.push(format!("│ {} │", row_parts.join(" │ ")));
+            }
+
+            if row_index < rows.len() - 1 {
+                lines.push(separator_line.clone());
+            }
+        }
+
+        let bottom_border_cells: Vec<String> = column_widths.iter().map(|w| "─".repeat(*w)).collect();
+        lines.push(mark_table_end(&format!(
+            "└─{}─┘",
+            bottom_border_cells.join("─┴─")
+        )));
+
+        if next_token_type.is_some() && next_token_type != Some("space") {
+            lines.push(String::new()); // Add spacing after table
+        }
+        lines
+    }
+}
+
+fn apply_text_with_newlines(apply_text: &Rc<dyn Fn(&str) -> String>, text: &str) -> String {
+    let segments: Vec<&str> = text.split('\n').collect();
+    segments
+        .into_iter()
+        .map(|segment| apply_text(segment))
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
+/// Port of `/^\s+\x1b\[36m[-\d]/`.
+fn is_nested_list_line(line: &str) -> bool {
+    let trimmed_len = line.len() - line.trim_start().len();
+    if trimmed_len == 0 {
+        return false;
+    }
+    let rest = &line[trimmed_len..];
+    let rest = match rest.strip_prefix("\x1b[36m") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    match rest.chars().next() {
+        Some(ch) => ch == '-' || ch.is_ascii_digit(),
+        None => false,
+    }
+}
+
+/// Port of `/^([a-z]:[\\/])/i` -> `file:///$1`.
+fn replace_windows_drive(href: &str) -> String {
+    let mut chars = href.chars();
+    let first = chars.next();
+    let second = chars.next();
+    let third = chars.next();
+    if let (Some(letter), Some(':'), Some(sep)) = (first, second, third) {
+        if letter.is_ascii_alphabetic() && (sep == '\\' || sep == '/') {
+            return format!("file:///{letter}:{sep}{}", &href[3..]);
+        }
+    }
+    href.to_string()
+}
+
+/// Port of `new URL(target, baseUrl).href` for the subset the renderer needs.
+fn resolve_url(target: &str, base: &str) -> Option<String> {
+    if target.starts_with("http://") || target.starts_with("https://") || target.starts_with("file://") {
+        return Some(target.to_string());
+    }
+    if target.starts_with("//") {
+        let scheme = base.split("://").next().unwrap_or("https");
+        return Some(format!("{scheme}:{target}"));
+    }
+    if target.starts_with('/') {
+        let scheme_end = base.find("://")? + 3;
+        let host_end = base[scheme_end..].find('/').map(|i| scheme_end + i).unwrap_or(base.len());
+        return Some(format!("{}{}", &base[..host_end], target));
+    }
+    let cut = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
+    Some(format!("{}{}", &base[..cut], target))
+}
+
+/// Port of `latexToUnicode(text).replace(/\s*\n\s*/g, " ")`.
+fn collapse_math_whitespace(text: &str) -> String {
+    let mut result = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\n' {
+            while result.ends_with([' ', '\t']) {
+                result.pop();
+            }
+            result.push(' ');
+            while matches!(chars.peek(), Some(' ') | Some('\t')) {
+                chars.next();
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+impl Component for Markdown {
+    fn render(&mut self, width: usize) -> Vec<String> {
+        if let (Some(lines), Some(cached_text), Some(cached_width)) =
+            (&self.cached_lines, &self.cached_text, self.cached_width)
+        {
+            if *cached_text == self.text && cached_width == width {
+                return lines.clone();
+            }
+        }
+
+        let content_width = width.saturating_sub(self.padding_x * 2).max(1);
+        let text = match &self.options.transform {
+            Some(transform) => transform(&self.text, content_width),
+            None => self.text.clone(),
+        };
+
+        if text.is_empty() || text.trim().is_empty() {
+            let result: Vec<String> = Vec::new();
+            self.selection_regions = Vec::new();
+            self.cached_text = Some(self.text.clone());
+            self.cached_width = Some(width);
+            self.cached_lines = Some(result.clone());
+            return result;
+        }
+
+        let normalized_text = text.replace('\t', "   ");
+
+        // Parse markdown to HTML-like tokens
+        let lexed = lex(&normalized_text);
+        let tokens = lexed.tokens;
+
+        // Reference-link definitions make a block's rendering depend on other
+        // blocks, so per-block caching is disabled when any are present.
+        let cacheable = lexed.links.is_empty();
+
+        // Render, wrap, and pad per top-level block so unchanged blocks can be
+        // served from the cache. The final block is never cached: while streaming,
+        // appended text can reinterpret it (unterminated fences, growing lists);
+        // once a block is no longer last, its raw text is final.
+        let mut next_cache: HashMap<String, Vec<String>> = HashMap::new();
+        let mut content_lines: Vec<String> = Vec::new();
+        for i in 0..tokens.len() {
+            let token = tokens[i].clone();
+            let next_token_type = tokens.get(i + 1).map(|t| t.type_name().to_string());
+            let use_cache = cacheable && i < tokens.len() - 1;
+            let key = if use_cache {
+                format!(
+                    "{}|{}|{}|{}",
+                    width,
+                    token.type_name(),
+                    next_token_type.clone().unwrap_or_default(),
+                    raw_of(&token)
+                )
+            } else {
+                String::new()
+            };
+            let mut block_lines = if use_cache {
+                next_cache
+                    .get(&key)
+                    .cloned()
+                    .or_else(|| self.block_cache.get(&key).cloned())
+            } else {
+                None
+            };
+            if block_lines.is_none() {
+                block_lines = Some(self.render_block(
+                    &token,
+                    next_token_type.as_deref(),
+                    width,
+                    content_width,
+                ));
+            }
+            let block_lines = block_lines.unwrap_or_default();
+            if use_cache {
+                next_cache.insert(key, block_lines.clone());
+            }
+            content_lines.extend(block_lines);
+        }
+        self.block_cache = next_cache;
+
+        let bg_fn = self
+            .default_text_style
+            .as_ref()
+            .and_then(|style| style.bg_color.clone());
+        let empty_line = " ".repeat(width);
+        let mut empty_lines: Vec<String> = Vec::new();
+        for _ in 0..self.padding_y {
+            let line = match &bg_fn {
+                Some(bg_fn) => apply_background_to_line(&empty_line, width, bg_fn.as_ref()),
+                None => empty_line.clone(),
+            };
+            empty_lines.push(line);
+        }
+
+        let mut marked_result: Vec<String> = Vec::new();
+        marked_result.extend(empty_lines.iter().cloned());
+        marked_result.extend(content_lines);
+        marked_result.extend(empty_lines);
+
+        let mut identities: Vec<usize> = std::mem::take(&mut self.table_identities);
+        let (result, regions) = extract_table_cell_selection_regions(&marked_result, &mut |index| {
+            if index >= identities.len() {
+                identities.resize(index + 1, 0);
+                identities[index] = index;
+            }
+            identities[index]
+        });
+        self.table_identities = identities;
+        self.selection_regions = regions;
+
+        self.cached_text = Some(self.text.clone());
+        self.cached_width = Some(width);
+        self.cached_lines = Some(result.clone());
+
+        if !result.is_empty() {
+            result
+        } else {
+            vec![String::new()]
+        }
+    }
+
+    fn get_selection_regions(&self) -> Vec<TableCellSelectionRegion> {
+        self.selection_regions.clone()
+    }
+
+    fn invalidate(&mut self) {
+        self.cached_text = None;
+        self.cached_width = None;
+        self.cached_lines = None;
+        self.selection_regions = Vec::new();
+        // External invalidation (e.g. theme change) affects rendered output, so
+        // the per-block cache must go too.
+        self.block_cache = HashMap::new();
+    }
+}
+
+/// Port of `token.raw` for the block cache key.
+fn raw_of(token: &Token) -> String {
+    match token {
+        Token::Paragraph { tokens } | Token::Heading { tokens, .. } => collect_text(tokens),
+        Token::Code { text, .. } => text.clone(),
+        Token::BlockMath(math) => math.raw.clone(),
+        Token::Html { raw } => raw.clone(),
+        Token::Table { raw, .. } => raw.clone(),
+        Token::Blockquote { tokens } => collect_text(tokens),
+        Token::Hr => "---".to_string(),
+        Token::Space => String::new(),
+        other => collect_text(std::slice::from_ref(other)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(text: &str) -> String {
+        text.to_string()
+    }
+
+    fn theme() -> MarkdownTheme {
+        MarkdownTheme {
+            heading: Rc::new(|text: &str| format!("H<{text}>")),
+            link: Rc::new(plain),
+            link_url: Rc::new(|text: &str| format!("URL<{text}>")),
+            code: Rc::new(|text: &str| format!("`{text}`")),
+            code_block: Rc::new(plain),
+            code_block_border: Rc::new(plain),
+            quote: Rc::new(plain),
+            quote_border: Rc::new(plain),
+            hr: Rc::new(plain),
+            list_bullet: Rc::new(plain),
+            bold: Rc::new(|text: &str| format!("**{text}**")),
+            italic: Rc::new(|text: &str| format!("_{text}_")),
+            strikethrough: Rc::new(|text: &str| format!("~~{text}~~")),
+            underline: Rc::new(plain),
+            highlight_code: None,
+            code_block_indent: None,
+            math: None,
+            math_block: None,
+        }
+    }
+
+    fn markdown(text: &str) -> Markdown {
+        Markdown::new(text.to_string(), 0, 0, theme(), None, MarkdownOptions::default())
+    }
+
+    #[test]
+    fn strict_strikethrough_matches_marked_rule() {
+        assert_eq!(
+            strict_strikethrough("~~gone~~ rest"),
+            Some(("gone".to_string(), "~~gone~~".to_string()))
+        );
+        assert_eq!(strict_strikethrough("~~ gone~~"), None);
+        assert_eq!(strict_strikethrough("~~gone ~~"), None);
+        assert_eq!(strict_strikethrough("~~gone~~~"), None);
+        assert_eq!(strict_strikethrough("~gone~"), None);
+    }
+
+    #[test]
+    fn block_math_matches_delimiters() {
+        let (raw, text) = match_block_math("$$x^2$$").unwrap();
+        assert_eq!(raw, "$$x^2$$");
+        assert_eq!(text, "x^2");
+        let (raw, text) = match_block_math("  \\[a+b\\]\n").unwrap();
+        assert_eq!(raw, "  \\[a+b\\]\n");
+        assert_eq!(text, "a+b");
+        assert!(match_block_math("$x$").is_none());
+    }
+
+    #[test]
+    fn inline_math_rejects_prose_dollar_amounts() {
+        assert_eq!(
+            match_inline_math("$x+1$ and more").unwrap(),
+            ("$x+1$".to_string(), "x+1".to_string())
+        );
+        assert_eq!(match_inline_math("$5 and $10"), None);
+        assert_eq!(
+            match_inline_math("\\(y\\)").unwrap(),
+            ("\\(y\\)".to_string(), "y".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_markdown_renders_nothing() {
+        let mut md = markdown("   ");
+        assert_eq!(md.render(20), Vec::<String>::new());
+    }
+
+    #[test]
+    fn heading_uses_heading_theme_and_prefix_for_level_3() {
+        let mut md = markdown("### Title");
+        let lines = md.render(20);
+        assert_eq!(lines[0], "H<**### **>H<**Title**>");
+    }
+
+    #[test]
+    fn paragraph_is_padded_to_width() {
+        let mut md = markdown("hi");
+        assert_eq!(md.render(6), vec!["hi    ".to_string()]);
+    }
+
+    #[test]
+    fn code_block_is_indented_and_wrapped() {
+        let mut md = markdown("```\nabc\n```");
+        assert_eq!(md.render(8), vec!["  abc   ".to_string()]);
+    }
+
+    #[test]
+    fn bullet_list_renders_bullets() {
+        let mut md = markdown("- one\n- two");
+        let lines = md.render(10);
+        assert_eq!(lines[0], "- one     ");
+        assert_eq!(lines[1], "- two     ");
+    }
+
+    #[test]
+    fn ordered_list_uses_start_number() {
+        let mut md = markdown("3. three\n4. four");
+        let lines = md.render(10);
+        assert_eq!(lines[0], "3. three  ");
+        assert_eq!(lines[1], "4. four   ");
+    }
+
+    #[test]
+    fn table_renders_borders_and_cells() {
+        let mut md = markdown("| a | b |\n| --- | --- |\n| 1 | 2 |");
+        let lines = md.render(20);
+        let joined = lines.join("\n");
+        assert!(joined.contains('┌'), "{joined}");
+        assert!(joined.contains("a"), "{joined}");
+        assert!(joined.contains("1"), "{joined}");
+        // Selection regions are extracted from the marked-up table.
+        assert!(!md.get_selection_regions().is_empty());
+    }
+
+    #[test]
+    fn narrow_table_falls_back_to_raw_markdown() {
+        let mut md = markdown("| a | b |\n| --- | --- |\n| 1 | 2 |");
+        let lines = md.render(4);
+        let joined = lines.join("\n");
+        assert!(!joined.contains('┌'), "{joined}");
+        assert!(joined.contains('|'), "{joined}");
+    }
+
+    #[test]
+    fn blockquote_is_prefixed_with_border() {
+        let mut md = markdown("> quoted");
+        assert_eq!(md.render(12), vec!["│ quoted    ".to_string()]);
+    }
+
+    #[test]
+    fn horizontal_rule_is_capped_at_80_columns() {
+        let mut md = markdown("---");
+        assert_eq!(md.render(100), vec!["─".repeat(80)]);
+    }
+
+    #[test]
+    fn inline_code_and_bold_use_theme() {
+        let mut md = markdown("a `b` **c**");
+        assert_eq!(md.render(20), vec!["a `b` **c**        ".to_string()]);
+    }
+
+    #[test]
+    fn link_prints_url_when_text_differs() {
+        let mut md = markdown("[text](https://example.com)");
+        assert_eq!(md.render(40)[0], "textURL< (https://example.com)>     ");
+    }
+
+    #[test]
+    fn link_hides_url_when_text_matches_href() {
+        let mut md = markdown("[https://example.com](https://example.com)");
+        assert_eq!(md.render(40)[0], "https://example.com                 ");
+    }
+
+    #[test]
+    fn block_math_uses_math_block_style() {
+        let mut md = markdown("$$x^2$$");
+        let lines = md.render(20);
+        assert!(lines[0].contains("x"), "{lines:?}");
+    }
+
+    #[test]
+    fn inline_math_is_rendered_through_latex_to_unicode() {
+        let mut md = markdown("value $\\alpha$ end");
+        let rendered = md.render(40)[0].clone();
+        assert!(rendered.contains("value"), "{rendered}");
+    }
+
+    #[test]
+    fn render_cache_returns_same_lines_for_same_input() {
+        let mut md = markdown("hello");
+        let first = md.render(10);
+        let second = md.render(10);
+        assert_eq!(first, second);
+        md.set_text("world".to_string());
+        assert_eq!(md.render(10), vec!["world     ".to_string()]);
+    }
+
+    #[test]
+    fn invalidate_clears_block_cache() {
+        let mut md = markdown("a\n\nb");
+        let _ = md.render(10);
+        assert!(!md.block_cache.is_empty());
+        md.invalidate();
+        assert!(md.block_cache.is_empty());
+    }
+
+    #[test]
+    fn transform_option_runs_before_parsing() {
+        let mut md = Markdown::new(
+            "x".to_string(),
+            0,
+            0,
+            theme(),
+            None,
+            MarkdownOptions {
+                transform: Some(Rc::new(|text: &str, width: usize| format!("{text}-{width}"))),
+                base_url: None,
+            },
+        );
+        assert_eq!(md.render(5), vec!["x-5  ".to_string()]);
+    }
+
+    #[test]
+    fn default_text_style_wraps_paragraph_text() {
+        let mut md = Markdown::new(
+            "plain".to_string(),
+            0,
+            0,
+            theme(),
+            Some(DefaultTextStyle {
+                color: Some(Rc::new(|text: &str| format!("[{text}]"))),
+                bg_color: None,
+                bold: true,
+                italic: false,
+                strikethrough: false,
+                underline: false,
+            }),
+            MarkdownOptions::default(),
+        );
+        let lines = md.render(20);
+        assert_eq!(lines[0], "[**plain**]        ");
+    }
+
+    #[test]
+    fn default_background_color_extends_to_full_width() {
+        let mut md = Markdown::new(
+            "x".to_string(),
+            0,
+            0,
+            theme(),
+            Some(DefaultTextStyle {
+                color: None,
+                bg_color: Some(Rc::new(|text: &str| format!("<{text}>"))),
+                bold: false,
+                italic: false,
+                strikethrough: false,
+                underline: false,
+            }),
+            MarkdownOptions::default(),
+        );
+        assert_eq!(md.render(3), vec!["<x  >".to_string()]);
+    }
+}
