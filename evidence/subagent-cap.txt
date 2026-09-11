@@ -1,0 +1,3 @@
+Hish's rule (2026-09-11): at most 25 sub-agents concurrently for this port.
+Model for every sub-agent: ollama-cloud/deepseek-v4.1-flash only.
+If that model is blocked or out of tokens there is NO fallback: stop and wait for reset.

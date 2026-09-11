@@ -105,6 +105,12 @@ one file. Finish the slice, then check once, fix the real errors, and report.
 6. Report honestly. "Compiles" is not "ported". If you could not port something,
    say exactly what and why.
 
+## Scratch files
+
+Write scratch/temporary files only under `.port-env/tmp/`. Never write temporary
+or generated data into `evidence/` - that directory holds final evidence only.
+Generated Rust data tables belong in the crate (`crates/<crate>/src/...`).
+
 ## Fake providers only
 
 Never call a real provider, never use real API keys, never read
