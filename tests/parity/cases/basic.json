@@ -1,0 +1,47 @@
+[
+ {
+  "name": "arithmetic",
+  "cells": [
+   "x = 41",
+   "x + 1"
+  ],
+  "compare": [
+   "status",
+   "result",
+   "stdout"
+  ]
+ },
+ {
+  "name": "stdout-ordering",
+  "cells": [
+   "print('a'); print('b')",
+   "import sys; sys.stdout.write('c')"
+  ],
+  "compare": [
+   "status",
+   "stdout"
+  ]
+ },
+ {
+  "name": "exception",
+  "cells": [
+   "1/0"
+  ],
+  "compare": [
+   "status",
+   "error"
+  ]
+ },
+ {
+  "name": "state-across-cells",
+  "cells": [
+   "items = []",
+   "items.append(1)",
+   "items"
+  ],
+  "compare": [
+   "status",
+   "result"
+  ]
+ }
+]
