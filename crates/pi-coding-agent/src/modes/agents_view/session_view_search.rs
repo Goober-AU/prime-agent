@@ -267,9 +267,8 @@ fn split_exact(value: &str, digits_first: bool) -> Option<(String, String)> {
     if chars.is_empty() {
         return None;
     }
-    let is_letter = |ch: char| ch.is_ascii_lowercase();
-    let is_digit = |ch: char| ch.is_ascii_digit();
-    let (first, second) = if digits_first { (is_digit, is_letter) } else { (is_letter, is_digit) };
+    let first: fn(char) -> bool = if digits_first { |ch: char| ch.is_ascii_digit() } else { |ch: char| ch.is_ascii_lowercase() };
+    let second: fn(char) -> bool = if digits_first { |ch: char| ch.is_ascii_lowercase() } else { |ch: char| ch.is_ascii_digit() };
     let boundary = chars.iter().position(|ch| second(*ch))?;
     if boundary == 0 || !chars[..boundary].iter().all(|ch| first(*ch)) {
         return None;

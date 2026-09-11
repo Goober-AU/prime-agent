@@ -6,7 +6,6 @@
 //! Vertex URL derivation, the API-key vs OAuth-token header rules and the error text.
 
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 
 use futures::StreamExt;
 use indexmap::IndexMap;

@@ -448,7 +448,7 @@ pub fn transition_session_action(
                     .to_string(),
             );
         }
-        let transcript: HashSet<&pi_agent_core::types::AgentMessage> = options
+        let transcript: Vec<&pi_agent_core::types::AgentMessage> = options
             .rollback_proof
             .as_ref()
             .map(|proof| proof.transcript.iter().collect())
@@ -456,9 +456,13 @@ pub fn transition_session_action(
         let durable = primary_records(action)
             .iter()
             .any(|record| match &record.message {
-                DeliveryMessage::User(message) => transcript
-                    .iter()
-                    .any(|candidate| matches!(candidate, pi_agent_core::types::AgentMessage::Message(pi_ai::types::Message::User(user)) if user == message)),
+                DeliveryMessage::User(message) => transcript.iter().any(|candidate| {
+                    matches!(
+                        candidate,
+                        pi_agent_core::types::AgentMessage::Message(pi_ai::types::Message::User(user))
+                            if user == message
+                    )
+                }),
                 DeliveryMessage::Custom(_) => false,
             });
         if durable {
@@ -487,7 +491,7 @@ impl AdmissionDisposition {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum SubmissionOutcome {
     Accepted {
         action_id: String,
@@ -501,6 +505,39 @@ pub enum SubmissionOutcome {
     ExtensionCommand {
         completion: Arc<tokio::sync::Notify>,
     },
+}
+
+/// `Notify` has no `PartialEq`, so the discriminant and payloads are compared
+/// explicitly; two extension commands are equal when they share one notifier.
+impl PartialEq for SubmissionOutcome {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                SubmissionOutcome::Accepted {
+                    action_id: left_id,
+                    disposition: left,
+                },
+                SubmissionOutcome::Accepted {
+                    action_id: right_id,
+                    disposition: right,
+                },
+            ) => left_id == right_id && left == right,
+            (
+                SubmissionOutcome::Coalesced {
+                    existing_action_id: left,
+                },
+                SubmissionOutcome::Coalesced {
+                    existing_action_id: right,
+                },
+            ) => left == right,
+            (SubmissionOutcome::HandledWithoutTurn, SubmissionOutcome::HandledWithoutTurn) => true,
+            (
+                SubmissionOutcome::ExtensionCommand { completion: left },
+                SubmissionOutcome::ExtensionCommand { completion: right },
+            ) => Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1470,7 +1507,7 @@ mod tests {
         assert!(store.ticket_for(&action).is_ok());
         let unknown = turn_action("z", DeliveryPolicy::NextTurnBoundary, "z");
         assert_eq!(
-            store.ticket_for(&unknown).unwrap_err(),
+            store.ticket_for(&unknown).err().unwrap(),
             "Session action z is not owned by this store"
         );
         assert_eq!(

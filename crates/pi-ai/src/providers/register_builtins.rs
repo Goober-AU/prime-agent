@@ -7,11 +7,10 @@
 use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::api_registry::{clear_api_providers, get_api_providers, register_api_provider, ApiProvider};
-use crate::compaction::{CompactionOptions, ProviderCompactionResult};
+use crate::compaction::CompactionOptions;
 use crate::types::CompactFunction;
 use crate::types::{AssistantMessage, Context, Model, StreamFunction, StreamOptions, Usage};
 use crate::utils::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
-use futures::future::BoxFuture;
 
 use super::amazon_bedrock::{stream_bedrock, stream_simple_bedrock, BedrockOptions};
 use super::amazon_bedrock_responses::{
@@ -173,7 +172,10 @@ fn compact_openai_responses_guarded() -> CompactFunction {
 		if model.api != "openai-responses" {
 			panic!("Mismatched compaction api: {}", model.api);
 		}
-		Box::pin(compact_openai_responses(model, context, options))
+		let model = model.clone();
+		let context = context.clone();
+		let options = options.cloned();
+		Box::pin(async move { compact_openai_responses(&model, &context, options.as_ref()).await })
 	})
 }
 
@@ -182,7 +184,10 @@ fn compact_openai_codex_responses_guarded() -> CompactFunction {
 		if model.api != "openai-codex-responses" {
 			panic!("Mismatched compaction api: {}", model.api);
 		}
-		Box::pin(compact_openai_codex_responses(model, context, options))
+		let model = model.clone();
+		let context = context.clone();
+		let options = options.cloned();
+		Box::pin(async move { compact_openai_codex_responses(&model, &context, options.as_ref()).await })
 	})
 }
 

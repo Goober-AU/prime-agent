@@ -224,6 +224,10 @@ pub enum StdinBufferEvent {
     Paste(String),
 }
 
+/// Port of the `StdinBufferEventMap` type: the buffer emits either a complete
+/// `data` sequence or a `paste` payload.
+pub type StdinBufferEventMap = StdinBufferEvent;
+
 /// Buffers stdin input and emits complete sequences.
 ///
 /// The TypeScript class is an EventEmitter with a `setTimeout` flush timer; here the

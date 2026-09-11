@@ -540,6 +540,15 @@ fn stringify(value: &Value) -> String {
     serde_json::to_string(value).expect("value serializes")
 }
 
+/// `toolCall.arguments` - the TypeScript keeps whatever `parseStreamingJson` returned;
+/// the Rust `ToolCall` field is a JSON object, so a non-object parse result maps to `{}`.
+fn as_arguments(value: Value) -> Map<String, Value> {
+    match value {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    }
+}
+
 /// `${value}` for a possibly missing JSON value (JS prints "undefined"/"null").
 fn js_display(value: Option<&Value>) -> String {
     match value {
@@ -871,7 +880,7 @@ pub async fn process_responses_stream(
                     _ => String::new(),
                 };
                 if let ContentBlock::ToolCall(tool_call) = &mut output.content[index] {
-                    tool_call.arguments = parse_streaming_json(Some(&partial_json));
+                    tool_call.arguments = as_arguments(parse_streaming_json(Some(&partial_json)));
                 }
                 stream.push(AssistantMessageEvent::ToolCallDelta {
                     content_index: block_index(output),
@@ -896,7 +905,7 @@ pub async fn process_responses_stream(
                 };
                 let index = current_block.as_ref().expect("checked").index();
                 if let ContentBlock::ToolCall(tool_call) = &mut output.content[index] {
-                    tool_call.arguments = parse_streaming_json(Some(&arguments));
+                    tool_call.arguments = as_arguments(parse_streaming_json(Some(&arguments)));
                 }
 
                 if arguments.starts_with(&previous_partial_json) {
@@ -991,10 +1000,7 @@ pub async fn process_responses_stream(
                         }
                     }
                 };
-                let arguments = match args {
-                    Value::Object(map) => map,
-                    _ => Map::new(),
-                };
+                let arguments = as_arguments(args);
 
                 let tool_call: ToolCall = match current_block.take() {
                     Some(CurrentBlock::ToolCall { index, .. }) => {
@@ -1111,7 +1117,7 @@ pub async fn process_responses_stream(
                 js_display(code),
                 js_display(get(&event, "message"))
             );
-            let provider_error_type = code.filter(|value| !value.is_null()).map(js_display);
+            let provider_error_type = code.filter(|value| !value.is_null()).map(|value| js_display(Some(value)));
             let kind = classify_stream_failure(provider_error_type.as_deref(), None);
             return Err(stream_failure(message, kind, provider_error_type.as_deref()));
         } else if event_type == "response.failed" {
@@ -1121,22 +1127,22 @@ pub async fn process_responses_stream(
             let provider_error_type = error
                 .and_then(|error| get(error, "code"))
                 .filter(|value| !value.is_null())
-                .map(js_display)
+                .map(|value| js_display(Some(value)))
                 .or_else(|| {
                     details
                         .and_then(|details| get(details, "reason"))
                         .filter(|value| !value.is_null())
-                        .map(js_display)
+                        .map(|value| js_display(Some(value)))
                 });
             let message = if let Some(error) = error.filter(|error| !error.is_null()) {
                 format!(
                     "{}: {}",
                     {
-                        let code = get(error, "code").map(js_display).unwrap_or_default();
+                        let code = get(error, "code").map(|value| js_display(Some(value))).unwrap_or_default();
                         if code.is_empty() { "unknown".to_string() } else { code }
                     },
                     {
-                        let text = get(error, "message").map(js_display).unwrap_or_default();
+                        let text = get(error, "message").map(|value| js_display(Some(value))).unwrap_or_default();
                         if text.is_empty() { "no message".to_string() } else { text }
                     }
                 )

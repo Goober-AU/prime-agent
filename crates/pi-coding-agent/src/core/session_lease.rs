@@ -117,8 +117,7 @@ impl SessionLease {
     }
 }
 
-fn leases_enabled(environment: &[(String, String)], lookup: &dyn Fn(&str) -> Option<String>) -> bool {
-    let _ = environment;
+fn leases_enabled(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
     let value = lookup(SESSION_LEASES_ENABLED_ENV).unwrap_or_default().to_lowercase();
     value == "1" || value == "true" || value == "yes"
 }
@@ -367,7 +366,26 @@ fn is_process_alive(pid: i64) -> bool {
     }
     #[cfg(windows)]
     {
-        get_windows_process_start_id(pid, None).is_some()
+        windows_process_id_exists(pid as u32)
+    }
+}
+
+#[cfg(windows)]
+fn windows_process_id_exists(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    const STILL_ACTIVE: u32 = 259;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle == 0 {
+            return false;
+        }
+        let mut exit_code: u32 = 0;
+        let ok = GetExitCodeProcess(handle, &mut exit_code) != 0;
+        CloseHandle(handle);
+        ok && exit_code == STILL_ACTIVE
     }
 }
 
@@ -570,9 +588,9 @@ pub fn acquire_session_lease(
                     .find(|(key, _)| key == name)
                     .map(|(_, value)| value.clone())
             };
-            leases_enabled(environment, &lookup)
+            leases_enabled(&lookup)
         }
-        None => leases_enabled(&[], &env_lookup),
+        None => leases_enabled(&env_lookup),
     };
     if !enabled {
         return Ok(None);
@@ -735,7 +753,7 @@ mod tests {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
         };
-        assert!(!leases_enabled(&environment, &lookup));
+        assert!(!leases_enabled(&lookup));
         for value in ["1", "true", "TRUE", "yes", "Yes"] {
             let environment = env(&[(SESSION_LEASES_ENABLED_ENV, value)]);
             let lookup = |name: &str| {
@@ -744,7 +762,7 @@ mod tests {
                     .find(|(key, _)| key == name)
                     .map(|(_, value)| value.clone())
             };
-            assert!(leases_enabled(&environment, &lookup), "{value}");
+            assert!(leases_enabled(&lookup), "{value}");
         }
         let environment = env(&[(SESSION_LEASES_ENABLED_ENV, "0")]);
         let lookup = |name: &str| {
@@ -753,7 +771,7 @@ mod tests {
                 .find(|(key, _)| key == name)
                 .map(|(_, value)| value.clone())
         };
-        assert!(!leases_enabled(&environment, &lookup));
+        assert!(!leases_enabled(&lookup));
     }
 
     #[test]

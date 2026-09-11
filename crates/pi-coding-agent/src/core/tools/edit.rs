@@ -635,6 +635,11 @@ fn io_error_code(error: &std::io::Error) -> String {
 }
 
 /// Port of the edit tool's `renderCall`.
+///
+/// The TypeScript renderer kicks off `computeEditsDiff` asynchronously and
+/// repaints when it resolves. Rust renders synchronously, so the diff is applied
+/// through [`set_edit_preview`] before the component is built; callers that need
+/// the async path call [`compute_edits_diff`] and then this function.
 pub fn render_edit_call(
     state: &mut EditRenderState,
     last_component: Option<EditCallRenderComponent>,
@@ -642,8 +647,6 @@ pub fn render_edit_call(
     theme: &dyn ToolTheme,
     expanded: bool,
     cwd: &str,
-    args_complete: bool,
-    invalidate: &dyn Fn(),
 ) -> EditCallRenderComponent {
     let mut component = get_edit_call_render_component(state, last_component);
     let preview_input = get_renderable_preview_input(args);
@@ -651,30 +654,43 @@ pub fn render_edit_call(
 
     if component.preview_args_key != args_key {
         component.preview = None;
-        component.preview_args_key = args_key.clone();
+        component.preview_args_key = args_key;
         component.preview_pending = false;
         component.settled_error = false;
     }
 
-    if args_complete && preview_input.is_some() && component.preview.is_none() && !component.preview_pending {
-        component.preview_pending = true;
-        let request_key = args_key.clone();
-        let (path, edits) = preview_input.clone().expect("preview input");
-        let cwd = cwd.to_string();
-        let mut computed = component.clone();
-        // The TUI renders synchronously; the preview diff is computed on the
-        // runtime and pushed into the component when it resolves.
-        if let Ok(outcome) = futures::executor::block_on(compute_edits_diff(&path, &edits, &cwd)) {
-            if computed.preview_args_key == request_key {
-                set_edit_preview(&mut computed, outcome.into(), request_key);
-                invalidate();
-            }
-        }
-        component = computed;
-    }
-
     build_edit_call_component(&mut component, args, theme, expanded, cwd);
+    state.call_component = Some(component.clone());
     component
+}
+
+/// Async half of `renderCall`: resolve the predicted diff, then render.
+pub async fn render_edit_call_with_preview(
+    state: &mut EditRenderState,
+    last_component: Option<EditCallRenderComponent>,
+    args: Option<&RenderableEditArgs>,
+    theme: &dyn ToolTheme,
+    expanded: bool,
+    cwd: &str,
+) -> EditCallRenderComponent {
+    let preview_input = get_renderable_preview_input(args);
+    let args_key = preview_args_key(preview_input.as_ref());
+    if let Some((path, edits)) = preview_input.as_ref() {
+        let outcome = compute_edits_diff(path, edits, cwd).await;
+        let mut component = get_edit_call_render_component(state, last_component);
+        if component.preview_args_key != args_key {
+            component.preview = None;
+            component.preview_args_key = args_key.clone();
+            component.preview_pending = false;
+            component.settled_error = false;
+        }
+        set_edit_preview(&mut component, outcome.into(), args_key);
+        state.call_component = Some(component.clone());
+        build_edit_call_component(&mut component, args, theme, expanded, cwd);
+        state.call_component = Some(component.clone());
+        return component;
+    }
+    render_edit_call(state, last_component, args, theme, expanded, cwd)
 }
 
 /// Port of the edit tool's `renderResult`.

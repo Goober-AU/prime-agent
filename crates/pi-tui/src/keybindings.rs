@@ -4,6 +4,23 @@ use crate::keys::matches_key;
 use indexmap::IndexMap;
 use std::cell::RefCell;
 
+/// Port of the `Keybindings` interface. TypeScript keys that interface by action
+/// id, so an action id is the unit the interface enumerates.
+pub type Keybindings = String;
+
+/// Port of `Keybinding = keyof Keybindings`.
+pub type Keybinding = String;
+
+/// Port of the `KeybindingsConfig` record: user overrides by action id.
+pub type KeybindingsConfig = IndexMap<String, Vec<String>>;
+
+/// Port of the `KeybindingDefinitions` record.
+pub type KeybindingDefinitions = IndexMap<String, KeybindingDefinition>;
+
+/// Port of the `TUI_KEYBINDINGS` constant.
+pub static TUI_KEYBINDINGS: once_cell::sync::Lazy<KeybindingDefinitions> =
+    once_cell::sync::Lazy::new(tui_keybindings);
+
 /// Definition of one keybinding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindingDefinition {

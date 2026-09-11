@@ -157,12 +157,8 @@ pub fn stream_mistral(
 		match run_stream_mistral(&model, &context, &options, &mut output, &out).await {
 			Ok(()) => {}
 			Err(error) => {
-				for block in output.content.iter_mut() {
-					// partialArgs is only a streaming scratch buffer; never persist it.
-					if let ContentBlock::ToolCall(tool_call) = block {
-						tool_call.partial_args = None;
-					}
-				}
+				// partialArgs is only a streaming scratch buffer; never persist it.
+				// (The Rust port keeps it outside the block, so there is nothing to delete.)
 				let aborted = options
 					.stream
 					.signal
@@ -608,7 +604,8 @@ pub fn build_chat_payload(
 		}
 	}
 
-	rename_chat_payload_keys(&mut payload)
+	rename_chat_payload_keys(&mut payload);
+	payload
 }
 
 /// TS: the SDK's outbound `remap$` - camelCase in code, snake_case on the wire.
@@ -671,6 +668,15 @@ fn strip_symbol_keys(value: &Value) -> Value {
 	}
 }
 
+/// TS: `{ type: "image_url", imageUrl }` - the SDK's `ImageURLChunk` outbound remap
+/// (`imageUrl` -> `image_url`) is applied here so the wire JSON matches.
+fn image_url_chunk(url: &str) -> Value {
+	let mut chunk = Map::new();
+	chunk.insert("type".to_string(), Value::String("image_url".to_string()));
+	chunk.insert("image_url".to_string(), Value::String(url.to_string()));
+	Value::Object(chunk)
+}
+
 /// TS: `toChatMessages(messages, supportsImages)`.
 pub fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Value> {
 	let mut result: Vec<Value> = Vec::new();
@@ -705,13 +711,7 @@ pub fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Valu
 								Value::Object(chunk)
 							}
 							crate::types::ImageOrTextContent::Image(image) => {
-								let mut chunk = Map::new();
-								chunk.insert("type".to_string(), Value::String("image_url".to_string()));
-								chunk.insert(
-									"imageUrl".to_string(),
-									Value::String(format!("data:{};base64,{}", image.mime_type, image.data)),
-								);
-								Value::Object(chunk)
+								image_url_chunk(&format!("data:{};base64,{}", image.mime_type, image.data))
 							}
 						})
 						.collect();
@@ -826,13 +826,7 @@ pub fn to_chat_messages(messages: &[Message], supports_images: bool) -> Vec<Valu
 					let crate::types::ImageOrTextContent::Image(image) = part else {
 						continue;
 					};
-					let mut image_chunk = Map::new();
-					image_chunk.insert("type".to_string(), Value::String("image_url".to_string()));
-					image_chunk.insert(
-						"imageUrl".to_string(),
-						Value::String(format!("data:{};base64,{}", image.mime_type, image.data)),
-					);
-					tool_content.push(Value::Object(image_chunk));
+					tool_content.push(image_url_chunk(&format!("data:{};base64,{}", image.mime_type, image.data)));
 				}
 				let mut message = Map::new();
 				message.insert("role".to_string(), Value::String("tool".to_string()));
@@ -960,5 +954,809 @@ fn map_chat_stop_reason(reason: Option<&str>) -> StopReason {
 		"tool_calls" => "toolUse".to_string(),
 		"error" => "error".to_string(),
 		_ => "stop".to_string(),
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Streaming
+// ---------------------------------------------------------------------------
+
+/// The Mistral SSE transport (`EventStream` in the SDK).
+struct MistralChunkStream {
+	chunks: std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+	buffer: String,
+	pending: Vec<Value>,
+	done: bool,
+	finished: bool,
+	signal: Option<tokio_util::sync::CancellationToken>,
+}
+
+impl MistralChunkStream {
+	fn new(response: reqwest::Response, signal: Option<tokio_util::sync::CancellationToken>) -> Self {
+		Self {
+			chunks: Box::pin(response.bytes_stream()),
+			buffer: String::new(),
+			pending: Vec::new(),
+			done: false,
+			finished: false,
+			signal,
+		}
+	}
+
+	/// TS: `for await (const event of mistralStream)` - each item is `event.data`.
+	async fn next(&mut self) -> Result<Option<Value>, MistralStreamError> {
+		loop {
+			if !self.pending.is_empty() {
+				return Ok(Some(self.pending.remove(0)));
+			}
+			if self.done {
+				return Ok(None);
+			}
+			if self.finished {
+				return Ok(None);
+			}
+			if let Some(signal) = &self.signal {
+				if signal.is_cancelled() {
+					return Err(MistralStreamError::Message("Request was aborted".to_string()));
+				}
+			}
+			match self.chunks.next().await {
+				None => {
+					self.finished = true;
+				}
+				Some(Err(error)) => return Err(MistralStreamError::Message(error.to_string())),
+				Some(Ok(bytes)) => {
+					self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+					self.drain_events()?;
+				}
+			}
+		}
+	}
+
+	/// TS: `findBoundary` + `parseMessage` + the `[DONE]` short circuit.
+	fn drain_events(&mut self) -> Result<(), MistralStreamError> {
+		const BOUNDARIES: [&str; 8] = [
+			"\r\n\r\n", "\r\n\r", "\r\n\n", "\r\r\n", "\n\r\n", "\r\r", "\n\r", "\n\n",
+		];
+		loop {
+			let mut boundary_index: Option<usize> = None;
+			let mut boundary_length = 0usize;
+			for boundary in BOUNDARIES {
+				if let Some(index) = self.buffer.find(boundary) {
+					if boundary_index.map_or(true, |current| index < current) {
+						boundary_index = Some(index);
+						boundary_length = boundary.len();
+					}
+				}
+			}
+			let Some(boundary_index) = boundary_index else {
+				return Ok(());
+			};
+			let message = self.buffer[..boundary_index].to_string();
+			self.buffer = self.buffer[boundary_index + boundary_length..].to_string();
+			let Some(data) = parse_sse_message(&message) else {
+				continue;
+			};
+			if data == "[DONE]" {
+				self.done = true;
+				return Ok(());
+			}
+			match serde_json::from_str::<Value>(&data) {
+				Ok(value) => self.pending.push(value),
+				Err(error) => {
+					return Err(MistralStreamError::Message(format!(
+						"malformed json: {}",
+						error
+					)))
+				}
+			}
+		}
+	}
+}
+
+/// TS: `parseMessage(chunk, parse, state, dataRequired)` - returns the joined
+/// `data` field, or `None` for a message with no data lines.
+fn parse_sse_message(message: &str) -> Option<String> {
+	let mut data_lines: Vec<String> = Vec::new();
+	let mut ignore = true;
+	for line in message.split(|c| c == '\r' || c == '\n') {
+		if line.is_empty() || line.starts_with(':') {
+			continue;
+		}
+		ignore = false;
+		let index = line.find(':');
+		let (field, value) = match index {
+			Some(index) if index > 0 => {
+				let value = &line[index + 1..];
+				let value = value.strip_prefix(' ').unwrap_or(value);
+				(&line[..index], value)
+			}
+			_ => (line, ""),
+		};
+		if field == "data" {
+			data_lines.push(value.to_string());
+		}
+	}
+	if ignore {
+		return None;
+	}
+	if data_lines.is_empty() {
+		return None;
+	}
+	Some(data_lines.join("\n"))
+}
+
+/// TS: `consumeChatStream(model, output, stream, mistralStream)`.
+async fn consume_chat_stream(
+	model: &Model,
+	output: &mut AssistantMessage,
+	stream: &AssistantMessageEventStream,
+	mistral_stream: &mut MistralChunkStream,
+) -> Result<(), MistralStreamError> {
+	let mut current_block: Option<CurrentBlock> = None;
+	let mut tool_blocks_by_key: IndexMap<String, usize> = IndexMap::new();
+	// `partialArgs` is a streaming scratch buffer the TypeScript stores on the block and
+	// deletes before the block is persisted; the Rust `ToolCall` has no such field, so the
+	// buffer lives beside it, keyed by the block index.
+	let mut partial_args_by_index: HashMap<usize, String> = HashMap::new();
+
+	while let Some(chunk) = mistral_stream.next().await? {
+		// Mistral's streamed CompletionChunk carries an id field. Keep the first non-empty one,
+		// mirroring how OpenAI-style streaming exposes a stable response identifier per stream.
+		if output.response_id.is_none() {
+			if let Some(id) = chunk.get("id").and_then(Value::as_str) {
+				if !id.is_empty() {
+					output.response_id = Some(id.to_string());
+				}
+			}
+		}
+
+		if let Some(usage) = chunk.get("usage").filter(|usage| !usage.is_null()) {
+			output.usage.input = number_field(usage, "promptTokens");
+			output.usage.output = number_field(usage, "completionTokens");
+			output.usage.cache_read = 0.0;
+			output.usage.cache_write = 0.0;
+			let total_tokens = number_field(usage, "totalTokens");
+			output.usage.total_tokens = if total_tokens != 0.0 {
+				total_tokens
+			} else {
+				output.usage.input + output.usage.output
+			};
+			calculate_cost(model, &mut output.usage, None);
+		}
+
+		let choice = chunk
+			.get("choices")
+			.and_then(Value::as_array)
+			.and_then(|choices| choices.first());
+		let Some(choice) = choice else {
+			continue;
+		};
+
+		if let Some(finish_reason) = choice.get("finishReason").and_then(Value::as_str) {
+			output.stop_reason = map_chat_stop_reason(Some(finish_reason));
+			if output.stop_reason == "error" {
+				output.stop_reason_raw = Some(finish_reason.to_string());
+			}
+		}
+
+		let delta = choice.get("delta").cloned().unwrap_or(Value::Object(Map::new()));
+		if let Some(content) = delta.get("content").filter(|content| !content.is_null()) {
+			let content_items: Vec<Value> = match content {
+				Value::String(text) => vec![Value::String(text.clone())],
+				Value::Array(items) => items.clone(),
+				_ => Vec::new(),
+			};
+			for item in content_items {
+				if let Value::String(text) = &item {
+					let text_delta = sanitize_surrogates(text);
+					if !matches!(current_block, Some(CurrentBlock::Text(_))) {
+						if let Some(block) = current_block.take() {
+							finish_current_block(&block, output, stream);
+						}
+						output.content.push(ContentBlock::Text(TextContent::new(String::new())));
+						stream.push(AssistantMessageEvent::TextStart {
+							content_index: output.content.len() - 1,
+							partial: output.clone(),
+						});
+						current_block = Some(CurrentBlock::Text(TextContent::new(String::new())));
+					}
+					if let Some(CurrentBlock::Text(block)) = current_block.as_mut() {
+						block.text.push_str(&text_delta);
+						if let Some(ContentBlock::Text(target)) = output.content.last_mut() {
+							target.text = block.text.clone();
+						}
+					}
+					stream.push(AssistantMessageEvent::TextDelta {
+						content_index: output.content.len() - 1,
+						delta: text_delta,
+						partial: output.clone(),
+					});
+					continue;
+				}
+
+				let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+				if item_type == "thinking" {
+					let delta_text = item
+						.get("thinking")
+						.and_then(Value::as_array)
+						.map(|parts| {
+							parts
+								.iter()
+								.map(|part| part.get("text").and_then(Value::as_str).unwrap_or_default())
+								.collect::<Vec<_>>()
+								.join("")
+						})
+						.unwrap_or_default();
+					let thinking_delta = sanitize_surrogates(&delta_text);
+					if thinking_delta.is_empty() {
+						continue;
+					}
+					if !matches!(current_block, Some(CurrentBlock::Thinking(_))) {
+						if let Some(block) = current_block.take() {
+							finish_current_block(&block, output, stream);
+						}
+						output
+							.content
+							.push(ContentBlock::Thinking(ThinkingContent::new(String::new())));
+						stream.push(AssistantMessageEvent::ThinkingStart {
+							content_index: output.content.len() - 1,
+							partial: output.clone(),
+						});
+						current_block = Some(CurrentBlock::Thinking(ThinkingContent::new(String::new())));
+					}
+					if let Some(CurrentBlock::Thinking(block)) = current_block.as_mut() {
+						block.thinking.push_str(&thinking_delta);
+						if let Some(ContentBlock::Thinking(target)) = output.content.last_mut() {
+							target.thinking = block.thinking.clone();
+						}
+					}
+					stream.push(AssistantMessageEvent::ThinkingDelta {
+						content_index: output.content.len() - 1,
+						delta: thinking_delta,
+						partial: output.clone(),
+					});
+					continue;
+				}
+
+				if item_type == "text" {
+					let text_delta = sanitize_surrogates(item.get("text").and_then(Value::as_str).unwrap_or_default());
+					if !matches!(current_block, Some(CurrentBlock::Text(_))) {
+						if let Some(block) = current_block.take() {
+							finish_current_block(&block, output, stream);
+						}
+						output.content.push(ContentBlock::Text(TextContent::new(String::new())));
+						stream.push(AssistantMessageEvent::TextStart {
+							content_index: output.content.len() - 1,
+							partial: output.clone(),
+						});
+						current_block = Some(CurrentBlock::Text(TextContent::new(String::new())));
+					}
+					if let Some(CurrentBlock::Text(block)) = current_block.as_mut() {
+						block.text.push_str(&text_delta);
+						if let Some(ContentBlock::Text(target)) = output.content.last_mut() {
+							target.text = block.text.clone();
+						}
+					}
+					stream.push(AssistantMessageEvent::TextDelta {
+						content_index: output.content.len() - 1,
+						delta: text_delta,
+						partial: output.clone(),
+					});
+				}
+			}
+		}
+
+		let tool_calls = delta
+			.get("toolCalls")
+			.and_then(Value::as_array)
+			.cloned()
+			.unwrap_or_default();
+		for tool_call in tool_calls {
+			if let Some(block) = current_block.take() {
+				finish_current_block(&block, output, stream);
+			}
+			let raw_id = tool_call.get("id").and_then(Value::as_str).unwrap_or_default();
+			let call_id = if !raw_id.is_empty() && raw_id != "null" {
+				raw_id.to_string()
+			} else {
+				let index = tool_call.get("index").and_then(Value::as_i64).unwrap_or(0);
+				derive_mistral_tool_call_id(&format!("toolcall:{}", index), 0)
+			};
+			let index = tool_call.get("index").and_then(Value::as_i64).unwrap_or(0);
+			let key = format!("{}:{}", call_id, index);
+			let mut block_index = tool_blocks_by_key.get(&key).copied();
+
+			if let Some(existing_index) = block_index {
+				if !matches!(
+					output.content.get(existing_index),
+					Some(ContentBlock::ToolCall(_))
+				) {
+					block_index = None;
+				}
+			}
+
+			if block_index.is_none() {
+				let name = tool_call
+					.get("function")
+					.and_then(|function| function.get("name"))
+					.and_then(Value::as_str)
+					.unwrap_or_default()
+					.to_string();
+				let tool_block = ToolCall::new(call_id.clone(), name, Map::new());
+				output.content.push(ContentBlock::ToolCall(tool_block));
+				tool_blocks_by_key.insert(key.clone(), output.content.len() - 1);
+				partial_args_by_index.insert(output.content.len() - 1, String::new());
+				stream.push(AssistantMessageEvent::ToolCallStart {
+					content_index: output.content.len() - 1,
+					partial: output.clone(),
+				});
+			}
+
+			let function = tool_call.get("function").cloned().unwrap_or(Value::Object(Map::new()));
+			let args_delta = match function.get("arguments") {
+				Some(Value::String(arguments)) => arguments.clone(),
+				Some(other) => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+				None => serde_json::to_string(&Value::Object(Map::new())).unwrap_or_else(|_| "{}".to_string()),
+			};
+			let index = tool_blocks_by_key.get(&key).copied().unwrap_or(0);
+			let partial_args = format!(
+				"{}{}",
+				partial_args_by_index.get(&index).cloned().unwrap_or_default(),
+				args_delta
+			);
+			partial_args_by_index.insert(index, partial_args.clone());
+			if let Some(ContentBlock::ToolCall(block)) = output.content.get_mut(index) {
+				block.arguments = match parse_streaming_json(Some(&partial_args)) {
+					Value::Object(map) => map,
+					_ => Map::new(),
+				};
+			}
+			stream.push(AssistantMessageEvent::ToolCallDelta {
+				content_index: index,
+				delta: args_delta,
+				partial: output.clone(),
+			});
+		}
+	}
+
+	if let Some(block) = current_block.take() {
+		finish_current_block(&block, output, stream);
+	}
+	for index in tool_blocks_by_key.values().copied().collect::<Vec<usize>>() {
+		let Some(ContentBlock::ToolCall(tool_block)) = output.content.get_mut(index) else {
+			continue;
+		};
+		let partial_args = partial_args_by_index.get(&index).cloned().unwrap_or_default();
+		tool_block.arguments = match parse_streaming_json(Some(&partial_args)) {
+			Value::Object(map) => map,
+			_ => Map::new(),
+		};
+		// Finalize in-place; the scratch buffer is dropped so replay only
+		// carries parsed arguments.
+		let tool_call = tool_block.clone();
+		stream.push(AssistantMessageEvent::ToolCallEnd {
+			content_index: index,
+			tool_call,
+			partial: output.clone(),
+		});
+	}
+
+	Ok(())
+}
+
+/// The block the streaming loop is currently filling.
+#[derive(Debug, Clone, PartialEq)]
+enum CurrentBlock {
+	Text(TextContent),
+	Thinking(ThinkingContent),
+}
+
+/// TS: `finishCurrentBlock(block?)`.
+fn finish_current_block(block: &CurrentBlock, output: &AssistantMessage, stream: &AssistantMessageEventStream) {
+	match block {
+		CurrentBlock::Text(text) => {
+			stream.push(AssistantMessageEvent::TextEnd {
+				content_index: output.content.len() - 1,
+				content: text.text.clone(),
+				partial: output.clone(),
+			});
+		}
+		CurrentBlock::Thinking(thinking) => {
+			stream.push(AssistantMessageEvent::ThinkingEnd {
+				content_index: output.content.len() - 1,
+				content: thinking.thinking.clone(),
+				partial: output.clone(),
+			});
+		}
+	}
+}
+
+/// TS: `chunk.usage?.promptTokens || 0`.
+fn number_field(value: &Value, key: &str) -> f64 {
+	value.get(key).and_then(Value::as_f64).unwrap_or(0.0)
+}
+
+/// Keeps `safeJsonStringify` referenced exactly like the TypeScript module.
+pub fn _safe_json_stringify(value: &Value) -> String {
+	safe_json_stringify(value)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::types::{
+		ImageContent, ImageOrTextContent, InputModality, ModelCost, Tool, ToolResultMessage, UserContent, UserMessage,
+	};
+	use serde_json::json;
+
+	fn model(id: &str) -> Model {
+		let mut model = Model::new(id, id, "mistral-conversations", "mistral", "https://api.mistral.ai");
+		model.input = vec![InputModality::Text];
+		model.cost = ModelCost::zero();
+		model
+	}
+
+	fn base_options() -> StreamOptions {
+		StreamOptions::default()
+	}
+
+	#[test]
+	fn options_round_trip_through_serde() {
+		let mut options = MistralOptions::from_base(&base_options());
+		options.prompt_mode = Some("reasoning".to_string());
+		options.reasoning_effort = Some("high".to_string());
+		options.tool_choice = Some(json!("required"));
+		let value = serde_json::to_value(&options).unwrap();
+		assert_eq!(value["promptMode"], json!("reasoning"));
+		assert_eq!(value["reasoningEffort"], json!("high"));
+		assert_eq!(value["toolChoice"], json!("required"));
+		let back: MistralOptions = serde_json::from_value(value).unwrap();
+		assert_eq!(back.prompt_mode.as_deref(), Some("reasoning"));
+	}
+
+	#[test]
+	fn tool_call_id_normalizer_keeps_nine_char_alphanumeric_ids() {
+		let normalizer = MistralToolCallIdNormalizer::new();
+		assert_eq!(normalizer.normalize("abc123XYZ"), "abc123XYZ");
+		// Too short / too long ids are hashed.
+		let hashed = normalizer.normalize("short");
+		assert_eq!(hashed.len(), MISTRAL_TOOL_CALL_ID_LENGTH);
+		assert!(hashed.chars().all(|c| c.is_ascii_alphanumeric()));
+		// Repeated calls return the memoised value.
+		assert_eq!(normalizer.normalize("short"), hashed);
+	}
+
+	#[test]
+	fn tool_call_id_normalizer_avoids_collisions_with_an_attempt_suffix() {
+		// Both ids normalise to the same 9-char seed; the second must differ.
+		let normalizer = MistralToolCallIdNormalizer::new();
+		let first = normalizer.normalize("call-1");
+		let second = normalizer.normalize("call1");
+		assert_ne!(first, second);
+		assert_eq!(first.len(), MISTRAL_TOOL_CALL_ID_LENGTH);
+		assert_eq!(second.len(), MISTRAL_TOOL_CALL_ID_LENGTH);
+	}
+
+	#[test]
+	fn derive_tool_call_id_strips_non_alphanumerics() {
+		let derived = derive_mistral_tool_call_id("call:1|2", 0);
+		assert_eq!(derived.len(), MISTRAL_TOOL_CALL_ID_LENGTH);
+		assert!(derived.chars().all(|c| c.is_ascii_alphanumeric()));
+		assert_eq!(derive_mistral_tool_call_id("abc123XYZ", 0), "abc123XYZ");
+		assert_ne!(derive_mistral_tool_call_id("abcdefghij", 0), derive_mistral_tool_call_id("abcdefghij", 1));
+	}
+
+	#[test]
+	fn format_mistral_error_matches_typescript_branches() {
+		let with_body = MistralStreamError::Api {
+			message: "Status 429: Body: slow down".to_string(),
+			status_code: Some(429),
+			body: Some("  slow down  ".to_string()),
+			value: Value::Null,
+		};
+		assert_eq!(format_mistral_error(&with_body), "Mistral API error (429): slow down");
+
+		let without_body = MistralStreamError::Api {
+			message: "Status 500: Body: ".to_string(),
+			status_code: Some(500),
+			body: Some("   ".to_string()),
+			value: Value::Null,
+		};
+		assert_eq!(
+			format_mistral_error(&without_body),
+			"Mistral API error (500): Status 500: Body: "
+		);
+
+		let plain = MistralStreamError::Message("boom".to_string());
+		assert_eq!(format_mistral_error(&plain), "boom");
+	}
+
+	#[test]
+	fn truncate_error_text_appends_the_truncation_note() {
+		assert_eq!(truncate_error_text("abc", 10), "abc");
+		assert_eq!(truncate_error_text("abcdef", 3), "abc... [truncated 3 chars]");
+	}
+
+	#[test]
+	fn map_chat_stop_reason_follows_the_typescript_switch() {
+		assert_eq!(map_chat_stop_reason(None), "stop");
+		assert_eq!(map_chat_stop_reason(Some("stop")), "stop");
+		assert_eq!(map_chat_stop_reason(Some("length")), "length");
+		assert_eq!(map_chat_stop_reason(Some("model_length")), "length");
+		assert_eq!(map_chat_stop_reason(Some("tool_calls")), "toolUse");
+		assert_eq!(map_chat_stop_reason(Some("error")), "error");
+		assert_eq!(map_chat_stop_reason(Some("wat")), "stop");
+	}
+
+	#[test]
+	fn reasoning_routing_helpers_match_typescript() {
+		assert!(uses_reasoning_effort(&model("mistral-small-2603")));
+		assert!(uses_reasoning_effort(&model("mistral-small-latest")));
+		assert!(uses_reasoning_effort(&model("mistral-medium-3.5")));
+		assert!(!uses_reasoning_effort(&model("mistral-large-latest")));
+
+		let mut reasoning_model = model("mistral-large-latest");
+		reasoning_model.reasoning = true;
+		assert!(uses_prompt_mode_reasoning(&reasoning_model));
+		let mut effort_model = model("mistral-small-latest");
+		effort_model.reasoning = true;
+		assert!(!uses_prompt_mode_reasoning(&effort_model));
+	}
+
+	#[test]
+	fn map_reasoning_effort_prefers_the_thinking_level_map() {
+		let mut model = model("mistral-small-latest");
+		model.thinking_level_map = Some(
+			[("high".to_string(), Some("none".to_string()))]
+				.into_iter()
+				.collect(),
+		);
+		assert_eq!(map_reasoning_effort(&model, "high"), "none");
+		assert_eq!(map_reasoning_effort(&model, "low"), "high");
+	}
+
+	#[test]
+	fn map_tool_choice_passes_strings_and_normalises_objects() {
+		assert_eq!(map_tool_choice(None), None);
+		assert_eq!(map_tool_choice(Some(&json!("auto"))), Some(json!("auto")));
+		assert_eq!(map_tool_choice(Some(&json!("required"))), Some(json!("required")));
+		assert_eq!(map_tool_choice(Some(&json!("bogus"))), None);
+		assert_eq!(
+			map_tool_choice(Some(&json!({"type": "function", "function": {"name": "read"}}))),
+			Some(json!({"type": "function", "function": {"name": "read"}}))
+		);
+	}
+
+	#[test]
+	fn build_chat_payload_uses_snake_case_wire_keys() {
+		let model = model("mistral-large-latest");
+		let context = Context::new(
+			Some("be nice".to_string()),
+			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			Some(vec![Tool {
+				name: "read".to_string(),
+				description: "Read".to_string(),
+				parameters: json!({"type": "object"}),
+			}]),
+		);
+		let mut options = MistralOptions::from_base(&base_options());
+		options.stream.temperature = Some(0.3);
+		options.stream.max_tokens = Some(128.0);
+		options.tool_choice = Some(json!("any"));
+		options.prompt_mode = Some("reasoning".to_string());
+		options.reasoning_effort = Some("high".to_string());
+		let payload = build_chat_payload(&model, &context, &context.messages, Some(&options));
+		assert_eq!(
+			Value::Object(payload),
+			json!({
+				"model": "mistral-large-latest",
+				"stream": true,
+				"messages": [
+					{"role": "system", "content": "be nice"},
+					{"role": "user", "content": "hi"}
+				],
+				"tools": [{
+					"type": "function",
+					"function": {
+						"name": "read",
+						"description": "Read",
+						"parameters": {"type": "object"},
+						"strict": false
+					}
+				}],
+				"temperature": 0.3,
+				"max_tokens": 128.0,
+				"tool_choice": "any",
+				"prompt_mode": "reasoning",
+				"reasoning_effort": "high"
+			})
+		);
+	}
+
+	#[test]
+	fn build_chat_payload_omits_optional_fields() {
+		let model = model("mistral-large-latest");
+		let context = Context::new(
+			None,
+			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			None,
+		);
+		let payload = build_chat_payload(&model, &context, &context.messages, None);
+		assert_eq!(
+			Value::Object(payload),
+			json!({
+				"model": "mistral-large-latest",
+				"stream": true,
+				"messages": [{"role": "user", "content": "hi"}]
+			})
+		);
+	}
+
+	#[test]
+	fn to_chat_messages_omits_images_for_text_only_models() {
+		let messages = vec![Message::user(UserMessage::new(
+			UserContent::Blocks(vec![ImageOrTextContent::Image(ImageContent::new("AAAA", "image/png"))]),
+			0,
+		))];
+		assert_eq!(
+			to_chat_messages(&messages, false),
+			vec![json!({"role": "user", "content": "(image omitted: model does not support images)"})]
+		);
+
+		let messages = vec![Message::user(UserMessage::new(
+			UserContent::Blocks(vec![
+				ImageOrTextContent::Text(TextContent::new("look")),
+				ImageOrTextContent::Image(ImageContent::new("AAAA", "image/png")),
+			]),
+			0,
+		))];
+		assert_eq!(
+			to_chat_messages(&messages, true),
+			vec![json!({
+				"role": "user",
+				"content": [
+					{"type": "text", "text": "look"},
+					{"type": "image_url", "image_url": "data:image/png;base64,AAAA"}
+				]
+			})]
+		);
+	}
+
+	#[test]
+	fn to_chat_messages_maps_assistant_blocks_and_tool_results() {
+		let mut assistant = AssistantMessage::default();
+		assistant.content = vec![
+			ContentBlock::Text(TextContent::new("answer")),
+			ContentBlock::Thinking(ThinkingContent::new("hmm")),
+			ContentBlock::ToolCall(ToolCall::new("call-1", "read", json!({"path": "a"}).as_object().unwrap().clone())),
+		];
+		let messages = vec![
+			Message::assistant(assistant),
+			Message::tool_result(ToolResultMessage::new(
+				"call-1",
+				"read",
+				vec![ImageOrTextContent::Text(TextContent::new("ok"))],
+				false,
+				0,
+			)),
+			Message::tool_result(ToolResultMessage::new(
+				"call-2",
+				"read",
+				vec![ImageOrTextContent::Text(TextContent::new("bad"))],
+				true,
+				0,
+			)),
+		];
+		assert_eq!(
+			to_chat_messages(&messages, false),
+			vec![
+				json!({
+					"role": "assistant",
+					"content": [
+						{"type": "text", "text": "answer"},
+						{"type": "thinking", "thinking": [{"type": "text", "text": "hmm"}]}
+					],
+					"tool_calls": [{
+						"id": "call-1",
+						"type": "function",
+						"function": {"name": "read", "arguments": "{\"path\":\"a\"}"}
+					}]
+				}),
+				json!({"role": "tool", "tool_call_id": "call-1", "name": "read", "content": [{"type": "text", "text": "ok"}]}),
+				json!({"role": "tool", "tool_call_id": "call-2", "name": "read", "content": [{"type": "text", "text": "[tool error] bad"}]})
+			]
+		);
+	}
+
+	#[test]
+	fn build_tool_result_text_matches_typescript_branches() {
+		assert_eq!(build_tool_result_text("out", false, true, false), "out");
+		assert_eq!(build_tool_result_text("  out  ", false, true, true), "[tool error] out");
+		assert_eq!(
+			build_tool_result_text("out", true, false, false),
+			"out\n[tool image omitted: model does not support images]"
+		);
+		assert_eq!(build_tool_result_text("", true, true, false), "(see attached image)");
+		assert_eq!(build_tool_result_text("", true, true, true), "[tool error] (see attached image)");
+		assert_eq!(
+			build_tool_result_text("", true, false, false),
+			"(image omitted: model does not support images)"
+		);
+		assert_eq!(
+			build_tool_result_text("", true, false, true),
+			"[tool error] (image omitted: model does not support images)"
+		);
+		assert_eq!(build_tool_result_text("", false, true, false), "(no tool output)");
+		assert_eq!(build_tool_result_text("", false, true, true), "[tool error] (no tool output)");
+	}
+
+	#[test]
+	fn request_options_merge_headers_and_add_affinity() {
+		let mut model = model("mistral-large-latest");
+		let mut model_headers = IndexMap::new();
+		model_headers.insert("x-model".to_string(), "1".to_string());
+		model.headers = Some(model_headers);
+		let mut options = MistralOptions::from_base(&base_options());
+		let mut options_headers = IndexMap::new();
+		options_headers.insert("x-option".to_string(), "2".to_string());
+		options.stream.headers = Some(options_headers);
+		options.stream.session_id = Some("session-1".to_string());
+		let request_options = build_request_options(&model, &options);
+		assert!(request_options.retries_strategy_none);
+		assert_eq!(request_options.headers.get("x-model").map(String::as_str), Some("1"));
+		assert_eq!(request_options.headers.get("x-option").map(String::as_str), Some("2"));
+		assert_eq!(request_options.headers.get("x-affinity").map(String::as_str), Some("session-1"));
+
+		let mut explicit = MistralOptions::from_base(&base_options());
+		let mut explicit_headers = IndexMap::new();
+		explicit_headers.insert("x-affinity".to_string(), "caller".to_string());
+		explicit.stream.headers = Some(explicit_headers);
+		explicit.stream.session_id = Some("session-1".to_string());
+		let request_options = build_request_options(&model, &explicit);
+		assert_eq!(request_options.headers.get("x-affinity").map(String::as_str), Some("caller"));
+	}
+
+	#[test]
+	fn sse_parser_joins_data_lines_and_stops_at_done() {
+		assert_eq!(parse_sse_message("data: a\ndata: b"), Some("a\nb".to_string()));
+		assert_eq!(parse_sse_message(":comment\n\ndata:x"), Some("x".to_string()));
+		assert_eq!(parse_sse_message(":only-comment"), None);
+		assert_eq!(parse_sse_message("event: ping"), None);
+	}
+
+	#[test]
+	fn chunk_stream_parses_events_and_honours_done() {
+		let mut stream = MistralChunkStream {
+			chunks: Box::pin(futures::stream::empty()),
+			buffer: "data: {\"id\": \"a\"}\n\ndata: [DONE]\n\ndata: {\"id\": \"b\"}\n\n".to_string(),
+			pending: Vec::new(),
+			done: false,
+			finished: false,
+			signal: None,
+		};
+		stream.drain_events().unwrap();
+		assert_eq!(stream.pending, vec![json!({"id": "a"})]);
+		assert!(stream.done);
+	}
+
+	#[test]
+	fn chunk_stream_reports_malformed_json() {
+		let mut stream = MistralChunkStream {
+			chunks: Box::pin(futures::stream::empty()),
+			buffer: "data: {oops}\n\n".to_string(),
+			pending: Vec::new(),
+			done: false,
+			finished: false,
+			signal: None,
+		};
+		let error = stream.drain_events().unwrap_err();
+		assert!(error.error_message().starts_with("malformed json: "));
+	}
+
+	#[test]
+	fn number_field_defaults_to_zero() {
+		assert_eq!(number_field(&json!({"promptTokens": 5}), "promptTokens"), 5.0);
+		assert_eq!(number_field(&json!({}), "promptTokens"), 0.0);
 	}
 }

@@ -173,7 +173,7 @@ fn is_termux_session() -> bool {
 /// The TypeScript `showOverlay(component, options)` passes the component
 /// separately; the port carries it in `component` so a single options value
 /// describes the whole call.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct OverlayOptions {
     pub component: Option<Rc<RefCell<dyn Component>>>,
     pub width: Option<SizeValue>,
@@ -418,12 +418,6 @@ struct OverlayLayout {
     max_height: Option<i64>,
 }
 
-/// Port of `resolveOverlayLayout`'s return value for the width/maxHeight pre-pass.
-#[derive(Debug, Clone, Copy)]
-struct OverlaySize {
-    width: i64,
-    max_height: Option<i64>,
-}
 /// TUI - Main class for managing terminal UI with differential rendering
 pub struct TUI {
     container: Container,
@@ -709,6 +703,7 @@ impl TUI {
         }
         for entry in self.overlay_stack.iter() {
             entry.shared.focused.set(self.is_focused_component(&entry.component));
+            entry.shared.focus_order.set(entry.focus_order);
         }
         if removed_any {
             if self.overlay_stack.is_empty() {
@@ -1304,14 +1299,11 @@ impl TUI {
                     } else if event.button == MOUSE_BUTTON_LEFT && event.press && !event.motion {
                         self.stop_selection_auto_scroll();
                         let (row, col) = (event.y as i64 - 1, event.x as i64 - 1);
-                        let began = match self.fullscreen.as_mut() {
-                            Some(fullscreen) => {
-                                fullscreen.viewport.begin_selection(row, col)
-                                    || fullscreen.viewport.begin_frame_selection(row, col)
+                        if let Some(fullscreen) = self.fullscreen.as_mut() {
+                            if !fullscreen.viewport.begin_selection(row, col) {
+                                fullscreen.viewport.begin_frame_selection(row, col);
                             }
-                            None => false,
-                        };
-                        let _ = began;
+                        }
                         self.request_render(false);
                     } else if event.button == MOUSE_BUTTON_LEFT && event.press && event.motion {
                         let (row, col) = (event.y as i64 - 1, event.x as i64 - 1);
@@ -1665,6 +1657,7 @@ impl TUI {
                 term_height as i64,
             );
 
+            let overlay_len = overlay_lines.len();
             rendered.push(OverlayRender {
                 component,
                 overlay_lines,
@@ -1675,7 +1668,7 @@ impl TUI {
                 above_marker,
             });
             if above_marker.is_none() {
-                min_lines_needed = min_lines_needed.max(final_layout.row.max(0) as usize + rendered.last().unwrap().overlay_lines.len());
+                min_lines_needed = min_lines_needed.max(final_layout.row.max(0) as usize + overlay_len);
             }
         }
 
@@ -1694,7 +1687,7 @@ impl TUI {
         let viewport_start = working_height.saturating_sub(term_height);
 
         // Composite each overlay
-        for rendered_overlay in rendered.iter_mut() {
+        for rendered_overlay in rendered.iter() {
             let component = rendered_overlay.component.clone();
             let width = rendered_overlay.width;
             let scrollback = rendered_overlay.scrollback;
@@ -1862,50 +1855,6 @@ impl TUI {
                 *line = format!("{}{reset}", normalize_terminal_output(line));
             }
         }
-    }
-
-    fn collect_kitty_image_ids(&self, lines: &[String]) -> HashSet<u32> {
-        let mut ids = HashSet::new();
-        for line in lines {
-            for id in extract_kitty_image_ids(line) {
-                ids.insert(id);
-            }
-        }
-        ids
-    }
-
-    fn delete_kitty_images(&self, ids: impl IntoIterator<Item = u32>) -> String {
-        let mut buffer = String::new();
-        for id in ids {
-            buffer.push_str(&delete_kitty_image(id));
-        }
-        buffer
-    }
-
-    fn expand_last_changed_for_kitty_images(&self, first_changed: usize, last_changed: usize) -> usize {
-        let mut expanded_last_changed = last_changed;
-        for i in first_changed..self.previous_lines.len() {
-            if !extract_kitty_image_ids(&self.previous_lines[i]).is_empty() {
-                expanded_last_changed = expanded_last_changed.max(i);
-            }
-        }
-        expanded_last_changed
-    }
-
-    fn delete_changed_kitty_images(&self, first_changed: i64, last_changed: i64) -> String {
-        if first_changed < 0 || last_changed < first_changed {
-            return String::new();
-        }
-
-        let mut ids: HashSet<u32> = HashSet::new();
-        let max_line = (last_changed as usize).min(self.previous_lines.len().saturating_sub(1));
-        for i in first_changed as usize..=max_line {
-            for id in extract_kitty_image_ids(self.previous_lines.get(i).map(String::as_str).unwrap_or("")) {
-                ids.insert(id);
-            }
-        }
-
-        self.delete_kitty_images(ids)
     }
 
     /// Splice overlay content into a base line at a specific column. Single-pass optimized.
@@ -2144,7 +2093,6 @@ impl TUI {
         let cursor_pos = self.extract_cursor_position(&mut new_lines, height);
 
         self.apply_line_resets(&mut new_lines);
-        let mut new_lines = new_lines;
 
         let full_redraw_count = &mut self.full_redraw_count;
         let terminal = &mut self.terminal;
@@ -2157,6 +2105,7 @@ impl TUI {
         let previous_width = &mut self.previous_width;
         let previous_height = &mut self.previous_height;
         let show_hardware_cursor = self.show_hardware_cursor;
+        let stopped = &mut self.stopped;
 
         // Helper to clear the viewport and repaint the current screen. Do not
         // clear terminal scrollback: users rely on it to read long prior messages.
@@ -2288,8 +2237,6 @@ impl TUI {
             *previous_width = width as i64;
             *previous_height = height;
         };
-        let _ = &full_render;
-
         let debug_redraw = std::env::var("PI_DEBUG_REDRAW").map(|v| v == "1").unwrap_or(false);
         let log_redraw = |reason: &str, previous_len: usize, new_len: usize, height: usize| {
             if !debug_redraw {
@@ -2307,8 +2254,6 @@ impl TUI {
                 let _ = file.write_all(msg.as_bytes());
             }
         };
-        let _ = &log_redraw;
-
         // First render - just output everything without clearing (assumes clean screen)
         if previous_lines.is_empty() && !width_changed && !height_changed {
             log_redraw("first render", previous_lines.len(), new_lines.len(), height);
@@ -2675,8 +2620,20 @@ impl TUI {
                 }
                 let _ = std::fs::write(&crash_log_path, crash_data);
 
-                // Clean up terminal state before throwing
-                self.stop(TuiStopOptions::default());
+                // Clean up terminal state before throwing (port of `this.stop()`).
+                *stopped = true;
+                if !previous_lines.is_empty() {
+                    let target_row = previous_lines.len();
+                    let line_diff = target_row as i64 - *hardware_cursor_row_field as i64;
+                    if line_diff > 0 {
+                        terminal.write(&format!("\x1b[{line_diff}B"));
+                    } else if line_diff < 0 {
+                        terminal.write(&format!("\x1b[{}A", -line_diff));
+                    }
+                    terminal.write("\r\n");
+                }
+                terminal.show_cursor();
+                terminal.stop(TerminalStopOptions::default());
 
                 let error_msg = format!(
                     "Rendered line {i} exceeds terminal width ({} > {width}).\n\nThis is likely caused by a custom TUI component not truncating its output.\nUse visibleWidth() to measure and truncateToWidth() to truncate lines.\n\nDebug log written to: {}",
@@ -2767,4 +2724,445 @@ impl TUI {
         *previous_width = width as i64;
         *previous_height = height;
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FakeTerminal {
+        written: String,
+        columns: usize,
+        rows: usize,
+        alt_screen: bool,
+        mouse_tracking: bool,
+    }
+
+    impl FakeTerminal {
+        fn new(columns: usize, rows: usize) -> Self {
+            Self {
+                written: String::new(),
+                columns,
+                rows,
+                alt_screen: false,
+                mouse_tracking: false,
+            }
+        }
+    }
+
+    impl Terminal for FakeTerminal {
+        fn start(&mut self, _on_input: Box<dyn Fn(String)>, _on_resize: Box<dyn Fn()>) {}
+
+        fn stop(&mut self, _options: crate::terminal::TerminalStopOptions) {}
+
+        fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
+
+        fn write(&mut self, data: &str) {
+            self.written.push_str(data);
+        }
+
+        fn columns(&self) -> usize {
+            self.columns
+        }
+
+        fn rows(&self) -> usize {
+            self.rows
+        }
+
+        fn kitty_protocol_active(&self) -> bool {
+            false
+        }
+
+        fn move_by(&mut self, _lines: i64) {}
+
+        fn hide_cursor(&mut self) {}
+
+        fn show_cursor(&mut self) {}
+
+        fn clear_line(&mut self) {}
+
+        fn clear_from_cursor(&mut self) {}
+
+        fn clear_screen(&mut self) {}
+
+        fn enter_alt_screen(&mut self) {
+            self.alt_screen = true;
+        }
+
+        fn leave_alt_screen(&mut self) {
+            self.alt_screen = false;
+        }
+
+        fn alt_screen_active(&self) -> bool {
+            self.alt_screen
+        }
+
+        fn set_mouse_tracking(&mut self, enabled: bool) {
+            self.mouse_tracking = enabled;
+        }
+
+        fn mouse_tracking_active(&self) -> bool {
+            self.mouse_tracking
+        }
+
+        fn set_title(&mut self, _title: &str) {}
+
+        fn set_progress(&mut self, _active: bool) {}
+    }
+
+    struct Line(&'static str);
+
+    impl Component for Line {
+        fn render(&mut self, _width: f64) -> Vec<String> {
+            vec![self.0.to_string()]
+        }
+
+        fn invalidate(&mut self) {}
+    }
+
+    struct FocusableLine {
+        text: &'static str,
+        focused: bool,
+    }
+
+    impl Component for FocusableLine {
+        fn render(&mut self, _width: f64) -> Vec<String> {
+            vec![format!("{}{}", self.text, if self.focused { CURSOR_MARKER } else { "" })]
+        }
+
+        fn invalidate(&mut self) {}
+
+        fn as_focusable(&mut self) -> Option<&mut dyn Focusable> {
+            Some(self)
+        }
+    }
+
+    impl Focusable for FocusableLine {
+        fn focused(&self) -> bool {
+            self.focused
+        }
+
+        fn set_focused(&mut self, focused: bool) {
+            self.focused = focused;
+        }
+    }
+
+    #[test]
+    fn size_value_parsing() {
+        assert_eq!(parse_size_value(Some(&SizeValue::Number(12.0)), 80.0), Some(12.0));
+        assert_eq!(
+            parse_size_value(Some(&SizeValue::Percent("50%".to_string())), 80.0),
+            Some(40.0)
+        );
+        assert_eq!(parse_size_value(Some(&SizeValue::Percent("bogus".to_string())), 80.0), None);
+        assert_eq!(parse_size_value(None, 80.0), None);
+    }
+
+    #[test]
+    fn anchor_resolution_matches_typescript() {
+        assert_eq!(resolve_anchor_row(OverlayAnchor::TopCenter, 4, 10, 1), 1);
+        assert_eq!(resolve_anchor_row(OverlayAnchor::BottomCenter, 4, 10, 1), 7);
+        assert_eq!(resolve_anchor_row(OverlayAnchor::Center, 4, 10, 1), 4);
+        assert_eq!(resolve_anchor_col(OverlayAnchor::LeftCenter, 4, 10, 1), 1);
+        assert_eq!(resolve_anchor_col(OverlayAnchor::RightCenter, 4, 10, 1), 7);
+        assert_eq!(resolve_anchor_col(OverlayAnchor::Center, 4, 10, 1), 4);
+    }
+
+    #[test]
+    fn container_renders_children_and_offsets_regions() {
+        let mut container = Container::new();
+        container.add_child(Rc::new(RefCell::new(Line("a"))) as Rc<RefCell<dyn Component>>);
+        container.add_child(Rc::new(RefCell::new(Line("b"))) as Rc<RefCell<dyn Component>>);
+        assert_eq!(container.render(10.0), vec!["a".to_string(), "b".to_string()]);
+        container.remove_child(&container.children[0].clone());
+        assert_eq!(container.render(10.0), vec!["b".to_string()]);
+        container.clear();
+        assert!(container.render(10.0).is_empty());
+    }
+
+    #[test]
+    fn kitty_image_ids_are_extracted_from_params() {
+        assert_eq!(extract_kitty_image_ids("\x1b_Ga=T,i=42;AAAA\x1b\\"), vec![42]);
+        assert_eq!(extract_kitty_image_ids("\x1b_Ga=T,f=100,q=2;AAAA\x1b\\"), Vec::<u32>::new());
+        assert_eq!(extract_kitty_image_ids("plain"), Vec::<u32>::new());
+    }
+
+    #[test]
+    fn focus_flag_tracks_focusable_components() {
+        let mut tui = TUI::new(Box::new(FakeTerminal::new(80, 24)), Some(false));
+        let focusable = Rc::new(RefCell::new(FocusableLine {
+            text: "hi",
+            focused: false,
+        })) as Rc<RefCell<dyn Component>>;
+        tui.add_child(focusable.clone());
+        assert!(is_focusable(Some(focusable.clone())));
+        tui.set_focus(Some(focusable.clone()));
+        assert!(focusable.borrow().as_focusable().unwrap().focused());
+        tui.set_focus(None);
+        assert!(!focusable.borrow().as_focusable().unwrap().focused());
+    }
+
+    #[test]
+    fn overlay_handle_requests_are_applied_by_sync() {
+        let mut tui = TUI::new(Box::new(FakeTerminal::new(80, 24)), Some(false));
+        let component = Rc::new(RefCell::new(Line("overlay"))) as Rc<RefCell<dyn Component>>;
+        let handle = tui.show_overlay(OverlayOptions {
+            component: Some(component.clone()),
+            non_capturing: true,
+            ..OverlayOptions::default()
+        });
+        assert!(tui.has_overlay());
+        assert!(!handle.is_focused());
+
+        handle.set_hidden(true);
+        tui.sync_overlays();
+        assert!(handle.is_hidden());
+        assert!(!tui.has_overlay());
+
+        handle.set_hidden(false);
+        handle.focus();
+        tui.sync_overlays();
+        assert!(tui.has_overlay());
+        assert!(handle.is_focused());
+
+        handle.hide();
+        tui.sync_overlays();
+        assert!(!tui.has_overlay());
+    }
+
+    #[test]
+    fn cursor_marker_is_extracted_and_stripped() {
+        let mut tui = TUI::new(Box::new(FakeTerminal::new(80, 24)), Some(false));
+        let mut lines = vec![format!("ab{CURSOR_MARKER}cd")];
+        let position = tui.extract_cursor_position(&mut lines, 24).unwrap();
+        assert_eq!(position.row, 0);
+        assert_eq!(position.col, 2);
+        assert_eq!(lines, vec!["abcd".to_string()]);
+    }
+
+    #[test]
+    fn cell_size_response_updates_dimensions_and_is_consumed() {
+        let mut tui = TUI::new(Box::new(FakeTerminal::new(80, 24)), Some(false));
+        assert!(!tui.consume_cell_size_response("\x1b[A"));
+        assert!(tui.consume_cell_size_response("\x1b[6;18;9t"));
+        assert_eq!(crate::terminal_image::get_cell_dimensions().width_px, 9);
+        assert_eq!(crate::terminal_image::get_cell_dimensions().height_px, 18);
+    }
+
+    #[derive(Clone)]
+    struct SharedTerminal(Rc<RefCell<FakeTerminal>>);
+
+    impl Terminal for SharedTerminal {
+        fn start(&mut self, _on_input: Box<dyn Fn(String)>, _on_resize: Box<dyn Fn()>) {}
+
+        fn stop(&mut self, _options: crate::terminal::TerminalStopOptions) {}
+
+        fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
+
+        fn write(&mut self, data: &str) {
+            self.0.borrow_mut().written.push_str(data);
+        }
+
+        fn columns(&self) -> usize {
+            self.0.borrow().columns
+        }
+
+        fn rows(&self) -> usize {
+            self.0.borrow().rows
+        }
+
+        fn kitty_protocol_active(&self) -> bool {
+            false
+        }
+
+        fn move_by(&mut self, _lines: i64) {}
+
+        fn hide_cursor(&mut self) {}
+
+        fn show_cursor(&mut self) {}
+
+        fn clear_line(&mut self) {}
+
+        fn clear_from_cursor(&mut self) {}
+
+        fn clear_screen(&mut self) {}
+
+        fn enter_alt_screen(&mut self) {
+            self.0.borrow_mut().alt_screen = true;
+        }
+
+        fn leave_alt_screen(&mut self) {
+            self.0.borrow_mut().alt_screen = false;
+        }
+
+        fn alt_screen_active(&self) -> bool {
+            self.0.borrow().alt_screen
+        }
+
+        fn set_mouse_tracking(&mut self, enabled: bool) {
+            self.0.borrow_mut().mouse_tracking = enabled;
+        }
+
+        fn mouse_tracking_active(&self) -> bool {
+            self.0.borrow().mouse_tracking
+        }
+
+        fn set_title(&mut self, _title: &str) {}
+
+        fn set_progress(&mut self, _active: bool) {}
+    }
+
+    #[test]
+    fn first_render_writes_lines_without_clearing() {
+        let terminal = Rc::new(RefCell::new(FakeTerminal::new(80, 24)));
+        let mut tui = TUI::new(Box::new(SharedTerminal(terminal.clone())), Some(false));
+        tui.add_child(Rc::new(RefCell::new(Line("hello"))) as Rc<RefCell<dyn Component>>);
+        tui.do_render();
+        let written = terminal.borrow().written.clone();
+        assert!(written.starts_with("\x1b[?2026h"));
+        assert!(written.contains("hello"));
+        assert!(!written.contains("\x1b[2J"));
+        assert!(written.ends_with("\x1b[?2026l"));
+    }
+
+    #[test]
+    fn fullscreen_paints_a_fixed_frame_and_restores_inline_state() {
+        let terminal = Rc::new(RefCell::new(FakeTerminal::new(20, 5)));
+        let mut tui = TUI::new(Box::new(SharedTerminal(terminal.clone())), Some(false));
+        let scroll = vec![Rc::new(RefCell::new(Line("one"))) as Rc<RefCell<dyn Component>>];
+        let dock = Rc::new(RefCell::new(Line("dock"))) as Rc<RefCell<dyn Component>>;
+        tui.enter_fullscreen(FullscreenOptions {
+            scroll,
+            dock,
+            mouse: true,
+            viewport_controls: true,
+        });
+        assert!(tui.is_fullscreen());
+        assert!(terminal.borrow().alt_screen);
+        assert!(terminal.borrow().mouse_tracking);
+        assert!(tui.get_scroll_info().unwrap().following);
+
+        terminal.borrow_mut().written.clear();
+        tui.do_render();
+        let written = terminal.borrow().written.clone();
+        assert!(written.contains("dock"));
+
+        tui.exit_fullscreen(ExitFullscreenOptions {
+            flush: false,
+            leave_alt_screen: true,
+        });
+        assert!(!tui.is_fullscreen());
+        assert!(!terminal.borrow().alt_screen);
+        assert!(!terminal.borrow().mouse_tracking);
+    }
+}
+// ---------------------------------------------------------------------------
+// Module-level helpers
+// ---------------------------------------------------------------------------
+
+/// Position the hardware cursor for IME candidate window.
+fn position_hardware_cursor_static(
+    terminal: &mut Box<dyn Terminal>,
+    cursor_pos: Option<CursorPosition>,
+    total_lines: usize,
+    hardware_cursor_row: &mut usize,
+    show_hardware_cursor: bool,
+) {
+    let cursor_pos = match cursor_pos {
+        Some(cursor_pos) if total_lines > 0 => cursor_pos,
+        _ => {
+            terminal.hide_cursor();
+            return;
+        }
+    };
+
+    // Clamp cursor position to valid range
+    let target_row = cursor_pos.row.min(total_lines - 1);
+    let target_col = cursor_pos.col;
+
+    // Move cursor from current position to target
+    let row_delta = target_row as i64 - *hardware_cursor_row as i64;
+    let mut buffer = String::new();
+    if row_delta > 0 {
+        buffer.push_str(&format!("\x1b[{row_delta}B")); // Move down
+    } else if row_delta < 0 {
+        buffer.push_str(&format!("\x1b[{}A", -row_delta)); // Move up
+    }
+    // Move to absolute column (1-indexed)
+    buffer.push_str(&format!("\x1b[{}G", target_col + 1));
+
+    if !buffer.is_empty() {
+        terminal.write(&buffer);
+    }
+
+    *hardware_cursor_row = target_row;
+    if show_hardware_cursor {
+        terminal.show_cursor();
+    } else {
+        terminal.hide_cursor();
+    }
+}
+
+fn collect_kitty_image_ids_static(lines: &[String]) -> HashSet<u32> {
+    let mut ids = HashSet::new();
+    for line in lines {
+        for id in extract_kitty_image_ids(line) {
+            ids.insert(id);
+        }
+    }
+    ids
+}
+
+fn delete_changed_kitty_images_static(
+    previous_lines: &[String],
+    first_changed: i64,
+    last_changed: i64,
+) -> String {
+    if first_changed < 0 || last_changed < first_changed {
+        return String::new();
+    }
+
+    let mut ids: HashSet<u32> = HashSet::new();
+    let max_line = (last_changed as usize).min(previous_lines.len().saturating_sub(1));
+    for i in first_changed as usize..=max_line {
+        for id in extract_kitty_image_ids(previous_lines.get(i).map(String::as_str).unwrap_or("")) {
+            ids.insert(id);
+        }
+    }
+
+    let mut buffer = String::new();
+    for id in ids {
+        buffer.push_str(&delete_kitty_image(id));
+    }
+    buffer
+}
+
+fn expand_last_changed_for_kitty_images_static(
+    previous_lines: &[String],
+    first_changed: usize,
+    last_changed: usize,
+) -> usize {
+    let mut expanded_last_changed = last_changed;
+    for i in first_changed..previous_lines.len() {
+        if !extract_kitty_image_ids(&previous_lines[i]).is_empty() {
+            expanded_last_changed = expanded_last_changed.max(i);
+        }
+    }
+    expanded_last_changed
+}
+
+/// Port of the `PI_DEBUG_REDRAW` / `PI_TUI_DEBUG` log paths under `~/.prime/agent`.
+fn debug_log_path(file_name: &str) -> std::path::PathBuf {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_default();
+    std::path::Path::new(&home)
+        .join(".prime")
+        .join("agent")
+        .join(file_name)
+}
+
+/// Port of `new Date().toISOString()`.
+fn iso_timestamp() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }

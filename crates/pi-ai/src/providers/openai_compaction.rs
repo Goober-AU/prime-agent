@@ -9,7 +9,6 @@ use crate::compaction::{CompactionOptions, ProviderCompactionCheckpoint, Provide
 use crate::models::calculate_cost;
 use crate::types::{
 	Api, Model, NativeCompactionValidation, Usage, NATIVE_COMPACTION_API_VERSION_V1,
-	NATIVE_COMPACTION_PROTOCOL_OPENAI_RESPONSES_COMPACT_V1,
 };
 use crate::utils::headers::header_map_to_record;
 use crate::utils::stream_failure::parse_retry_after_ms;

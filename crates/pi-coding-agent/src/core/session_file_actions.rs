@@ -28,7 +28,7 @@ impl DeleteSessionFileResult {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct DeleteSessionFileOptions {
     /// `afterFileRemoved?` - invoked once the session file itself is gone.
     pub after_file_removed: Option<Box<dyn FnMut()>>,

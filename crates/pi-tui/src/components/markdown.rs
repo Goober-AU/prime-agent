@@ -91,12 +91,12 @@ fn match_block_math(src: &str) -> Option<(String, String)> {
         (format!("$${}$$", &body[..end]), body[..end].to_string())
     } else if let Some(body) = rest.strip_prefix("\\[") {
         let end = body.find("\\]")?;
-        (format!("\\[{}]\\]", &body[..end]), body[..end].to_string())
+        (format!("\\[{}\\]", &body[..end]), body[..end].to_string())
     } else {
         return None;
     };
 
-    let after_body = &rest[indent.len() + raw_body.len()..];
+    let after_body = &rest[raw_body.len()..];
     let mut trailing = String::new();
     let mut after = after_body;
     for ch in after_body.chars() {
@@ -129,7 +129,7 @@ fn match_inline_math(src: &str) -> Option<(String, String)> {
     if let Some(body) = src.strip_prefix("\\[") {
         if let Some(end) = body.find("\\]") {
             if !body[..end].is_empty() {
-                return Some((format!("\\[{}]\\]", &body[..end]), body[..end].to_string()));
+                return Some((format!("\\[{}\\]", &body[..end]), body[..end].to_string()));
             }
         }
     }

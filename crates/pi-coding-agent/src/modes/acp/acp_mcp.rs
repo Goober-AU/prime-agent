@@ -7,61 +7,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-/// Local minimal stand-in for `core/mcp/acp-mcp-types.ts` (`AcpMcpServerConfig`).
-/// The owning slice has not landed yet; see blocked_on in evidence/status.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum AcpMcpServerConfig {
-    Http {
-        name: String,
-        url: String,
-        headers: Vec<(String, String)>,
-    },
-    Stdio {
-        name: String,
-        command: String,
-        args: Vec<String>,
-        cwd: String,
-        env: Vec<(String, String)>,
-    },
-}
-
-impl AcpMcpServerConfig {
-    pub fn http(name: String, url: String, headers: Vec<(String, String)>) -> Self {
-        AcpMcpServerConfig::Http { name, url, headers }
-    }
-
-    pub fn stdio(name: String, command: String, args: Vec<String>, cwd: String, env: Vec<(String, String)>) -> Self {
-        AcpMcpServerConfig::Stdio {
-            name,
-            command,
-            args,
-            cwd,
-            env,
-        }
-    }
-
-    pub fn name(&self) -> &str {
-        match self {
-            AcpMcpServerConfig::Http { name, .. } => name,
-            AcpMcpServerConfig::Stdio { name, .. } => name,
-        }
-    }
-
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            AcpMcpServerConfig::Http { .. } => "http",
-            AcpMcpServerConfig::Stdio { .. } => "stdio",
-        }
-    }
-
-    pub fn cwd_value(&self) -> Option<String> {
-        match self {
-            AcpMcpServerConfig::Stdio { cwd, .. } => Some(cwd.clone()),
-            AcpMcpServerConfig::Http { .. } => None,
-        }
-    }
-}
+use crate::core::mcp::acp_mcp_types::{
+    AcpMcpHttpServerConfig, AcpMcpServerConfig, AcpMcpStdioServerConfig,
+};
 
 static SERVER_NAME_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$").expect("static regex"));
@@ -104,11 +52,13 @@ pub struct AcpRequestError {
 
 impl AcpRequestError {
     pub fn invalid_params(reason: impl Into<String>) -> Self {
-        Self { reason: reason.into() }
+        Self {
+            reason: reason.into(),
+        }
     }
 }
 
-/// HTTP header name validation, matching Node's `validateHeaderName`.
+/// `validateHeaderName` from `node:http`, as a token check.
 fn is_valid_header_name(name: &str) -> bool {
     if name.is_empty() {
         return false;
@@ -122,15 +72,15 @@ fn is_valid_header_name(name: &str) -> bool {
     })
 }
 
-/// HTTP header value validation, matching Node's `validateHeaderValue`.
+/// `validateHeaderValue` from `node:http`, as an invalid-character check.
 fn is_valid_header_value(value: &str) -> bool {
     value
         .bytes()
         .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte) || byte >= 0x80)
 }
 
-fn entries(server: &str, label: &str, values: &[McpEnvEntry]) -> Result<Vec<(String, String)>, AcpRequestError> {
-    let mut result: Vec<(String, String)> = Vec::new();
+fn entries(server: &str, label: &str, values: &[McpEnvEntry]) -> Result<Map<String, Value>, AcpRequestError> {
+    let mut result: Map<String, Value> = Map::new();
     let mut seen: HashSet<String> = HashSet::new();
     for entry in values {
         if entry.name.is_empty() {
@@ -161,7 +111,7 @@ fn entries(server: &str, label: &str, values: &[McpEnvEntry]) -> Result<Vec<(Str
             )));
         }
         seen.insert(identity);
-        result.push((entry.name.clone(), entry.value.clone()));
+        result.insert(entry.name.clone(), Value::String(entry.value.clone()));
     }
     Ok(result)
 }
@@ -199,13 +149,13 @@ pub fn resolve_acp_mcp_servers(
                     server.name
                 )));
             }
-            resolved.push(AcpMcpServerConfig::stdio(
-                server.name.clone(),
-                command.clone(),
-                server.args.clone(),
-                cwd.to_string(),
-                entries(&server.name, "environment", &server.env)?,
-            ));
+            resolved.push(AcpMcpServerConfig::Stdio(AcpMcpStdioServerConfig {
+                name: server.name.clone(),
+                command: command.clone(),
+                args: server.args.clone(),
+                cwd: cwd.to_string(),
+                env: entries(&server.name, "environment", &server.env)?,
+            }));
             continue;
         }
 
@@ -233,28 +183,13 @@ pub fn resolve_acp_mcp_servers(
                 server.name
             )));
         }
-        resolved.push(AcpMcpServerConfig::http(
-            server.name.clone(),
-            url.to_string(),
-            entries(&server.name, "header", &server.headers)?,
-        ));
+        resolved.push(AcpMcpServerConfig::Http(AcpMcpHttpServerConfig {
+            name: server.name.clone(),
+            url: url.to_string(),
+            headers: entries(&server.name, "header", &server.headers)?,
+        }));
     }
     Ok(resolved)
-}
-
-/// `McpServer[]` read from an ACP `session/new` payload.
-pub fn parse_mcp_servers(value: Option<&Value>) -> Vec<AcpMcpServer> {
-    match value {
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|item| serde_json::from_value::<AcpMcpServer>(item.clone()).ok())
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-pub fn server_config_to_value(config: &AcpMcpServerConfig) -> Value {
-    serde_json::to_value(config).unwrap_or(Value::Object(Map::new()))
 }
 
 #[cfg(test)]
@@ -274,8 +209,14 @@ mod tests {
     fn resolves_stdio_servers_with_cwd() {
         let resolved = resolve_acp_mcp_servers(&[stdio_server("alpha", "npx")], "C:/work").unwrap();
         assert_eq!(resolved.len(), 1);
-        assert_eq!(resolved[0].type_name(), "stdio");
-        assert_eq!(resolved[0].cwd_value().as_deref(), Some("C:/work"));
+        assert_eq!(resolved[0].transport(), "stdio");
+        match &resolved[0] {
+            AcpMcpServerConfig::Stdio(config) => {
+                assert_eq!(config.cwd, "C:/work");
+                assert_eq!(config.args, vec!["--serve".to_string()]);
+            }
+            AcpMcpServerConfig::Http(_) => panic!("expected stdio"),
+        }
     }
 
     #[test]
@@ -339,5 +280,28 @@ mod tests {
         }];
         let error = resolve_acp_mcp_servers(&[server], ".").unwrap_err();
         assert_eq!(error.reason, "MCP server alpha has an empty environment name");
+    }
+
+    #[test]
+    fn http_headers_and_urls_are_normalized() {
+        let server = AcpMcpServer {
+            name: "web".to_string(),
+            type_: Some("http".to_string()),
+            url: Some("https://example.com/mcp".to_string()),
+            headers: vec![McpEnvEntry {
+                name: "Authorization".to_string(),
+                value: "Bearer t".to_string(),
+            }],
+            ..Default::default()
+        };
+        let resolved = resolve_acp_mcp_servers(&[server], ".").unwrap();
+        assert_eq!(resolved[0].transport(), "http");
+        match &resolved[0] {
+            AcpMcpServerConfig::Http(config) => {
+                assert_eq!(config.url, "https://example.com/mcp");
+                assert_eq!(config.headers.get("Authorization"), Some(&Value::String("Bearer t".to_string())));
+            }
+            AcpMcpServerConfig::Stdio(_) => panic!("expected http"),
+        }
     }
 }

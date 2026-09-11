@@ -42,7 +42,7 @@ impl std::fmt::Display for SessionSelectorNotFoundError {
 
 impl std::error::Error for SessionSelectorNotFoundError {}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionSelectorAmbiguousError {
     pub error: SessionSelectorError,
     pub matches: Vec<SessionInfo>,
@@ -58,7 +58,7 @@ impl std::error::Error for SessionSelectorAmbiguousError {}
 
 /// `SessionSelectorError` subtypes are reported as one error type so callers can
 /// match on the variant, exactly like `instanceof` checks in the TypeScript.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResolveSessionError {
     NotFound(SessionSelectorNotFoundError),
     Ambiguous(SessionSelectorAmbiguousError),
@@ -258,7 +258,6 @@ fn edit_distance(left: &str, right: &str) -> usize {
 mod tests {
     use super::*;
     use crate::core::session_manager::SessionInfo;
-    use std::path::PathBuf;
 
     fn info(id: &str, name: Option<&str>) -> SessionInfo {
         SessionInfo {
@@ -336,10 +335,5 @@ mod tests {
                 path: "./x.jsonl".to_string()
             }
         );
-    }
-
-    #[test]
-    fn unused_pathbuf_import_keeps_the_helper_available() {
-        let _ = PathBuf::from(".");
     }
 }

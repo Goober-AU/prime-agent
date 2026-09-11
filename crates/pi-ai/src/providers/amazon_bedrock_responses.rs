@@ -19,8 +19,7 @@ use crate::utils::stream_failure::{
 };
 
 use super::bedrock_responses_client::{
-	create_bedrock_responses_client, responses_event_stream, send_signed_responses_request,
-	BedrockResponsesAuthOptions,
+	create_bedrock_responses_client, responses_event_stream, BedrockResponsesAuthOptions,
 };
 use super::openai_responses_shared::{
 	convert_responses_messages, convert_responses_tools, process_responses_stream, OpenAIResponsesStreamOptions,
@@ -391,6 +390,18 @@ async fn run_bedrock_responses_stream(
 	}
 
 	Ok(())
+}
+
+/// TS: `function applyBedrockAstraContextPricing(usage: Usage): void`.
+pub fn apply_bedrock_astra_context_pricing(usage: &mut Usage) {
+	if usage.input + usage.cache_read + usage.cache_write <= 272_000.0 {
+		return;
+	}
+	usage.cost.input *= 2.0;
+	usage.cost.cache_read *= 2.0;
+	usage.cost.cache_write *= 2.0;
+	usage.cost.output *= 1.5;
+	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cache_read + usage.cost.cache_write;
 }
 
 #[cfg(test)]

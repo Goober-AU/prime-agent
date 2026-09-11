@@ -6,7 +6,6 @@
 //! or a running agent. Returning a vector lets one prime-agent event fan out to
 //! several ACP updates (or none, for events ACP has no place for).
 
-use base64::Engine;
 use serde_json::{Map, Value};
 
 use crate::modes::acp::acp_meta::{
@@ -505,17 +504,6 @@ pub fn bash_tool_call_id(run_id: Option<&str>) -> String {
     }
 }
 
-/// Decoded base64 length helper kept public for tests.
-pub fn base64_decoded_byte_length(data: &str) -> u64 {
-    base64_byte_length(data)
-}
-
-/// The engine is only used by tests today; keep the dependency honest.
-#[allow(dead_code)]
-fn _engine_marker() -> impl base64::Engine {
-    base64::engine::general_purpose::STANDARD
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,10 +526,10 @@ mod tests {
 
     #[test]
     fn decoded_base64_length_matches_the_formula() {
-        assert_eq!(base64_decoded_byte_length(""), 0);
-        assert_eq!(base64_decoded_byte_length("QQ=="), 1);
-        assert_eq!(base64_decoded_byte_length("QUI="), 2);
-        assert_eq!(base64_decoded_byte_length("QUJD"), 3);
+        assert_eq!(base64_byte_length(""), 0);
+        assert_eq!(base64_byte_length("QQ=="), 1);
+        assert_eq!(base64_byte_length("QUI="), 2);
+        assert_eq!(base64_byte_length("QUJD"), 3);
     }
 
     #[test]

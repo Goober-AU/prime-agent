@@ -2062,10 +2062,11 @@ pub fn parse_web_socket(
                 tokio::pin!(notified);
                 notified.as_mut().enable();
                 // Re-check after registering interest so a message cannot be missed.
-                let mut shared = state.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                let has_event = !shared.queue.is_empty();
-                let done = shared.done;
-                drop(shared);
+                // The guard is scoped so it is never held across the await.
+                let (has_event, done) = {
+                    let shared = state.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    (!shared.queue.is_empty(), shared.done)
+                };
                 if !has_event && !done {
                     notified.await;
                 }
@@ -2302,11 +2303,11 @@ pub fn start_web_socket_output_on_first_event<S>(
     error_slot: Arc<Mutex<Option<CodexThrown>>>,
 ) -> Pin<Box<dyn futures::Stream<Item = Value> + Send>>
 where
-    S: futures::Stream<Item = Result<Value, CodexThrown>> + Send + 'static,
+    S: futures::Stream<Item = Value> + Send + 'static,
 {
     Box::pin(futures::stream::unfold(
         (
-            Box::pin(events) as Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>>,
+            Box::pin(events) as Pin<Box<dyn futures::Stream<Item = Value> + Send>>,
             false,
             output,
             stream,
@@ -2314,24 +2315,15 @@ where
             error_slot,
         ),
         |(mut events, started, output, stream, on_start, error_slot)| async move {
-            loop {
-                let event = match events.next().await {
-                    None => return None,
-                    Some(Err(error)) => {
-                        *error_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
-                        return None;
-                    }
-                    Some(Ok(event)) => event,
-                };
-                if !started {
-                    on_start();
-                    stream.push(AssistantMessageEvent::Start {
-                        partial: output.clone(),
-                    });
-                    return Some((event, (events, true, output, stream, on_start, error_slot)));
-                }
-                return Some((event, (events, true, output, stream, on_start, error_slot)));
+            let _ = &error_slot;
+            let event = events.next().await?;
+            if !started {
+                on_start();
+                stream.push(AssistantMessageEvent::Start {
+                    partial: output.clone(),
+                });
             }
+            Some((event, (events, true, output, stream, on_start, error_slot)))
         },
     ))
 }

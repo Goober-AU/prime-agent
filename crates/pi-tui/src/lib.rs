@@ -8,6 +8,7 @@ pub mod keybindings;
 pub mod keys;
 pub mod kill_ring;
 pub mod latex;
+pub mod r#mod;
 pub mod mouse;
 pub mod render_cache;
 pub mod selection_metadata;

@@ -414,11 +414,11 @@ const COMMON_FRACTIONS: &[(&str, &str)] = &[
     ("1/8", "⅛"),
 ];
 
-fn lookup(table: &[(&str, &str)], key: &str) -> Option<&'static str> {
+fn lookup<'a>(table: &'a [(&'a str, &'a str)], key: &str) -> Option<&'a str> {
     table.iter().find(|(k, _)| *k == key).map(|(_, v)| *v)
 }
 
-fn lookup_char(table: &[(&str, &str)], key: char) -> Option<&'static str> {
+fn lookup_char<'a>(table: &'a [(&'a str, &'a str)], key: char) -> Option<&'a str> {
     let mut buf = [0u8; 4];
     lookup(table, key.encode_utf8(&mut buf))
 }
@@ -426,6 +426,7 @@ fn lookup_char(table: &[(&str, &str)], key: char) -> Option<&'static str> {
 fn in_set(table: &[&str], key: &str) -> bool {
     table.contains(&key)
 }
+
 
 /// Code point of the styled "A" in the Mathematical Alphanumeric block.
 #[derive(Debug, Clone)]

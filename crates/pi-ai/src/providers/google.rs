@@ -6,7 +6,6 @@
 //! wire shape (`generateContentParametersToMldev`), header merge order and error text.
 
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
 
 use futures::StreamExt;
 use indexmap::IndexMap;
@@ -492,15 +491,14 @@ pub fn create_client(
 	options_headers: Option<&IndexMap<String, String>>,
 	session_id: Option<&str>,
 ) -> GoogleClient {
-	let mut base_url = String::new();
 	let mut api_version = GOOGLE_AI_API_DEFAULT_VERSION.to_string();
-	if !model.base_url.is_empty() {
-		base_url = model.base_url.clone();
+	let base_url = if !model.base_url.is_empty() {
 		// baseUrl already includes version path, don't append
 		api_version = String::new();
+		model.base_url.clone()
 	} else {
-		base_url = "https://generativelanguage.googleapis.com/".to_string();
-	}
+		"https://generativelanguage.googleapis.com/".to_string()
+	};
 
 	let mut merged: IndexMap<String, Option<String>> = IndexMap::new();
 	if let Some(model_headers) = &model.headers {

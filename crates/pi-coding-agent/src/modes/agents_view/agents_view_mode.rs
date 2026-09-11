@@ -2404,7 +2404,6 @@ impl<'a> AgentsViewMode<'a> {
             .clone()
             .ok_or_else(|| "Agents view daemon client is not connected".to_string())
     }
-}
 
     /// `subscribeToClientClose(client)`.
     fn subscribe_to_client_close(&mut self, client: DaemonTransportClient) {

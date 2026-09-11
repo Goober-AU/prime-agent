@@ -28,7 +28,25 @@ use pi_agent_core::types::{AgentToolResult, AgentToolUpdateCallback, ToolExecuti
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use ipython::{create_ipython_tool_definition, IpythonToolDetails, IpythonToolOptions};
+pub use acp_mcp::{acp_mcp_tool_names, create_acp_mcp_tool_definitions, AcpMcpServerConfig};
+pub use bash::{
+    create_bash_tool, create_bash_tool_definition, create_local_bash_operations, BashOperations, BashSpawnContext,
+    BashSpawnHook, BashToolDetails, BashToolInput, BashToolOptions, LocalBashOperationsOptions,
+};
+pub use edit::{
+    create_edit_tool, create_edit_tool_definition, EditOperations, EditToolDetails, EditToolInput, EditToolOptions,
+};
+pub use file_mutation_queue::with_file_mutation_queue;
+pub use ipython::{
+    create_ipython_tool, create_ipython_tool_definition, IpythonKernelProvisioner, IpythonToolDetails,
+    IpythonToolInput, IpythonToolOptions,
+};
+pub use truncate::{
+    format_size, truncate_head, truncate_line, truncate_tail, TruncationOptions, TruncationResult, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_LINES,
+};
+
+use ipython::create_ipython_tool_definition as create_ipython_tool_definition_inner;
 
 /// TypeScript `ToolName = "ipython"`.
 pub type ToolName = &'static str;
@@ -220,7 +238,7 @@ pub fn create_all_tool_definitions(
     let mut definitions = BTreeMap::new();
     definitions.insert(
         "ipython",
-        create_ipython_tool_definition(cwd, options.and_then(|options| options.ipython.clone())),
+        create_ipython_tool_definition_inner(cwd, options.and_then(|options| options.ipython.clone())),
     );
     definitions
 }

@@ -3,14 +3,14 @@ use super::super::kernel::bootstrap::default_rlm_extra_import_labels;
 
 #[derive(Debug, Clone, Default)]
 pub struct RlmPromptOptions {
-	pub cwd: String,
-	pub skills_dir: Option<String>,
-	pub installed_skills: Option<Vec<String>>,
-	pub messages_path: String,
-	pub allow_recursion: Option<bool>,
-	pub depth: Option<i64>,
-	pub parent_agent: Option<String>,
-	pub active_tools: Option<Vec<String>>,
+    pub cwd: String,
+    pub skills_dir: Option<String>,
+    pub installed_skills: Option<Vec<String>>,
+    pub messages_path: String,
+    pub allow_recursion: Option<bool>,
+    pub depth: Option<i64>,
+    pub parent_agent: Option<String>,
+    pub active_tools: Option<Vec<String>>,
 }
 
 /// The `'''` literal used by the `edit` skill guidance line.
@@ -26,198 +26,209 @@ const REPL_CONTROL_PROMPT: &str = "The `ipython` tool is a persistent Python REP
 
 #[derive(Debug, Clone, Default)]
 pub struct ChildAgentDoctrineOptions {
-	pub depth: Option<i64>,
-	pub parent_agent: Option<String>,
-	pub installed_skills: Option<Vec<String>>,
-	pub active_tools: Option<Vec<String>>,
+    pub depth: Option<i64>,
+    pub parent_agent: Option<String>,
+    pub installed_skills: Option<Vec<String>>,
+    pub active_tools: Option<Vec<String>>,
 }
 
 pub fn build_child_agent_doctrine(options: ChildAgentDoctrineOptions) -> Option<String> {
-	let depth = options.depth.unwrap_or(0);
-	let has_ipython = match &options.active_tools {
-		None => true,
-		Some(tools) => tools.iter().any(|tool| tool == "ipython"),
-	};
-	let has_agent_message = options
-		.installed_skills
-		.as_ref()
-		.map(|skills| skills.iter().any(|skill| skill == "agent_message"))
-		.unwrap_or(false);
-	if depth <= 0 {
-		return None;
-	}
-	let mut lines = vec![
-		format!(
-			"You are a child agent spawned by {}. Task prompts are labeled `[task from parent]`.",
-			options.parent_agent.unwrap_or_else(|| "your parent agent".to_string())
-		),
-		"For a child task, finish with exactly one final line: `RLM_CHILD_STATUS: complete`, `RLM_CHILD_STATUS: blocked`, or `RLM_CHILD_STATUS: failed`. A progress update or stopReason:length is not completion; if an output limit ends a response, send a concise partial-result report and terminal status instead of starting more work.".to_string(),
-	];
-	if has_agent_message && has_ipython {
-		lines.push(
-			"When a task calls for an answer, reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`. Not every message or task needs a reply; continue cleanup after sending and go idle normally.".to_string(),
-		);
-	}
-	Some(lines.join("\n"))
+    let depth = options.depth.unwrap_or(0);
+    let has_ipython = match &options.active_tools {
+        None => true,
+        Some(tools) => tools.iter().any(|tool| tool == "ipython"),
+    };
+    let has_agent_message = options
+        .installed_skills
+        .as_ref()
+        .map(|skills| skills.iter().any(|skill| skill == "agent_message"))
+        .unwrap_or(false);
+    if depth <= 0 {
+        return None;
+    }
+    let mut lines = vec![
+        format!(
+            "You are a child agent spawned by {}. Task prompts are labeled `[task from parent]`.",
+            options.parent_agent.unwrap_or_else(|| "your parent agent".to_string())
+        ),
+        "For a child task, finish with exactly one final line: `RLM_CHILD_STATUS: complete`, `RLM_CHILD_STATUS: blocked`, or `RLM_CHILD_STATUS: failed`. A progress update or stopReason:length is not completion; if an output limit ends a response, send a concise partial-result report and terminal status instead of starting more work.".to_string(),
+    ];
+    if has_agent_message && has_ipython {
+        lines.push(
+            "When a task calls for an answer, reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`. Not every message or task needs a reply; continue cleanup after sending and go idle normally.".to_string(),
+        );
+    }
+    Some(lines.join("\n"))
 }
 
 pub fn build_rlm_prompt(options: &RlmPromptOptions) -> String {
-	let installed_skills = options.installed_skills.clone().unwrap_or_default();
-	let has_agent_message = installed_skills.iter().any(|skill| skill == "agent_message");
-	let has_agent_observe = installed_skills.iter().any(|skill| skill == "agent_observe");
-	let allow_recursion = options.allow_recursion.unwrap_or(true);
-	let depth = options.depth.unwrap_or(0);
-	let active_tools = options.active_tools.clone().unwrap_or_default();
-	let has_ipython = match &options.active_tools {
-		None => true,
-		Some(tools) => tools.iter().any(|tool| tool == "ipython"),
-	};
-	let can_run_shell_skills = has_ipython || active_tools.iter().any(|tool| tool == "bash");
-	let mut parts: Vec<String> = vec![
-		"You are a general purpose agent that uses code to solve tasks.".to_string(),
-		"You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.".to_string(),
-		"When you are done, stop calling tools and state your final answer.".to_string(),
-		String::new(),
-		LONG_RUNNING_WORK_PROMPT.to_string(),
-		String::new(),
-	];
-	if depth == 0 {
-		parts.push(USER_PROGRESS_PROMPT.to_string());
-		parts.push(String::new());
-	}
-	parts.push(SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT.to_string());
-	parts.push(String::new());
-	parts.push(format!("Working directory: {}", options.cwd));
-	parts.push(format!("Conversation log: {}", options.messages_path));
-	parts.push(format!("Recursive agent depth: {depth}"));
-	parts.push(format!(
-		"Pre-installed Python packages: {}.",
-		default_rlm_extra_import_labels().join(", ")
-	));
-	parts.push(
-		"Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module)."
-			.to_string(),
-	);
+    let installed_skills = options.installed_skills.clone().unwrap_or_default();
+    let has_agent_message = installed_skills
+        .iter()
+        .any(|skill| skill == "agent_message");
+    let has_agent_observe = installed_skills
+        .iter()
+        .any(|skill| skill == "agent_observe");
+    let allow_recursion = options.allow_recursion.unwrap_or(true);
+    let depth = options.depth.unwrap_or(0);
+    let active_tools = options.active_tools.clone().unwrap_or_default();
+    let has_ipython = match &options.active_tools {
+        None => true,
+        Some(tools) => tools.iter().any(|tool| tool == "ipython"),
+    };
+    let can_run_shell_skills = has_ipython || active_tools.iter().any(|tool| tool == "bash");
+    let mut parts: Vec<String> = vec![
+        "You are a general purpose agent that uses code to solve tasks.".to_string(),
+        "You solve tasks by breaking down problems into sub-tasks, writing and executing code, observing results, and iterating one step at a time.".to_string(),
+        "When you are done, stop calling tools and state your final answer.".to_string(),
+        String::new(),
+        LONG_RUNNING_WORK_PROMPT.to_string(),
+        String::new(),
+    ];
+    if depth == 0 {
+        parts.push(USER_PROGRESS_PROMPT.to_string());
+        parts.push(String::new());
+    }
+    parts.push(SIMPLIFIED_TECHNICAL_ENGLISH_PROMPT.to_string());
+    parts.push(String::new());
+    parts.push(format!("Working directory: {}", options.cwd));
+    parts.push(format!("Conversation log: {}", options.messages_path));
+    parts.push(format!("Recursive agent depth: {depth}"));
+    parts.push(format!(
+        "Pre-installed Python packages: {}.",
+        default_rlm_extra_import_labels().join(", ")
+    ));
+    parts.push(
+        "Install additional packages with `uv pip install <pkg>` (this is a uv-managed venv with no pip module)."
+            .to_string(),
+    );
 
-	let child_doctrine = build_child_agent_doctrine(ChildAgentDoctrineOptions {
-		depth: options.depth,
-		parent_agent: options.parent_agent.clone(),
-		installed_skills: options.installed_skills.clone(),
-		active_tools: options.active_tools.clone(),
-	});
-	if let Some(doctrine) = child_doctrine {
-		parts.push(String::new());
-		parts.push(doctrine);
-	}
+    let child_doctrine = build_child_agent_doctrine(ChildAgentDoctrineOptions {
+        depth: options.depth,
+        parent_agent: options.parent_agent.clone(),
+        installed_skills: options.installed_skills.clone(),
+        active_tools: options.active_tools.clone(),
+    });
+    if let Some(doctrine) = child_doctrine {
+        parts.push(String::new());
+        parts.push(doctrine);
+    }
 
-	let mut skill_lines: Vec<String> = Vec::new();
-	if let Some(skills_dir) = &options.skills_dir {
-		skill_lines.push(format!(
-			"Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
-		));
-	}
-	if !installed_skills.is_empty() {
-		let installed = installed_skills
-			.iter()
-			.map(|skill| format!("`{skill}`"))
-			.collect::<Vec<_>>()
-			.join(", ");
-		if has_ipython {
-			skill_lines.push(format!("Installed Python skill modules (pre-imported): {installed}."));
-			skill_lines.push(
-				"Read each skill's SKILL.md for its API. Inspect a module with `help(<skill>)` or `dir(<skill>)`, then inspect a documented callable with `inspect.signature(<skill>.<function>)`.".to_string(),
-			);
-		} else if can_run_shell_skills {
-			skill_lines.push(format!("Installed skills available as shell commands: {installed}."));
-		}
-		if can_run_shell_skills {
-			skill_lines.push(
-				"Each skill is also available as a shell command by the same name: `<skill> ...`. Discover its CLI usage with `<skill> --help`.".to_string(),
-			);
-		}
-		if has_ipython && installed_skills.iter().any(|skill| skill == "edit") {
-			skill_lines.push(format!(
-				"For targeted existing-file edits, prefer the pre-imported async `edit` skill from the REPL: `old = {}...{}; new = {}...{}; await edit(path=\"pkg/file.py\", old_str=old, new_str=new)`. Use exact old/new strings; if the text contains triple double quotes, use triple single-quoted variables or build `old`/`new` from inspected file slices.",
-				TRIPLE_QUOTE, TRIPLE_QUOTE, TRIPLE_QUOTE, TRIPLE_QUOTE
-			));
-		}
-	}
-	if !skill_lines.is_empty() {
-		parts.push(String::new());
-		parts.extend(skill_lines);
-	}
-	if has_agent_message {
-		parts.push(
-			"Agent messaging is restricted to your parent, siblings, and direct children; roots are siblings, and deeper communication relays through the intermediate child.".to_string(),
-		);
-	}
-	if has_agent_observe {
-		parts.push(
-			"Agent observation is restricted to your parent, siblings, and direct children; roots are siblings, and deeper inspection relays through the intermediate child.".to_string(),
-		);
-	}
+    let mut skill_lines: Vec<String> = Vec::new();
+    if let Some(skills_dir) = &options.skills_dir {
+        skill_lines.push(format!(
+            "Local skills live under {skills_dir}. Read their SKILL.md files when helpful."
+        ));
+    }
+    if !installed_skills.is_empty() {
+        let installed = installed_skills
+            .iter()
+            .map(|skill| format!("`{skill}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if has_ipython {
+            skill_lines.push(format!(
+                "Installed Python skill modules (pre-imported): {installed}."
+            ));
+            skill_lines.push(
+                "Read each skill's SKILL.md for its API. Inspect a module with `help(<skill>)` or `dir(<skill>)`, then inspect a documented callable with `inspect.signature(<skill>.<function>)`.".to_string(),
+            );
+        } else if can_run_shell_skills {
+            skill_lines.push(format!(
+                "Installed skills available as shell commands: {installed}."
+            ));
+        }
+        if can_run_shell_skills {
+            skill_lines.push(
+                "Each skill is also available as a shell command by the same name: `<skill> ...`. Discover its CLI usage with `<skill> --help`.".to_string(),
+            );
+        }
+        if has_ipython && installed_skills.iter().any(|skill| skill == "edit") {
+            skill_lines.push(format!(
+                "For targeted existing-file edits, prefer the pre-imported async `edit` skill from the REPL: `old = {}...{}; new = {}...{}; await edit(path=\"pkg/file.py\", old_str=old, new_str=new)`. Use exact old/new strings; if the text contains triple double quotes, use triple single-quoted variables or build `old`/`new` from inspected file slices.",
+                TRIPLE_QUOTE, TRIPLE_QUOTE, TRIPLE_QUOTE, TRIPLE_QUOTE
+            ));
+        }
+    }
+    if !skill_lines.is_empty() {
+        parts.push(String::new());
+        parts.extend(skill_lines);
+    }
+    if has_agent_message {
+        parts.push(
+            "Agent messaging is restricted to your parent, siblings, and direct children; roots are siblings, and deeper communication relays through the intermediate child.".to_string(),
+        );
+    }
+    if has_agent_observe {
+        parts.push(
+            "Agent observation is restricted to your parent, siblings, and direct children; roots are siblings, and deeper inspection relays through the intermediate child.".to_string(),
+        );
+    }
 
-	if depth == 0 && has_ipython {
-		parts.push(String::new());
-		parts.push(
-			"From a daemon-backed depth-0 session, use `await rlm.create_session('task', name='researcher')` to start a separate top-level session. The call returns after the daemon creates the session and accepts its first prompt. Inline and nested sessions cannot use it. `rlm(...)` still creates a child.".to_string(),
-		);
-	}
+    if depth == 0 && has_ipython {
+        parts.push(String::new());
+        parts.push(
+            "From a daemon-backed depth-0 session, use `await rlm.create_session('task', name='researcher')` to start a separate top-level session. The call returns after the daemon creates the session and accepts its first prompt. Inline and nested sessions cannot use it. `rlm(...)` still creates a child.".to_string(),
+        );
+    }
 
-	if allow_recursion && has_ipython {
-		parts.push(String::new());
-		parts.push(
-			"A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.".to_string(),
-		);
-		parts.push(
-			"Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.".to_string(),
-		);
-		parts.push(
-			"A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.".to_string(),
-		);
-		if has_agent_message {
-			parts.push(
-				"Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Replies and follow-ups arrive as ordinary agent messages; not every task requires a reply.".to_string(),
-			);
-			parts.push(
-				"Use `await agent_message.list_agents()` to discover family and `await rlm.list_subagents()` to recover direct child handles. Use `agent_message.send(..., receiver_role='child', receiver_name=child.name)` for follow-ups.".to_string(),
-			);
-		} else {
-			parts.push("Use `await rlm.list_subagents()` to recover direct child handles after admission.".to_string());
-		}
-		if has_agent_observe {
-			parts.push(
-				"Use `agent_observe` to inspect a child's rollout. Observation is restricted to your parent, siblings, and direct children; relay through the intermediate child for deeper descendants.".to_string(),
-			);
-		} else {
-			parts.push(
-				"Inspect files a child wrote when you need to collect its work without an observation capability.".to_string(),
-			);
-		}
-		parts.push(
-			"Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.".to_string(),
-		);
-	}
+    if allow_recursion && has_ipython {
+        parts.push(String::new());
+        parts.push(
+            "A callable `rlm` is already in your global namespace. `await rlm('sub-task')` spawns a child and returns immediately after task admission with `rlm_child_id`, `name`, `session_dir`, and `model`; it never waits for or returns the child's answer.".to_string(),
+        );
+        parts.push(
+            "Choose a stable child name with `await rlm('sub-task', name='api-reviewer')`; names must be unique among siblings. If omitted, the host generates a readable unique name.".to_string(),
+        );
+        parts.push(
+            "A child inherits your model. If a different model is explicitly requested, use `await rlm.find_models(...)` and an exact returned selector. An unavailable requested model fails spawn; decide whether to retry or omit `model`. Children also inherit your thinking level; the `thinking` option overrides it with any level the resolved child model supports, and an unsupported level fails spawn.".to_string(),
+        );
+        if has_agent_message {
+            parts.push(
+                "Children reply explicitly with `await agent_message.send(message, receiver_role='parent')` when an answer is needed. Replies and follow-ups arrive as ordinary agent messages; not every task requires a reply.".to_string(),
+            );
+            parts.push(
+                "Use `await agent_message.list_agents()` to discover family and `await rlm.list_subagents()` to recover direct child handles. Use `agent_message.send(..., receiver_role='child', receiver_name=child.name)` for follow-ups.".to_string(),
+            );
+        } else {
+            parts.push(
+                "Use `await rlm.list_subagents()` to recover direct child handles after admission."
+                    .to_string(),
+            );
+        }
+        if has_agent_observe {
+            parts.push(
+                "Use `agent_observe` to inspect a child's rollout. Observation is restricted to your parent, siblings, and direct children; relay through the intermediate child for deeper descendants.".to_string(),
+            );
+        } else {
+            parts.push(
+                "Inspect files a child wrote when you need to collect its work without an observation capability.".to_string(),
+            );
+        }
+        parts.push(
+            "Spawn independent children in separate calls and end your turn instead of awaiting completion. Multiple replies may arrive over multiple turns. Delete a direct child explicitly with `await rlm.delete_subagent(child)` when it is no longer needed.".to_string(),
+        );
+    }
 
-	if has_ipython {
-		parts.push(String::new());
-		parts.push(REPL_CONTROL_PROMPT.to_string());
-		if installed_skills.iter().any(|skill| skill == "refine") {
-			parts.push(String::new());
-			parts.push(
-				"Treat continual harness refinement as a small, evidence-backed update after observing a repeated failure or reusable tactic: diagnose the issue, update the smallest relevant continual harness component, validate on the next action, then record the outcome. Use `await refine.run()` to turn repeated delegation patterns into reusable subagent specs, repeated procedures into skills, durable facts/preferences into memories, and narrow behavioral policies into prompt addendums. It returns immediately and is only queued; no harness change is saved until a later Refinement complete outcome appears. Continue working normally after calling it, but never tell the user a refinement is saved or locked in based only on the queued response. Do not rewrite the whole continual harness when a focused memory, skill, prompt note, or subagent spec is enough.".to_string(),
-			);
-		}
-	}
+    if has_ipython {
+        parts.push(String::new());
+        parts.push(REPL_CONTROL_PROMPT.to_string());
+        if installed_skills.iter().any(|skill| skill == "refine") {
+            parts.push(String::new());
+            parts.push(
+                "Treat continual harness refinement as a small, evidence-backed update after observing a repeated failure or reusable tactic: diagnose the issue, update the smallest relevant continual harness component, validate on the next action, then record the outcome. Use `await refine.run()` to turn repeated delegation patterns into reusable subagent specs, repeated procedures into skills, durable facts/preferences into memories, and narrow behavioral policies into prompt addendums. It returns immediately and is only queued; no harness change is saved until a later Refinement complete outcome appears. Continue working normally after calling it, but never tell the user a refinement is saved or locked in based only on the queued response. Do not rewrite the whole continual harness when a focused memory, skill, prompt note, or subagent spec is enough.".to_string(),
+            );
+        }
+    }
 
-	parts.join("\n")
+    parts.join("\n")
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct SubagentGuidanceOptions {
-	pub include_refine_examples: Option<bool>,
-	pub has_agent_message: Option<bool>,
-	pub has_agent_observe: Option<bool>,
+    pub include_refine_examples: Option<bool>,
+    pub has_agent_message: Option<bool>,
+    pub has_agent_observe: Option<bool>,
 }
 
 /// Supplemental sub-agent delegation guidance, appended after the base RLM
@@ -227,115 +238,126 @@ pub struct SubagentGuidanceOptions {
 /// uses. The subagent-spec menu itself renders just after this, inside the
 /// harness-state block.
 pub fn build_subagent_guidance(options: SubagentGuidanceOptions) -> String {
-	let mut lines: Vec<String> = vec![
-		"# Delegating to sub-agents".to_string(),
-		String::new(),
-		"Spawn independent, self-contained work with `handle = await rlm('task', name='worker')`. This returns at admission, not completion; keep the handle to stop or inspect the child later.".to_string(),
-	];
-	if options.has_agent_message.unwrap_or(false) {
-		lines.push(
-			"Ask for an explicit reply when needed. A child replies with `await agent_message.send(message, receiver_role='parent')`; parent follow-ups use `receiver_role='child'` plus the child's name or id. Not every message needs a reply.".to_string(),
-		);
-	}
-	lines.push("Use `await rlm.list_subagents()` after kernel restart or compaction.".to_string());
-	if options.has_agent_observe.unwrap_or(false) {
-		lines.push("Use `agent_observe` for bounded transcript inspection.".to_string());
-	}
-	lines.push("Have children write files and read those files for fan-in.".to_string());
-	lines.push(
-		"Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.".to_string(),
-	);
-	if options.include_refine_examples.unwrap_or(true) {
-		lines.push("Persist genuinely reusable delegation patterns with `await refine.run()`.".to_string());
-	}
-	lines.join("\n")
+    let mut lines: Vec<String> = vec![
+        "# Delegating to sub-agents".to_string(),
+        String::new(),
+        "Spawn independent, self-contained work with `handle = await rlm('task', name='worker')`. This returns at admission, not completion; keep the handle to stop or inspect the child later.".to_string(),
+    ];
+    if options.has_agent_message.unwrap_or(false) {
+        lines.push(
+            "Ask for an explicit reply when needed. A child replies with `await agent_message.send(message, receiver_role='parent')`; parent follow-ups use `receiver_role='child'` plus the child's name or id. Not every message needs a reply.".to_string(),
+        );
+    }
+    lines.push("Use `await rlm.list_subagents()` after kernel restart or compaction.".to_string());
+    if options.has_agent_observe.unwrap_or(false) {
+        lines.push("Use `agent_observe` for bounded transcript inspection.".to_string());
+    }
+    lines.push("Have children write files and read those files for fan-in.".to_string());
+    lines.push(
+        "Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.".to_string(),
+    );
+    if options.include_refine_examples.unwrap_or(true) {
+        lines.push(
+            "Persist genuinely reusable delegation patterns with `await refine.run()`.".to_string(),
+        );
+    }
+    lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+    use super::*;
 
-	fn base() -> RlmPromptOptions {
-		RlmPromptOptions {
-			cwd: "/repo".to_string(),
-			messages_path: "/sessions/s.jsonl".to_string(),
-			..Default::default()
-		}
-	}
+    fn base() -> RlmPromptOptions {
+        RlmPromptOptions {
+            cwd: "/repo".to_string(),
+            messages_path: "/sessions/s.jsonl".to_string(),
+            ..Default::default()
+        }
+    }
 
-	#[test]
-	fn builds_a_depth_zero_prompt_with_the_progress_note() {
-		let prompt = build_rlm_prompt(&base());
-		assert!(prompt.starts_with("You are a general purpose agent that uses code to solve tasks."));
-		assert!(prompt.contains("As the user-facing root agent,"));
-		assert!(prompt.contains("Working directory: /repo"));
-		assert!(prompt.contains("Conversation log: /sessions/s.jsonl"));
-		assert!(prompt.contains("Recursive agent depth: 0"));
-		assert!(prompt.contains("Pre-installed Python packages: requests, httpx, yaml (PyYAML), tomli, dotenv (python-dotenv), pandas, numpy, scipy, bs4 (Beautiful Soup), lxml, pydantic, tyro."));
-		assert!(prompt.contains("A callable `rlm` is already in your global namespace."));
-		assert!(prompt.contains(REPL_CONTROL_PROMPT));
-		assert!(!prompt.contains("You are a child agent spawned by"));
-	}
+    #[test]
+    fn builds_a_depth_zero_prompt_with_the_progress_note() {
+        let prompt = build_rlm_prompt(&base());
+        assert!(
+            prompt.starts_with("You are a general purpose agent that uses code to solve tasks.")
+        );
+        assert!(prompt.contains("As the user-facing root agent,"));
+        assert!(prompt.contains("Working directory: /repo"));
+        assert!(prompt.contains("Conversation log: /sessions/s.jsonl"));
+        assert!(prompt.contains("Recursive agent depth: 0"));
+        assert!(prompt.contains("Pre-installed Python packages: requests, httpx, yaml (PyYAML), tomli, dotenv (python-dotenv), pandas, numpy, scipy, bs4 (Beautiful Soup), lxml, pydantic, tyro."));
+        assert!(prompt.contains("A callable `rlm` is already in your global namespace."));
+        assert!(prompt.contains(REPL_CONTROL_PROMPT));
+        assert!(!prompt.contains("You are a child agent spawned by"));
+    }
 
-	#[test]
-	fn child_prompts_include_the_doctrine_and_skip_root_only_blocks() {
-		let options = RlmPromptOptions {
-			depth: Some(1),
-			parent_agent: Some("lead".to_string()),
-			installed_skills: Some(vec!["agent_message".to_string(), "refine".to_string()]),
-			..base()
-		};
-		let prompt = build_rlm_prompt(&options);
-		assert!(prompt.contains("You are a child agent spawned by lead."));
-		assert!(prompt.contains("RLM_CHILD_STATUS: complete"));
-		assert!(prompt.contains("reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`"));
-		assert!(!prompt.contains("As the user-facing root agent,"));
-		assert!(!prompt.contains("rlm.create_session"));
-		assert!(prompt.contains("Children reply explicitly with `await agent_message.send(message, receiver_role='parent')`"));
-		assert!(!prompt.contains("Use `agent_observe` to inspect a child's rollout."));
-	}
+    #[test]
+    fn child_prompts_include_the_doctrine_and_skip_root_only_blocks() {
+        let options = RlmPromptOptions {
+            depth: Some(1),
+            parent_agent: Some("lead".to_string()),
+            installed_skills: Some(vec!["agent_message".to_string(), "refine".to_string()]),
+            ..base()
+        };
+        let prompt = build_rlm_prompt(&options);
+        assert!(prompt.contains("You are a child agent spawned by lead."));
+        assert!(prompt.contains("RLM_CHILD_STATUS: complete"));
+        assert!(prompt.contains(
+            "reply explicitly with `await agent_message.send(message, receiver_role=\"parent\")`"
+        ));
+        assert!(!prompt.contains("As the user-facing root agent,"));
+        assert!(!prompt.contains("rlm.create_session"));
+        assert!(prompt.contains("Children reply explicitly with `await agent_message.send(message, receiver_role='parent')`"));
+        assert!(!prompt.contains("Use `agent_observe` to inspect a child's rollout."));
+    }
 
-	#[test]
-	fn shell_only_sessions_use_shell_skill_lines() {
-		let options = RlmPromptOptions {
-			installed_skills: Some(vec!["edit".to_string()]),
-			active_tools: Some(vec!["bash".to_string()]),
-			..base()
-		};
-		let prompt = build_rlm_prompt(&options);
-		assert!(prompt.contains("Installed skills available as shell commands: `edit`."));
-		assert!(prompt.contains("Discover its CLI usage with `<skill> --help`."));
-		assert!(!prompt.contains("Installed Python skill modules (pre-imported)"));
-		assert!(!prompt.contains("await rlm('sub-task')"));
-	}
+    #[test]
+    fn shell_only_sessions_use_shell_skill_lines() {
+        let options = RlmPromptOptions {
+            installed_skills: Some(vec!["edit".to_string()]),
+            active_tools: Some(vec!["bash".to_string()]),
+            ..base()
+        };
+        let prompt = build_rlm_prompt(&options);
+        assert!(prompt.contains("Installed skills available as shell commands: `edit`."));
+        assert!(prompt.contains("Discover its CLI usage with `<skill> --help`."));
+        assert!(!prompt.contains("Installed Python skill modules (pre-imported)"));
+        assert!(!prompt.contains("await rlm('sub-task')"));
+    }
 
-	#[test]
-	fn build_child_agent_doctrine_requires_a_positive_depth() {
-		assert_eq!(build_child_agent_doctrine(ChildAgentDoctrineOptions::default()), None);
-		let doctrine = build_child_agent_doctrine(ChildAgentDoctrineOptions {
-			depth: Some(2),
-			installed_skills: Some(vec!["agent_message".to_string()]),
-			active_tools: Some(vec!["ipython".to_string()]),
-			..Default::default()
-		})
-		.expect("doctrine");
-		assert!(doctrine.starts_with("You are a child agent spawned by your parent agent."));
-		assert!(doctrine.contains("continue cleanup after sending and go idle normally."));
-	}
+    #[test]
+    fn build_child_agent_doctrine_requires_a_positive_depth() {
+        assert_eq!(
+            build_child_agent_doctrine(ChildAgentDoctrineOptions::default()),
+            None
+        );
+        let doctrine = build_child_agent_doctrine(ChildAgentDoctrineOptions {
+            depth: Some(2),
+            installed_skills: Some(vec!["agent_message".to_string()]),
+            active_tools: Some(vec!["ipython".to_string()]),
+            ..Default::default()
+        })
+        .expect("doctrine");
+        assert!(doctrine.starts_with("You are a child agent spawned by your parent agent."));
+        assert!(doctrine.contains("continue cleanup after sending and go idle normally."));
+    }
 
-	#[test]
-	fn builds_the_subagent_guidance_block() {
-		let guidance = build_subagent_guidance(SubagentGuidanceOptions::default());
-		assert!(guidance.starts_with("# Delegating to sub-agents"));
-		assert!(guidance.contains("Have children write files and read those files for fan-in."));
-		assert!(guidance.ends_with("Persist genuinely reusable delegation patterns with `await refine.run()`."));
-		let without = build_subagent_guidance(SubagentGuidanceOptions {
-			include_refine_examples: Some(false),
-			has_agent_message: Some(true),
-			has_agent_observe: Some(true),
-		});
-		assert!(without.contains("Ask for an explicit reply when needed."));
-		assert!(without.contains("Use `agent_observe` for bounded transcript inspection."));
-		assert!(!without.contains("refine.run()"));
-	}
+    #[test]
+    fn builds_the_subagent_guidance_block() {
+        let guidance = build_subagent_guidance(SubagentGuidanceOptions::default());
+        assert!(guidance.starts_with("# Delegating to sub-agents"));
+        assert!(guidance.contains("Have children write files and read those files for fan-in."));
+        assert!(guidance.ends_with(
+            "Persist genuinely reusable delegation patterns with `await refine.run()`."
+        ));
+        let without = build_subagent_guidance(SubagentGuidanceOptions {
+            include_refine_examples: Some(false),
+            has_agent_message: Some(true),
+            has_agent_observe: Some(true),
+        });
+        assert!(without.contains("Ask for an explicit reply when needed."));
+        assert!(without.contains("Use `agent_observe` for bounded transcript inspection."));
+        assert!(!without.contains("refine.run()"));
+    }
 }
