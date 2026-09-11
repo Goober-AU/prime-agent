@@ -108,8 +108,9 @@
   "src": "packages/ai/src/index.ts",
   "loc": 47,
   "crate": "pi-ai",
-  "rust": "crates/pi-ai/src/mod.rs",
-  "status": "pending"
+  "rust": "crates/pi-ai/src/lib.rs",
+  "status": "pending",
+  "note": "crate root; index.ts re-exports are the crate root re-exports"
  },
  {
   "package": "ai",

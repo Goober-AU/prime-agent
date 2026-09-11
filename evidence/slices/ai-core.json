@@ -39,7 +39,7 @@
   },
   {
    "src": "packages/ai/src/index.ts",
-   "rust": "crates/pi-ai/src/mod.rs",
+   "rust": "crates/pi-ai/src/lib.rs",
    "loc": 47
   },
   {
