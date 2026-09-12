@@ -117,39 +117,49 @@ pub fn slim_session_event_for_wire(event: &Value) -> Value {
 }
 
 /// `bindActiveSessionState`.
+/// The caller holds `Arc<StdMutex<ActiveSessionState>>`; this takes the same handle rather than a
+/// `&mut` borrow so the lock is held only for the synchronous prologue below. `bindActiveSessionState`
+/// (daemon-extension-binding.ts:49-97) mutates the state synchronously and awaits only
+/// `bindExtensions`, so a `&mut ActiveSessionState` parameter cannot be `Send` when this body awaits.
 pub async fn bind_active_session_state(
-    state: &mut ActiveSessionState,
+    state: &Arc<StdMutex<ActiveSessionState>>,
     session: Arc<dyn DaemonExtensionBindingSession>,
     callbacks: ActiveSessionBindingCallbacks,
 ) {
-    session.set_exec_env_provider(state.client_env.clone());
-    // Every runtime rebuild re-loads extensions, which capture client env
-    // synchronously at that moment.
-    session.set_runtime_env_scope(state.client_env.clone());
+    // Synchronous prologue: every mutation and subscription happens under this one lock, which is
+    // released before the first await. Every runtime rebuild re-loads extensions, which capture
+    // client env synchronously at that moment.
+    let (ui_context, error_active_session_id, error_broadcast) = {
+        let mut state = state.lock().expect("active session poisoned");
+        session.set_exec_env_provider(state.client_env.clone());
+        session.set_runtime_env_scope(state.client_env.clone());
 
-    if let Some(unsubscribe) = state.unsubscribe.take() {
-        unsubscribe();
-    }
-    session.set_subagent_runtime_host(callbacks.subagent_runtime_host.clone());
-    let active_session_id = state.active_session_id.clone();
-    let broadcast = Arc::clone(&callbacks.broadcast);
-    state.unsubscribe = Some(session.subscribe(Arc::new(move |event: &Value| {
-        broadcast(
-            &broadcast_state(&active_session_id),
-            DaemonOutbound::SessionEvent {
-                active_session_id: active_session_id.clone(),
-                event: slim_session_event_for_wire(event),
-            },
-        );
-    })));
+        if let Some(unsubscribe) = state.unsubscribe.take() {
+            unsubscribe();
+        }
+        session.set_subagent_runtime_host(callbacks.subagent_runtime_host.clone());
+        let active_session_id = state.active_session_id.clone();
+        let broadcast = Arc::clone(&callbacks.broadcast);
+        state.unsubscribe = Some(session.subscribe(Arc::new(move |event: &Value| {
+            broadcast(
+                &broadcast_state(&active_session_id),
+                DaemonOutbound::SessionEvent {
+                    active_session_id: active_session_id.clone(),
+                    event: slim_session_event_for_wire(event),
+                },
+            );
+        })));
 
-    let rebind_state = Arc::new(StdMutex::new(None::<Value>));
-    let _ = rebind_state;
-    session.set_rebind_session(Arc::new(move || Box::pin(async move {})));
+        let rebind_state = Arc::new(StdMutex::new(None::<Value>));
+        let _ = rebind_state;
+        session.set_rebind_session(Arc::new(move || Box::pin(async move {})));
 
-    let ui_context = Arc::new(ExtensionUiContext::new(state, Arc::clone(&callbacks.broadcast)));
-    let error_broadcast = Arc::clone(&callbacks.broadcast);
-    let error_active_session_id = state.active_session_id.clone();
+        (
+            Arc::new(ExtensionUiContext::new(&state, Arc::clone(&callbacks.broadcast))),
+            state.active_session_id.clone(),
+            Arc::clone(&callbacks.broadcast),
+        )
+    };
     session
         .bind_extensions(ExtensionBindingInput {
             ui_context,

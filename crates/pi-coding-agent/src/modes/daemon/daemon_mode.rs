@@ -6659,9 +6659,8 @@ impl AgentDaemon {
         // afterwards. Verified with rustc on a minimal repro: the guard-across-await shape
         // fails for all variants (drop(guard), scoped block, owned local of the guard), while
         // the `&Arc<StdMutex<..>>` callee with a scoped lock compiles. Then delete this cursor.
-        let mut state_guard = state.lock().expect("active session poisoned");
         bind_active_session_state(
-            &mut state_guard,
+            state,
             binder,
             ActiveSessionBindingCallbacks {
                 broadcast: Arc::new(
@@ -6689,7 +6688,6 @@ impl AgentDaemon {
             },
         )
         .await;
-        drop(state_guard);
         let _ = daemon;
         Ok(())
     }
@@ -8212,13 +8210,10 @@ impl AgentDaemon {
     fn flush_roster_now(self: &Arc<Self>) {
         let scheduled_jobs = self.cron_store.list();
         let mut entries: HashMap<String, WorkerRosterEntry> = HashMap::new();
-        // REPAIR CURSOR: `build_session_list` returns `daemon_session_list::SessionSummary`
-        // while `worker_roster_entry_from_summary` (agent_roster.rs:235) takes
-        // `RosterSessionSummary`; both unowned stubs of the same TypeScript type. Fix:
-        // collapse the two stubs onto one owner (agent_roster.rs's `RosterSessionSummary`
-        // is the one the roster path serializes), then delete this cursor.
+        // `build_session_list` yields the daemon's `SessionSummary` projection, which
+        // `roster_view()` narrows to the `RosterSessionSummary` the roster path serializes.
         for summary in build_session_list(&self.state_refs(), &[], &scheduled_jobs) {
-            let entry = worker_roster_entry_from_summary(&summary);
+            let entry = worker_roster_entry_from_summary(&summary.roster_view());
             entries.insert(entry.agent_id.clone(), entry);
         }
         {
