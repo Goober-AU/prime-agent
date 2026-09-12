@@ -36,7 +36,7 @@ thiserror = "2"
 anyhow = "1"
 tracing = "0.1"
 # time / ids / rand
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rand = "0.8"
 # fs / paths / text
