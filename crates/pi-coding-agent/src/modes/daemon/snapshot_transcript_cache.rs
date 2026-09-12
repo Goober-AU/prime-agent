@@ -420,7 +420,7 @@ impl SnapshotTranscriptCache {
         if let Some(waiters) = waiters {
             let stored = self.read_chunk(index);
             for waiter in waiters {
-                let _ = waiter.sender.send(stored.clone());
+                let _ = waiter.sender.send(stored.clone().map(Some));
             }
         }
         Ok(())

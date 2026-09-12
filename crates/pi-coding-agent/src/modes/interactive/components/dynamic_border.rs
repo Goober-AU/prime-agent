@@ -35,7 +35,8 @@ impl Component for DynamicBorder {
 
     fn render(&mut self, width: f64) -> Vec<String> {
         let count = (width.max(1.0)) as usize;
-        vec![(self.color)("\u{2500}".repeat(count))]
+        let line = "\u{2500}".repeat(count);
+        vec![(self.color)(&line)]
     }
 }
 

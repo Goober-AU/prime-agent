@@ -173,13 +173,21 @@ pub fn normalize_requested_rlm_subagent_thinking_level(
         return Err(format!("{operation} thinking must be a string"));
     };
     let level = level.trim().to_lowercase();
-    if !THINKING_LEVELS.iter().any(|known| *known == level) {
+    let Some(known) = THINKING_LEVELS.iter().find(|known| **known == level) else {
         return Err(format!(
             "{operation} thinking must be one of: {}",
             THINKING_LEVELS.join(", ")
         ));
-    }
-    Ok(Some(level))
+    };
+    Ok(Some(match *known {
+        "off" => ThinkingLevel::Off,
+        "minimal" => ThinkingLevel::Minimal,
+        "low" => ThinkingLevel::Low,
+        "medium" => ThinkingLevel::Medium,
+        "high" => ThinkingLevel::High,
+        "xhigh" => ThinkingLevel::Xhigh,
+        _ => ThinkingLevel::Max,
+    }))
 }
 
 /// `normalizeRequestedRlmSubagentModel(value, operation = "rlm.run")`.
@@ -697,7 +705,7 @@ mod tests {
         assert_eq!(
             normalize_requested_rlm_subagent_thinking_level(Some(&json!(" HIGH ")), None)
                 .unwrap()
-                .as_deref(),
+                .map(|level| level.as_str()),
             Some("high")
         );
         assert_eq!(

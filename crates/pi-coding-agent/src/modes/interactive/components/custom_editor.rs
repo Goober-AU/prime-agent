@@ -593,6 +593,41 @@ mod tests {
     use crate::modes::interactive::theme::theme::{get_editor_theme, init_theme};
     use pi_tui::terminal::ProcessTerminal;
 
+    /// `theme.ts`'s `EditorTheme` carries `Box` closures with `Send + Sync`; the
+    /// `pi-tui` editor takes `Rc` closures without those bounds. Private port of the
+    /// conversion the other editor host applies (`extension-editor.ts`). The
+    /// constructor itself already takes the `pi-tui` type.
+    fn to_tui_editor_theme(
+        source: crate::modes::interactive::theme::theme::EditorTheme,
+    ) -> EditorTheme {
+        EditorTheme {
+            border_color: Rc::new(move |text: &str| (source.border_color)(text)),
+            background_color: source.background_color.map(|color| {
+                let color: Rc<dyn Fn(&str) -> String> = Rc::new(move |text: &str| (color)(text));
+                color
+            }),
+            autocomplete_background_color: Some({
+                let color: Rc<dyn Fn(&str) -> String> =
+                    Rc::new(move |text: &str| (source.autocomplete_background_color)(text));
+                color
+            }),
+            select_list: pi_tui::components::select_list::SelectListTheme {
+                selected_prefix: source.select_list.selected_prefix,
+                selected_text: source.select_list.selected_text,
+                description: source.select_list.description,
+                argument_hint: Some(source.select_list.argument_hint),
+                source_tag: Some(source.select_list.source_tag),
+                scroll_info: source.select_list.scroll_info,
+                no_match: source.select_list.no_match,
+            },
+            command_color: Some({
+                let color: Rc<dyn Fn(&str) -> String> =
+                    Rc::new(move |text: &str| (source.command_color)(text));
+                color
+            }),
+        }
+    }
+
     fn init() {
         init_theme(Some("prime"), false);
     }
@@ -602,7 +637,7 @@ mod tests {
             Box::new(ProcessTerminal::new()),
             None,
         )));
-        CustomEditor::new(tui, get_editor_theme(), options)
+        CustomEditor::new(tui, to_tui_editor_theme(get_editor_theme()), options)
     }
 
     fn strip_ansi(text: &str) -> String {

@@ -1131,7 +1131,7 @@ mod tests {
     }
 
     fn sample_event(id: &str) -> PerformanceMetricEvent {
-        let mut measurements: PerformanceMetricMeasurements = std::collections::BTreeMap::new();
+        let mut measurements = PerformanceMetricMeasurements::new();
         measurements.insert(PerformanceMetricMeasurement::TotalMs, Some(12.5));
         measurements.insert(PerformanceMetricMeasurement::WaitMs, Some(1.5));
         measurements.insert(PerformanceMetricMeasurement::DispatchToFirstVisibleMs, Some(5.0));

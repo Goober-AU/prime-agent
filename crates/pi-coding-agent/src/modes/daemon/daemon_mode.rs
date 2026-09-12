@@ -2422,7 +2422,7 @@ impl AgentDaemon {
     }
 
     /// `fencePeerTransports(closingReason?)`.
-    fn fence_peer_transports(&self, closing_reason: Option<DaemonClosingReason>) {
+    fn fence_peer_transports(self: &Arc<Self>, closing_reason: Option<DaemonClosingReason>) {
         self.peer_grants
             .lock()
             .expect("peer grants poisoned")
@@ -3983,7 +3983,7 @@ impl AgentDaemon {
         {
             let replay_fields: Vec<&str> = ["content", "customMessage", "prefixMessages"]
                 .into_iter()
-                .filter(|field| body.contains_key(*field))
+                .filter(|field| body.get(*field).is_some())
                 .collect();
             if !replay_fields.is_empty() {
                 return Err(format!(
@@ -3996,13 +3996,13 @@ impl AgentDaemon {
         match command.type_.as_str() {
             "ack_result" => Ok(None),
             "list" => {
-                let active_sessions = self.session_states();
+                let active_sessions = self.state_refs();
                 let scheduled_jobs = self.cron_store.list();
                 let sessions = if body.get("all").and_then(Value::as_bool) != Some(true) {
                     self.build_session_list_with_passive_rlm_subagents(
-                        active_sessions,
+                        &active_sessions,
                         Vec::new(),
-                        scheduled_jobs,
+                        &scheduled_jobs,
                     )
                     .await
                 } else {
@@ -4014,18 +4014,15 @@ impl AgentDaemon {
                         .or_else(|| default_config.session_dir.clone());
                     let saved_sessions = match body.get("cwd").and_then(Value::as_str) {
                         Some(cwd) => {
-                            SessionManager::list(resolve_path(cwd), list_session_dir.clone())
+                            SessionManager::list(resolve_path(cwd), list_session_dir.as_deref(), None)
                                 .await
-                                .unwrap_or_default()
                         }
-                        None => SessionManager::list_all(None, list_session_dir.clone())
-                            .await
-                            .unwrap_or_default(),
+                        None => SessionManager::list_all(None, list_session_dir.as_deref()).await,
                     };
                     self.build_session_list_with_passive_rlm_subagents(
-                        active_sessions,
+                        &active_sessions,
                         saved_sessions,
-                        scheduled_jobs,
+                        &scheduled_jobs,
                     )
                     .await
                 };
@@ -4045,7 +4042,7 @@ impl AgentDaemon {
                     let manager = self.session_of(&state).session_manager();
                     let manager = manager.lock().expect("session manager poisoned");
                     cwd = manager.get_cwd();
-                    session_dir = manager.get_session_dir();
+                    session_dir = Some(manager.get_session_dir());
                 } else {
                     cwd = resolve_path(body.get("cwd").and_then(Value::as_str).unwrap_or(""));
                     session_dir = body
@@ -4056,119 +4053,103 @@ impl AgentDaemon {
                 let command_id = command.id.clone();
                 let progress_client = Arc::clone(client);
                 let progress_active_session_id = active_session_id.clone();
-                let on_progress = command_id.as_ref().map(|command_id| {
-                    let client = Arc::clone(&progress_client);
-                    let active_session_id = progress_active_session_id.clone();
-                    let command_id = command_id.clone();
-                    Arc::new(move |loaded: f64, total: f64| {
-                        let mut object = Map::new();
-                        object.insert("id".to_string(), Value::String(command_id.clone()));
-                        object.insert(
-                            "type".to_string(),
-                            Value::String("session_list_progress".to_string()),
-                        );
-                        object.insert(
-                            "command".to_string(),
-                            Value::String("list_saved_sessions".to_string()),
-                        );
-                        if let Some(active_session_id) = &active_session_id {
+                let command_id = command.id.clone();
+                let progress_client = Arc::clone(client);
+                let progress_active_session_id = active_session_id.clone();
+                let on_progress: Option<Arc<dyn Fn(i64, i64) + Send + Sync>> =
+                    command_id.as_ref().map(|command_id| {
+                        let client = Arc::clone(&progress_client);
+                        let active_session_id = progress_active_session_id.clone();
+                        let command_id = command_id.clone();
+                        Arc::new(move |loaded: i64, total: i64| {
+                            let mut object = Map::new();
+                            object.insert("id".to_string(), Value::String(command_id.clone()));
                             object.insert(
-                                "activeSessionId".to_string(),
-                                Value::String(active_session_id.clone()),
+                                "type".to_string(),
+                                Value::String("session_list_progress".to_string()),
                             );
-                        }
-                        object.insert("loaded".to_string(), Value::from(loaded));
-                        object.insert("total".to_string(), Value::from(total));
-                        let _ = client
-                            .writer
-                            .write(serialize_json_line(&Value::Object(object)));
-                    }) as Arc<dyn Fn(f64, f64) + Send + Sync>
-                });
+                            object.insert(
+                                "command".to_string(),
+                                Value::String("list_saved_sessions".to_string()),
+                            );
+                            if let Some(active_session_id) = &active_session_id {
+                                object.insert(
+                                    "activeSessionId".to_string(),
+                                    Value::String(active_session_id.clone()),
+                                );
+                            }
+                            object.insert("loaded".to_string(), Value::from(loaded));
+                            object.insert("total".to_string(), Value::from(total));
+                            let _ = client
+                                .writer
+                                .write(serialize_json_line(&Value::Object(object)));
+                        })
+                    });
                 let item_client = Arc::clone(client);
                 let item_active_session_id = active_session_id.clone();
-                let on_session = command_id.as_ref().map(|command_id| {
-                    let client = Arc::clone(&item_client);
-                    let active_session_id = item_active_session_id.clone();
-                    let command_id = command_id.clone();
-                    Arc::new(move |session: &SessionInfo| {
-                        let mut object = Map::new();
-                        object.insert("id".to_string(), Value::String(command_id.clone()));
-                        object.insert(
-                            "type".to_string(),
-                            Value::String("session_list_item".to_string()),
-                        );
-                        object.insert(
-                            "command".to_string(),
-                            Value::String("list_saved_sessions".to_string()),
-                        );
-                        if let Some(active_session_id) = &active_session_id {
+                let on_session: Option<Arc<dyn Fn(&SessionInfo) + Send + Sync>> =
+                    command_id.as_ref().map(|command_id| {
+                        let client = Arc::clone(&item_client);
+                        let active_session_id = item_active_session_id.clone();
+                        let command_id = command_id.clone();
+                        Arc::new(move |session: &SessionInfo| {
+                            let mut object = Map::new();
+                            object.insert("id".to_string(), Value::String(command_id.clone()));
                             object.insert(
-                                "activeSessionId".to_string(),
-                                Value::String(active_session_id.clone()),
+                                "type".to_string(),
+                                Value::String("session_list_item".to_string()),
                             );
-                        }
-                        object.insert(
-                            "session".to_string(),
-                            serde_json::to_value(serialize_saved_session_info(session))
-                                .unwrap_or(Value::Null),
-                        );
-                        let _ = client
-                            .writer
-                            .write(serialize_json_line(&Value::Object(object)));
-                    }) as Arc<dyn Fn(&SessionInfo) + Send + Sync>
-                });
+                            object.insert(
+                                "command".to_string(),
+                                Value::String("list_saved_sessions".to_string()),
+                            );
+                            if let Some(active_session_id) = &active_session_id {
+                                object.insert(
+                                    "activeSessionId".to_string(),
+                                    Value::String(active_session_id.clone()),
+                                );
+                            }
+                            object.insert(
+                                "session".to_string(),
+                                serde_json::to_value(serialize_saved_session_info(session))
+                                    .unwrap_or(Value::Null),
+                            );
+                            let _ = client
+                                .writer
+                                .write(serialize_json_line(&Value::Object(object)));
+                        })
+                    });
                 let scope_current = body.get("scope").and_then(Value::as_str) == Some("current");
+                let callbacks = crate::core::session_manager::SessionListCallbacks {
+                    on_progress: on_progress.clone().map(|callback| {
+                        Box::new(move |loaded: i64, total: i64| callback(loaded, total))
+                            as Box<crate::core::session_manager::SessionListProgress>
+                    }),
+                    on_session: on_session.clone().map(|callback| {
+                        Box::new(move |session: &SessionInfo| callback(session))
+                            as Box<crate::core::session_manager::SessionListItem>
+                    }),
+                };
                 let saved_sessions = if scope_current {
-                    SessionManager::list_with_callbacks(
-                        cwd.clone(),
-                        session_dir.clone(),
-                        crate::core::session_manager::SessionListCallbacks {
-                            on_progress: on_progress.clone(),
-                            on_session: on_session.clone(),
-                        },
-                    )
-                    .await
-                    .unwrap_or_default()
+                    SessionManager::list(&cwd, session_dir.as_deref(), Some(&callbacks)).await
                 } else {
-                    SessionManager::list_all_with_callbacks(
-                        crate::core::session_manager::SessionListCallbacks {
-                            on_progress: on_progress.clone(),
-                            on_session: on_session.clone(),
-                        },
-                        session_dir.clone(),
-                    )
-                    .await
-                    .unwrap_or_default()
+                    SessionManager::list_all(Some(&callbacks), session_dir.as_deref()).await
                 };
                 let daemon = Arc::clone(self);
                 let sessions = with_passive_rlm_descendant_infos(
                     saved_sessions,
-                    &self.rlm_spawn_ledger_for(session_dir.as_deref()).await,
+                    &*self.rlm_spawn_ledger_for(session_dir.as_deref()).await,
                     crate::modes::daemon::rlm_ledger::WithPassiveRlmDescendantInfosOptions {
                         cwd: if scope_current {
                             Some(cwd.clone())
                         } else {
                             None
                         },
-                        on_session: on_session.clone(),
+                        on_session,
                         log: Some(Arc::new(move |message: &str| daemon.log(message))),
                     },
                 )
                 .await;
-                Ok(Some(DaemonResponse::success(
-                    id,
-                    "list_saved_sessions",
-                    Some(serde_json::json!({
-                        "sessions": sessions.iter().map(serialize_saved_session_info).collect::<Vec<_>>()
-                    })),
-                )))
-            }
-            "create" => {
-                let state = self.create_runtime(command, None).await?;
-                Ok(Some(DaemonResponse::success(
-                    id,
-                    "create",
-                    Some(
                         serde_json::to_value(self.summary_for_state(&state))
                             .unwrap_or(Value::Null),
                     ),
@@ -4198,7 +4179,7 @@ impl AgentDaemon {
                                 .iter()
                                 .filter_map(Value::as_str)
                                 .map(str::to_string)
-                                .collect()
+                                .collect::<HashSet<String>>()
                         }),
                     body.get("supportsExtensionUi").and_then(Value::as_bool),
                 );
@@ -4221,15 +4202,15 @@ impl AgentDaemon {
                 // adoption remains safe while mutations are only draining; after
                 // fencing, defer it until rollback so the checkpoint never omits a
                 // live identity.
-                let client_env =
-                    filter_client_env(body.get("env").and_then(Value::as_object).map(|object| {
-                        object
-                            .iter()
-                            .filter_map(|(key, value)| {
-                                value.as_str().map(|value| (key.clone(), value.to_string()))
-                            })
-                            .collect::<HashMap<String, String>>()
-                    }));
+                let client_env_map = body.get("env").and_then(Value::as_object).map(|object| {
+                    object
+                        .iter()
+                        .filter_map(|(key, value)| {
+                            value.as_str().map(|value| (key.clone(), value.to_string()))
+                        })
+                        .collect::<HashMap<String, String>>()
+                });
+                let client_env = filter_client_env(client_env_map.as_ref());
                 let defer_client_env = self
                     .update_restart
                     .lock()
@@ -4252,7 +4233,7 @@ impl AgentDaemon {
                         .expect("sessions poisoned")
                         .get(&state_active_session_id)
                         .cloned();
-                    if current.as_ref() != Some(&state)
+                    if current.as_deref().map(|entry| &entry.state) != Some(&state)
                         || self
                             .closing_sessions
                             .lock()
@@ -4521,7 +4502,7 @@ impl AgentDaemon {
                     .map(|entry| entry.summary.runtime_kind.clone())
                     .unwrap_or(None);
                 let tombstone = tombstone_saved_session_delete(
-                    &self.rlm_spawn_ledger().await,
+                    &*self.rlm_spawn_ledger().await,
                     session_path,
                     composed_runtime_kind.as_deref(),
                 )
@@ -7208,7 +7189,7 @@ impl DaemonSessionState {
 
 impl AgentDaemon {
     /// `broadcastToSession(state, message)`.
-    fn broadcast_to_session(&self, entry: &Arc<DaemonSessionState>, message: DaemonOutbound) {
+    fn broadcast_to_session(self: &Arc<Self>, entry: &Arc<DaemonSessionState>, message: DaemonOutbound) {
         let state = entry.state.clone();
         if let DaemonOutbound::SessionEvent { event, .. } = &message {
             let event_type = event
@@ -7350,7 +7331,7 @@ impl AgentDaemon {
     }
 
     /// `broadcastToSession` for another module's frame (the extension binding).
-    fn broadcast_raw_to_session(&self, target: &ActiveSessionState, message: &Value) {
+    fn broadcast_raw_to_session(self: &Arc<Self>, target: &ActiveSessionState, message: &Value) {
         let entry = self.session_states().into_iter().find(|entry| {
             entry
                 .state
@@ -7365,7 +7346,7 @@ impl AgentDaemon {
     }
 
     /// `broadcastGlobal(message)`.
-    fn broadcast_global(&self, message: &DaemonOutbound) {
+    fn broadcast_global(self: &Arc<Self>, message: &DaemonOutbound) {
         for client in self.client_handles() {
             self.write(&client, message);
         }
@@ -7487,7 +7468,7 @@ impl AgentDaemon {
     }
 
     /// `write(client, message)`.
-    fn write(&self, client: &Arc<DaemonClientHandle>, message: &DaemonOutbound) -> bool {
+    fn write(self: &Arc<Self>, client: &Arc<DaemonClientHandle>, message: &DaemonOutbound) -> bool {
         self.write_serialized(
             client,
             &serialize_json_line(&message.to_value()),
@@ -7497,7 +7478,7 @@ impl AgentDaemon {
 
     /// `writeSerialized(client, serialized, message)`.
     fn write_serialized(
-        &self,
+        self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
         serialized: &str,
         message: Option<&DaemonOutbound>,
@@ -7535,7 +7516,7 @@ impl AgentDaemon {
     }
 
     /// The socket reported backpressure (`socket.write` returning false).
-    fn mark_client_backpressured(&self, client: &Arc<DaemonClientHandle>, active_session_id: &str) {
+    fn mark_client_backpressured(self: &Arc<Self>, client: &Arc<DaemonClientHandle>, active_session_id: &str) {
         client.set_backpressured(true);
         self.queue_client_catchup(
             client,
@@ -7708,7 +7689,7 @@ impl AgentDaemon {
 
     /// `observeRosterEvent(state, message)`.
     fn observe_roster_event(
-        &self,
+        self: &Arc<Self>,
         state: &Arc<StdMutex<ActiveSessionState>>,
         message: &DaemonOutbound,
     ) {
@@ -7738,7 +7719,7 @@ impl AgentDaemon {
 
     /// `observeRosterChildUpdate(state, child)`.
     fn observe_roster_child_update(
-        &self,
+        self: &Arc<Self>,
         state: &Arc<StdMutex<ActiveSessionState>>,
         child: &Value,
     ) {
@@ -10517,7 +10498,7 @@ impl AgentDaemon {
     }
 
     /// `passiveRlmTopologyFingerprint(savedRootInfos)`.
-    async fn passive_rlm_topology_fingerprint(&self, saved_root_infos: &[SessionInfo]) -> String {
+    async fn passive_rlm_topology_fingerprint(self: &Arc<Self>, saved_root_infos: &[SessionInfo]) -> String {
         let ledger_stat = self
             .passive_rlm_stat_string(self.rlm_spawn_ledger().await.ledger_path())
             .await;
@@ -13754,7 +13735,7 @@ impl AgentDaemon {
     }
 
     /// `isPersistedCronJobRunnable(jobId)`.
-    async fn is_persisted_cron_job_runnable(&self, job_id: &str) -> bool {
+    async fn is_persisted_cron_job_runnable(self: &Arc<Self>, job_id: &str) -> bool {
         for _ in 0..2 {
             let Some(job) = self.get_runnable_cron_job(job_id) else {
                 return false;
@@ -14273,7 +14254,7 @@ impl AgentDaemon {
     /// made durable). Display metadata goes to the child's per-child display file
     /// at both moments.
     fn record_rlm_subagent_state(
-        &self,
+        self: &Arc<Self>,
         parent_state: &Arc<StdMutex<ActiveSessionState>>,
         input: RlmSubagentStateInput,
     ) -> bool {
@@ -14621,7 +14602,7 @@ impl AgentDaemon {
     /// `this.writeSerialized` is synchronous here, so the drain wait is the
     /// remaining failure mode: the write either lands or the buffer reports it.
     async fn write_worker_snapshot_buffer(
-        &self,
+        self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
         buffer: Vec<u8>,
         message: &DaemonOutbound,

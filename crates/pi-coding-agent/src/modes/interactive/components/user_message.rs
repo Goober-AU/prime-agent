@@ -1,8 +1,9 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/user-message.ts
 
 use std::rc::Rc;
+use std::sync::Arc;
 
-use pi_tui::components::markdown::{Markdown, MarkdownTheme};
+use pi_tui::components::markdown::{Markdown, MarkdownTheme as TuiMarkdownTheme};
 use pi_tui::components::r#box::Box_;
 use pi_tui::selection_metadata::TableCellSelectionRegion;
 use pi_tui::tui::Component;
@@ -22,6 +23,38 @@ pub const OSC133_ZONE_FINAL: &str = "\u{1b}]133;C\u{7}";
 /// `isRecognizedSlashCommand` callback.
 pub type IsRecognizedSlashCommand<'a> = &'a dyn Fn(&str) -> bool;
 
+/// `theme.ts`'s `MarkdownTheme` carries `Arc` closures with `Send + Sync`; the
+/// `pi-tui` markdown component holds `Rc` closures without those bounds. Private
+/// port of the conversion the other message cards apply.
+fn to_tui_markdown_theme(source: MarkdownTheme) -> TuiMarkdownTheme {
+    fn rc(value: Arc<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
+        Rc::new(move |text: &str| value(text))
+    }
+
+    TuiMarkdownTheme {
+        heading: rc(source.heading),
+        link: rc(source.link),
+        link_url: rc(source.link_url),
+        code: rc(source.code),
+        code_block: rc(source.code_block),
+        code_block_border: rc(source.code_block_border),
+        quote: rc(source.quote),
+        quote_border: rc(source.quote_border),
+        hr: rc(source.hr),
+        list_bullet: rc(source.list_bullet),
+        bold: rc(source.bold),
+        italic: rc(source.italic),
+        strikethrough: rc(source.strikethrough),
+        underline: rc(source.underline),
+        highlight_code: Some(Rc::new(move |code: &str, language: Option<&str>| {
+            (source.highlight_code)(code, language)
+        })),
+        code_block_indent: source.code_block_indent,
+        math: Some(rc(source.math)),
+        math_block: Some(rc(source.math_block)),
+    }
+}
+
 struct HighlightedMarkdown {
     markdown: Markdown,
     mask: PromptTokenMask,
@@ -30,7 +63,7 @@ struct HighlightedMarkdown {
 impl HighlightedMarkdown {
     fn new(
         text: &str,
-        markdown_theme: MarkdownTheme,
+        markdown_theme: TuiMarkdownTheme,
         command_end: usize,
         include_bare_separator: bool,
     ) -> Self {
@@ -106,7 +139,7 @@ impl UserMessageComponent {
         );
         content_box.add_child(Box::new(HighlightedMarkdown::new(
             text,
-            markdown_theme,
+            to_tui_markdown_theme(markdown_theme),
             command_end,
             include_bare_separator,
         )));

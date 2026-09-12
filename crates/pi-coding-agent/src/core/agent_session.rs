@@ -2086,6 +2086,9 @@ pub struct AgentSession {
     custom_tools: Vec<crate::core::extensions::types::ToolDefinition>,
     acp_mcp_tools: Mutex<Vec<crate::core::extensions::types::ToolDefinition>>,
     base_tool_definitions: Mutex<BTreeMap<String, crate::core::extensions::types::ToolDefinition>>,
+    /// `this` as a weak handle, mirroring the TypeScript instance identity. Some
+    /// `&self` methods must hand the session to helpers that spawn tasks.
+    session_self: OnceLock<Weak<AgentSession>>,
     cwd: String,
     agent_dir: Option<String>,
     include_goals: bool,
@@ -2371,6 +2374,7 @@ impl AgentSession {
             custom_tools: config.custom_tools.unwrap_or_default(),
             acp_mcp_tools: Mutex::new(Vec::new()),
             base_tool_definitions: Mutex::new(BTreeMap::new()),
+            session_self: OnceLock::new(),
             cwd: config.cwd.clone(),
             agent_dir: config.agent_dir.clone(),
             include_goals: config.include_goals.unwrap_or(true),
@@ -2503,6 +2507,7 @@ impl AgentSession {
             *session.goal_accounting_started_at.lock().unwrap() = Some(now_ms());
         }
 
+        *session.session_self.get_or_init(|| Arc::downgrade(&session)) = Arc::downgrade(&session);
         let listener_session = Arc::downgrade(&session);
         let unsubscribe = session.agent.subscribe(Arc::new(
             move |event: AgentEvent, signal: Option<CancellationToken>| {
@@ -2528,6 +2533,13 @@ impl AgentSession {
         session.ensure_harness_digest_context();
         session.schedule_rlm_reload_backstop();
         Ok(session)
+    }
+
+    /// The session as an `Arc` when one exists, mirroring the TypeScript
+    /// instance (which is always reachable at `this`). Methods that must hand
+    /// the session to spawned work call this.
+    fn session_arc(&self) -> Option<Arc<AgentSession>> {
+        self.session_self.get().and_then(|weak| weak.upgrade())
     }
 
     /// Refreshes MCP provider registrations without rebuilding the session runtime.
@@ -4018,18 +4030,19 @@ impl AgentSession {
             cwd: Some(self.cwd.clone()),
             signal: self.agent.signal(),
         };
-        let autonomous_message = {
-            let mut state = self.autonomous_state.lock().unwrap();
-            crate::core::autonomous::next_autonomous_continuation(
-                &mut state,
-                message,
-                options,
-                now_ms(),
-            )
-            .await
-            .ok()
-            .flatten()
-        };
+        // The state guard cannot be held across the await (the hook future must
+        // stay `Send`), so the state is moved in and written back.
+        let mut state = self.autonomous_state.lock().unwrap().clone();
+        let autonomous_message = crate::core::autonomous::next_autonomous_continuation(
+            &mut state,
+            message,
+            options,
+            now_ms(),
+        )
+        .await
+        .ok()
+        .flatten();
+        *self.autonomous_state.lock().unwrap() = state;
         let autonomous_message = match autonomous_message {
             Some(message) => message,
             None => return None,
@@ -4283,11 +4296,18 @@ impl AgentSession {
                 let previous = {
                     let pending = self.pending_requested_refine.lock().unwrap().clone();
                     match pending {
-                        Some(pending) => Some(PendingRequestedRefine {
-                            instructions: pending.instructions,
-                            global: pending.global,
-                        }),
-                        None => self.serialized_explicit_refine_options.lock().unwrap().clone(),
+                        Some(pending) => Some(pending),
+                        // `RefineOptions` carries the same two members the
+                        // pending request reads (`instructions`, `global`).
+                        None => self
+                            .serialized_explicit_refine_options
+                            .lock()
+                            .unwrap()
+                            .clone()
+                            .map(|options| PendingRequestedRefine {
+                                instructions: options.instructions,
+                                global: options.global,
+                            }),
                     }
                 };
                 *self.pending_requested_refine.lock().unwrap() = Some(PendingRequestedRefine {
@@ -6828,6 +6848,8 @@ impl AgentSession {
                 QueuedActionPayload::Turn(turn) => turn.prepared.clone(),
                 QueuedActionPayload::SessionCommand(_) => None,
             }))
+        // The caller wraps this value in `PreparedPromptPreparation`; see
+        // `prepare_active_turns` callers below.
     }
 
     /// `emitBeforeAgentStart(prompt, images, basePromptSnapshot, basePromptOptions)`.
@@ -6900,7 +6922,8 @@ impl AgentSession {
         {
             self.wait_for_refine_idle().await;
         }
-        Ok(Some(prepared))
+        // `steps.prepare()` already yields `PreparedPromptPreparation | undefined`.
+        Ok(prepared)
     }
 
     /// `_applyPreparedSystemPrompt`.
@@ -8361,18 +8384,27 @@ impl AgentSession {
     /// `_runtimeActivity`.
     fn runtime_activity(&self) -> RuntimeActivity {
         RuntimeActivity {
-            is_streaming: self.is_streaming(),
-            is_compacting: self.is_compacting(),
-            is_retrying: self.is_retrying(),
-            is_bash_running: self.is_bash_running(),
-            queued_work_paused: !self.queued_work_pauses.lock().unwrap().is_empty(),
-            session_input_pump_suspended: self.session_input_pump_suspended.load(Ordering::SeqCst),
+            lower_agent_run: self.is_streaming(),
+            compaction: self.is_compacting(),
+            retry: self.is_retrying(),
+            bash: self.is_bash_running(),
+            refinement_apply: self.refine_in_flight.lock().unwrap().is_some(),
+            branch_mutation: self.branch_summary_operation.lock().unwrap().is_some(),
+            scheduler_pause_count: self.queued_work_pauses.lock().unwrap().len() as i64
+                + i64::from(self.session_input_pump_suspended.load(Ordering::SeqCst)),
+            disposing: self.disposed.load(Ordering::SeqCst)
+                || self.disposing.load(Ordering::SeqCst),
         }
     }
 
     /// `_hasSelectableSessionInput`.
     fn has_selectable_session_input(&self) -> bool {
-        !self.action_store.lock().unwrap().unfinished_actions(None).is_empty()
+        let store = self.action_store.lock().unwrap();
+        !store.queued_actions(None).is_empty()
+            || store
+                .active_actions(None)
+                .iter()
+                .any(|action| action.lifecycle.state == "selected")
     }
 
     /// `get hasPendingSessionWork`.
@@ -9037,10 +9069,10 @@ impl AgentSession {
             if self.latest_context_harness_digest() != Some(digest.clone()) {
                 next_turn_messages.insert(
                     0,
-                    custom_message_from_agent_message(create_harness_digest_message(
+                    custom_message_of(&AgentMessage::Custom(create_harness_digest_message(
                         digest,
                         now_ms_i64(),
-                    )),
+                    ))),
                 );
             }
         }
@@ -9293,7 +9325,10 @@ impl AgentSession {
         } else {
             create_session_slash_command_message(
                 command.clone(),
-                crate::core::messages::SessionSlashCommandDetails::default(),
+                crate::core::messages::SessionSlashCommandDetails {
+                    command: command.clone(),
+                    command_entry_id: None,
+                },
                 true,
                 now_ms_i64(),
             )
@@ -9650,9 +9685,9 @@ impl AgentSession {
         mutation: &QueuedMessageMutation,
     ) -> QueuedMessageMutationStatus {
         let policy = queued_message_lane_delivery_policy(lane);
-        let projection: Vec<QueuedSessionAction> = visible_session_action_projection(
-            &self.action_store.lock().unwrap().queued_actions(Some(policy)),
-        );
+        let queued = self.action_store.lock().unwrap().queued_actions(Some(policy));
+        let projection: Vec<QueuedSessionAction> =
+            visible_session_action_projection(&queued).into_iter().cloned().collect();
         let item = if index >= 0 {
             projection.get(index as usize).cloned()
         } else {
@@ -9858,7 +9893,10 @@ impl AgentSession {
             .find(|action| {
                 !matches!(
                     action.lifecycle.state(),
-                    "queued" | "completed" | "failed" | "cancelled"
+                    ActionLifecycleState::Queued
+                        | ActionLifecycleState::Completed
+                        | ActionLifecycleState::Failed
+                        | ActionLifecycleState::Cancelled
                 )
             })
             .map(|action| {
@@ -9867,8 +9905,8 @@ impl AgentSession {
                     QueuedActionPayload::SessionCommand(_) => SessionActionSnapshotKind::SessionCommand,
                 };
                 let phase = match action.lifecycle.state() {
-                    "preparing" => SessionActionPhase::Preparing,
-                    "committing" => SessionActionPhase::Committing,
+                    ActionLifecycleState::Preparing => SessionActionPhase::Preparing,
+                    ActionLifecycleState::Committing => SessionActionPhase::Committing,
                     _ => SessionActionPhase::Running,
                 };
                 SessionActionSnapshotActive {
@@ -10283,10 +10321,7 @@ impl AgentSession {
         let previous = self.agent.state().model;
         let mut state = self.agent.state();
         state.model = model.clone();
-        state.thinking_level = clamp_thinking_level_for_model(
-            &model,
-            self.thinking_level(),
-        );
+        state.thinking_level = clamp_thinking_level_for_model(&model, self.thinking_level());
         state.service_tier = self.clamp_service_tier_for_model(None);
         self.agent.set_state(state);
         self.restore_provider_context_for_model();
@@ -10416,18 +10451,20 @@ impl AgentSession {
 
     /// `setThinkingLevel(level)`.
     pub fn set_thinking_level(self: &Arc<Self>, level: ThinkingLevel) {
-        let clamped = clamp_thinking_level_for_model(&self.model(), level);
+        // `_clampThinkingLevel(level, availableLevels)`; no model means `"off"`.
+        let clamped = match self.model() {
+            Some(model) => clamp_thinking_level_for_model(&model, level),
+            None => ThinkingLevel::Off,
+        };
         let mut state = self.agent.state();
-        state.thinking_level = clamped.clone();
+        state.thinking_level = clamped;
         self.agent.set_state(state);
         let _ = self
             .session_manager
             .lock()
             .unwrap()
             .append_thinking_level_change(&thinking_level_name(&clamped));
-        self.emit(AgentSessionEvent::ThinkingLevelChange {
-            level: thinking_level_name(&clamped),
-        });
+        self.emit(AgentSessionEvent::ThinkingLevelChange { level: clamped });
     }
 
     /// `setServiceTier(serviceTier)`.
@@ -10441,9 +10478,9 @@ impl AgentSession {
             .session_manager
             .lock()
             .unwrap()
-            .append_service_tier_change(&service_tier_name(&clamped));
+            .append_service_tier_change(&clamped);
         self.emit(AgentSessionEvent::ServiceTierChange {
-            service_tier: service_tier_name(&clamped),
+            service_tier: clamped.clone(),
         });
     }
 
@@ -10466,7 +10503,8 @@ impl AgentSession {
                 return service_tier;
             }
         }
-        ServiceTier::Standard
+        // TS: `"default"`.
+        Some(Some("default".to_string()))
     }
 
     /// `cycleThinkingLevel()`.
@@ -10487,7 +10525,16 @@ impl AgentSession {
 
     /// `getAvailableThinkingLevels()`.
     pub fn get_available_thinking_levels(&self) -> Vec<ThinkingLevel> {
-        get_supported_thinking_levels(&self.model())
+        let Some(model) = self.model() else {
+            return crate::core::thinking_levels::THINKING_LEVELS
+                .iter()
+                .map(|level| crate::core::sdk::parse_thinking_level(level))
+                .collect();
+        };
+        get_supported_thinking_levels(&model)
+            .iter()
+            .map(|level| crate::core::sdk::parse_thinking_level(level))
+            .collect()
     }
 
     /// `supportsThinking()`.
@@ -10505,7 +10552,10 @@ impl AgentSession {
 
     /// `_clampThinkingLevel(level, _availableLevels)`.
     fn clamp_thinking_level(&self, level: ThinkingLevel) -> ThinkingLevel {
-        clamp_thinking_level_for_model(&self.model(), level)
+        match self.model() {
+            Some(model) => clamp_thinking_level_for_model(&model, level),
+            None => ThinkingLevel::Off,
+        }
     }
 
     /// `_syncKernelStateAfterCompaction()`.

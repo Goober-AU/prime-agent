@@ -65,12 +65,23 @@ impl PrimeInferenceLoginCallbacks {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct PrimeInferenceLoginOptions {
     pub config_path: Option<String>,
     pub fetch_fn: Option<FetchFn>,
     pub poll_interval_ms: Option<u64>,
     pub request_timeout_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for PrimeInferenceLoginOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PrimeInferenceLoginOptions")
+            .field("config_path", &self.config_path)
+            .field("poll_interval_ms", &self.poll_interval_ms)
+            .field("request_timeout_ms", &self.request_timeout_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

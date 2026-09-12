@@ -301,7 +301,7 @@ impl ExtensionSelectorComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::RefCell;
 
     fn init() {
         crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
@@ -320,12 +320,12 @@ mod tests {
     fn renders_selected_row_and_scroll_indicator() {
         init();
         let options: Vec<String> = (0..20).map(|index| format!("option {index}")).collect();
-        let selected = Rc::new(Cell::new(String::new()));
+        let selected = Rc::new(RefCell::new(String::new()));
         let selected_for_select = Rc::clone(&selected);
         let mut component = ExtensionSelectorComponent::new(
-            "Pick one".to_string(),
+            "Pick one",
             options,
-            Box::new(move |value| selected_for_select.set(value.to_string())),
+            Box::new(move |value| *selected_for_select.borrow_mut() = value.to_string()),
             Box::new(|| {}),
             ExtensionSelectorOptions::default(),
         );
@@ -339,35 +339,35 @@ mod tests {
     #[test]
     fn confirm_selects_the_current_option() {
         init();
-        let selected = Rc::new(Cell::new(String::new()));
+        let selected = Rc::new(RefCell::new(String::new()));
         let selected_for_select = Rc::clone(&selected);
         let mut component = ExtensionSelectorComponent::new(
-            "Pick one".to_string(),
+            "Pick one",
             vec!["a".to_string(), "b".to_string()],
-            Box::new(move |value| selected_for_select.set(value.to_string())),
+            Box::new(move |value| *selected_for_select.borrow_mut() = value.to_string()),
             Box::new(|| {}),
             ExtensionSelectorOptions::default(),
         );
         component.handle_input("\n");
-        assert_eq!(selected.get(), "a");
+        assert_eq!(*selected.borrow(), "a");
         component.handle_input("j");
         component.handle_input("\n");
-        assert_eq!(selected.get(), "b");
+        assert_eq!(*selected.borrow(), "b");
     }
 
     #[test]
     fn cancel_invokes_the_cancel_callback() {
         init();
-        let cancelled = Rc::new(Cell::new(false));
+        let cancelled = Rc::new(RefCell::new(false));
         let cancelled_for_cancel = Rc::clone(&cancelled);
         let mut component = ExtensionSelectorComponent::new(
-            "Pick one".to_string(),
+            "Pick one",
             vec!["a".to_string()],
             Box::new(|_| {}),
-            Box::new(move || cancelled_for_cancel.set(true)),
+            Box::new(move || *cancelled_for_cancel.borrow_mut() = true),
             ExtensionSelectorOptions::default(),
         );
         component.handle_input("\u{1b}");
-        assert!(cancelled.get());
+        assert!(*cancelled.borrow());
     }
 }

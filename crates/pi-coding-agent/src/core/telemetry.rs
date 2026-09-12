@@ -512,7 +512,7 @@ fn join_path(base: &str, leaf: &str) -> String {
 fn properties(pairs: &[(&str, TelemetryPrimitive)]) -> TelemetryProperties {
     let mut map: TelemetryProperties = IndexMap::new();
     for (key, value) in pairs {
-        map.insert(key.to_string(), value);
+        map.insert(key.to_string(), value.clone());
     }
     map
 }
@@ -1362,9 +1362,9 @@ pub fn install_agent_telemetry(
 mod tests {
     use super::*;
 
-    fn uuid_generator() -> Box<dyn Fn() -> String + Send + Sync> {
+    fn uuid_generator() -> Arc<dyn Fn() -> String + Send + Sync> {
         let counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
-        Box::new(move || {
+        Arc::new(move || {
             let value = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             format!("00000000-0000-4000-8000-{:012}", value)
         })

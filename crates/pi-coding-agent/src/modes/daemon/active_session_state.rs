@@ -407,10 +407,12 @@ mod tests {
             &resolve_active_session_state(&sessions, "cdef").expect("suffix"),
             &one
         ));
-        assert_eq!(
-            resolve_active_session_state(&sessions, "zzz").expect_err("unknown").to_string(),
-            "Unknown active session: zzz"
-        );
+        // `expect_err` would require `ActiveSessionState: Debug`; the TypeScript
+        // asserts on the thrown message only.
+        let error = resolve_active_session_state(&sessions, "zzz")
+            .err()
+            .expect("unknown");
+        assert_eq!(error.to_string(), "Unknown active session: zzz");
     }
 
     #[test]
@@ -418,7 +420,9 @@ mod tests {
         let mut sessions: HashMap<String, Arc<StdMutex<ActiveSessionState>>> = HashMap::new();
         sessions.insert("aa11".to_string(), state("aa11", "s1", None));
         sessions.insert("aa22".to_string(), state("aa22", "s2", None));
-        let error = resolve_active_session_state(&sessions, "aa").expect_err("ambiguous");
+        let error = resolve_active_session_state(&sessions, "aa")
+            .err()
+            .expect("ambiguous");
         assert!(error
             .to_string()
             .starts_with("Ambiguous active session \"aa\": matches "));

@@ -313,7 +313,7 @@ mod tests {
         let state = parse_legacy_rlm_continuation_state(&value, &[assistant(20, "length", "partial")])
             .expect("valid state");
         assert_eq!(state.terminal_status.as_deref(), Some("failed"));
-        let result = state.pending_result.expect("pending result");
+        let result = state.pending_result.as_ref().expect("pending result");
         assert_eq!(result.status, "failed");
         assert!(result.partial);
         assert_eq!(result.text, "partial");

@@ -558,7 +558,7 @@ mod tests {
     }
 
     fn user_servers(
-        entries: Vec<(&str, McpServerConfig)>,
+        entries: Vec<(&'static str, McpServerConfig)>,
     ) -> Option<Arc<dyn Fn() -> Option<IndexMap<String, McpServerConfig>> + Send + Sync>> {
         Some(Arc::new(move || {
             let mut servers: IndexMap<String, McpServerConfig> = IndexMap::new();

@@ -427,10 +427,10 @@ pub fn acp_updates_for_session_event(
         AgentConnectionSessionEvent::GoalUpdate { goal } => {
             let mut meta = PrimeAgentSessionMeta::new();
             meta.goal = Some(crate::modes::acp::acp_meta::PrimeAgentGoalMeta {
-                status: goal.status.clone(),
+                status: goal.status.as_str().to_string(),
                 objective: goal.objective.clone(),
                 token_budget: goal.token_budget,
-                tokens_used: goal.tokens_used,
+                tokens_used: Some(goal.tokens_used),
             });
             vec![update_with(
                 "session_info_update",
@@ -558,7 +558,7 @@ mod tests {
         let mut state = AcpEventMappingState::default();
         let updates = acp_updates_for_session_event(&AgentConnectionSessionEvent::AutoRetryEnd {
             success: true,
-            attempt: 1,
+            attempt: 1.0,
             final_error: None,
         }, &mut state);
         assert!(updates.is_empty());

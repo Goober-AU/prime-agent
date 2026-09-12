@@ -459,9 +459,13 @@ fn build_edit_call_component(
     component.clear();
     component.add_child(format_edit_call(args, theme));
 
-    if let Some(EditPreview::Error { error }) = component.preview.as_ref() {
+    let preview_error = match component.preview.as_ref() {
+        Some(EditPreview::Error { error }) => Some(error.clone()),
+        _ => None,
+    };
+    if let Some(error) = preview_error {
         component.add_child(String::new());
-        component.add_child(theme.fg("error", error));
+        component.add_child(theme.fg("error", &error));
         return;
     }
     // A failed execution must not present the predicted diff as applied changes.

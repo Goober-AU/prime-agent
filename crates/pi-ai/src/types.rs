@@ -381,6 +381,18 @@ pub const THINKING_CONTENT_TYPE: &str = "thinking";
 pub const IMAGE_CONTENT_TYPE: &str = "image";
 pub const TOOL_CALL_TYPE: &str = "toolCall";
 
+fn role_user() -> String {
+    ROLE_USER.to_string()
+}
+
+fn role_assistant() -> String {
+    ROLE_ASSISTANT.to_string()
+}
+
+fn role_tool_result() -> String {
+    ROLE_TOOL_RESULT.to_string()
+}
+
 fn text_content_type() -> String {
     TEXT_CONTENT_TYPE.to_string()
 }
@@ -665,6 +677,7 @@ impl UserContent {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserMessage {
+    #[serde(default = "role_user")]
     pub role: String,
     pub content: UserContent,
     /// Provider-owned replacement for this message, supplied by a durable
@@ -688,6 +701,7 @@ impl UserMessage {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssistantMessage {
+    #[serde(default = "role_assistant")]
     pub role: String,
     pub content: Vec<ContentBlock>,
     pub api: Api,
@@ -755,6 +769,7 @@ impl crate::utils::diagnostics::HasDiagnostics for AssistantMessage {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResultMessage {
+    #[serde(default = "role_tool_result")]
     pub role: String,
     #[serde(rename = "toolCallId")]
     pub tool_call_id: String,

@@ -1593,7 +1593,11 @@ mod tests {
         let provisioner = provisioner_with(Arc::new(StubKernelClient));
         let signal = AbortSignal::new();
         signal.abort(None);
-        let error = provisioner.ensure(None, Some(signal)).await.expect_err("aborted");
+        let error = provisioner
+        .ensure(None, Some(signal))
+        .await
+        .err()
+        .expect("aborted");
         assert_eq!(error.to_string(), "Python execution aborted");
     }
 

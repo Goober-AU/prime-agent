@@ -1881,7 +1881,7 @@ pub fn create_extension_runner(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::extensions::loader::{create_extension_runtime, ExtensionApiImpl, register_extension_factory};
+    use crate::core::extensions::loader::{create_extension_runtime, register_extension_factory};
     use crate::core::extensions::types::{
         create_event_bus, CancelledResult, ExtensionActions, ExtensionContextActions, ExtensionEvent,
         ExtensionHandler, ExtensionShortcut, SessionShutdownPayload,
@@ -1942,11 +1942,26 @@ mod tests {
         runner
     }
 
+    /// Builds an in-memory extension the way `create_extension` does for an
+    /// inline (`<inline>`) source, so tests can register handlers directly.
     fn extension_with_handler(event_type: &str, handler: ExtensionHandler) -> SharedExtension {
-        let extension = Arc::new(Mutex::new(crate::core::extensions::loader::create_extension_for_test(
-            "<inline>",
-            "<inline>",
-        )));
+        let extension = Arc::new(Mutex::new(Extension {
+            path: "<inline>".to_string(),
+            resolved_path: "<inline>".to_string(),
+            source_info: crate::core::source_info::create_synthetic_source_info(
+                "<inline>",
+                &crate::core::source_info::SyntheticSourceInfoOptions {
+                    source: "inline".to_string(),
+                    ..Default::default()
+                },
+            ),
+            handlers: HashMap::new(),
+            tools: HashMap::new(),
+            message_renderers: HashMap::new(),
+            commands: HashMap::new(),
+            flags: HashMap::new(),
+            shortcuts: HashMap::new(),
+        }));
         extension
             .lock()
             .unwrap()
@@ -2086,11 +2101,13 @@ mod tests {
         {
             let mut guard = extension.lock().unwrap();
             for name in ["dup", "dup", "solo"] {
+                let key = format!("{name}-{}", guard.commands.len());
+                let source_info = guard.source_info.clone();
                 guard.commands.insert(
-                    format!("{name}-{}", guard.commands.len()),
+                    key,
                     crate::core::extensions::types::RegisteredCommand {
                         name: name.to_string(),
-                        source_info: guard.source_info.clone(),
+                        source_info,
                         description: None,
                         get_argument_completions: None,
                         handler: Arc::new(|_, _| Box::pin(async { Ok(()) })),
@@ -2413,6 +2430,5 @@ mod tests {
         assert_eq!(ctx.cwd(), "/cwd");
         assert!(!ctx.has_ui());
         let _ = create_event_bus();
-        let _ = ExtensionApiImpl::default_marker();
     }
 }

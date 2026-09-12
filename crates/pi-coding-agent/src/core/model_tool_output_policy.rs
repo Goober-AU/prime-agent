@@ -687,8 +687,9 @@ mod tests {
     #[test]
     fn text_content_construction_keeps_type_field() {
         let content = TextContent {
-            content_type: TEXT_CONTENT_TYPE.to_string(),
+            type_: TEXT_CONTENT_TYPE.to_string(),
             text: "x".to_string(),
+            text_signature: None,
         };
         assert_eq!(
             serde_json::to_value(ImageOrTextContent::Text(content)).unwrap(),

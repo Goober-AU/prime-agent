@@ -487,6 +487,16 @@ mod tests {
         branches: HashMap<String, Vec<SessionEntry>>,
     }
 
+    impl ReadonlySessionManager for FakeSession {
+        fn get_branch(&self, leaf_id: &str) -> Vec<SessionEntry> {
+            self.branches.get(leaf_id).cloned().unwrap_or_default()
+        }
+
+        fn get_entry(&self, id: &str) -> Option<SessionEntry> {
+            self.entries.get(id).cloned()
+        }
+    }
+
     fn message_entry(
         id: &str,
         parent_id: Option<&str>,

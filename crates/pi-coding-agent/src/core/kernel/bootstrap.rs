@@ -1065,7 +1065,9 @@ async fn lock_missing_pid_is_stale(lock_dir: &str) -> bool {
 }
 
 /// `tryAcquireDirLock(lockDir, ownerAlive)` (TODO(slice): needs utils/dir-lock).
-async fn acquire_bootstrap_lock(venv: &str) -> Result<Box<dyn Fn() -> BoxFutureLocal>, KernelError> {
+async fn acquire_bootstrap_lock(
+    venv: &str,
+) -> Result<Arc<dyn Fn() -> BoxFutureLocal + Send + Sync>, KernelError> {
     let lock_dir = bootstrap_lock_dir(venv);
     if let Some(parent) = Path::new(&lock_dir).parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
@@ -1084,7 +1086,7 @@ async fn acquire_bootstrap_lock(venv: &str) -> Result<Box<dyn Fn() -> BoxFutureL
         match try_acquire_dir_lock(&lock_dir, owner_alive).await {
             DirLockAttempt::Acquired => {
                 let lock_dir = lock_dir.clone();
-                return Ok(Box::new(move || {
+                return Ok(Arc::new(move || {
                     let lock_dir = lock_dir.clone();
                     Box::pin(async move {
                         let _ = tokio::fs::remove_dir_all(&lock_dir).await;

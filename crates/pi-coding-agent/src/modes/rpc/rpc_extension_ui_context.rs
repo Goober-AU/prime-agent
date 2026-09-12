@@ -91,8 +91,8 @@ impl RpcExtensionUiState {
         );
         request.insert("id".to_string(), Value::String(id.to_string()));
         request.insert("method".to_string(), Value::String(method.to_string()));
-        for (key, value) in payload {
-            request.insert(key, value);
+        for (key, value) in &payload {
+            request.insert(key.clone(), value.clone());
         }
         (self.output)(RpcExtensionUiRequest {
             type_: "extension_ui_request".to_string(),

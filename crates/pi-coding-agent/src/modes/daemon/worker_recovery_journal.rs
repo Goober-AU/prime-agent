@@ -60,7 +60,7 @@ pub struct WorkerRecoveryJournal {
 impl WorkerRecoveryJournal {
     pub fn new(path: &str) -> Self {
         if let Some(parent) = Path::new(path).parent() {
-            let _ = create_private_dir(parent);
+            let _ = create_private_dir(&parent.to_string_lossy());
         }
         let latest = parse_records(path);
         Self {

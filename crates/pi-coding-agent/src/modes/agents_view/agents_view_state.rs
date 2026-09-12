@@ -2404,7 +2404,7 @@ mod tests {
         };
         let records = reconcile_unified_sessions(&[parent, child], &[], &[]);
         let index = build_unified_session_index(&records);
-        let rollups = compute_recursive_rollups(&records, &index);
+        let rollups = compute_recursive_rollups(&records, Some(&index));
         let parent_key = records[0].identity.clone();
         assert_eq!(rollups.get(&parent_key).unwrap().cost, 3.5);
         assert_eq!(rollups.get(&parent_key).unwrap().descendant_count, 1);

@@ -35,6 +35,7 @@ pub(crate) fn lock_path_for_dir(dir: &str) -> String {
 }
 
 /// Held lock. Releasing removes the lock entry, like `proper-lockfile`'s release.
+#[derive(Debug)]
 pub(crate) struct MemoryLock {
 	path: String,
 }

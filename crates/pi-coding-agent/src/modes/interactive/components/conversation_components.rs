@@ -356,11 +356,9 @@ mod tests {
             AgentMessage::Message(pi_ai::types::Message::User(pi_ai::types::UserMessage {
                 role: "user".to_string(),
                 content: pi_ai::types::UserContent::Blocks(vec![
-                    pi_ai::types::ImageOrTextContent::Image(pi_ai::types::ImageContent {
-                        r#type: "image".to_string(),
-                        data: "x".to_string(),
-                        mime_type: "image/png".to_string(),
-                    }),
+                    pi_ai::types::ImageOrTextContent::Image(pi_ai::types::ImageContent::new(
+                        "x", "image/png",
+                    )),
                 ]),
                 provider_context: None,
                 timestamp: 0,
@@ -376,7 +374,8 @@ mod tests {
 
     #[test]
     fn hidden_session_commands_are_skipped() {
-        let message = create_session_slash_command_message(
+        let message = crate::core::messages::custom_message_to_agent_message(
+            create_session_slash_command_message(
             SessionSlashCommand {
                 name: "help".to_string(),
                 args: String::new(),
@@ -392,7 +391,8 @@ mod tests {
             },
             false,
             0,
-        );
+        ),
+        ));
         let kinds = build_conversation_components(&[message], &options(&no_definition));
         assert!(kinds.is_empty());
     }
@@ -404,7 +404,8 @@ mod tests {
             args: String::new(),
             text: "/help".to_string(),
         };
-        let message = create_session_slash_command_result_message(
+        let message = crate::core::messages::custom_message_to_agent_message(
+            create_session_slash_command_result_message(
             "done".to_string(),
             crate::core::messages::SessionSlashCommandResultDetails {
                 command: command.clone(),
@@ -415,7 +416,8 @@ mod tests {
             },
             true,
             0,
-        );
+        ),
+        ));
         let kinds = build_conversation_components(&[message], &options(&no_definition));
         assert_eq!(
             kinds,

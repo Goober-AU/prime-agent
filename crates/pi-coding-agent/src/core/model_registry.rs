@@ -3876,8 +3876,8 @@ mod tests {
                     } else {
                         serde_json::json!({"data": []}).to_string()
                     },
-                }) as pi_ai::types::BoxFuture<Result<crate::core::prime_inference_auth::HttpResponse, String>>
-            })
+                })
+            }) as pi_ai::types::BoxFuture<Result<crate::core::prime_inference_auth::HttpResponse, String>>
         })));
 
         let previous_ids = registry.authorized_private_prime_inference_model_ids.clone();

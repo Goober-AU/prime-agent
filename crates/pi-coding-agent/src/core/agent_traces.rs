@@ -950,7 +950,9 @@ pub async fn upload_all_agent_traces(options: &AgentTraceUploadAllOptions) -> Ag
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Mirrors `interface AgentTraceUploadedSignature { size: number; mtimeMs: number }`.
+/// `mtimeMs` is a JS number, so only `PartialEq` is derived.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct AgentTraceUploadedSignature {
     size: u64,
     mtime_ms: f64,

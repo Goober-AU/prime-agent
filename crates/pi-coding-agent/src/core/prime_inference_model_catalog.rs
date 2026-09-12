@@ -740,8 +740,9 @@ mod tests {
     #[tokio::test]
     async fn fetch_catalog_reports_status_and_empty_body() {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_for_fetch = Arc::clone(&seen);
         let fetch_fn: FetchFn = Arc::new(move |request| {
-            seen.lock().unwrap().push(request);
+            seen_for_fetch.lock().unwrap().push(request);
             Box::pin(async move {
                 Ok(HttpResponse {
                     status: 401,

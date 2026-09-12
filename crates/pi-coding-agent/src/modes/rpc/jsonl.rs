@@ -217,10 +217,12 @@ mod tests {
     fn overflow_reports_the_prefix_and_discards_the_rest() {
         let lines = Arc::new(Mutex::new(Vec::new()));
         let overflows = Arc::new(Mutex::new(Vec::new()));
-        let overflow_sink = overflows.clone();
+        // The reader keeps the `Arc` for its whole life; the sink shares it.
+        let overflow_sink = Arc::clone(&overflows);
+        let sink_lines = Arc::clone(&lines);
         let mut reader = JsonlLineReader::new(
             Arc::new(move |line: String| {
-                lines.lock().unwrap().push(line);
+                sink_lines.lock().unwrap().push(line);
             }),
             JsonlLineReaderOptions {
                 max_line_length: Some(4),

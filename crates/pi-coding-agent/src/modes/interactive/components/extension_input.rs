@@ -198,7 +198,7 @@ impl ExtensionInputComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
+    use std::cell::RefCell;
 
     fn init() {
         crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
@@ -207,42 +207,42 @@ mod tests {
     #[test]
     fn submits_the_input_value_on_enter() {
         init();
-        let submitted = Rc::new(Cell::new(String::new()));
+        let submitted = Rc::new(RefCell::new(String::new()));
         let submitted_for_callback = Rc::clone(&submitted);
         let mut component = ExtensionInputComponent::new(
-            "Title".to_string(),
+            "Title",
             None,
-            Box::new(move |value| submitted_for_callback.set(value.to_string())),
+            Box::new(move |value| *submitted_for_callback.borrow_mut() = value.to_string()),
             Box::new(|| {}),
             ExtensionInputOptions::default(),
         );
         component.handle_input("h");
         component.handle_input("i");
         component.handle_input("\n");
-        assert_eq!(submitted.get(), "hi");
+        assert_eq!(*submitted.borrow(), "hi");
     }
 
     #[test]
     fn cancel_invokes_the_cancel_callback() {
         init();
-        let cancelled = Rc::new(Cell::new(false));
+        let cancelled = Rc::new(RefCell::new(false));
         let cancelled_for_callback = Rc::clone(&cancelled);
         let mut component = ExtensionInputComponent::new(
-            "Title".to_string(),
+            "Title",
             None,
             Box::new(|_| {}),
-            Box::new(move || cancelled_for_callback.set(true)),
+            Box::new(move || *cancelled_for_callback.borrow_mut() = true),
             ExtensionInputOptions::default(),
         );
         component.handle_input("\u{1b}");
-        assert!(cancelled.get());
+        assert!(*cancelled.borrow());
     }
 
     #[test]
     fn focus_propagates_to_the_input() {
         init();
         let mut component = ExtensionInputComponent::new(
-            "Title".to_string(),
+            "Title",
             None,
             Box::new(|_| {}),
             Box::new(|| {}),

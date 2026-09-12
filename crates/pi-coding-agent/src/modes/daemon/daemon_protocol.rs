@@ -2253,6 +2253,62 @@ pub struct DaemonResponse {
     pub error_info: Option<DaemonErrorInfo>,
 }
 
+impl DaemonResponse {
+    /// `success(id, command, data?)` (daemon-protocol.ts).
+    pub fn success(id: Option<&str>, command: &str, data: Option<Value>) -> Self {
+        Self {
+            id: id.map(str::to_string),
+            type_: "response".to_string(),
+            command: command.to_string(),
+            success: true,
+            data,
+            error: None,
+            error_info: None,
+        }
+    }
+
+    /// `failure(id, command, error, errorInfo?)` (daemon-protocol.ts).
+    pub fn failure(
+        id: Option<&str>,
+        command: &str,
+        error: &str,
+        error_info: Option<DaemonErrorInfo>,
+    ) -> Self {
+        Self {
+            id: id.map(str::to_string),
+            type_: "response".to_string(),
+            command: command.to_string(),
+            success: false,
+            data: None,
+            error: Some(error.to_string()),
+            error_info,
+        }
+    }
+
+    /// `isDaemonResponse(value)` (daemon-client.ts) plus the cast that follows it.
+    pub fn from_value(value: &Value) -> Option<Self> {
+        let object = value.as_object()?;
+        if object.get("type")?.as_str()? != "response" {
+            return None;
+        }
+        if !object.get("success")?.is_boolean() {
+            return None;
+        }
+        let command = object.get("command")?.as_str()?.to_string();
+        Some(Self {
+            id: object.get("id").and_then(Value::as_str).map(str::to_string),
+            type_: "response".to_string(),
+            command,
+            success: object.get("success").and_then(Value::as_bool).unwrap_or(false),
+            data: object.get("data").cloned(),
+            error: object.get("error").and_then(Value::as_str).map(str::to_string),
+            error_info: object
+                .get("errorInfo")
+                .and_then(|value| serde_json::from_value(value.clone()).ok()),
+        })
+    }
+}
+
 /// `DaemonSessionClosedReason`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -9,6 +9,10 @@ use pi_tui::tui::{Component, Container};
 
 use super::super::theme::theme::get_select_list_theme;
 use super::dynamic_border::{ColorFn, DynamicBorder};
+// `theme.ts`'s `SelectListTheme` carries `Send + Sync` closures; the `pi-tui`
+// select list takes the same closures without those bounds. The conversion is
+// shared with the other selectors (components/show-images-selector.ts).
+use super::show_images_selector::to_tui_select_list_theme;
 
 /// `THINKING_SELECT_LIST_LAYOUT` (kept as a function because the layout owns closures).
 fn thinking_select_list_layout() -> SelectListLayoutOptions {
@@ -82,7 +86,7 @@ impl ThinkingSelectorComponent {
         let mut select_list = SelectList::new(
             thinking_levels.clone(),
             thinking_levels.len(),
-            get_select_list_theme(),
+            to_tui_select_list_theme(get_select_list_theme()),
             thinking_select_list_layout(),
         );
 

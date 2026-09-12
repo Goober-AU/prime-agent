@@ -476,7 +476,7 @@ pub mod test_support {
         pub connected: AtomicBool,
         pub requests: Mutex<Vec<serde_json::Value>>,
         pub responses: Mutex<Vec<Result<DaemonResponse, String>>>,
-        pub listeners: Mutex<Vec<Arc<dyn Fn(&DaemonOutbound) + Send + Sync>>>,
+        pub listeners: Arc<Mutex<Vec<Arc<dyn Fn(&DaemonOutbound) + Send + Sync>>>>,
     }
 
     impl FakeDaemonTransport {
@@ -492,7 +492,7 @@ pub mod test_support {
                 connected: AtomicBool::new(true),
                 requests: Mutex::new(Vec::new()),
                 responses: Mutex::new(Vec::new()),
-                listeners: Mutex::new(Vec::new()),
+                listeners: Arc::new(Mutex::new(Vec::new())),
             })
         }
 
@@ -546,15 +546,14 @@ pub mod test_support {
         }
         fn on_message(&self, listener: MessageListener) -> Box<dyn Fn() + Send + Sync> {
             let shared: Arc<dyn Fn(&DaemonOutbound) + Send + Sync> = Arc::from(listener);
-            let listeners = self.listeners.clone();
-            {
-                let mut guard = listeners.lock().unwrap();
-                guard.push(shared);
-            }
+            let listeners = Arc::clone(&self.listeners);
+            listeners.lock().unwrap().push(Arc::clone(&shared));
             Box::new(move || {
-                // Unsubscribing drops every listener for this fake transport; the
-                // store only ever holds one subscription at a time.
-                listeners.lock().unwrap().clear();
+                // `onMessage` returns `() => listeners.delete(listener)`.
+                listeners
+                    .lock()
+                    .unwrap()
+                    .retain(|candidate| !Arc::ptr_eq(candidate, &shared));
             })
         }
         fn on_close(&self, _listener: Box<dyn Fn(&str) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {

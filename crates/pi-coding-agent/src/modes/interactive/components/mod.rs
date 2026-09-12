@@ -111,6 +111,7 @@ pub use visual_truncate::{truncate_to_visual_lines, VisualTruncateResult};
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::tree_selector::FILTER_MODES;
 
     #[test]
     fn index_re_exports_resolve() {
@@ -130,8 +131,8 @@ mod tests {
             refinement_outcome_message::MalformedRefinementOutcomeMessageComponent,
         >();
         let _ = std::any::type_name::<slash_command_message::SlashCommandMessageComponent>();
-        let _ = std::any::type_name::<expandable_custom_message::ExpandableCustomMessageBox>();
-        let _ = std::any::type_name::<modal_back::BackGuardInput>();
+        let _ = std::any::type_name::<dyn expandable_custom_message::ExpandableCustomMessageBox>();
+        let _ = std::any::type_name::<dyn modal_back::BackGuardInput>();
         assert_eq!(
             FILTER_MODES,
             ["default", "no-tools", "user-only", "labeled-only", "all"]
