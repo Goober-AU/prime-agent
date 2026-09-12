@@ -143,3 +143,30 @@ which resets every live-pack path before committing. Exclusions come from
 
 The old habit of `git add -A crates/` is what made 27 live-pack files land in a single commit; treat
 any commit touching a live pack's file as suspect and re-diff the worktree before trusting it.
+
+## Gate ladder note (2026-09-12 late): the 27 -> 54 step is an IN-FLIGHT MIGRATION, not a regression
+
+gate20 = 27 unique (best reading so far). gate21/gate22 = 70 then 54, because the lead deleted the
+lossy duplicate types (`SessionState`, `AgentStatusRecord`, `SessionInfo`, `AgentCronJob`) from
+modes/daemon/daemon_session_list.rs and re-exported the canonical owners
+(`core::session_manager::{SessionInfo, SessionState, AgentStatus}`, `core::cron_jobs::AgentCronJob`).
+
+Why the count went UP: the two consumer files (daemon_catalog_process.rs, daemon_session_list.rs) were
+CLEAN before (0 errors at gate20) and still use the old stub shapes, so the migration exposed ~31
+mechanical sites in them. The change still removes real defects - it deletes an invented
+`heartbeat: bool` that stood in for the TS `isHeartbeatCronJob(job)` helper (TS
+daemon-session-list.ts:127, core cron-jobs.ts:1338), and collapses four duplicate types onto their
+canonical owners, which also clears ~4 errors in pack C's daemon_mode.rs.
+
+STATUS: pack M (repairM-stubs) owns daemon_catalog_process.rs + daemon_session_list.rs and is
+finishing the 31 sites now; the exact per-site delta is written to
+evidence/diagnostics/mig-delta.txt. A CORRECT finish must land the crate at or BELOW 27.
+
+Do NOT read 54 as "the repair got worse" and do NOT revert the re-exports to restore 27: that would
+reintroduce the duplicate/invented types. If a turn needs the best-known-good crate number, it is 27
+and it is SUPERSEDED once pack M reports.
+
+Also this window: `ActiveSessionState.clients` is now `Vec<Arc<StdMutex<DaemonSocketClient>>>`
+(commit 8215e8347), matching TS daemon-mode.ts:3533-3545 where `state.clients.add(client)` adds the
+same object `this.clients` holds and mutates in place. That change took the crate 34 -> 27 and pack C's
+file 24 -> 17.
