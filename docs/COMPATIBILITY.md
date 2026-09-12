@@ -41,6 +41,35 @@ Tracked here as they are confirmed. Every entry names the evidence.
 3. **Test correction provenance.** The reference checkout has two uncommitted test
    changes (daemon-supervisor-ownership, rlm-ledger). They are not part of the pinned
    commit and were not copied. Status: not yet reproduced here.
+4. **Slice plumbing seams (structural, must be collapsed before release).** While the
+   port was built in slices, each slice declared local stand-ins for types owned by a
+   slice that was still empty, because a worker may only write its own files. A scan
+   found 209 type names declared in more than one file (172 of them inside a single
+   crate); the largest seams are `core/extensions/types.rs` (38), 
+   `modes/interactive/interactive_mode_services.rs` (36), `core/agent_session.rs` (31). 
+   Each seam is marked in-file ("slice plumbing" / "local stand-ins"). They must each be
+   collapsed onto the single owning module before release. Evidence:
+   `evidence/duplication-audit.json`. The daemon seam is already fixed (item 5).
+5. **Daemon protocol duplication (found and fixed).** `daemon-client.ts` in the
+   reference IMPORTS its wire types from `daemon-protocol.ts` (verified: zero export
+   overlap). The first port attempt instead embedded an 83 KB inner `mod protocol` in
+   `daemon_client.rs`, creating two competing definitions of `DaemonCommand`,
+   `DaemonResponse` and the `DAEMON_*` constants in one crate. Repair slice
+   `ca-daemon-consolidate` deletes the inner module and repoints to
+   `super::daemon_protocol`. Evidence: `evidence/duplication-audit.json`.
+6. **Under-port audit (found and fixed).** A completeness scan compared Rust bytes to
+   TypeScript bytes for every written file. One file was a stub in disguise:
+   `daemon_supervisor.rs` held 2 of 29 functions and no `DaemonSupervisor` class
+   (11 KB against 287 KB of TypeScript) while reporting done. It is re-queued as
+   `mega-daemon-supervisor`, ported in seven named line-ranged passes. The scan found no
+   other instance. Evidence: `evidence/under-port-audit.json`.
+7. **Build-job-count quoting on MSYS.** `set CARGO_BUILD_JOBS=4 && cargo ...` fails
+   because cargo parses the trailing space in `4 `. Export the variable instead. This
+   affected worker builds only and did not change any ported code.
+8. **Worker output limit.** Large files (>=1000 LOC) killed several workers that tried
+   to read and write the whole file in one pass, producing zero bytes. The slice briefs
+   now require named line-ranged passes with append-only writes and a pass ledger in the
+   status file, so a successor can resume mid-file.
 
 ## Verification status
 
