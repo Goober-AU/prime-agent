@@ -1,0 +1,41 @@
+{
+ "paused_at": "2026-09-12",
+ "reason": "user requested a pause",
+ "state": {
+  "mapped_files_written": "412/412",
+  "crates_green": [
+   "pi-ai",
+   "pi-tui",
+   "pi-agent-core"
+  ],
+  "pi_coding_agent_errors": 87,
+  "error_hotspots": {
+   "core/agent_session.rs": 65,
+   "modes/daemon/daemon_worker_client.rs": 8,
+   "modes/daemon/daemon_mode.rs": 6
+  },
+  "tests_executed_for_pi_coding_agent": 0,
+  "pushed": false
+ },
+ "agents": {
+  "live": 0,
+  "deleted": "all 13 sub-agents stopped, handles removed"
+ },
+ "resume_steps": [
+  "1. Respawn repair-agent-session-types FIRST: agent_session.rs has 65 of the 87 errors. Its defect is 19 uses of types that were never defined (PreparedTurnActionOptions, RlmChildTurnOutcome, CompactOptions) plus 3 invented helpers (image_to_value, compaction_entry_from_session_entry) that exist nowhere in the TypeScript. Instruct it to WRITE declarations first, in small appends, and leave a // REPAIR CURSOR comment.",
+  "2. Respawn a worker for daemon_worker_client.rs + daemon_mode.rs (8 + 6 errors).",
+  "3. Then the long tail (~8 errors across 8 files).",
+  "4. ONE workspace-wide cargo build + cargo test.",
+  "5. Write HANDOFF.md, refresh docs/MIGRATION-MAP.md, run the parity harness.",
+  "6. Push ONLY branch rust-port/current-windows-20260911 and report the URL."
+ ],
+ "hazards_to_remember": [
+  "NEVER run git stash/reset/checkout while workers are live (self-inflicted incident, evidence/incidents.md).",
+  "Exactly one live writer per file; see evidence/repair-ownership.json.",
+  "grep -c 'error\\[E' MISSES bare 'error:' syntax errors; trust the exit code.",
+  "Files mid-write show transient syntax errors; check mtime age before acting.",
+  "Crate-root mod.rs files are reached via lib.rs ([path=\"mod.rs\"] pub mod index;) - not defects.",
+  "Do not add a DaemonCommand::new builder: the canonical API is DaemonCommandBody = Map<String,Value>.",
+  "Cap: total agents (all depths) <= 15; sub-agents must never spawn children."
+ ]
+}
