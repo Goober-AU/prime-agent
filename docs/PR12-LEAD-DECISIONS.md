@@ -119,3 +119,10 @@ Reference command:
 4. **Count UNIQUE (file, line, message) sites.** rustc emits the same error once per target
    (lib and lib test), so raw message counts roughly double: gate run 1 was 950 messages =
    527 unique.
+
+## WORKER HAZARD: do not redirect to `NUL` on this machine
+
+`> NUL` in a Windows git-bash shell does not discard output - it creates a real, untracked file named
+`NUL` at the repo root (68 KB seen). `NUL` is a Windows reserved device name, so the file cannot be
+read normally and it pollutes `git status`. Use `> /dev/null` instead, or `2> file.log`.
+Removed once already (2026-09-12); if it reappears, a worker's command is the cause.
