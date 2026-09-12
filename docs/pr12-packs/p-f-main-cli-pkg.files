@@ -1,0 +1,11 @@
+main_entry.rs
+package_manager_cli.rs
+modes/telegram/commands.rs
+modes/acp/acp_mode.rs
+core/kernel/repl_manager.rs
+core/sdk.rs
+core/auth_storage.rs
+modes/agents_view/agents_view_mode.rs
+modes/rpc/rpc_mode.rs
+modes/telegram/bridge.rs
+modes/rpc/rpc_client.rs

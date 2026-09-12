@@ -1,0 +1,105 @@
+{
+ "p-a-agent-session": {
+  "files": [
+   "core/agent_session.rs"
+  ],
+  "errors": 355,
+  "doc": "docs/pr12-packs/p-a-agent-session.md"
+ },
+ "p-b-runtime-members": {
+  "files": [
+   "core/agent_session/runtime_members.rs"
+  ],
+  "errors": 108,
+  "doc": "docs/pr12-packs/p-b-runtime-members.md"
+ },
+ "p-c-daemon-mode": {
+  "files": [
+   "modes/daemon/daemon_mode.rs"
+  ],
+  "errors": 223,
+  "doc": "docs/pr12-packs/p-c-daemon-mode.md"
+ },
+ "p-d-daemon-rest": {
+  "files": [
+   "cli/daemon_command.rs",
+   "modes/daemon/saved_session_info.rs",
+   "modes/daemon/daemon_supervisor_ownership.rs",
+   "modes/daemon/daemon_protocol.rs",
+   "cli/daemon_ps.rs",
+   "modes/daemon/daemon_client.rs",
+   "modes/daemon/daemon_errors.rs",
+   "modes/daemon/daemon_supervisor.rs"
+  ],
+  "errors": 63,
+  "doc": "docs/pr12-packs/p-d-daemon-rest.md"
+ },
+ "p-e-interactive": {
+  "files": [
+   "modes/interactive/interactive_mode.rs",
+   "modes/interactive/components/tree_selector.rs",
+   "modes/interactive/components/assistant_message.rs",
+   "modes/interactive/components/branch_summary_message.rs",
+   "modes/interactive/components/injected_prompt_message.rs",
+   "modes/interactive/components/side_question.rs",
+   "modes/interactive/auth_flows.rs",
+   "modes/interactive/components/extension_editor.rs",
+   "modes/interactive/components/oauth_selector.rs",
+   "modes/interactive/components/heartbeat_manager.rs",
+   "modes/interactive/components/model_selector.rs"
+  ],
+  "errors": 129,
+  "doc": "docs/pr12-packs/p-e-interactive.md"
+ },
+ "p-f-main-cli-pkg": {
+  "files": [
+   "main_entry.rs",
+   "package_manager_cli.rs",
+   "modes/telegram/commands.rs",
+   "modes/acp/acp_mode.rs",
+   "core/kernel/repl_manager.rs",
+   "core/sdk.rs",
+   "core/auth_storage.rs",
+   "modes/agents_view/agents_view_mode.rs",
+   "modes/rpc/rpc_mode.rs",
+   "modes/telegram/bridge.rs",
+   "modes/rpc/rpc_client.rs"
+  ],
+  "errors": 127,
+  "doc": "docs/pr12-packs/p-f-main-cli-pkg.md"
+ },
+ "p-g-tail": {
+  "files": [
+   "core/compaction/compaction.rs",
+   "core/cron_jobs.rs",
+   "core/prime_inference_model_catalog.rs",
+   "core/agent_messages.rs",
+   "core/performance_metrics.rs",
+   "core/extensions/builtin/memory.rs",
+   "core/semantic_edges.rs",
+   "core/tools/bash.rs",
+   "modes/interactive/components/custom_message.rs",
+   "modes/interactive/interactive_mode_services.rs",
+   "modes/daemon/compact_session_stream.rs",
+   "cli/config_selector.rs",
+   "core/autonomous.rs",
+   "core/kernel/bootstrap.rs",
+   "modes/daemon/rlm_ledger.rs",
+   "core/legacy_rlm_continuation.rs",
+   "core/model_registry.rs",
+   "core/model_tool_output_policy.rs",
+   "core/session_lease.rs",
+   "core/side_question.rs",
+   "modes/interactive/components/refinement_outcome_message.rs",
+   "themes/optimus_logo.rs",
+   "cli/daemon_update_restart.rs",
+   "core/prompt_admission.rs",
+   "core/tools/acp_mcp.rs",
+   "core/tools/ipython.rs",
+   "modes/daemon/daemon_catalog_entry.rs",
+   "modes/telegram/worker.rs"
+  ],
+  "errors": 73,
+  "doc": "docs/pr12-packs/p-g-tail.md"
+ }
+}

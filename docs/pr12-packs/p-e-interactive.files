@@ -1,0 +1,11 @@
+modes/interactive/interactive_mode.rs
+modes/interactive/components/tree_selector.rs
+modes/interactive/components/assistant_message.rs
+modes/interactive/components/branch_summary_message.rs
+modes/interactive/components/injected_prompt_message.rs
+modes/interactive/components/side_question.rs
+modes/interactive/auth_flows.rs
+modes/interactive/components/extension_editor.rs
+modes/interactive/components/oauth_selector.rs
+modes/interactive/components/heartbeat_manager.rs
+modes/interactive/components/model_selector.rs
