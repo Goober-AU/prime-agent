@@ -501,7 +501,9 @@ pub struct DaemonEventMeta {
     pub replayed: Option<bool>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Like `DaemonCommand`, this envelope embeds `SessionActionRecoverySnapshot` (via
+/// `DaemonCommand`) which carries no `PartialEq`; nothing compares these wire values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonCommandEnvelope {
     #[serde(rename = "type")]
     pub type_: String,

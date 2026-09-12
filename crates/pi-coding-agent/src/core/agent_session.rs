@@ -1514,6 +1514,76 @@ pub fn custom_message_content_parts(content: &CustomMessageContent) -> Vec<pi_ai
     }
 }
 
+/// Bridge an evidence-shape message to a pi-ai user message for the refinement
+/// completion, mirroring `core/extensions/builtin/memory.rs`.
+fn refinement_message_to_pi_ai(
+    message: &crate::core::memory::evidence::AgentMessage,
+) -> Option<pi_ai::types::Message> {
+    let crate::core::memory::evidence::AgentMessage::User { content, timestamp } = message else {
+        return None;
+    };
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    block.get("text").and_then(Value::as_str).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(""),
+        _ => String::new(),
+    };
+    Some(pi_ai::types::Message::User(pi_ai::types::UserMessage::new(
+        pi_ai::types::UserContent::Text(text),
+        *timestamp as i64,
+    )))
+}
+
+/// Map the pi-ai `AssistantMessage` onto the refinement slice's minimal local
+/// shape (`blocked_on: pi-ai types` in refinement.rs).
+fn refinement_assistant_message(
+    message: &pi_ai::types::AssistantMessage,
+) -> crate::core::refinement::refinement::AssistantMessage {
+    use crate::core::refinement::refinement::{
+        AssistantContent, AssistantMessage as LocalAssistant, AssistantUsage, StopReason,
+    };
+    let content = message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            pi_ai::types::ContentBlock::Text(text) => Some(AssistantContent::Text {
+                text: text.text.clone(),
+            }),
+            pi_ai::types::ContentBlock::Thinking(thinking) => Some(AssistantContent::Thinking {
+                thinking: thinking.thinking.clone(),
+            }),
+            pi_ai::types::ContentBlock::ToolCall(_) => None,
+        })
+        .collect();
+    let stop_reason = match message.stop_reason.as_str() {
+        "length" => StopReason::Length,
+        "toolUse" => StopReason::ToolUse,
+        "error" => StopReason::Error,
+        "aborted" => StopReason::Aborted,
+        _ => StopReason::Stop,
+    };
+    LocalAssistant {
+        content,
+        usage: AssistantUsage {
+            input: message.usage.input,
+            output: message.usage.output,
+            cache_read: message.usage.cache_read,
+            cache_write: message.usage.cache_write,
+        },
+        stop_reason,
+        error_message: message.error_message.clone(),
+    }
+}
+
 /// `queuedAgentMessagePreview`.
 pub fn queued_agent_message_preview(action: &QueuedSessionAction) -> String {
     match &action.payload {
@@ -6755,10 +6825,34 @@ impl AgentSession {
             }
         }
 
-        if policy.input_source.is_some() {
+        if let Some(input_source) = policy.input_source {
             if let Some(runner) = self.extension_runner() {
                 if runner.has_handlers("input") {
-                    runner.emit_input(text, images.clone(), policy.input_source.unwrap().as_str());
+                    let session = self.clone();
+                    let original_text = text.to_string();
+                    let policy = policy.clone();
+                    return Box::pin(async move {
+                        let result = runner
+                            .emit_input(
+                                original_text.clone(),
+                                images.clone(),
+                                input_source.as_str().to_string(),
+                            )
+                            .await;
+                        match result {
+                            InputEventResult::Handled => Ok(NormalizedSubmission::Handled),
+                            InputEventResult::Transform {
+                                text: transformed,
+                                images: transformed_images,
+                            } => Ok(session.finish_submission_normalization(
+                                &transformed,
+                                transformed_images.or(images),
+                                &policy,
+                            )),
+                            InputEventResult::Continue => Ok(session
+                                .finish_submission_normalization(&original_text, images, &policy)),
+                        }
+                    });
                 }
             }
         }
@@ -9488,7 +9582,7 @@ impl AgentSession {
                 .unwrap()
                 .append_custom_message_entry(
                     &message.custom_type,
-                    message.content.clone(),
+                    &custom_message_entry_content(&message.content),
                     message.display,
                     message.details.clone(),
                 );
@@ -10010,7 +10104,7 @@ impl AgentSession {
             .filter_map(|action| session_action_recovery_of(action))
             .collect();
         SessionActionRecoverySnapshot {
-            version: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+            format_version: SESSION_ACTION_RECOVERY_FORMAT_VERSION,
             actions,
         }
     }
@@ -10627,24 +10721,45 @@ impl AgentSession {
     }
 
     /// `_onIpythonStateRestored(result)`.
-    fn on_ipython_state_restored(&self, result: RestoreResult) {
-        let message = create_custom_message(
-            IPYTHON_STATE_RESTORED_CUSTOM_TYPE.to_string(),
-            CustomMessageContent::Text(status_text_from_restore(&result)),
-            true,
-            Some(serde_json::to_value(&result).unwrap_or(Value::Null)),
-            now_ms_i64(),
-        );
-        let _ = self
-            .session_manager
-            .lock()
-            .unwrap()
-            .append_custom_message_entry(
-                &message.custom_type,
-                message.content.clone(),
-                message.display,
-                message.details.clone(),
+    fn on_ipython_state_restored(self: &Arc<Self>, result: RestoreResult) {
+        let mut text_lines = vec!["<ipython_state_restored>".to_string()];
+        if !result.restored.is_empty() {
+            text_lines.push(format!(
+                "Your Python kernel state was revived from your previous session. These names are available again: {}.",
+                result.restored.join(", ")
+            ));
+        } else {
+            text_lines.push(
+                "Your previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need."
+                    .to_string(),
             );
+        }
+        if !result.failed.is_empty() {
+            text_lines.push(format!(
+                "These could not be restored and must be recreated if needed: {}.",
+                result
+                    .failed
+                    .iter()
+                    .map(|failed| failed.name.clone())
+                    .collect::<Vec<String>>()
+                    .join(", ")
+            ));
+        }
+        text_lines.push("</ipython_state_restored>".to_string());
+        let message = CustomMessage {
+            role: "custom".to_string(),
+            custom_type: IPYTHON_STATE_RESTORED_CUSTOM_TYPE.to_string(),
+            content: CustomMessageContent::Text(text_lines.join("\n")),
+            display: true,
+            details: Some(serde_json::json!({ "restored": !result.restored.is_empty() })),
+            timestamp: now_ms_i64(),
+        };
+        let session = self.clone();
+        tokio::spawn(async move {
+            let _ = session
+                .send_custom_message(message, None, Some("nextTurn".to_string()))
+                .await;
+        });
     }
 
     /// `setSteeringMode(mode)`.
@@ -10674,7 +10789,10 @@ impl AgentSession {
         let controller = CancellationToken::new();
         *self.compaction_abort_controller.lock().unwrap() = Some(controller.clone());
         let result = self
-            .perform_compaction_unmeasured(Some(custom_instructions.map(|value| value.to_string())), controller.clone())
+            .perform_compaction_unmeasured(
+                custom_instructions.map(|value| value.to_string()),
+                controller.clone(),
+            )
             .await;
         *self.compaction_abort_controller.lock().unwrap() = None;
         self.reap_deleted_rlm_subagent_runtimes_after_compaction().await;
@@ -11013,8 +11131,18 @@ impl AgentSession {
         let auth = self.get_required_request_auth(&model).await?;
         let state = self.load_merged_harness_state();
         let history = self.load_refinement_history();
+        // The refinement slice keeps its own minimal `AgentMessage` (blocked_on: pi-ai
+        // types), so the live messages cross the boundary by serialized shape, exactly
+        // like `core/extensions/builtin/memory.rs` does.
+        let messages: Vec<crate::core::memory::evidence::AgentMessage> = self
+            .agent
+            .state()
+            .messages
+            .iter()
+            .filter_map(refinement_evidence_message)
+            .collect();
         review_auto_refine(ReviewAutoRefineRequest {
-            messages: &self.agent.state().messages,
+            messages: &messages,
             state: &state,
             history: &history,
             model: RefineModel {
@@ -11025,33 +11153,64 @@ impl AgentSession {
                 reason: context.reason,
                 turns_since_last_review: context.turns_since_last_review,
             },
-            headers: auth.headers.clone(),
+            headers: Some(auth.headers.clone().into_iter().collect()),
             thinking_level: Some(thinking_level_name(&self.thinking_level())),
             retry: Some(self.provider_retry_policy()),
-            complete: self.refinement_completion_fn(model),
+            complete: self.refinement_completion_fn(model, auth.api_key.clone(), auth.headers.clone()),
         })
         .await
         .map_err(|error| error.message)
     }
 
+    /// `reviewAutoRefine(messages, ...)` message bridge.
+    ///
+    /// blocked_on: the refinement slice's `AgentMessage` is a minimal local stand-in
+    /// for the real agent message union; it is filled by shape.
+    fn refinement_evidence_message(
+        message: &AgentMessage,
+    ) -> Option<crate::core::memory::evidence::AgentMessage> {
+        serde_json::to_value(message)
+            .ok()
+            .and_then(|value| {
+                serde_json::from_value::<crate::core::memory::evidence::AgentMessage>(value).ok()
+            })
+    }
+
     /// `providerRetryPolicy(this.settingsManager)`.
     fn provider_retry_policy(&self) -> ProviderRetryPolicy {
-        crate::core::provider_retry::provider_retry_policy(&self.settings_manager.lock().unwrap())
+        let retry = crate::core::provider_retry::provider_retry_policy(
+            &self.settings_manager.lock().unwrap(),
+        );
+        // The refinement slice declares its own minimal `ProviderRetryPolicy`.
+        ProviderRetryPolicy {
+            enabled: retry.enabled,
+            max_retries: retry.max_retries.max(0.0) as u32,
+            base_delay_ms: retry.base_delay_ms,
+            max_retry_delay_ms: retry.max_retry_delay_ms,
+        }
     }
 
     /// `completeWithProviderRetry(() => completeSimple(model, context, options))`.
-    fn refinement_completion_fn(&self, model: Model) -> CompletionFn {
+    ///
+    /// The TypeScript passes `{ signal, apiKey, headers }` into `completeSimple`;
+    /// the port captures them at closure creation because the refinement slice's
+    /// `RefinementCompletionRequest` carries only the prompt.
+    fn refinement_completion_fn(
+        &self,
+        model: Model,
+        api_key: String,
+        headers: indexmap::IndexMap<String, String>,
+    ) -> CompletionFn {
         Arc::new(move |request: RefinementCompletionRequest| {
             let model = model.clone();
+            let api_key = api_key.clone();
+            let headers = headers.clone();
             Box::pin(async move {
                 let options = pi_ai::types::SimpleStreamOptions {
                     stream: pi_ai::types::StreamOptions {
                         max_tokens: Some(request.max_tokens),
-                        api_key: request.api_key.clone(),
-                        headers: request
-                            .headers
-                            .clone()
-                            .map(|headers| headers.into_iter().collect()),
+                        api_key: Some(api_key),
+                        headers: Some(headers),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -11061,16 +11220,12 @@ impl AgentSession {
                     messages: request
                         .messages
                         .iter()
-                        .map(|message| {
-                            pi_ai::types::Message::User(pi_ai::types::UserMessage::new(
-                                pi_ai::types::UserContent::Text(message.content.clone()),
-                                message.timestamp,
-                            ))
-                        })
+                        .filter_map(refinement_message_to_pi_ai)
                         .collect(),
                     tools: None,
                 };
-                pi_ai::stream::complete_simple(&model, &context, Some(&options)).await
+                let response = pi_ai::stream::complete_simple(&model, &context, Some(&options)).await;
+                refinement_assistant_message(&response)
             })
         })
     }
@@ -11155,7 +11310,11 @@ impl AgentSession {
             options: options.clone(),
             headers: auth.headers.clone(),
             thinking_level: Some(thinking_level_name(&self.thinking_level())),
-            complete: self.refinement_completion_fn(model.clone()),
+            complete: self.refinement_completion_fn(
+                model.clone(),
+                auth.api_key.clone(),
+                auth.headers.clone(),
+            ),
         })
         .await
         .map_err(|error| error.message)?;

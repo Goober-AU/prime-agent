@@ -681,8 +681,6 @@ impl KernelState {
                 let this = self.clone();
                 let task_promise = promise.clone();
                 let on_progress = options.on_bootstrap_progress.clone();
-                // REPAIR CURSOR: this spawn needs `do_start` to be `Send`, which
-                // core/kernel/bootstrap.rs breaks (not owned here) - see final report.
                 tokio::spawn(async move {
                     let outcome = this
                         .do_start(KernelStartOptions {

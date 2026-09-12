@@ -4053,9 +4053,6 @@ impl AgentDaemon {
                 let command_id = command.id.clone();
                 let progress_client = Arc::clone(client);
                 let progress_active_session_id = active_session_id.clone();
-                let command_id = command.id.clone();
-                let progress_client = Arc::clone(client);
-                let progress_active_session_id = active_session_id.clone();
                 let on_progress: Option<Arc<dyn Fn(i64, i64) + Send + Sync>> =
                     command_id.as_ref().map(|command_id| {
                         let client = Arc::clone(&progress_client);
@@ -4150,6 +4147,20 @@ impl AgentDaemon {
                     },
                 )
                 .await;
+                Ok(Some(DaemonResponse::success(
+                    id,
+                    "list_saved_sessions",
+                    Some(serde_json::json!({
+                        "sessions": sessions.iter().map(serialize_saved_session_info).collect::<Vec<_>>()
+                    })),
+                )))
+            }
+            "create" => {
+                let state = self.create_runtime(command, None).await?;
+                Ok(Some(DaemonResponse::success(
+                    id,
+                    "create",
+                    Some(
                         serde_json::to_value(self.summary_for_state(&state))
                             .unwrap_or(Value::Null),
                     ),

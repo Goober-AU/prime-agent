@@ -392,7 +392,7 @@ mod tests {
             false,
             0,
         ),
-        ));
+        );
         let kinds = build_conversation_components(&[message], &options(&no_definition));
         assert!(kinds.is_empty());
     }
@@ -417,7 +417,7 @@ mod tests {
             true,
             0,
         ),
-        ));
+        );
         let kinds = build_conversation_components(&[message], &options(&no_definition));
         assert_eq!(
             kinds,
