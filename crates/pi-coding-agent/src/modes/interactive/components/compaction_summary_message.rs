@@ -9,9 +9,10 @@ use pi_tui::components::text::Text;
 use pi_tui::tui::Component;
 
 use crate::core::messages::CompactionSummaryMessage;
-use crate::modes::interactive::theme::theme::{get_markdown_theme, theme, MarkdownTheme};
+use crate::modes::interactive::theme::theme::{theme, MarkdownTheme};
 
 use super::expandable_custom_message::custom_message_label;
+use super::keybinding_hints::expand_collapse_hint;
 
 /// Compaction summary card: full markdown summary when expanded.
 pub struct CompactionSummaryMessageComponent {
@@ -131,6 +132,7 @@ impl Component for CompactionSummaryMessageComponent {
 mod tests {
     use super::*;
     use crate::core::messages::create_compaction_summary_message;
+    use crate::modes::interactive::theme::theme::get_markdown_theme;
 
     fn summary() -> CompactionSummaryMessage {
         create_compaction_summary_message(

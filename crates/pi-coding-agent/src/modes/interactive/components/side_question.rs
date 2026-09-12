@@ -2,7 +2,9 @@
 
 use std::rc::Rc;
 
-use pi_tui::components::markdown::{DefaultTextStyle, Markdown, MarkdownOptions, MarkdownTheme as TuiMarkdownTheme};
+use pi_tui::components::markdown::{
+    DefaultTextStyle, Markdown, MarkdownOptions, MarkdownTheme as TuiMarkdownTheme,
+};
 use pi_tui::components::r#box::Box_;
 use pi_tui::components::text::Text;
 use pi_tui::tui::Component;
@@ -45,7 +47,9 @@ fn to_tui_markdown_theme(theme: MarkdownTheme) -> TuiMarkdownTheme {
 /// `{ color: (content) => theme.fg("userMessageText", content) }`.
 fn user_message_text_style() -> Option<DefaultTextStyle> {
     Some(DefaultTextStyle {
-        color: Some(Rc::new(|content: &str| theme().fg("userMessageText", content))),
+        color: Some(Rc::new(|content: &str| {
+            theme().fg("userMessageText", content)
+        })),
         ..Default::default()
     })
 }
@@ -73,7 +77,10 @@ enum Entry {
 
 /// Port of `applySurface`.
 fn apply_surface(line: &str, width: usize) -> String {
-    let padded = format!("{line}{}", " ".repeat(width.saturating_sub(visible_width(line))));
+    let padded = format!(
+        "{line}{}",
+        " ".repeat(width.saturating_sub(visible_width(line)))
+    );
     let background = theme().get_popup_background_color();
     padded
         .split("\x1b[0m")
@@ -171,20 +178,32 @@ impl SideQuestionComponent {
     }
 
     /// Port of `renderAnswer`.
-    fn render_answer(turn: &mut SideQuestionTurnState, padding_x: usize, width: f64) -> Vec<String> {
+    fn render_answer(
+        turn: &mut SideQuestionTurnState,
+        padding_x: usize,
+        width: f64,
+    ) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         if !turn.event.answer.is_empty() {
             lines.extend(<Markdown as Component>::render(&mut turn.answer, width));
         }
         if let Some(error_message) = &turn.event.error_message {
             // A turn can fail after streaming partial output; show both.
-            lines.extend(Text::new(theme().fg("error", error_message), padding_x, 0, None).render(width));
+            lines.extend(
+                Text::new(theme().fg("error", error_message), padding_x, 0, None).render(width),
+            );
         }
         if !lines.is_empty() {
             return lines;
         }
         if turn.event.status == "cancelled" {
-            return Text::new(theme().fg("userMessageText", "Cancelled"), padding_x, 0, None).render(width);
+            return Text::new(
+                theme().fg("userMessageText", "Cancelled"),
+                padding_x,
+                0,
+                None,
+            )
+            .render(width);
         }
         let message = if turn.event.status == "complete" {
             "No response"
@@ -285,7 +304,12 @@ impl Component for SideQuestionComponent {
 mod tests {
     use super::*;
 
-    fn event(id: &str, question: &str, answer: &str, status: &str) -> AgentConnectionSideQuestionEvent {
+    fn event(
+        id: &str,
+        question: &str,
+        answer: &str,
+        status: &str,
+    ) -> AgentConnectionSideQuestionEvent {
         AgentConnectionSideQuestionEvent {
             id: id.to_string(),
             question: question.to_string(),
@@ -312,8 +336,14 @@ mod tests {
 
     #[test]
     fn padding_is_clamped_to_at_least_two() {
-        assert_eq!(SideQuestionComponent::new(event("1", "q", "", "running"), Some(0)).padding_x, 2);
-        assert_eq!(SideQuestionComponent::new(event("1", "q", "", "running"), Some(5)).padding_x, 5);
+        assert_eq!(
+            SideQuestionComponent::new(event("1", "q", "", "running"), Some(0)).padding_x,
+            2
+        );
+        assert_eq!(
+            SideQuestionComponent::new(event("1", "q", "", "running"), Some(5)).padding_x,
+            5
+        );
     }
 
     #[test]
@@ -343,7 +373,8 @@ mod tests {
 
     #[test]
     fn render_surfaces_every_line_to_the_popup_background() {
-        let mut component = SideQuestionComponent::new(event("1", "hello", "world", "running"), None);
+        let mut component =
+            SideQuestionComponent::new(event("1", "hello", "world", "running"), None);
         let lines = component.render(20.0);
         assert!(!lines.is_empty());
         assert!(lines.len() > 3);

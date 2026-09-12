@@ -257,7 +257,7 @@ fn padded_background_line(
     padding_x: usize,
     background: Option<&dyn Fn(&str) -> String>,
 ) -> String {
-    let width = std::cmp::max(0.0, width.floor()) as usize;
+    let width = width.floor().max(0.0) as usize;
     let inner_width = std::cmp::max(1, width - padding_x * 2);
     let content = truncate_to_width(text, inner_width as f64, "", false);
     let right_padding = " ".repeat(inner_width.saturating_sub(visible_width(&content)));
@@ -296,7 +296,7 @@ fn surface_line(text: &str, width: f64, padding_x: usize) -> String {
 
 /// Port of `surfaceWrappedLines`.
 fn surface_wrapped_lines(text: &str, width: f64, padding_x: usize) -> Vec<String> {
-    let width = std::cmp::max(0.0, width.floor()) as usize;
+    let width = width.floor().max(0.0) as usize;
     let inner_width = std::cmp::max(1, width - padding_x * 2);
     wrap_text_with_ansi(text, inner_width)
         .into_iter()

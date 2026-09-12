@@ -157,7 +157,7 @@ pub fn merge_turn_file_changes(
 const FILE_CHANGE_SUMMARY_PREFIX: &str = "    \u{2570}\u{2500} ";
 /// Indent that aligns diff rows with the summary line's text column.
 pub fn file_change_diff_indent() -> &'static str {
-    FILE_CHANGE_DIFF_INDENT
+    FILE_CHANGE_DIFF_INDENT.as_str()
 }
 
 /// `" ".repeat(visibleWidth(FILE_CHANGE_SUMMARY_PREFIX))`

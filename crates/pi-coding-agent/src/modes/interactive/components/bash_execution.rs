@@ -75,10 +75,9 @@ impl BashExecutionComponent {
                 .add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
         }
 
-        container.add_child(
-            Rc::new(RefCell::new(DynamicBorder::new(border_color.clone())))
-                as Rc<RefCell<dyn Component>>,
-        );
+        container.add_child(Rc::new(RefCell::new(DynamicBorder::new(Box::new(
+            move |text: &str| theme().fg(color_key, text),
+        )))) as Rc<RefCell<dyn Component>>);
 
         let content_container = Rc::new(RefCell::new(Container::new()));
         container.add_child(Rc::clone(&content_container) as Rc<RefCell<dyn Component>>);

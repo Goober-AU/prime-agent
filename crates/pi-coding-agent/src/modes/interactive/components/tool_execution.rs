@@ -1,15 +1,15 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/tool-execution.ts
 //!
 //! PARTIAL: `ToolExecutionComponent` composes per-tool renderers from
-//! `core/extensions/types.ts`, the pi-tui `Image` component and the
-//! `IPythonCellComponent` (components/ipython-cell.ts, another slice whose Rust
-//! file is still empty). Every free function and every state transition of the
-//! class is ported 1:1; the ipython shell is represented by its state struct
-//! (see `ipython_cell_state` below) instead of the real component.
+//! `core/extensions/types.ts`, the pi-tui `Image` component and the real
+//! `IPythonCellComponent` (components/ipython-cell.ts ->
+//! `super::ipython_cell`). Every free function and every state transition of the
+//! class is ported 1:1.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use pi_agent_core::types::AgentToolResult;
 use pi_tui::components::image::{Image, ImageOptions, ImageTheme};
 use pi_tui::components::text::Text;
 use pi_tui::tui::Component;
@@ -30,83 +30,11 @@ use crate::modes::interactive::theme::working_icon::{get_working_pulse_frame, wo
 
 use super::tool_panel::ToolPanel;
 
-/// Port of `getIpythonCodeFromArgs` (components/ipython-cell.ts - `IPythonCellComponent`
-/// belongs to another slice, so the helper is private to this module).
-use ipython_cell_state::get_ipython_code_from_args;
-
-/// Port of the `IPythonCellState` / `IPythonCellContentBlock` shapes from
-/// packages/coding-agent/src/modes/interactive/components/ipython-cell.ts.
-///
-/// `IPythonCellComponent` itself belongs to another slice (components/ipython-cell.rs
-/// is still empty), so this module carries the state `tool-execution.ts` hands to
-/// that component instead of the component instance.
-mod ipython_cell_state {
-    use serde_json::Value;
-
-    /// `IPythonCellContentBlock`
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct IPythonCellContentBlock {
-        pub r#type: String,
-        pub text: Option<String>,
-        pub data: Option<String>,
-        pub mime_type: Option<String>,
-    }
-
-    /// `IPythonCellState`
-    #[derive(Debug, Clone, Default)]
-    pub struct IPythonCellState {
-        pub code: String,
-        pub content: Option<Vec<crate::core::tools::render_utils::RenderContentBlock>>,
-        pub details: Option<Value>,
-        pub is_partial: bool,
-        pub is_error: bool,
-        pub expanded: bool,
-        pub agent_messages_expanded: bool,
-        pub edit_diffs_expanded: bool,
-        pub show_expand_hint: bool,
-        pub execution_started: bool,
-        pub args_complete: bool,
-        pub show_images: bool,
-        /// Session cwd - edit paths nested under it render relative, else absolute.
-        pub cwd: String,
-    }
-
-    /// Port of `getIpythonCodeFromArgs` (ipython-cell.ts): the tool arguments may
-    /// carry the code as a string or as a JSON string containing `{ code }`.
-    pub fn get_ipython_code_from_args(args: &Value) -> String {
-        let code = args.get("code");
-        let parsed: Value = match code {
-            Some(Value::String(text)) => {
-                serde_json::from_str(text).unwrap_or(Value::String(text.clone()))
-            }
-            Some(other) => other.clone(),
-            None => Value::Null,
-        };
-        parsed
-            .get("code")
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .unwrap_or_default()
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn reads_code_from_both_argument_shapes() {
-            assert_eq!(
-                get_ipython_code_from_args(&serde_json::json!({"code": "x = 1"})),
-                "x = 1"
-            );
-            assert_eq!(
-                get_ipython_code_from_args(&serde_json::json!({"code": "{\"code\":\"x = 1\"}"})),
-                "x = 1"
-            );
-            assert_eq!(get_ipython_code_from_args(&serde_json::json!({})), "");
-        }
-    }
-}
+/// `getIpythonCodeFromArgs` / `IPythonCellState` live in
+/// components/ipython-cell.ts -> `super::ipython_cell`.
+use super::ipython_cell::{
+    get_ipython_code_from_args, IPythonCellComponent, IPythonCellContentBlock, IPythonCellState,
+};
 
 /// `ToolExecutionOptions`
 #[derive(Debug, Clone, Copy)]
@@ -243,6 +171,31 @@ pub struct ToolExecutionResult {
     pub details: Option<Value>,
 }
 
+/// Adapts the shared `IPythonCellComponent` to the pi-tui `Component` the
+/// self-render container holds (the TypeScript container keeps one instance and
+/// re-adds it on every rebuild).
+struct SharedComponent(Rc<RefCell<IPythonCellComponent>>);
+
+impl Component for SharedComponent {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        self.0.borrow_mut().render(width)
+    }
+
+    fn invalidate(&mut self) {
+        self.0.borrow_mut().invalidate();
+    }
+}
+
+/// `IPythonCellState.content` entries are the tool result blocks.
+fn to_ipython_cell_block(block: &ResultContentBlock) -> IPythonCellContentBlock {
+    IPythonCellContentBlock {
+        r#type: block.r#type.clone(),
+        text: block.text.clone(),
+        data: block.data.clone(),
+        mime_type: block.mime_type.clone(),
+    }
+}
+
 /// Port of `ToolExecutionComponent`.
 pub struct ToolExecutionComponent {
     content_panel: ToolPanel,
@@ -250,8 +203,8 @@ pub struct ToolExecutionComponent {
     self_render_children: Vec<Box<dyn Component>>,
     call_renderer_component: Option<Box<dyn Component>>,
     result_renderer_component: Option<Box<dyn Component>>,
-    /// `ipythonCellComponent` state (the component itself is another slice's file).
-    pub ipython_cell_state: Option<ipython_cell_state::IPythonCellState>,
+    /// `ipythonCellComponent` (components/ipython-cell.ts).
+    pub ipython_cell_component: Option<Rc<RefCell<IPythonCellComponent>>>,
     renderer_state: Value,
     image_components: Vec<Image>,
     tool_name: String,
@@ -291,7 +244,7 @@ impl ToolExecutionComponent {
             self_render_children: Vec::new(),
             call_renderer_component: None,
             result_renderer_component: None,
-            ipython_cell_state: None,
+            ipython_cell_component: None,
             renderer_state: Value::Object(serde_json::Map::new()),
             image_components: Vec::new(),
             tool_name: tool_name.to_string(),
@@ -635,29 +588,43 @@ impl ToolExecutionComponent {
             self.self_render_children.clear();
 
             if self.should_use_ipython_renderer() {
-                let state = ipython_cell_state::IPythonCellState {
-                    code: get_ipython_code_from_args(&self.args),
-                    content: self.result.as_ref().map(|result| result.content.clone()),
+                let state = IPythonCellState {
+                    code: get_ipython_code_from_args(Some(&self.args)),
+                    content: self
+                        .result
+                        .as_ref()
+                        .map(|result| result.content.iter().map(to_ipython_cell_block).collect()),
                     details: self
                         .result
                         .as_ref()
                         .and_then(|result| result.details.clone()),
-                    is_partial: self.is_partial,
-                    is_error: self
-                        .result
-                        .as_ref()
-                        .map(|result| result.is_error)
-                        .unwrap_or(false),
-                    expanded: self.expanded,
-                    agent_messages_expanded: self.agent_messages_expanded,
-                    edit_diffs_expanded: self.edit_diffs_expanded,
-                    execution_started: self.execution_started,
-                    args_complete: self.args_complete,
-                    show_expand_hint: self.show_expand_hint,
-                    show_images: self.show_images,
-                    cwd: self.cwd.clone(),
+                    is_partial: Some(self.is_partial),
+                    is_error: Some(
+                        self.result
+                            .as_ref()
+                            .map(|result| result.is_error)
+                            .unwrap_or(false),
+                    ),
+                    expanded: Some(self.expanded),
+                    agent_messages_expanded: Some(self.agent_messages_expanded),
+                    edit_diffs_expanded: Some(self.edit_diffs_expanded),
+                    execution_started: Some(self.execution_started),
+                    args_complete: Some(self.args_complete),
+                    show_expand_hint: Some(self.show_expand_hint),
+                    show_images: Some(self.show_images),
+                    cwd: Some(self.cwd.clone()),
                 };
-                self.ipython_cell_state = Some(state);
+                match self.ipython_cell_component.as_mut() {
+                    Some(component) => component.borrow_mut().update(state),
+                    None => {
+                        self.ipython_cell_component =
+                            Some(Rc::new(RefCell::new(IPythonCellComponent::new(state))));
+                    }
+                }
+                if let Some(component) = self.ipython_cell_component.clone() {
+                    self.self_render_children
+                        .push(Box::new(SharedComponent(component)));
+                }
                 has_content = true;
             } else {
                 has_content = self.mount_renderers(self.self_render_children.len(), true);
@@ -972,20 +939,30 @@ mod tests {
             "/cwd",
         );
         assert_eq!(component.get_render_shell(), "self");
-        assert!(component.ipython_cell_state.is_some());
+        assert!(component.ipython_cell_component.is_some());
     }
 
     #[test]
-    fn ipython_code_is_read_from_either_shape() {
+    fn ipython_code_is_read_from_the_args() {
         assert_eq!(
-            get_ipython_code_from_args(&serde_json::json!({"code": "print(1)"})),
+            get_ipython_code_from_args(Some(&serde_json::json!({"code": "print(1)"}))),
             "print(1)"
         );
-        assert_eq!(
-            get_ipython_code_from_args(&serde_json::json!({"code": "{\"code\":\"print(1)\"}"})),
-            "print(1)"
-        );
-        assert_eq!(get_ipython_code_from_args(&Value::Null), "");
+        assert_eq!(get_ipython_code_from_args(Some(&Value::Null)), "");
+        assert_eq!(get_ipython_code_from_args(None), "");
+    }
+
+    #[test]
+    fn result_blocks_map_to_ipython_cell_blocks() {
+        let block = ResultContentBlock {
+            r#type: "text".to_string(),
+            text: Some("out".to_string()),
+            data: None,
+            mime_type: None,
+        };
+        let mapped = to_ipython_cell_block(&block);
+        assert_eq!(mapped.r#type, "text");
+        assert_eq!(mapped.text.as_deref(), Some("out"));
     }
 
     #[test]

@@ -19,8 +19,10 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 
 use crate::config::get_bundled_skills_dir;
+// `export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.js";`
+pub use crate::core::diagnostics::{ResourceCollision, ResourceDiagnostic};
 use crate::core::diagnostics::{
-    ResourceDiagnostic, RESOURCE_DIAGNOSTIC_COLLISION, RESOURCE_DIAGNOSTIC_ERROR, RESOURCE_DIAGNOSTIC_WARNING,
+    RESOURCE_DIAGNOSTIC_COLLISION, RESOURCE_DIAGNOSTIC_ERROR, RESOURCE_DIAGNOSTIC_WARNING,
 };
 use crate::core::event_bus::{create_event_bus, EventBus};
 use crate::core::extensions::loader::{create_extension_runtime, load_extension_from_factory, load_extensions};
@@ -39,7 +41,6 @@ use crate::core::system_prompt::ContextFile;
 use crate::modes::interactive::theme::theme::{load_theme_from_path, Theme};
 use crate::utils::paths::{canonicalize_path, is_local_path};
 
-pub use crate::core::diagnostics::{ResourceCollision, ResourceDiagnostic as ResourceDiagnosticExport};
 
 /// `CONFIG_DIR_NAME` from config.ts (package.json `piConfig.configDir`).
 pub const CONFIG_DIR_NAME: &str = ".prime/agent";
@@ -209,6 +210,17 @@ pub struct DefaultResourceLoaderOptions {
     pub append_system_prompt_override: Option<Arc<dyn Fn(Vec<String>) -> Vec<String> + Send + Sync>>,
 }
 
+/// `DefaultResourceLoaderOptions` with empty `cwd`/`agentDir`.
+///
+/// The TypeScript declares both as required; `Default` exists so callers that
+/// take the options from another options object (`{ ...resourceLoaderOptions }`
+/// with no loader options supplied) can build the same "no extra options" value.
+impl Default for DefaultResourceLoaderOptions {
+    fn default() -> Self {
+        Self::new("", "")
+    }
+}
+
 impl DefaultResourceLoaderOptions {
     /// `{ cwd, agentDir }` - every other option defaults exactly like the TypeScript.
     pub fn new(cwd: &str, agent_dir: &str) -> Self {
@@ -263,8 +275,12 @@ struct LoaderState {
     last_theme_paths: Vec<String>,
 }
 
-/// `class DefaultResourceLoader`.
-pub struct DefaultResourceLoader {
+/// The mutable state behind [`DefaultResourceLoader`].
+///
+/// TypeScript's `DefaultResourceLoader` is one object that `reload()` mutates;
+/// Rust shares it through an `Arc` so `reload()` can return a `'static` future
+/// for the `agent-session` seam while the loader itself stays immutable.
+pub struct LoaderInner {
     cwd: String,
     agent_dir: String,
     settings_manager: Arc<tokio::sync::Mutex<SettingsManager>>,
@@ -296,7 +312,7 @@ pub struct DefaultResourceLoader {
     state: Mutex<LoaderState>,
 }
 
-impl std::fmt::Debug for DefaultResourceLoader {
+impl std::fmt::Debug for LoaderInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DefaultResourceLoader")
             .field("cwd", &self.cwd)
@@ -305,7 +321,7 @@ impl std::fmt::Debug for DefaultResourceLoader {
     }
 }
 
-impl DefaultResourceLoader {
+impl LoaderInner {
     pub fn new(options: DefaultResourceLoaderOptions) -> Self {
         let settings_manager = options
             .settings_manager
@@ -377,6 +393,20 @@ impl DefaultResourceLoader {
     }
 }
 
+/// `createSourceInfo(path, metadata)`.
+///
+/// `package-manager.ts` and `source-info.ts` declare `PathMetadata` separately in
+/// Rust, so the loader converts between the two identical shapes here.
+fn create_source_info_from_metadata(path: &str, metadata: &PathMetadata) -> SourceInfo {
+    SourceInfo {
+        path: path.to_string(),
+        source: metadata.source.clone(),
+        scope: metadata.scope.clone(),
+        origin: metadata.origin.clone(),
+        base_dir: metadata.base_dir.clone(),
+    }
+}
+
 /// `join(a, b)` with `MAIN_SEPARATOR`, matching `utils/paths` join semantics.
 fn join_path(base: &str, part: &str) -> String {
     let base = base.trim_end_matches(['/', '\\']);
@@ -437,7 +467,7 @@ fn normalize_lexically(path: &Path) -> String {
     }
 }
 
-impl ResourceLoader for DefaultResourceLoader {
+impl ResourceLoader for LoaderInner {
     fn get_extensions(&self) -> LoadExtensionsResult {
         let state = self.state();
         LoadExtensionsResult {
@@ -496,7 +526,7 @@ impl ResourceLoader for DefaultResourceLoader {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             for entry in &skill_paths {
-                infos.insert(entry.path.clone(), create_source_info(&entry.path, &entry.metadata));
+                infos.insert(entry.path.clone(), create_source_info_from_metadata(&entry.path, &entry.metadata));
             }
         }
         {
@@ -505,7 +535,7 @@ impl ResourceLoader for DefaultResourceLoader {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             for entry in &prompt_paths {
-                infos.insert(entry.path.clone(), create_source_info(&entry.path, &entry.metadata));
+                infos.insert(entry.path.clone(), create_source_info_from_metadata(&entry.path, &entry.metadata));
             }
         }
         {
@@ -514,7 +544,7 @@ impl ResourceLoader for DefaultResourceLoader {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             for entry in &theme_paths {
-                infos.insert(entry.path.clone(), create_source_info(&entry.path, &entry.metadata));
+                infos.insert(entry.path.clone(), create_source_info_from_metadata(&entry.path, &entry.metadata));
             }
         }
 
@@ -558,7 +588,7 @@ impl ResourceLoader for DefaultResourceLoader {
 }
 
 /// `normalizeExtensionPaths(entries)`.
-impl DefaultResourceLoader {
+impl LoaderInner {
     fn normalize_extension_paths(&self, entries: Vec<ResourcePathEntry>) -> Vec<ResourcePathEntry> {
         entries
             .into_iter()
@@ -609,7 +639,7 @@ fn home_dir() -> String {
         .unwrap_or_default()
 }
 
-impl DefaultResourceLoader {
+impl LoaderInner {
     /// The body of `reload()`.
     async fn reload_inner(&self) {
         let resolved_paths = match self.package_manager.resolve(None).await {
@@ -691,7 +721,10 @@ impl DefaultResourceLoader {
         let mut enabled_skills: Vec<String> = Vec::new();
         for resource in enabled_skill_resources {
             let mut path = resource.path.clone();
-            if resource.metadata.source != "auto" || resource.metadata.origin == SOURCE_ORIGIN_PACKAGE {
+            // `if (source !== "auto" && origin !== "package") return resource.path;`
+            let auto_package =
+                resource.metadata.source == "auto" && resource.metadata.origin == SOURCE_ORIGIN_PACKAGE;
+            if auto_package {
                 let is_directory = std::fs::metadata(&path)
                     .map(|metadata| metadata.is_dir())
                     .unwrap_or(false);
@@ -924,7 +957,7 @@ impl DefaultResourceLoader {
     }
 }
 
-impl DefaultResourceLoader {
+impl LoaderInner {
     /// `updateSkillsFromPaths(skillPaths, metadataByPath?)`.
     fn update_skills_from_paths(&self, skill_paths: &[String], metadata_by_path: Option<&Vec<(String, PathMetadata)>>) {
         let skills_result = if self.no_skills && skill_paths.is_empty() {
@@ -1036,7 +1069,12 @@ impl DefaultResourceLoader {
             .map(|mut theme| {
                 if let Some(source_path) = theme.source_path.clone() {
                     if let Some(info) = self.find_source_info_for_path(&source_path, Some(&extension_infos), metadata_by_path) {
-                        theme.source_info = Some(info);
+                        // `theme.sourceInfo` is the theme module's own three-field shape.
+                        theme.source_info = Some(crate::modes::interactive::theme::theme::SourceInfo {
+                            path: info.path,
+                            source: info.source,
+                            scope: info.scope,
+                        });
                     }
                 }
                 Arc::new(theme)
@@ -1055,8 +1093,9 @@ impl DefaultResourceLoader {
     ) {
         for extension in extensions {
             let mut extension = extension.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let metadata_by_path = metadata_by_path.to_vec();
             let source_info = self
-                .find_source_info_for_path(&extension.path, None, Some(&metadata_by_path.to_vec()))
+                .find_source_info_for_path(&extension.path, None, Some(&metadata_by_path))
                 .unwrap_or_else(|| self.get_default_source_info_for_path(&extension.path));
             extension.source_info = source_info.clone();
             for command in extension.commands.values_mut() {
@@ -1102,7 +1141,7 @@ impl DefaultResourceLoader {
                 .iter()
                 .find(|(path, _)| *path == normalized_resource_path || path == resource_path)
             {
-                return Some(create_source_info(resource_path, metadata));
+                return Some(create_source_info_from_metadata(resource_path, metadata));
             }
 
             for (source_path, metadata) in metadata_by_path {
@@ -1110,7 +1149,7 @@ impl DefaultResourceLoader {
                 if normalized_resource_path == normalized_source_path
                     || normalized_resource_path.starts_with(&format!("{normalized_source_path}{}", std::path::MAIN_SEPARATOR))
                 {
-                    return Some(create_source_info(resource_path, metadata));
+                    return Some(create_source_info_from_metadata(resource_path, metadata));
                 }
             }
         }
@@ -1231,7 +1270,7 @@ fn is_under_path(target: &str, root: &str) -> bool {
     target.starts_with(&prefix)
 }
 
-impl DefaultResourceLoader {
+impl LoaderInner {
     /// `loadThemes(paths, includeDefaults = true)`.
     fn load_themes(&self, paths: &[String], include_defaults: bool) -> OwnedThemesResult {
         let mut themes: Vec<Theme> = Vec::new();
@@ -1528,8 +1567,8 @@ mod tests {
         file.write_all(content.as_bytes()).unwrap();
     }
 
-    fn loader(cwd: &str, agent_dir: &str) -> DefaultResourceLoader {
-        DefaultResourceLoader::new(DefaultResourceLoaderOptions {
+    fn loader(cwd: &str, agent_dir: &str) -> LoaderInner {
+        LoaderInner::new(DefaultResourceLoaderOptions {
             // No bundled skills: the tests assert the local source set only.
             bundled_skills_dir: Some(None),
             ..DefaultResourceLoaderOptions::new(cwd, agent_dir)
@@ -1620,7 +1659,7 @@ mod tests {
         let cwd = root.join("project");
         write_file(&cwd.join("AGENTS.md"), "Project instructions");
 
-        let loader = DefaultResourceLoader::new(DefaultResourceLoaderOptions {
+        let loader = LoaderInner::new(DefaultResourceLoaderOptions {
             no_context_files: true,
             bundled_skills_dir: Some(None),
             ..DefaultResourceLoaderOptions::new(&cwd.to_string_lossy(), &agent_dir.to_string_lossy())
@@ -1660,7 +1699,7 @@ mod tests {
         let agent_dir = root.join("agent");
         let cwd = root.join("project");
 
-        let loader = DefaultResourceLoader::new(DefaultResourceLoaderOptions {
+        let loader = LoaderInner::new(DefaultResourceLoaderOptions {
             bundled_skills_dir: Some(None),
             system_prompt: Some("Base".to_string()),
             system_prompt_override: Some(Arc::new(|base: Option<String>| {
@@ -1691,7 +1730,7 @@ mod tests {
             "---\nname: kept\ndescription: kept\n---\nbody",
         );
 
-        let loader = DefaultResourceLoader::new(DefaultResourceLoaderOptions {
+        let loader = LoaderInner::new(DefaultResourceLoaderOptions {
             bundled_skills_dir: Some(None),
             skills_override: Some(Arc::new(|base: SkillsResult| SkillsResult {
                 skills: base.skills.into_iter().filter(|skill| skill.name() != "kept").collect(),
@@ -1716,7 +1755,7 @@ mod tests {
         let extra = root.join("extra.md");
         write_file(&extra, "---\nname: extra\ndescription: extra\n---\nbody");
 
-        let loader = DefaultResourceLoader::new(DefaultResourceLoaderOptions {
+        let loader = LoaderInner::new(DefaultResourceLoaderOptions {
             no_skills: true,
             bundled_skills_dir: Some(None),
             additional_skill_paths: vec![extra.to_string_lossy().to_string()],
@@ -1809,5 +1848,152 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].path, "b");
         assert_eq!(conflicts[0].message, "Flag \"--shared\" conflicts with a");
+    }
+}
+
+/// `class DefaultResourceLoader` - a shared handle to one loader instance.
+///
+/// The TypeScript class is the loader itself; Rust splits the handle (cheap to
+/// clone, `Arc`-shared) from [`LoaderInner`], the state `reload()` mutates.
+#[derive(Clone)]
+pub struct DefaultResourceLoader {
+    inner: Arc<LoaderInner>,
+}
+
+impl std::fmt::Debug for DefaultResourceLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+impl DefaultResourceLoader {
+    pub fn new(options: DefaultResourceLoaderOptions) -> Self {
+        Self {
+            inner: Arc::new(LoaderInner::new(options)),
+        }
+    }
+
+    /// The shared state this handle points at.
+    pub fn inner(&self) -> &Arc<LoaderInner> {
+        &self.inner
+    }
+
+    /// `getExtensions()`.
+    pub fn get_extensions(&self) -> LoadExtensionsResult {
+        self.inner.get_extensions()
+    }
+
+    /// `reload()` as an inherent method, so call sites that hold the concrete
+    /// loader (not the shared trait object) resolve without importing a trait.
+    pub async fn reload(&self) {
+        self.inner.reload().await;
+    }
+
+    /// `getLoadedExtensionPaths()`.
+    pub fn get_loaded_extension_paths(&self) -> Vec<String> {
+        self.inner.get_loaded_extension_paths()
+    }
+
+    pub fn settings_manager(&self) -> Arc<tokio::sync::Mutex<SettingsManager>> {
+        self.inner.settings_manager()
+    }
+
+    pub fn bundled_skills_dir(&self) -> Option<String> {
+        self.inner.bundled_skills_dir()
+    }
+}
+
+impl ResourceLoader for DefaultResourceLoader {
+    fn get_extensions(&self) -> LoadExtensionsResult {
+        self.inner.get_extensions()
+    }
+
+    fn get_skills(&self) -> SkillsResult {
+        self.inner.get_skills()
+    }
+
+    fn get_prompts(&self) -> PromptsResult {
+        self.inner.get_prompts()
+    }
+
+    fn get_themes(&self) -> ThemesResult {
+        self.inner.get_themes()
+    }
+
+    fn get_agents_files(&self) -> AgentsFilesResult {
+        self.inner.get_agents_files()
+    }
+
+    fn get_system_prompt(&self) -> Option<String> {
+        self.inner.get_system_prompt()
+    }
+
+    fn get_append_system_prompt(&self) -> Vec<String> {
+        self.inner.get_append_system_prompt()
+    }
+
+    fn extend_resources(&self, paths: ResourceExtensionPaths) {
+        self.inner.extend_resources(paths)
+    }
+
+    fn reload(&self) -> BoxFuture<'_, ()> {
+        self.inner.reload()
+    }
+}
+
+/// `ResourceLoader` from `core/agent-session.ts` - the seam the session uses.
+///
+/// The session's seam declares `get_prompt_templates`/`get_context_files`/
+/// `get_system_prompt_override`/`get_append_system_prompt() -> Option<String>`,
+/// so the loader adapts its own `ResourceLoader` surface to it here.
+/// blocked_on: `core/agent-session.ts` owns the seam trait; this impl is the
+/// only Rust counterpart the loader can supply without editing that file.
+impl crate::core::agent_session::ResourceLoader for DefaultResourceLoader {
+    fn get_extensions(&self) -> Vec<crate::core::agent_session::ResourceExtensionPaths> {
+        self.inner
+            .get_extensions()
+            .extensions
+            .iter()
+            .map(|extension| {
+                let extension = extension.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                crate::core::agent_session::ResourceExtensionPaths {
+                    path: extension.resolved_path.clone(),
+                    extension_path: extension.path.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn get_skills(&self) -> Vec<Skill> {
+        self.inner.get_skills().skills
+    }
+
+    fn get_prompt_templates(&self) -> Vec<PromptTemplate> {
+        self.inner.get_prompts().prompts
+    }
+
+    fn get_context_files(&self) -> Vec<ContextFile> {
+        self.inner.get_agents_files().agents_files
+    }
+
+    fn get_system_prompt_override(&self) -> Option<String> {
+        self.inner.get_system_prompt()
+    }
+
+    fn get_append_system_prompt(&self) -> Option<String> {
+        let append = self.inner.get_append_system_prompt();
+        if append.is_empty() {
+            None
+        } else {
+            Some(append.join("\n\n"))
+        }
+    }
+
+    fn reload(&self) -> BoxFuture<()> {
+        let inner = self.inner.clone();
+        async move {
+            inner.reload().await;
+        }
+        .boxed()
     }
 }

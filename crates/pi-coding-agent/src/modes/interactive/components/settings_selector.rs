@@ -3,11 +3,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pi_tui::components::select_list::{
-    SelectItem, SelectList, SelectListLayoutOptions, SelectListTheme as TuiSelectListTheme,
-};
+use pi_tui::components::select_list::{SelectItem, SelectList, SelectListLayoutOptions};
 use pi_tui::components::settings_list::{
-    SettingItem, SettingsList, SettingsListOptions, SettingsListTheme as TuiSettingsListTheme, SubmenuDone,
+    SettingItem, SettingsList, SettingsListOptions, SettingsListTheme as TuiSettingsListTheme,
+    SubmenuDone,
 };
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
@@ -15,7 +14,9 @@ use pi_tui::tui::Component;
 
 use crate::core::session_action_store::IdleEvictionMinutes;
 use crate::core::settings_manager::WarningSettings;
-use crate::modes::interactive::theme::theme::{get_select_list_theme, get_settings_list_theme, theme};
+use crate::modes::interactive::theme::theme::{
+    get_select_list_theme, get_settings_list_theme, theme,
+};
 
 use super::show_images_selector::{to_tui_select_list_theme, DynamicBorder};
 
@@ -145,7 +146,11 @@ fn true_false_item(id: &str, label: &str, description: &str, value: bool) -> Set
         id: id.to_string(),
         label: label.to_string(),
         description: Some(description.to_string()),
-        current_value: if value { "true".to_string() } else { "false".to_string() },
+        current_value: if value {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        },
         values: Some(vec!["true".to_string(), "false".to_string()]),
         submenu: None,
     }
@@ -209,9 +214,7 @@ impl WarningSettingsSubmenu {
                         anthropic_extra_usage: Some(new_value == "true"),
                         ..state_for_change.clone()
                     };
-                    if let Some(callback) = on_change.borrow_mut().as_mut() {
-                        callback(updated);
-                    }
+                    (*on_change.borrow_mut())(updated);
                 }
             }),
             on_cancel,
@@ -273,7 +276,12 @@ impl SelectSubmenu {
 
         if !description.is_empty() {
             leading.push(Box::new(Spacer::new(1)));
-            leading.push(Box::new(Text::new(theme().fg("muted", description), 0, 0, None)));
+            leading.push(Box::new(Text::new(
+                theme().fg("muted", description),
+                0,
+                0,
+                None,
+            )));
         }
 
         leading.push(Box::new(Spacer::new(1)));
@@ -379,7 +387,8 @@ impl SettingsSelectorComponent {
         if let IdleEvictionMinutes::Minutes(minutes) = config.idle_eviction_minutes {
             if !idle_eviction_values.contains(&minutes) {
                 idle_eviction_values.push(minutes);
-                idle_eviction_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                idle_eviction_values
+                    .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             }
         }
 
@@ -491,9 +500,7 @@ impl SettingsSelectorComponent {
                             let done_for_cancel = Rc::clone(&done);
                             let on_change: Rc<RefCell<Box<dyn FnMut(WarningSettings)>>> =
                                 Rc::new(RefCell::new(Box::new(move |warnings: WarningSettings| {
-                                    if let Some(callback) = shared.borrow_mut().on_warnings_change.as_mut() {
-                                        callback(warnings);
-                                    }
+                                    (*shared.borrow_mut().on_warnings_change)(warnings);
                                 })));
                             Box::new(WarningSettingsSubmenu::new(
                                 warnings.get(),
@@ -535,9 +542,7 @@ impl SettingsSelectorComponent {
                                 options,
                                 current_value,
                                 Box::new(move |value: &str| {
-                                    if let Some(callback) = shared_select.borrow_mut().on_thinking_level_change.as_mut() {
-                                        callback(value.to_string());
-                                    }
+                                    (*shared_select.borrow_mut().on_thinking_level_change)(value.to_string());
                                     done_select(Some(value.to_string()));
                                 }),
                                 Box::new(move || done_cancel(None)),
@@ -579,9 +584,7 @@ impl SettingsSelectorComponent {
                                 options,
                                 current_value,
                                 Box::new(move |value: &str| {
-                                    if let Some(callback) = shared_select.borrow_mut().on_theme_change.as_mut() {
-                                        callback(value.to_string());
-                                    }
+                                    (*shared_select.borrow_mut().on_theme_change)(value.to_string());
                                     done_select(Some(value.to_string()));
                                 }),
                                 Box::new(move || {
@@ -642,7 +645,10 @@ impl SettingsSelectorComponent {
         );
 
         // Skill commands toggle (insert after block-images)
-        let block_images_index = items.iter().position(|item| item.id == "block-images").unwrap_or(0);
+        let block_images_index = items
+            .iter()
+            .position(|item| item.id == "block-images")
+            .unwrap_or(0);
         items.insert(
             block_images_index + 1,
             true_false_item(
@@ -654,7 +660,10 @@ impl SettingsSelectorComponent {
         );
 
         // Built-in skills toggle (insert after skill-commands)
-        let skill_commands_index = items.iter().position(|item| item.id == "skill-commands").unwrap_or(0);
+        let skill_commands_index = items
+            .iter()
+            .position(|item| item.id == "skill-commands")
+            .unwrap_or(0);
         items.insert(
             skill_commands_index + 1,
             true_false_item(
@@ -666,7 +675,10 @@ impl SettingsSelectorComponent {
         );
 
         // Hardware cursor toggle (insert after builtin-skills)
-        let builtin_skills_index = items.iter().position(|item| item.id == "builtin-skills").unwrap_or(0);
+        let builtin_skills_index = items
+            .iter()
+            .position(|item| item.id == "builtin-skills")
+            .unwrap_or(0);
         items.insert(
             builtin_skills_index + 1,
             true_false_item(
@@ -787,29 +799,46 @@ impl SettingsSelectorComponent {
                             (callbacks.on_idle_eviction_minutes_change)(value);
                         }
                         "show-images" => (callbacks.on_show_images_change)(new_value == "true"),
-                        "auto-resize-images" => (callbacks.on_auto_resize_images_change)(new_value == "true"),
+                        "auto-resize-images" => {
+                            (callbacks.on_auto_resize_images_change)(new_value == "true")
+                        }
                         "block-images" => (callbacks.on_block_images_change)(new_value == "true"),
-                        "skill-commands" => (callbacks.on_enable_skill_commands_change)(new_value == "true"),
-                        "builtin-skills" => (callbacks.on_enable_builtin_skills_change)(new_value == "true"),
-                        "steering-mode" => (callbacks.on_steering_mode_change)(new_value.to_string()),
-                        "follow-up-mode" => (callbacks.on_follow_up_mode_change)(new_value.to_string()),
+                        "skill-commands" => {
+                            (callbacks.on_enable_skill_commands_change)(new_value == "true")
+                        }
+                        "builtin-skills" => {
+                            (callbacks.on_enable_builtin_skills_change)(new_value == "true")
+                        }
+                        "steering-mode" => {
+                            (callbacks.on_steering_mode_change)(new_value.to_string())
+                        }
+                        "follow-up-mode" => {
+                            (callbacks.on_follow_up_mode_change)(new_value.to_string())
+                        }
                         "transport" => (callbacks.on_transport_change)(new_value.to_string()),
-                        "hide-thinking" => (callbacks.on_hide_thinking_block_change)(new_value == "true"),
+                        "hide-thinking" => {
+                            (callbacks.on_hide_thinking_block_change)(new_value == "true")
+                        }
                         "mermaid-rendering" => {
                             (callbacks.on_mermaid_rendering_mode_change)(new_value.to_string())
                         }
                         "quiet-startup" => (callbacks.on_quiet_startup_change)(new_value == "true"),
-                        "tree-filter-mode" => (callbacks.on_tree_filter_mode_change)(new_value.to_string()),
+                        "tree-filter-mode" => {
+                            (callbacks.on_tree_filter_mode_change)(new_value.to_string())
+                        }
                         "show-hardware-cursor" => {
                             (callbacks.on_show_hardware_cursor_change)(new_value == "true")
                         }
                         "editor-padding" => {
                             (callbacks.on_editor_padding_x_change)(js_string_to_number(new_value))
                         }
-                        "autocomplete-max-visible" => {
-                            (callbacks.on_autocomplete_max_visible_change)(js_string_to_number(new_value))
+                        "autocomplete-max-visible" => (callbacks
+                            .on_autocomplete_max_visible_change)(
+                            js_string_to_number(new_value)
+                        ),
+                        "clear-on-shrink" => {
+                            (callbacks.on_clear_on_shrink_change)(new_value == "true")
                         }
-                        "clear-on-shrink" => (callbacks.on_clear_on_shrink_change)(new_value == "true"),
                         "terminal-progress" => {
                             (callbacks.on_show_terminal_progress_change)(new_value == "true")
                         }
@@ -821,9 +850,7 @@ impl SettingsSelectorComponent {
             Box::new({
                 let shared = callbacks.rc();
                 move || {
-                    if let Some(callback) = shared.borrow_mut().on_cancel.as_mut() {
-                        callback();
-                    }
+                    (*shared.borrow_mut().on_cancel)();
                 }
             }),
             SettingsListOptions {
@@ -1008,7 +1035,7 @@ mod tests {
             .clone();
         assert_eq!(item.current_value, "45");
         assert_eq!(
-            item.values.unwrap(),
+            item.values.clone().unwrap(),
             vec![
                 "off".to_string(),
                 "30".to_string(),
@@ -1034,7 +1061,7 @@ mod tests {
             .unwrap()
             .clone();
         assert_eq!(item.current_value, "off");
-        assert_eq!(item.values.unwrap()[0], "off");
+        assert_eq!(item.values.clone().unwrap()[0], "off");
     }
 
     #[test]
@@ -1097,12 +1124,17 @@ mod tests {
         for _ in 0..warnings_index {
             selector.handle_input("\u{1b}[B");
         }
-        assert_eq!(selector.get_settings_list().selected_index(), warnings_index);
+        assert_eq!(
+            selector.get_settings_list().selected_index(),
+            warnings_index
+        );
         selector.handle_input("\r");
 
         // Change the single submenu item.
         let output = selector.render(60.0);
-        assert!(output.iter().any(|line| line.contains("Anthropic extra usage")));
+        assert!(output
+            .iter()
+            .any(|line| line.contains("Anthropic extra usage")));
         selector.handle_input("\r");
         let recorded = received.borrow();
         assert_eq!(recorded.len(), 1);

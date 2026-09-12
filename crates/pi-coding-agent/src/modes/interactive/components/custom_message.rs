@@ -8,10 +8,9 @@ use pi_tui::components::r#box::Box_;
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
 use pi_tui::tui::Component;
-use pi_tui::utils::strip_ansi;
 
 use crate::core::extensions::types::MessageRenderer;
-use crate::modes::interactive::theme::theme::{get_markdown_theme, theme, MarkdownTheme};
+use crate::modes::interactive::theme::theme::{theme, MarkdownTheme};
 
 use super::expandable_custom_message::custom_message_label;
 
@@ -184,6 +183,8 @@ impl Component for CustomMessageComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modes::interactive::theme::theme::get_markdown_theme;
+    use pi_tui::utils::strip_ansi;
 
     fn custom_message(custom_type: &str, content: &str) -> CustomMessage {
         CustomAgentMessage::Custom {

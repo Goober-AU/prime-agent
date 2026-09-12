@@ -13,15 +13,16 @@ use pi_tui::tui::TUI;
 /// port keeps the state in shared atomics and moves only the atomics into the
 /// interval task. The task posts the tick to the owner through an `mpsc`
 /// channel; the owner drains it from [`CountdownTimer::poll`], which preserves
-/// the TypeScript order: tick -> requestRender -> expire/dispose.
+/// the TypeScript order: tick -> requestRender -> expire/dispose. The callbacks
+/// therefore stay on the owner thread and need no `Send` bound.
 pub struct CountdownTimer {
     remaining_seconds: Arc<AtomicI64>,
     disposed: Arc<AtomicBool>,
     pending_ticks: tokio::sync::mpsc::UnboundedReceiver<()>,
     tick_sender: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     interval_task: Option<tokio::task::JoinHandle<()>>,
-    on_tick: Option<Box<dyn Fn(f64) + Send>>,
-    on_expire: Option<Box<dyn Fn() + Send>>,
+    on_tick: Option<Box<dyn Fn(f64)>>,
+    on_expire: Option<Box<dyn Fn()>>,
     tui: Option<Rc<RefCell<TUI>>>,
 }
 
@@ -30,8 +31,8 @@ impl CountdownTimer {
     pub fn new(
         timeout_ms: f64,
         tui: Option<Rc<RefCell<TUI>>>,
-        on_tick: Box<dyn Fn(f64) + Send>,
-        on_expire: Box<dyn Fn() + Send>,
+        on_tick: Box<dyn Fn(f64)>,
+        on_expire: Box<dyn Fn()>,
     ) -> Self {
         let remaining_seconds = Arc::new(AtomicI64::new(js_ceil(timeout_ms / 1000.0)));
         let (tick_sender, pending_ticks) = tokio::sync::mpsc::unbounded_channel();

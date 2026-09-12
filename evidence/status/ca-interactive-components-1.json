@@ -1,0 +1,108 @@
+{
+  "slice": "ca-interactive-components-1",
+  "crate": "pi-coding-agent",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/tree-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/tree_selector.rs",
+      "status": "ported",
+      "functions_mapped": 23,
+      "notes": "Full port: TreeList (flattened nodes, gutters/connectors, fold state, filters, labels with timestamps, key handling) plus TreeSelectorComponent (containers, DynamicBorder chrome, SearchLine, LabelInput with submit/cancel). The TS closure pair treeList.onLabelEdit -> showLabelInput is carried through a shared `pending_label_edit` slot: the list records the request and the selector performs it, which reproduces the same call order without a self-reference between the two objects. Message text is read duck-typed from `serde_json::to_value(message)` because the agent-connection shim types are not the pi-agent-core ones."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/armin.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/armin.rs",
+      "status": "ported",
+      "functions_mapped": 16,
+      "notes": "Full port of the CRT animation: grids, glitch/fade/dissolve/rain/scanline/typewriter ticks, Fisher-Yates shuffle, deterministic RNG, and the shared running/grid_version state. The TS setInterval is ported as a tokio interval task that advances the shared counters while render reads them (documented deviation: pi-tui has no timer registry, so the tick source is a spawned task)."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/heartbeat-manager.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/heartbeat_manager.rs",
+      "status": "ported",
+      "functions_mapped": 23,
+      "notes": "Full port: list/actions modes, sorting, selection, action list (pause/resume/stop), busy and error state, panel building through the real shared menu_panel module, and the back/close/confirm key handling. The TS async confirmSelection/runAction are split into `confirm_selection` (records the pending action so handle_input stays sync) plus the async `run_action` (busy/error/render sequence). `heartbeat.job` is read with a private `heartbeat_job()` helper because the agent-connection contract types it as Value."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/prime-team-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_team_selector.rs",
+      "status": "ported",
+      "functions_mapped": 8,
+      "notes": "Full port: personal+team options, fuzzy filtering, primary/secondary/meta rows, layout recomputation per render, and key handling. The TS `searchInput.onSubmit` closure cannot borrow the component, so the handler records the request and handle_input performs the same selection immediately after the input consumed the key (same ordering); the list's `compact: () => this.listLayout.compact` closure is carried by a shared Rc<Cell<bool>>."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/prompt-highlight.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/prompt_highlight.rs",
+      "status": "ported",
+      "functions_mapped": 5,
+      "notes": "Full port of the tokenizer, the UTF-16/code-point offset mapping, argument-token styling and the mask (private-use grapheme + U+FF9E width marker) with its restore step. Regexes are compiled once via OnceLock; the TS `\\uFF9E`-suffixed mask regex is written with Rust `\\u{...}` escapes."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/daxnuts.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/daxnuts.rs",
+      "status": "ported",
+      "functions_mapped": 5,
+      "notes": "Full port: 32x32 RGB image from the hex table (verified byte-identical, 6144 chars), scanline/fade reveal, text phases and the tokio interval tick task; the same deterministic RNG and centered layout."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/extension-editor.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_editor.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "notes": "Full port of the editor component and its external-editor handoff. pi-tui's Editor exposes no submitted-text getter, so the on_submit closure writes into a shared Rc<RefCell<Option<String>>> slot that handle_input drains - same observable submit behaviour, no new public API."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/refinement-outcome-message.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/refinement_outcome_message.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "notes": "Both components (RefinementOutcomeMessageComponent and MalformedRefinementOutcomeMessageComponent) are ported: summary line, per-edit diff rendering through the shared diff module, scope/kind labels, rollback text and the malformed fallback. Reads the real core types (RefinementOutcomeDetails, AppliedRefinementEdit, HarnessEntry/Scope) and the shared generate_diff_string."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/mermaid.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/mermaid.rs",
+      "status": "ported",
+      "functions_mapped": 0,
+      "notes": "The Marked lexing, the mermaid-token test, code_span, styleSpan/themedLines, the mode/streaming gate, the width check, the warnings path and the token.raw fallback are all ported. Only `grok-mermaid`'s `render()` is a private stub that reports an unsupported/unavailable diagram, so a Mermaid block falls back to raw exactly as it does when the upstream render returns undefined/warnings - real diagram layout is NOT ported."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/thinking-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/thinking_selector.rs",
+      "status": "ported",
+      "functions_mapped": 1,
+      "notes": "Full port: level descriptions table, SelectList construction with the 12/32 column layout, current-index selection, onSelect (value -> ThinkingLevel) and onCancel, wrapped in the two DynamicBorders."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/index.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/mod.rs",
+      "status": "ported",
+      "functions_mapped": 0,
+      "notes": "The TS module is a re-export surface; mod.rs now re-exports every one of the 56 names index.ts exports, from the same module path, and keeps a test asserting the slice's own re-exports resolve. No behaviour, matching the TS file."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/slash-command-message.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/slash_command_message.rs",
+      "status": "ported",
+      "functions_mapped": 1,
+      "notes": "Full port of isLeadingSlashCommand, styleSlashCommandText (command-end offset counted in UTF-16 units like TS, bare `--` gated by builtinSlashCommandTakesArgument), the default styleRest through prompt_highlight, and the component with its OSC 133 zone marks."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/expandable-custom-message.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/expandable_custom_message.rs",
+      "status": "ported",
+      "functions_mapped": 1,
+      "notes": "The abstract ExpandableCustomMessageBox is ported as the trait with its concrete defaulted set_expanded/invalidate plus the shared ExpandableBox struct (Box(1,1, customMessageBg)) that subclasses own, and custom_message_label. Other slices' files (skill/compaction/custom message) already implement the trait."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/modal-back.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/modal_back.rs",
+      "status": "ported",
+      "functions_mapped": 0,
+      "notes": "Exact port of shouldTreatAsBack: app.modal.back match, no-input case true, cursor-at-0 case true, otherwise false; the BackGuardInput trait is the Rust shape of the `{ getCursor(): number }` parameter. No functions of its own in the TS beyond this."
+    }
+  ],
+  "build": "cargo check -p pi-coding-agent: still failing, and none of the errors are in this slice. Run with: MSYS_NO_PATHCONV=1 cmd /c \"call scripts\\rust-env.cmd && set CARGO_BUILD_JOBS=4&& cargo check -p pi-coding-agent --message-format short\". The build now reaches pi-coding-agent (pi-agent-core and pi-ai compile), and the crate itself fails with errors owned by other slices: core/agent_session.rs (truncated/corrupted tail: 'struct is not supported in traits or impls', duplicate names, self params outside impls), core/extensions/mod.rs (E0753 inner doc comments), modes/telegram/bridge.rs (unclosed delimiter at 940:7), modes/acp/acp_mode.rs (expected expression), modes/daemon/snapshot_transcript_cache.rs (unmatched } in format string), plus E0432/E0603 unresolved-import errors in daemon/acp/rpc/agents_view/export_html files. Zero error and zero warning lines mention any of the 14 files of this slice (verified by grepping the compiler output for each of the 14 paths).",
+  "tests": "cargo test -p pi-coding-agent: not run to completion. `cargo test -p pi-coding-agent --no-run` fails at the same other-slice errors, so no test binary is produced and the tests written in this slice have not executed: modal_back.rs (2), expandable_custom_message.rs (2), mod.rs (1) - the remaining 11 files mirror TS behaviour without local unit tests because their logic is render/state driven and can only be judged through the running app.",
+  "blocked_on": "1) Other slices currently stop `cargo check -p pi-coding-agent` (see build) - this slice cannot be type-checked or tested until those compile. 2) crates/pi-coding-agent/src/modes/agent_connection/types.rs declares `AgentConnectionHeartbeat.job` as `serde_json::Value`, while the TypeScript types it `AgentCronJob`; heartbeat_manager.rs cannot change that file (another slice owns it) and reads the job back with a private `heartbeat_job()` helper that deserializes the value into the real `core::cron_jobs::AgentCronJob`. The contract should be retyped to `AgentCronJob` by its owner, then the helper can be deleted. 3) `mermaid.rs`: `grok-mermaid` has no Rust port in the repository, so the private `render()` reports a warning and the transform falls back to `token.raw` (the same fallback the TypeScript takes when `render` yields warnings/undefined); real diagram layout is missing until a grok-mermaid port exists. 4) The tree-selector's TS `Marked` lexer is mapped onto `pi_tui::components::markdown::lex`, whose `Token` has no `raw` field, so `token_raw()` re-serialises each top-level block from the token; a table's `raw` is preserved verbatim but other blocks are reconstructed, which is byte-identical only for the Markdown `Marked` emits.",
+  "honest_summary": "All 14 files of the slice are written as 1:1 ports with no reimagining: every exported TS symbol exists at the same module path (checked by resolving all 56 index.ts re-exports against the Rust modules, and every TS function name in the 13 non-index files has a Rust counterpart), the daxnuts DAX_HEX table and the armin BITS table are byte-exact against the TypeScript, and all 14 files are rustfmt-clean under `--config skip_children=true` (plain rustfmt on mod.rs cannot be used because the unrelated bash_execution.rs in this folder does not parse). What I could NOT do is prove anything at compile time: the crate never gets past other slices' errors, so no type error in this slice has been observed and none of the 5 tests have run - I verified the code by static checking (import resolution, item existence, constructor arities, self.field/method existence, TS export coverage) instead, which is weaker evidence than a build. The two honest interface risks are recorded in blocked_on: the `Value`-typed heartbeat job in another slice's file, and the missing grok-mermaid port."
+}

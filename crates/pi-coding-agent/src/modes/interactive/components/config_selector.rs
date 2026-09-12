@@ -2,9 +2,7 @@
 //!
 //! TUI component for managing package resources (enable/disable).
 
-use std::cell::RefCell;
 use std::path::{Component as PathComponent, Path};
-use std::rc::Rc;
 
 use pi_tui::components::input::Input;
 use pi_tui::components::spacer::Spacer;
@@ -14,7 +12,6 @@ use pi_tui::tui::{Component, Focusable};
 use pi_tui::utils::{truncate_to_width, visible_width};
 
 use crate::config::CONFIG_DIR_NAME;
-use crate::core::diagnostics::ResourceDiagnostic;
 use crate::core::package_manager::{PathMetadata, ResolvedPaths, ResolvedResource};
 use crate::core::settings_manager::{PackageSource, SettingsManager};
 use crate::modes::interactive::theme::theme::theme;
@@ -127,7 +124,11 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
             let subgroup_key = format!("{group_key}:{resource_type}");
             let group = &mut groups[group_index];
 
-            let subgroup_index = match group.subgroups.iter().position(|sg| sg.r#type == resource_type) {
+            let subgroup_index = match group
+                .subgroups
+                .iter()
+                .position(|sg| sg.r#type == resource_type)
+            {
                 Some(index) => index,
                 None => {
                     group.subgroups.push(ResourceSubgroup {
@@ -201,7 +202,9 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
             .sort_by_key(|subgroup| type_order(subgroup.r#type));
         for subgroup in group.subgroups.iter_mut() {
             // `localeCompare` on the port: plain lexicographic order.
-            subgroup.items.sort_by(|a, b| a.display_name.cmp(&b.display_name));
+            subgroup
+                .items
+                .sort_by(|a, b| a.display_name.cmp(&b.display_name));
         }
     }
 
@@ -211,12 +214,16 @@ pub fn build_groups(resolved: &ResolvedPaths) -> Vec<ResourceGroup> {
 /// Port of `FlatEntry`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FlatEntry {
-    Group { group: ResourceGroup },
+    Group {
+        group: ResourceGroup,
+    },
     Subgroup {
         subgroup: ResourceSubgroup,
         group: ResourceGroup,
     },
-    Item { item: ResourceItem },
+    Item {
+        item: ResourceItem,
+    },
 }
 
 fn entry_is_item(entry: &FlatEntry) -> bool {
@@ -313,7 +320,10 @@ fn normalized_parts(path: &str) -> Vec<String> {
             other => parts.push(other.to_string()),
         }
     }
-    let _ = Path::new(path).components().next().map(|c| c != PathComponent::RootDir);
+    let _ = Path::new(path)
+        .components()
+        .next()
+        .map(|c| c != PathComponent::RootDir);
     parts
 }
 
@@ -385,7 +395,11 @@ impl ResourceList {
             .position(entry_is_item)
             .map(|index| index as i64)
             .unwrap_or(-1);
-        self.selected_index = if first_item < 0 { 0 } else { first_item as usize };
+        self.selected_index = if first_item < 0 {
+            0
+        } else {
+            first_item as usize
+        };
     }
 
     /// Port of `findNextItem`.
@@ -448,7 +462,8 @@ impl ResourceList {
                     self.filtered_items.push(entry.clone())
                 }
                 FlatEntry::Subgroup { subgroup, group }
-                    if matching_subgroups.contains(&format!("{}:{}", group.key, subgroup.r#type)) =>
+                    if matching_subgroups
+                        .contains(&format!("{}:{}", group.key, subgroup.r#type)) =>
                 {
                     self.filtered_items.push(entry.clone())
                 }
@@ -576,12 +591,19 @@ impl ResourceList {
         self.apply_top_level_paths(&scope, array_key, updated);
     }
 
-    fn apply_top_level_paths(&mut self, scope: &str, array_key: ResourceType, updated: Vec<String>) {
+    fn apply_top_level_paths(
+        &mut self,
+        scope: &str,
+        array_key: ResourceType,
+        updated: Vec<String>,
+    ) {
         if scope == "project" {
             match array_key {
                 "extensions" => self.settings_manager.set_project_extension_paths(updated),
                 "skills" => self.settings_manager.set_project_skill_paths(updated),
-                "prompts" => self.settings_manager.set_project_prompt_template_paths(updated),
+                "prompts" => self
+                    .settings_manager
+                    .set_project_prompt_template_paths(updated),
                 "themes" => self.settings_manager.set_project_theme_paths(updated),
                 _ => {}
             }
@@ -617,15 +639,14 @@ impl ResourceList {
 
         // Convert string to object form if needed
         if let PackageSource::Source(source) = packages[pkg_index].clone() {
-            packages[pkg_index] = PackageSource::Filtered(
-                crate::core::settings_manager::FilteredPackageSource {
+            packages[pkg_index] =
+                PackageSource::Filtered(crate::core::settings_manager::FilteredPackageSource {
                     source,
                     extensions: None,
                     skills: None,
                     prompts: None,
                     themes: None,
-                },
-            );
+                });
         }
 
         // Get the resource array for this type
@@ -702,7 +723,10 @@ impl ResourceList {
 }
 
 /// The typed settings arrays the TypeScript reads by key (`settings[arrayKey] ?? []`).
-fn string_array_from_settings(settings: &crate::core::settings_manager::Settings, key: &str) -> Vec<String> {
+fn string_array_from_settings(
+    settings: &crate::core::settings_manager::Settings,
+    key: &str,
+) -> Vec<String> {
     match settings.get(key) {
         Some(serde_json::Value::Array(items)) => items
             .iter()
@@ -713,7 +737,9 @@ fn string_array_from_settings(settings: &crate::core::settings_manager::Settings
 }
 
 /// `settings.packages ?? []` as the `PackageSource[]` union.
-fn packages_from_settings(settings: &crate::core::settings_manager::Settings) -> Vec<PackageSource> {
+fn packages_from_settings(
+    settings: &crate::core::settings_manager::Settings,
+) -> Vec<PackageSource> {
     match settings.get("packages") {
         Some(serde_json::Value::Array(items)) => items
             .iter()
@@ -837,7 +863,8 @@ impl Component for ResourceList {
         if kb.matches(data, "tui.select.pageUp") {
             // Jump up by maxVisible, then find nearest item
             let mut target = self.selected_index.saturating_sub(self.max_visible);
-            while target < self.filtered_items.len() && !entry_is_item(&self.filtered_items[target]) {
+            while target < self.filtered_items.len() && !entry_is_item(&self.filtered_items[target])
+            {
                 target += 1;
             }
             if target < self.filtered_items.len() {
@@ -848,7 +875,8 @@ impl Component for ResourceList {
         if kb.matches(data, "tui.select.pageDown") {
             // Jump down by maxVisible, then find nearest item
             let mut target = (self.selected_index + self.max_visible)
-                .min(self.filtered_items.len().saturating_sub(1)) as i64;
+                .min(self.filtered_items.len().saturating_sub(1))
+                as i64;
             while target >= 0 && !entry_is_item(&self.filtered_items[target as usize]) {
                 target -= 1;
             }
@@ -946,10 +974,8 @@ impl ConfigSelectorComponent {
         resource_list.on_toggle = Some(Box::new(move |_item, _enabled| request_render()));
 
         // Bottom border
-        let trailing: Vec<Box<dyn Component>> = vec![
-            Box::new(Spacer::new(1)),
-            Box::new(DynamicBorder::new(None)),
-        ];
+        let trailing: Vec<Box<dyn Component>> =
+            vec![Box::new(Spacer::new(1)), Box::new(DynamicBorder::new(None))];
 
         Self {
             leading,
@@ -1023,6 +1049,9 @@ impl Focusable for ConfigSelectorComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::diagnostics::ResourceDiagnostic;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     fn metadata(origin: &str, scope: &str, source: &str, base_dir: Option<&str>) -> PathMetadata {
         PathMetadata {
@@ -1069,7 +1098,10 @@ mod tests {
             get_group_label(&metadata("package", "user", "npm:thing", None)),
             "npm:thing (user)"
         );
-        assert_eq!(get_group_label(&metadata("top-level", "user", "builtin", None)), "Built-in");
+        assert_eq!(
+            get_group_label(&metadata("top-level", "user", "builtin", None)),
+            "Built-in"
+        );
         assert_eq!(
             get_group_label(&metadata("top-level", "user", "auto", None)),
             format!("User (~/{CONFIG_DIR_NAME}/)")
@@ -1130,7 +1162,11 @@ mod tests {
             .find(|subgroup| subgroup.r#type == "extensions")
             .unwrap();
         assert_eq!(
-            extensions.items.iter().map(|i| i.display_name.clone()).collect::<Vec<_>>(),
+            extensions
+                .items
+                .iter()
+                .map(|i| i.display_name.clone())
+                .collect::<Vec<_>>(),
             vec!["aaa.ts".to_string(), "zzz.ts".to_string()]
         );
         let order: Vec<&str> = group.subgroups.iter().map(|s| s.r#type).collect();
@@ -1284,7 +1320,9 @@ mod tests {
         assert!(selector.focused());
         assert!(selector.get_resource_list().focused());
         let lines = selector.render(40.0);
-        assert!(lines.iter().any(|line| line.contains("Resource Configuration")));
+        assert!(lines
+            .iter()
+            .any(|line| line.contains("Resource Configuration")));
         assert!(lines.iter().any(|line| line.contains("\u{2500}")));
     }
 

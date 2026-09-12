@@ -1,0 +1,14 @@
+{
+ "audit": "mod.rs barrel declarations missing pub mod",
+ "method": "for every mod.rs, compare declared `mod X;` against sibling .rs files and subdirs with mod.rs",
+ "raw_hits": 5,
+ "true_positives": 1,
+ "false_positives": 4,
+ "true_positive": {
+  "file": "crates/pi-coding-agent/src/core/extensions/mod.rs",
+  "problem": "never declared `pub mod builtin|bundled_modules|loader|runner|types|wrapper`, so the whole extension tree was unreachable while the files existed on disk (883 B barrel, 6 real modules)",
+  "fix": "lead added the six declarations, matching the TS index.ts re-export list and the pattern used by core/kernel/mod.rs"
+ },
+ "false_positives_note": "the 4 crate-root mod.rs files (pi-ai, pi-agent-core, pi-tui, pi-coding-agent) are reached through lib.rs, which declares the modules; pi-ai uses #[path=\"mod.rs\"] pub mod index;. Not defects.",
+ "lesson": "the compiler is the verdict; sibling-file heuristics produce false positives"
+}

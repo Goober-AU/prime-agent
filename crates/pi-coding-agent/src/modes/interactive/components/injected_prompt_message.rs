@@ -13,8 +13,8 @@ use crate::core::goals::{GoalContextDetails, GoalContextKind, GOAL_CONTEXT_CUSTO
 use crate::core::messages::{
     AsyncBashCompletionDetails, HeartbeatPromptDetails, IpythonStateRestoredDetails,
     ASYNC_BASH_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-    HEARTBEAT_PROMPT_CUSTOM_TYPE, IPYTHON_STATE_RESTORED_CUSTOM_TYPE, RLM_CHILD_FAILURE_CUSTOM_TYPE,
-    RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+    HEARTBEAT_PROMPT_CUSTOM_TYPE, IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+    RLM_CHILD_FAILURE_CUSTOM_TYPE, RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
 };
 use crate::modes::interactive::theme::theme::{get_markdown_theme, theme, MarkdownTheme};
 
@@ -25,7 +25,11 @@ use super::keybinding_hints::expand_collapse_hint;
 /// see evidence/status/ca-interactive-components-3.json -> blocked_on.
 fn agent_message_summary_line(label: &str, participant: &str, preview: Option<&str>) -> String {
     let mut parts = vec![
-        format!("{} {}", theme().fg("accent", "\u{25c6}"), theme().fg("muted", label)),
+        format!(
+            "{} {}",
+            theme().fg("accent", "\u{25c6}"),
+            theme().fg("muted", label)
+        ),
         theme().fg("muted", participant),
     ];
     if let Some(preview) = preview {
@@ -257,10 +261,7 @@ impl InjectedPromptMessageComponent {
         let hint = if self.expanded {
             String::new()
         } else {
-            format!(
-                " {}",
-                expand_collapse_hint("app.tools.expand", false)
-            )
+            format!(" {}", expand_collapse_hint("app.tools.expand", false))
         };
         format!(
             "{pulse} {}{}{}{hint}",
@@ -381,7 +382,11 @@ mod tests {
     use super::*;
     use crate::core::goals::GoalStatus;
 
-    fn custom_message(custom_type: &str, content: &str, details: serde_json::Value) -> InjectedPromptMessage {
+    fn custom_message(
+        custom_type: &str,
+        content: &str,
+        details: serde_json::Value,
+    ) -> InjectedPromptMessage {
         InjectedPromptMessage {
             custom_type: custom_type.to_string(),
             content: CustomMessageContent::Text(content.to_string()),
@@ -433,15 +438,20 @@ mod tests {
 
     #[test]
     fn custom_content_is_read_as_text_or_image_blocks() {
-        assert_eq!(read_custom_text(&CustomMessageContent::Text("hi".to_string())), "hi");
+        assert_eq!(
+            read_custom_text(&CustomMessageContent::Text("hi".to_string())),
+            "hi"
+        );
         let blocks = CustomMessageContent::Blocks(vec![
             pi_agent_core::types::ContentBlock::text("a"),
-            pi_agent_core::types::ContentBlock::Image(serde_json::from_value(serde_json::json!({
-                "type": "image",
-                "data": "x",
-                "mimeType": "image/png"
-            }))
-            .unwrap()),
+            pi_agent_core::types::ContentBlock::Image(
+                serde_json::from_value(serde_json::json!({
+                    "type": "image",
+                    "data": "x",
+                    "mimeType": "image/png"
+                }))
+                .unwrap(),
+            ),
             pi_agent_core::types::ContentBlock::text("b"),
         ]);
         assert_eq!(read_custom_text(&blocks), "a\n[image]\nb");
@@ -517,7 +527,9 @@ mod tests {
             "body",
             serde_json::json!({"restored": true}),
         ));
-        assert!(restored.header_text().contains("Restored Python kernel state"));
+        assert!(restored
+            .header_text()
+            .contains("Restored Python kernel state"));
         let fresh = component(custom_message(
             IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
             "body",

@@ -1,7 +1,7 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/expandable-custom-message.ts
 
 use pi_tui::components::r#box::Box_ as TuiBox;
-use pi_tui::tui::{Component, Container};
+use pi_tui::tui::Component;
 
 use super::super::theme::theme::theme;
 
@@ -126,10 +126,9 @@ mod tests {
     }
 
     #[test]
-    fn container_alias_is_the_shared_box_type() {
+    fn custom_message_label_wraps_the_name_in_bold_brackets() {
         // `customMessageLabel` wraps the name in bold SGR inside brackets.
         let label = custom_message_label("refinement");
         assert!(label.contains("[refinement]"));
-        let _container = Container::new();
     }
 }

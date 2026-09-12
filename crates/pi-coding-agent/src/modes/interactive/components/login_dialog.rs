@@ -12,10 +12,9 @@ use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
 use pi_tui::keybindings::get_keybindings;
 use pi_tui::terminal_image::{get_capabilities, hyperlink};
-use pi_tui::tui::{Component, TUI};
+use pi_tui::tui::{Component, Focusable, TUI};
 use pi_tui::utils::truncate_to_width;
 
-use crate::core::auth_storage::AuthStorage;
 use crate::modes::interactive::theme::theme::theme;
 use crate::themes::prime_logo::PRIME_BUTTERFLY_LOGO;
 use crate::utils::child_process::{exec_file_hidden, SpawnOptions};
@@ -51,11 +50,12 @@ fn padded_background_line(
     text: &str,
     width: usize,
     padding_x: usize,
-    background: Option<&dyn Fn(&str) -> String>,
+    background: Option<&(dyn Fn(&str) -> String + Send + Sync)>,
 ) -> String {
     let inner_width = (width.saturating_sub(padding_x * 2)).max(1);
     let content = truncate_to_width(text, inner_width as f64, "", false);
-    let right_padding = " ".repeat(inner_width.saturating_sub(pi_tui::utils::visible_width(&content)));
+    let right_padding =
+        " ".repeat(inner_width.saturating_sub(pi_tui::utils::visible_width(&content)));
     let content_span = format!("{}{content}", " ".repeat(padding_x));
     let trailing_span = format!("{right_padding}{}", " ".repeat(padding_x));
     match background {
@@ -112,13 +112,22 @@ impl Component for MenuPanel {
         }
         let has_title = !self.title.trim().is_empty();
         let subtitle = self.subtitle.as_ref().map(|value| value.trim().to_string());
-        let has_subtitle = subtitle.as_deref().map(|value| !value.is_empty()).unwrap_or(false);
+        let has_subtitle = subtitle
+            .as_deref()
+            .map(|value| !value.is_empty())
+            .unwrap_or(false);
         let has_header = has_title || has_subtitle;
         if has_title {
-            lines.push(surface_line(&theme().bold(&theme().fg("text", &self.title)), safe_width));
+            lines.push(surface_line(
+                &theme().bold(&theme().fg("text", &self.title)),
+                safe_width,
+            ));
         }
         if let Some(subtitle) = subtitle.as_ref().filter(|_| has_subtitle) {
-            lines.extend(surface_wrapped_lines(&theme().fg("muted", subtitle), safe_width));
+            lines.extend(surface_wrapped_lines(
+                &theme().fg("muted", subtitle),
+                safe_width,
+            ));
         }
         if has_header {
             lines.push(surface_line("", safe_width));
@@ -170,10 +179,6 @@ impl MenuSearchInput {
         self.input.set_value(value);
     }
 
-    fn set_focused(&mut self, focused: bool) {
-        self.input.set_focused(focused);
-    }
-
     fn strip_input_prompt(line: &str) -> String {
         match line.strip_prefix("> ") {
             Some(rest) => rest.to_string(),
@@ -182,11 +187,21 @@ impl MenuSearchInput {
     }
 }
 
+impl Focusable for MenuSearchInput {
+    fn focused(&self) -> bool {
+        self.input.focused()
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        self.input.set_focused(focused);
+    }
+}
+
 impl Component for MenuSearchInput {
     fn render(&mut self, width: f64) -> Vec<String> {
         let safe_width = (width.max(0.0).floor() as usize).max(FIELD_PADDING_X * 2 + 1);
         let inner_width = (safe_width.saturating_sub(FIELD_PADDING_X * 2)).max(1);
-        let focused = self.input.focused();
+        let focused = Focusable::focused(&self.input);
         let content = if self.get_value().is_empty() && !focused {
             theme().fg("dim", &self.placeholder)
         } else {
@@ -248,12 +263,18 @@ pub fn centered_line(text: &str, width: usize) -> String {
 
 /// Port of `isTextEntryKeybinding`.
 pub fn is_text_entry_keybinding(key: &str) -> bool {
-    let parts: Vec<String> = key.to_lowercase().split('+').map(|part| part.to_string()).collect();
+    let parts: Vec<String> = key
+        .to_lowercase()
+        .split('+')
+        .map(|part| part.to_string())
+        .collect();
     let key_part = parts.last().cloned();
     !parts.contains(&"ctrl".to_string())
         && !parts.contains(&"alt".to_string())
         && (key_part.as_deref() == Some("space")
-            || key_part.map(|part| part.chars().count() == 1).unwrap_or(false))
+            || key_part
+                .map(|part| part.chars().count() == 1)
+                .unwrap_or(false))
 }
 
 /// Port of `isPrintableInput`.
@@ -280,7 +301,12 @@ impl Component for PrimeLoginHeader {
                 centered_line(
                     &theme().fg(
                         "text",
-                        &truncate_to_width(&padded_logo_line, effective_logo_width as f64, "", false),
+                        &truncate_to_width(
+                            &padded_logo_line,
+                            effective_logo_width as f64,
+                            "",
+                            false,
+                        ),
                     ),
                     safe_width,
                 )
@@ -306,16 +332,10 @@ impl Component for PrimeLoginHeader {
     }
 }
 
-/// `AuthStorage` is not read by this component; the TypeScript constructor takes
-/// the provider list from `getOAuthProviders()`.
-#[allow(dead_code)]
-fn unused_auth_storage_marker(_storage: &AuthStorage) {}
-
 /// Port of `LoginDialogComponent`.
 pub struct LoginDialogComponent {
     tui: Rc<RefCell<TUI>>,
     content_children: Vec<Box<dyn Component>>,
-    panel: MenuPanel,
     input: MenuSearchInput,
     on_complete: Box<dyn FnMut(bool, Option<String>)>,
     is_prime_inference: bool,
@@ -356,19 +376,9 @@ impl LoginDialogComponent {
             .map(|value| value.to_string())
             .unwrap_or_else(|| format!("Login to {provider_name}"));
 
-        let mut panel = MenuPanel::new(
-            if is_prime_inference { "" } else { title.as_str() },
-            if is_prime_inference {
-                None
-            } else {
-                Some("Complete this step to continue setup.")
-            },
-        );
-
-        let mut dialog = Self {
+        let dialog = Self {
             tui,
             content_children: Vec::new(),
-            panel: MenuPanel::new("", None),
             input: MenuSearchInput::new("Paste value"),
             on_complete,
             is_prime_inference,
@@ -385,10 +395,6 @@ impl LoginDialogComponent {
             focused: false,
         };
 
-        // `panel.addChild(this.contentContainer)` - the content container is the
-        // panel's single child, so the panel is rebuilt around it at render time.
-        let _ = &mut panel;
-        dialog.panel = panel;
         dialog
     }
 
@@ -465,7 +471,8 @@ impl LoginDialogComponent {
         let (command, args) = if platform == "darwin" {
             ("open".to_string(), vec![url.to_string()])
         } else if platform == "win32" {
-            let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+            let system_root =
+                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
             (
                 Path::new(&system_root)
                     .join("System32")
@@ -491,7 +498,10 @@ impl LoginDialogComponent {
         self.input_visible = true;
         self.auth_actions_text = Some(self.get_auth_actions_text(None));
         self.content_children.push(Box::new(Text::new(
-            theme().fg("muted", &key_hint("tui.select.cancel", "cancel", &KeyTextOptions::default())),
+            theme().fg(
+                "muted",
+                &key_hint("tui.select.cancel", "cancel", &KeyTextOptions::default()),
+            ),
             0,
             0,
             None,
@@ -553,11 +563,15 @@ impl LoginDialogComponent {
     pub fn show_info(&mut self, lines: Vec<String>) {
         self.start_content();
         for line in lines {
-            self.content_children.push(Box::new(Text::new(line, 0, 0, None)));
+            self.content_children
+                .push(Box::new(Text::new(line, 0, 0, None)));
         }
         self.content_children.push(Box::new(Spacer::new(1)));
         self.content_children.push(Box::new(Text::new(
-            theme().fg("muted", &key_hint("tui.select.cancel", "close", &KeyTextOptions::default())),
+            theme().fg(
+                "muted",
+                &key_hint("tui.select.cancel", "close", &KeyTextOptions::default()),
+            ),
             0,
             0,
             None,
@@ -568,7 +582,8 @@ impl LoginDialogComponent {
     pub fn show_continue_info(&mut self, lines: Vec<String>) -> tokio::sync::oneshot::Receiver<()> {
         self.start_content();
         for line in lines {
-            self.content_children.push(Box::new(Text::new(line, 0, 0, None)));
+            self.content_children
+                .push(Box::new(Text::new(line, 0, 0, None)));
         }
         self.content_children.push(Box::new(Spacer::new(1)));
         self.content_children.push(Box::new(Text::new(
@@ -601,7 +616,10 @@ impl LoginDialogComponent {
             None,
         )));
         self.content_children.push(Box::new(Text::new(
-            theme().fg("muted", &key_hint("tui.select.cancel", "cancel", &KeyTextOptions::default())),
+            theme().fg(
+                "muted",
+                &key_hint("tui.select.cancel", "cancel", &KeyTextOptions::default()),
+            ),
             0,
             0,
             None,
@@ -682,22 +700,14 @@ impl LoginDialogComponent {
 
     /// Port of `addLabel`.
     fn add_label(&mut self, text: &str) {
-        self.content_children.push(Box::new(Text::new(
-            theme().fg("muted", text),
-            0,
-            0,
-            None,
-        )));
+        self.content_children
+            .push(Box::new(Text::new(theme().fg("muted", text), 0, 0, None)));
     }
 
     /// Port of `addMutedText`.
     fn add_muted_text(&mut self, text: &str) {
-        self.content_children.push(Box::new(Text::new(
-            theme().fg("muted", text),
-            0,
-            0,
-            None,
-        )));
+        self.content_children
+            .push(Box::new(Text::new(theme().fg("muted", text), 0, 0, None)));
     }
 
     /// Port of `getAuthActionsText`.
@@ -716,7 +726,14 @@ impl LoginDialogComponent {
                 theme().fg("dim", &format_key_text(&copy_keys.join("/"), None))
                     + &theme().fg(
                         "muted",
-                        &format!(" {}", if status == Some("failed") { "retry" } else { "copy" }),
+                        &format!(
+                            " {}",
+                            if status == Some("failed") {
+                                "retry"
+                            } else {
+                                "copy"
+                            }
+                        ),
                     ),
             )
         } else {
@@ -727,11 +744,19 @@ impl LoginDialogComponent {
             Some("failed") => Some(theme().fg("error", "Failed to copy sign-in link")),
             _ => None,
         };
-        [status_text, copy_hint, Some(key_hint("tui.select.cancel", "cancel", &KeyTextOptions::default()))]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<String>>()
-            .join("  ")
+        [
+            status_text,
+            copy_hint,
+            Some(key_hint(
+                "tui.select.cancel",
+                "cancel",
+                &KeyTextOptions::default(),
+            )),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<String>>()
+        .join("  ")
     }
 
     /// Port of `copyAuthUrl`.
@@ -826,7 +851,11 @@ impl Component for LoginDialogComponent {
         // `this.addChild(panel)`: the content container is the panel's child.
         let content_children = std::mem::take(&mut self.content_children);
         let mut panel = MenuPanel::new(
-            if self.is_prime_inference { "" } else { self.title.as_str() },
+            if self.is_prime_inference {
+                ""
+            } else {
+                self.title.as_str()
+            },
             if self.is_prime_inference {
                 None
             } else {
@@ -868,20 +897,16 @@ impl pi_tui::tui::Focusable for LoginDialogComponent {
     }
 }
 
-/// The `panel` field is only consumed at render time, so it is kept for the
-/// `MenuPanel` identity the constructor sets up.
-#[allow(dead_code)]
-fn panel_marker(panel: &MenuPanel) -> usize {
-    panel.children.len()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use pi_tui::terminal::ProcessTerminal;
 
     fn tui() -> Rc<RefCell<TUI>> {
-        Rc::new(RefCell::new(TUI::new(Box::new(ProcessTerminal::new()), Some(false))))
+        Rc::new(RefCell::new(TUI::new(
+            Box::new(ProcessTerminal::new()),
+            Some(false),
+        )))
     }
 
     fn dialog(provider_id: &str) -> LoginDialogComponent {
@@ -919,17 +944,17 @@ mod tests {
 
     #[test]
     fn the_prime_inference_header_hides_the_title_and_subtitle() {
-        let component = dialog(PRIME_INFERENCE_PROVIDER_ID);
+        let mut component = dialog(PRIME_INFERENCE_PROVIDER_ID);
         assert!(component.is_prime_inference);
-        let mut lines = component.panel.render(60.0);
-        assert!(lines.iter().all(|line| !line.contains("Complete this step")));
-        lines.clear();
+        let lines = component.render(60.0);
+        assert!(lines
+            .iter()
+            .all(|line| !line.contains("Complete this step")));
 
-        let other = dialog("anthropic");
+        let mut other = dialog("anthropic");
         assert!(!other.is_prime_inference);
         assert_eq!(other.title(), "Login to anthropic");
         assert!(other
-            .panel
             .render(60.0)
             .iter()
             .any(|line| line.contains("Complete this step to continue setup.")));
@@ -937,9 +962,18 @@ mod tests {
 
     #[test]
     fn verification_codes_are_extracted_from_instructions() {
-        assert_eq!(parse_verification_code("Code: 1234"), Some("1234".to_string()));
-        assert_eq!(parse_verification_code("enter code: xy-z"), Some("xy-z".to_string()));
-        assert_eq!(parse_verification_code("  CODE:  42  "), Some("42".to_string()));
+        assert_eq!(
+            parse_verification_code("Code: 1234"),
+            Some("1234".to_string())
+        );
+        assert_eq!(
+            parse_verification_code("enter code: xy-z"),
+            Some("xy-z".to_string())
+        );
+        assert_eq!(
+            parse_verification_code("  CODE:  42  "),
+            Some("42".to_string())
+        );
         assert_eq!(parse_verification_code("code:"), None);
         assert_eq!(parse_verification_code("paste the url"), None);
     }
@@ -954,8 +988,15 @@ mod tests {
         let visible = component.get_auth_actions_text(None);
         assert!(hidden.contains("cancel"));
         assert!(visible.contains("cancel"));
-        assert_eq!(component.get_auth_actions_text(Some("copied")).contains("Copied sign-in link"), true);
-        assert!(component.get_auth_actions_text(Some("failed")).contains("Failed to copy sign-in link"));
+        assert_eq!(
+            component
+                .get_auth_actions_text(Some("copied"))
+                .contains("Copied sign-in link"),
+            true
+        );
+        assert!(component
+            .get_auth_actions_text(Some("failed"))
+            .contains("Failed to copy sign-in link"));
     }
 
     #[test]
@@ -965,7 +1006,9 @@ mod tests {
         let rendered = component.render(70.0);
         assert!(rendered.iter().any(|line| line.contains("Browser sign-in")));
         assert!(rendered.iter().any(|line| line.contains("9999")));
-        assert!(rendered.iter().any(|line| line.contains("Verification code")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Verification code")));
     }
 
     #[test]
@@ -997,11 +1040,15 @@ mod tests {
         let mut component = dialog("anthropic");
         component.show_waiting("waiting for browser");
         let rendered = component.render(60.0);
-        assert!(rendered.iter().any(|line| line.contains("waiting for browser")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("waiting for browser")));
         component.show_progress("polling");
         let rendered = component.render(60.0);
         assert!(rendered.iter().any(|line| line.contains("polling")));
-        assert!(rendered.iter().any(|line| line.contains("Preparing authentication")));
+        assert!(rendered
+            .iter()
+            .any(|line| line.contains("Preparing authentication")));
     }
 
     #[test]

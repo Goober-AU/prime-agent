@@ -10,13 +10,13 @@ use std::sync::Arc;
 use indexmap::IndexMap;
 use pi_ai::mcp::catalog::{builtin_mcp_catalog, get_catalog_entry, register_builtin_mcp_oauth_providers};
 use pi_ai::mcp::oauth::{create_mcp_oauth_provider, McpOAuthConfig};
-use pi_ai::utils::oauth::{get_oauth_provider, register_oauth_provider, unregister_oauth_provider};
+use pi_ai::utils::oauth::{register_oauth_provider, unregister_oauth_provider};
 use serde_json::{json, Map, Value};
 
 use crate::core::auth_storage::{AuthCredential, AuthStorage};
 use crate::core::kernel::shared::{HostRequestHandler, HostRequestHandlers, KernelError};
 use crate::core::mcp::acp_mcp_types::AcpMcpServerConfig;
-use crate::core::settings_manager::{HttpMcpServerConfig, McpServerConfig, StdioMcpServerConfig};
+use crate::core::settings_manager::{HttpMcpServerConfig, McpServerConfig};
 
 /// `interface McpManagerOptions`.
 pub struct McpManagerOptions {
@@ -43,9 +43,9 @@ impl Default for McpManagerOptions {
 /// A resolved integration: a catalog/user entry plus its provider id.
 const GENERIC_SERVER_NAME_PATTERN: &str = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$";
 
-/// `interface ResolvedIntegration`.
+/// `interface ResolvedIntegration` - private in the TypeScript class.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedIntegration {
+struct ResolvedIntegration {
     pub server: String,
     pub label: String,
     pub config: McpServerConfig,
@@ -128,9 +128,7 @@ impl McpManager {
     pub fn new(options: McpManagerOptions) -> Self {
         let mut manager = Self {
             auth_storage: options.auth_storage,
-            get_user_servers: options
-                .get_user_servers
-                .unwrap_or_else(|| Arc::new(|| None)),
+            get_user_servers: options.get_user_servers.unwrap_or_else(|| Arc::new(|| None)),
             begin_login: options.begin_login,
             integrations: IndexMap::new(),
             acp_servers: IndexMap::new(),
@@ -149,10 +147,17 @@ impl McpManager {
     }
 
     pub fn can_release_acp_servers(&self, owner_id: &str) -> bool {
-        self.acp_owner_id.is_none() || self.acp_owner_id.as_deref() == Some(owner_id)
+        match &self.acp_owner_id {
+            None => true,
+            Some(owner) => owner == owner_id,
+        }
     }
 
-    pub fn replace_acp_servers(&mut self, servers: &[AcpMcpServerConfig], owner_id: &str) -> Result<bool, String> {
+    pub fn replace_acp_servers(
+        &mut self,
+        servers: &[AcpMcpServerConfig],
+        owner_id: &str,
+    ) -> Result<bool, String> {
         if owner_id.is_empty() {
             return Err("ACP MCP owner id is required".to_string());
         }
@@ -176,6 +181,7 @@ impl McpManager {
             }
             next.insert(server.name().to_string(), server.clone());
         }
+        // `JSON.stringify(this.acpServers.get(name)) === JSON.stringify(config)`
         let unchanged = next.len() == self.acp_servers.len()
             && next.iter().all(|(name, config)| {
                 self.acp_servers
@@ -189,8 +195,12 @@ impl McpManager {
         if unchanged {
             return Ok(false);
         }
-        self.acp_owner_id = if next.is_empty() { None } else { Some(owner_id.to_string()) };
         self.acp_servers = next;
+        self.acp_owner_id = if self.acp_servers.is_empty() {
+            None
+        } else {
+            Some(owner_id.to_string())
+        };
         Ok(true)
     }
 
@@ -208,7 +218,13 @@ impl McpManager {
                 .unwrap_or(false);
             integrations.insert(
                 entry.server.clone(),
-                ResolvedIntegration::from_catalog(&entry.server, &entry.label, &entry.url, uses_oauth),
+                ResolvedIntegration {
+                    server: entry.server.clone(),
+                    label: entry.label.clone(),
+                    config: http_server(entry.url.clone(), Some(true), None, None),
+                    uses_oauth,
+                    user_declared: false,
+                },
             );
         }
         for (server, config) in (self.get_user_servers)().unwrap_or_default() {
@@ -246,13 +262,12 @@ impl McpManager {
                 continue;
             }
             let id = Self::provider_id(&integration.server);
-            if integration.uses_oauth() {
-                current.push(id.clone());
-                let url = integration.url().unwrap_or_default().to_string();
+            if integration.uses_oauth {
+                current.push(id);
                 register_oauth_provider(create_mcp_oauth_provider(McpOAuthConfig {
                     server: integration.server.clone(),
                     label: Some(integration.label.clone()),
-                    url,
+                    url: integration.url().unwrap_or_default().to_string(),
                     client_id: None,
                     scopes: None,
                 }));
@@ -279,10 +294,11 @@ impl McpManager {
             return true;
         }
         let bearer_token_env_var = integration.bearer_token_env_var();
-        if !integration.uses_oauth() && bearer_token_env_var.is_none() {
+        if !integration.uses_oauth && bearer_token_env_var.is_none() {
             return true;
         }
         if let Some(name) = bearer_token_env_var {
+            // `process.env[name]?.trim()`
             if std::env::var(name)
                 .map(|value| !value.trim().is_empty())
                 .unwrap_or(false)
@@ -290,13 +306,11 @@ impl McpManager {
                 return true;
             }
         }
-        let cred = {
-            // `authStorage.get(...)` is synchronous in the port.
-            let storage = self.auth_storage.try_lock();
-            match storage {
-                Ok(storage) => storage.get(&Self::provider_id(&integration.server)),
-                Err(_) => None,
-            }
+        // `this.authStorage.get(...)` is synchronous in the port, but the port keeps
+        // the storage behind a `tokio` mutex, so the lock must be non-blocking here.
+        let cred = match self.auth_storage.try_lock() {
+            Ok(storage) => storage.get(&Self::provider_id(&integration.server)),
+            Err(_) => None,
         };
         let Some(cred) = cred else {
             return false;
@@ -335,11 +349,8 @@ impl McpManager {
         let refresh: HostRequestHandler = Arc::new(move |payload: Value| {
             let manager = refresh_manager.clone();
             Box::pin(async move {
-                let server = payload.get("server").and_then(Value::as_str).unwrap_or("").to_string();
-                if server.is_empty() {
-                    return Err(KernelError::new("mcp.refresh requires a server"));
-                }
-                if manager.acp_server_names().contains(&server) {
+                let server = server_from_payload(&payload, "mcp.refresh requires a server")?;
+                if manager.acp_servers.contains_key(&server) {
                     return Err(KernelError::new(format!(
                         "ACP MCP server {server} does not use host OAuth"
                     )));
@@ -370,17 +381,14 @@ impl McpManager {
         let config: HostRequestHandler = Arc::new(move |payload: Value| {
             let manager = config_manager.clone();
             Box::pin(async move {
-                let server = payload.get("server").and_then(Value::as_str).unwrap_or("").to_string();
-                if server.is_empty() {
-                    return Err(KernelError::new("mcp.config requires a server"));
-                }
+                let server = server_from_payload(&payload, "mcp.config requires a server")?;
                 if let Some(acp_server) = manager.acp_servers.get(&server) {
                     // `const { name: _name, ...config } = acpServer;`
-                    let mut value = serde_json::to_value(acp_server).map_err(|error| KernelError::new(error.to_string()))?;
+                    let mut value = serde_json::to_value(acp_server)
+                        .map_err(|error| KernelError::new(error.to_string()))?;
                     if let Value::Object(map) = &mut value {
                         map.shift_remove("name");
                         map.insert("credentialSource".to_string(), Value::String("acp".to_string()));
-                        return Ok(Value::Object(map.clone()));
                     }
                     return Ok(value);
                 }
@@ -390,7 +398,8 @@ impl McpManager {
                 if !integration.user_declared || get_catalog_entry(&server).is_some() {
                     return Ok(json!({}));
                 }
-                serde_json::to_value(&integration.config).map_err(|error| KernelError::new(error.to_string()))
+                serde_json::to_value(&integration.config)
+                    .map_err(|error| KernelError::new(error.to_string()))
             })
         });
         handlers.insert("mcp.config".to_string(), config);
@@ -401,10 +410,7 @@ impl McpManager {
             let begin_login: HostRequestHandler = Arc::new(move |payload: Value| {
                 let begin_login = begin_login.clone();
                 Box::pin(async move {
-                    let server = payload.get("server").and_then(Value::as_str).unwrap_or("").to_string();
-                    if server.is_empty() {
-                        return Err(KernelError::new("mcp.begin_login requires a server"));
-                    }
+                    let server = server_from_payload(&payload, "mcp.begin_login requires a server")?;
                     begin_login(server).await.map_err(KernelError::new)?;
                     Ok(json!({}))
                 })
@@ -434,7 +440,8 @@ impl McpManager {
             })
             .map(|integration| integration.server.clone())
             .collect();
-        servers.sort();
+        // `sort((left, right) => left.localeCompare(right))`
+        servers.sort_by(|left, right| left.cmp(right));
         servers
     }
 
@@ -451,7 +458,7 @@ impl McpManager {
             .collect()
     }
 
-    /// The subset of manager state the kernel handlers read after construction.
+    /// The manager state the host handlers read after construction.
     fn shared_view(&self) -> Arc<McpManagerView> {
         Arc::new(McpManagerView {
             auth_storage: self.auth_storage.clone(),
@@ -459,6 +466,41 @@ impl McpManager {
             acp_servers: self.acp_servers.clone(),
         })
     }
+}
+
+/// `String(payload.server ?? "")`.
+fn server_from_payload(payload: &Value, missing_message: &str) -> Result<String, KernelError> {
+    let server = payload
+        .get("server")
+        .map(|value| match value {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .unwrap_or_default();
+    if server.is_empty() {
+        return Err(KernelError::new(missing_message));
+    }
+    Ok(server)
+}
+
+/// `{ type: "http", ... }` settings entry.
+fn http_server(
+    url: String,
+    oauth: Option<bool>,
+    bearer_token_env_var: Option<String>,
+    headers: Option<Map<String, Value>>,
+) -> McpServerConfig {
+    McpServerConfig::Http(HttpMcpServerConfig {
+        url,
+        headers,
+        bearer_token_env_var,
+        oauth,
+        enabled: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        startup_timeout_ms: None,
+        call_timeout_ms: None,
+    })
 }
 
 /// `Array<{ server; label; enabled; usesOAuth }>` returned by `listStatus`.
@@ -478,12 +520,6 @@ struct McpManagerView {
     acp_servers: IndexMap<String, AcpMcpServerConfig>,
 }
 
-impl McpManagerView {
-    fn acp_server_names(&self) -> Vec<String> {
-        self.acp_servers.keys().cloned().collect()
-    }
-}
-
 /// `(cred as { endpoint?: string }).endpoint`.
 fn credential_endpoint(credential: &AuthCredential) -> Option<String> {
     match credential {
@@ -496,63 +532,53 @@ fn credential_endpoint(credential: &AuthCredential) -> Option<String> {
     }
 }
 
-/// `getCatalogEntry(server)` is used by `registerUserProviders`; expose the
-/// stdio/http config helper so callers can build their own servers.
-pub fn http_mcp_server_config(url: &str) -> McpServerConfig {
-    McpServerConfig::Http(HttpMcpServerConfig {
-        url: url.to_string(),
-        headers: None,
-        bearer_token_env_var: None,
-        oauth: None,
-        enabled: None,
-        enabled_tools: None,
-        disabled_tools: None,
-        startup_timeout_ms: None,
-        call_timeout_ms: None,
-    })
-}
-
-/// `getOAuthProvider(id)` lookup used by tests and embedders.
-pub fn has_registered_oauth_provider(id: &str) -> bool {
-    get_oauth_provider(id).is_some()
-}
-
-/// `json!({})` helper kept for readability of the handler bodies.
-#[allow(dead_code)]
-fn empty_record() -> Value {
-    Value::Object(Map::new())
-}
-
-/// `StdioMcpServerConfig` is part of the settings surface this module reads.
-#[allow(dead_code)]
-fn stdio_config(command: &str) -> McpServerConfig {
-    McpServerConfig::Stdio(StdioMcpServerConfig {
-        command: command.to_string(),
-        args: None,
-        cwd: None,
-        env: None,
-        enabled: None,
-        enabled_tools: None,
-        disabled_tools: None,
-        startup_timeout_ms: None,
-        call_timeout_ms: None,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pi_ai::utils::oauth::reset_oauth_providers;
+    use pi_ai::utils::oauth::{get_oauth_provider, reset_oauth_providers};
+    use serde_json::Map;
+
+    fn auth_storage() -> Arc<tokio::sync::Mutex<AuthStorage>> {
+        Arc::new(tokio::sync::Mutex::new(AuthStorage::in_memory(IndexMap::new(), None)))
+    }
+
+    fn oauth_credential(access: &str, endpoint: Option<&str>) -> AuthCredential {
+        let mut extra = Map::new();
+        if let Some(endpoint) = endpoint {
+            extra.insert("endpoint".to_string(), Value::String(endpoint.to_string()));
+        }
+        AuthCredential::OAuth {
+            credentials: pi_ai::utils::oauth::OAuthCredentials {
+                refresh: "r".to_string(),
+                access: access.to_string(),
+                expires: f64::MAX,
+                extra,
+            },
+        }
+    }
+
+    fn user_servers(
+        entries: Vec<(&str, McpServerConfig)>,
+    ) -> Option<Arc<dyn Fn() -> Option<IndexMap<String, McpServerConfig>> + Send + Sync>> {
+        Some(Arc::new(move || {
+            let mut servers: IndexMap<String, McpServerConfig> = IndexMap::new();
+            for (name, config) in entries.clone() {
+                servers.insert(name.to_string(), config);
+            }
+            Some(servers)
+        }))
+    }
 
     fn manager(options: McpManagerOptions) -> McpManager {
         McpManager::new(options)
     }
 
-    fn auth_storage() -> Arc<tokio::sync::Mutex<AuthStorage>> {
-        Arc::new(tokio::sync::Mutex::new(AuthStorage::in_memory(
-            IndexMap::new(),
-            None,
-        )))
+    fn status_enabled(manager: &McpManager, server: &str) -> Option<bool> {
+        manager
+            .list_status()
+            .into_iter()
+            .find(|status| status.server == server)
+            .map(|status| status.enabled)
     }
 
     #[test]
@@ -571,17 +597,10 @@ mod tests {
     fn enables_an_integration_once_credentials_are_stored() {
         reset_oauth_providers();
         let storage = auth_storage();
-        storage.try_lock().unwrap().set(
-            "mcp:linear",
-            AuthCredential::OAuth {
-                credentials: pi_ai::utils::oauth::OAuthCredentials {
-                    refresh: "r".to_string(),
-                    access: "tok".to_string(),
-                    expires: 1_800_000_000_000.0,
-                    extra: Map::new(),
-                },
-            },
-        );
+        storage
+            .try_lock()
+            .unwrap()
+            .set("mcp:linear", oauth_credential("tok", None));
         let manager = manager(McpManagerOptions {
             auth_storage: storage,
             ..Default::default()
@@ -589,11 +608,7 @@ mod tests {
         let overrides = manager.get_disabled_builtin_skill_overrides();
         assert!(!overrides.contains(&"-linear/SKILL.md".to_string()));
         assert!(overrides.contains(&"-notion/SKILL.md".to_string()));
-        let status = manager
-            .list_status()
-            .into_iter()
-            .find(|status| status.server == "linear");
-        assert_eq!(status.map(|status| status.enabled), Some(true));
+        assert_eq!(status_enabled(&manager, "linear"), Some(true));
     }
 
     #[test]
@@ -608,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_re_registers_builtin_providers_after_a_registry_reset() {
+    fn keeps_mcp_providers_registered_after_a_registry_reset() {
         reset_oauth_providers();
         let mut manager = manager(McpManagerOptions {
             auth_storage: auth_storage(),
@@ -622,62 +637,24 @@ mod tests {
     }
 
     #[test]
-    fn re_registers_user_declared_oauth_servers() {
+    fn re_registers_user_declared_oauth_servers_after_a_registry_reset() {
         reset_oauth_providers();
         let mut manager = manager(McpManagerOptions {
             auth_storage: auth_storage(),
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                servers.insert(
-                    "acme".to_string(),
-                    http_mcp_server_config("https://mcp.acme.test/mcp"),
-                );
-                Some(servers)
-            })),
+            get_user_servers: user_servers(vec![(
+                "acme",
+                http_server("https://mcp.acme.test/mcp".to_string(), Some(true), None, None),
+            )]),
             ..Default::default()
         });
-        manager.register_user_providers();
-        assert!(get_oauth_provider("mcp:acme").is_none());
-        // `oauth: true` is what registers the provider.
-        let mut manager = manager_with_acme_oauth();
-        manager.register_user_providers();
         assert!(get_oauth_provider("mcp:acme").is_some());
         reset_oauth_providers();
-        manager.refresh();
+        manager.register_user_providers();
         assert!(get_oauth_provider("mcp:acme").is_some());
-    }
-
-    fn manager_with_acme_oauth() -> McpManager {
-        manager(McpManagerOptions {
-            auth_storage: auth_storage(),
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                servers.insert(
-                    "acme".to_string(),
-                    oauth_http_server("https://mcp.acme.test/mcp"),
-                );
-                Some(servers)
-            })),
-            ..Default::default()
-        })
-    }
-
-    fn oauth_http_server(url: &str) -> McpServerConfig {
-        McpServerConfig::Http(HttpMcpServerConfig {
-            url: url.to_string(),
-            headers: None,
-            bearer_token_env_var: None,
-            oauth: Some(true),
-            enabled: None,
-            enabled_tools: None,
-            disabled_tools: None,
-            startup_timeout_ms: None,
-            call_timeout_ms: None,
-        })
     }
 
     #[tokio::test]
-    async fn exposes_only_refresh_and_config_when_no_interactive_login_is_wired() {
+    async fn exposes_refresh_and_config_and_reports_missing_credentials() {
         reset_oauth_providers();
         let manager = manager(McpManagerOptions {
             auth_storage: auth_storage(),
@@ -736,272 +713,327 @@ mod tests {
         reset_oauth_providers();
         let manager = manager(McpManagerOptions {
             auth_storage: auth_storage(),
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                servers.insert("linear".to_string(), oauth_http_server("https://proxy.test/mcp"));
-                Some(servers)
-            })),
+            get_user_servers: user_servers(vec![(
+                "linear",
+                http_server("https://proxy.test/mcp".to_string(), Some(true), None, None),
+            )]),
             ..Default::default()
         });
-        let handlers = manager.host_handlers();
-        let config = handlers.get("mcp.config").unwrap().clone();
+        let config = manager.host_handlers().get("mcp.config").unwrap().clone();
         assert_eq!(config(json!({ "server": "linear" })).await.unwrap(), json!({}));
+        // Catalog-only entries are reserved for their authored skills, not the generic API.
         assert_eq!(config(json!({ "server": "notion" })).await.unwrap(), json!({}));
     }
 
     #[test]
-    fn an_oauth_override_of_a_catalog_name_is_not_authed_by_the_official_credential() {
+    fn does_not_treat_an_oauth_override_of_a_catalog_name_as_authed() {
+        reset_oauth_providers();
+        let storage = auth_storage();
+        storage
+            .try_lock()
+            .unwrap()
+            .set("mcp:linear", oauth_credential("official", None));
+        let manager = manager(McpManagerOptions {
+            auth_storage: storage,
+            get_user_servers: user_servers(vec![(
+                "linear",
+                http_server("https://proxy.test/mcp".to_string(), Some(true), None, None),
+            )]),
+            ..Default::default()
+        });
+        assert_eq!(status_enabled(&manager, "linear"), Some(false));
+    }
+
+    #[test]
+    fn does_not_enable_a_server_from_a_mismatched_or_unbound_credential() {
+        reset_oauth_providers();
+        let storage = auth_storage();
+        {
+            let mut guard = storage.try_lock().unwrap();
+            guard.set("mcp:unbound", oauth_credential("unbound-token", None));
+            guard.set(
+                "mcp:remote",
+                oauth_credential("old-token", Some("https://old.test/mcp")),
+            );
+        }
+        let manager = manager(McpManagerOptions {
+            auth_storage: storage,
+            get_user_servers: user_servers(vec![
+                (
+                    "remote",
+                    http_server("https://new.test/mcp".to_string(), Some(true), None, None),
+                ),
+                (
+                    "unbound",
+                    http_server("https://srv.test/mcp".to_string(), Some(true), None, None),
+                ),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(status_enabled(&manager, "remote"), Some(false));
+        assert_eq!(status_enabled(&manager, "unbound"), Some(false));
+        assert!(manager.get_enabled_persistent_generic_servers().is_empty());
+    }
+
+    #[test]
+    fn honors_a_bearer_token_env_var_for_user_declared_servers() {
+        reset_oauth_providers();
+        std::env::set_var("MY_MCP_TOKEN", "secret");
+        let manager = manager(McpManagerOptions {
+            auth_storage: auth_storage(),
+            get_user_servers: user_servers(vec![(
+                "custom",
+                http_server(
+                    "https://example.test/mcp".to_string(),
+                    None,
+                    Some("MY_MCP_TOKEN".to_string()),
+                    None,
+                ),
+            )]),
+            ..Default::default()
+        });
+        let enabled = status_enabled(&manager, "custom");
+        std::env::remove_var("MY_MCP_TOKEN");
+        assert_eq!(enabled, Some(true));
+    }
+
+    #[test]
+    fn lists_only_enabled_non_catalog_user_servers_in_deterministic_order() {
+        reset_oauth_providers();
+        let manager = manager(McpManagerOptions {
+            auth_storage: auth_storage(),
+            get_user_servers: user_servers(vec![
+                ("zebra", stdio_server("z", None)),
+                ("disabled", stdio_server("off", Some(false))),
+                ("linear", stdio_server("reserved", None)),
+                (
+                    "alpha",
+                    http_server("https://alpha.test/mcp".to_string(), None, None, None),
+                ),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(
+            manager.get_enabled_persistent_generic_servers(),
+            vec!["alpha".to_string(), "zebra".to_string()]
+        );
+    }
+
+    #[test]
+    fn picks_up_mcp_servers_added_after_construction_on_refresh() {
+        reset_oauth_providers();
+        let servers: Arc<std::sync::Mutex<Option<IndexMap<String, McpServerConfig>>>> =
+            Arc::new(std::sync::Mutex::new(Some(IndexMap::new())));
+        let servers_for_manager = servers.clone();
+        let mut manager = manager(McpManagerOptions {
+            auth_storage: auth_storage(),
+            get_user_servers: Some(Arc::new(move || {
+                servers_for_manager.lock().unwrap().clone()
+            })),
+            ..Default::default()
+        });
+        assert!(manager
+            .list_status()
+            .into_iter()
+            .find(|status| status.server == "acme")
+            .is_none());
+
+        {
+            let mut guard = servers.lock().unwrap();
+            let mut next: IndexMap<String, McpServerConfig> = IndexMap::new();
+            next.insert(
+                "acme".to_string(),
+                http_server("https://mcp.acme.test/mcp".to_string(), Some(true), None, None),
+            );
+            *guard = Some(next);
+        }
+        manager.refresh();
+        assert!(manager
+            .list_status()
+            .into_iter()
+            .find(|status| status.server == "acme")
+            .is_some());
+        assert!(get_oauth_provider("mcp:acme").is_some());
+    }
+
+    #[test]
+    fn keeps_the_builtin_provider_when_a_user_server_uses_a_reserved_catalog_name() {
+        reset_oauth_providers();
+        let _ = manager(McpManagerOptions {
+            auth_storage: auth_storage(),
+            get_user_servers: user_servers(vec![(
+                "linear",
+                http_server("https://proxy.test/mcp".to_string(), Some(true), None, None),
+            )]),
+            ..Default::default()
+        });
+        let provider = get_oauth_provider("mcp:linear").expect("builtin provider");
+        assert_eq!(provider.name, "Linear");
+    }
+
+    #[test]
+    fn unregisters_a_user_servers_oauth_provider_when_it_is_removed_on_refresh() {
+        reset_oauth_providers();
+        let servers: Arc<std::sync::Mutex<Option<IndexMap<String, McpServerConfig>>>> =
+            Arc::new(std::sync::Mutex::new({
+                let mut initial: IndexMap<String, McpServerConfig> = IndexMap::new();
+                initial.insert(
+                    "acme".to_string(),
+                    http_server("https://mcp.acme.test/mcp".to_string(), Some(true), None, None),
+                );
+                Some(initial)
+            }));
+        let servers_for_manager = servers.clone();
+        let mut manager = manager(McpManagerOptions {
+            auth_storage: auth_storage(),
+            get_user_servers: Some(Arc::new(move || servers_for_manager.lock().unwrap().clone())),
+            ..Default::default()
+        });
+        assert!(get_oauth_provider("mcp:acme").is_some());
+
+        *servers.lock().unwrap() = Some(IndexMap::new());
+        manager.refresh();
+        assert!(get_oauth_provider("mcp:acme").is_none());
+    }
+
+    #[tokio::test]
+    async fn serves_user_stdio_configuration_without_resolving_tagged_env_values() {
+        reset_oauth_providers();
+        let config = McpServerConfig::Stdio(crate::core::settings_manager::StdioMcpServerConfig {
+            command: "node".to_string(),
+            args: Some(vec!["server.js".to_string(), "--raw".to_string()]),
+            cwd: Some("/tmp/work".to_string()),
+            env: Some({
+                let mut env = Map::new();
+                env.insert("TOKEN".to_string(), json!({ "env": "MCP_TOKEN" }));
+                env
+            }),
+            enabled: None,
+            enabled_tools: Some(vec!["raw.tool/name".to_string()]),
+            disabled_tools: None,
+            startup_timeout_ms: None,
+            call_timeout_ms: None,
+        });
+        let expected = serde_json::to_value(&config).unwrap();
+        let manager = manager(McpManagerOptions {
+            auth_storage: auth_storage(),
+            get_user_servers: user_servers(vec![("local", config)]),
+            ..Default::default()
+        });
+        let config_handler = manager.host_handlers().get("mcp.config").unwrap().clone();
+        assert_eq!(config_handler(json!({ "server": "local" })).await.unwrap(), expected);
+        assert_eq!(status_enabled(&manager, "local"), Some(true));
+    }
+
+    #[test]
+    fn does_not_enable_an_authored_catalog_skill_when_a_generic_server_shadows_its_name() {
+        reset_oauth_providers();
+        for config in [
+            stdio_server("node", None),
+            http_server("https://proxy.test/mcp".to_string(), None, None, None),
+        ] {
+            let manager = manager(McpManagerOptions {
+                auth_storage: auth_storage(),
+                get_user_servers: user_servers(vec![("linear", config)]),
+                ..Default::default()
+            });
+            assert!(manager
+                .get_disabled_builtin_skill_overrides()
+                .contains(&"-linear/SKILL.md".to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn keeps_acp_credentials_session_scoped_and_isolated_from_stored_oauth() {
         reset_oauth_providers();
         let storage = auth_storage();
         storage.try_lock().unwrap().set(
-            "mcp:linear",
-            AuthCredential::OAuth {
-                credentials: pi_ai::utils::oauth::OAuthCredentials {
-                    refresh: "r".to_string(),
-                    access: "official".to_string(),
-                    expires: 1_800_000_000_000.0,
-                    extra: Map::new(),
-                },
-            },
+            "mcp:task",
+            oauth_credential("stored-oauth-token", Some("https://user.example/mcp")),
         );
-        let manager = manager(McpManagerOptions {
-            auth_storage: storage,
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                servers.insert("linear".to_string(), oauth_http_server("https://proxy.test/mcp"));
-                Some(servers)
-            })),
-            ..Default::default()
-        });
-        let status = manager
-            .list_status()
-            .into_iter()
-            .find(|status| status.server == "linear");
-        assert_eq!(status.map(|status| status.enabled), Some(false));
-    }
-
-    #[test]
-    fn a_credential_bound_to_another_endpoint_does_not_enable_a_server() {
-        reset_oauth_providers();
-        let storage = auth_storage();
-        {
-            let mut guard = storage.try_lock().unwrap();
-            let mut extra = Map::new();
-            extra.insert(
-                "endpoint".to_string(),
-                Value::String("https://old.test/mcp".to_string()),
-            );
-            guard.set(
-                "mcp:remote",
-                AuthCredential::OAuth {
-                    credentials: pi_ai::utils::oauth::OAuthCredentials {
-                        refresh: "r".to_string(),
-                        access: "old-token".to_string(),
-                        expires: 1_800_000_000_000.0,
-                        extra,
-                    },
-                },
-            );
-            guard.set(
-                "mcp:unbound",
-                AuthCredential::OAuth {
-                    credentials: pi_ai::utils::oauth::OAuthCredentials {
-                        refresh: "r".to_string(),
-                        access: "unbound-token".to_string(),
-                        expires: 1_800_000_000_000.0,
-                        extra: Map::new(),
-                    },
-                },
-            );
-        }
-        let manager = manager(McpManagerOptions {
-            auth_storage: storage,
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                servers.insert("remote".to_string(), oauth_http_server("https://new.test/mcp"));
-                servers.insert("unbound".to_string(), oauth_http_server("https://unbound.test/mcp"));
-                Some(servers)
-            })),
-            ..Default::default()
-        });
-        let status = manager.list_status();
-        let enabled = |server: &str| {
-            status
-                .iter()
-                .find(|status| status.server == server)
-                .map(|status| status.enabled)
-        };
-        assert_eq!(enabled("remote"), Some(false));
-        assert_eq!(enabled("unbound"), Some(false));
-    }
-
-    #[test]
-    fn generic_servers_are_name_pattern_gated_and_sorted() {
-        reset_oauth_providers();
-        let storage = auth_storage();
-        {
-            let mut guard = storage.try_lock().unwrap();
-            guard.set(
-                "mcp:zeta",
-                AuthCredential::ApiKey {
-                    key: "k".to_string(),
-                    prime_team: None,
-                },
-            );
-        }
-        let manager = manager(McpManagerOptions {
-            auth_storage: storage,
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                servers.insert("zeta".to_string(), http_mcp_server_config("https://z.test/mcp"));
-                servers.insert("has space".to_string(), http_mcp_server_config("https://s.test/mcp"));
-                servers.insert("linear".to_string(), http_mcp_server_config("https://l.test/mcp"));
-                Some(servers)
-            })),
-            ..Default::default()
-        });
-        let servers = manager.get_enabled_persistent_generic_servers();
-        assert_eq!(servers, vec!["zeta".to_string()]);
-    }
-
-    #[test]
-    fn acp_servers_replace_only_for_the_owner() {
-        reset_oauth_providers();
         let mut manager = manager(McpManagerOptions {
-            auth_storage: auth_storage(),
+            auth_storage: storage.clone(),
+            get_user_servers: user_servers(vec![(
+                "task",
+                http_server("https://user.example/mcp".to_string(), Some(true), None, None),
+            )]),
             ..Default::default()
         });
-        assert!(manager.can_release_acp_servers("a"));
-        assert!(manager.replace_acp_servers(&[], "a").unwrap() == false);
+        let acp_server = AcpMcpServerConfig::Http(crate::core::mcp::acp_mcp_types::AcpMcpHttpServerConfig {
+            name: "task".to_string(),
+            url: "https://task.example/mcp".to_string(),
+            headers: {
+                let mut headers = Map::new();
+                headers.insert(
+                    "Authorization".to_string(),
+                    Value::String("Bearer task-token".to_string()),
+                );
+                headers
+            },
+        });
+        assert!(manager.replace_acp_servers(&[acp_server], "owner-a").unwrap());
 
-        let server = AcpMcpServerConfig::Http(crate::core::mcp::acp_mcp_types::AcpMcpHttpServerConfig {
-            name: "acp".to_string(),
-            url: "https://acp.test/mcp".to_string(),
-            headers: Map::new(),
-        });
-        assert!(manager.replace_acp_servers(&[server.clone()], "a").unwrap());
-        assert!(!manager.replace_acp_servers(&[server.clone()], "a").unwrap());
-        assert!(manager.replace_acp_servers(&[server.clone()], "b").is_err());
-        assert!(!manager.can_release_acp_servers("b"));
-        assert_eq!(manager.get_acp_servers().len(), 1);
-
-        let duplicate = AcpMcpServerConfig::Http(crate::core::mcp::acp_mcp_types::AcpMcpHttpServerConfig {
-            name: "acp".to_string(),
-            url: "https://other.test/mcp".to_string(),
-            headers: Map::new(),
-        });
-        assert!(manager
-            .replace_acp_servers(&[server.clone(), duplicate], "a")
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn config_reports_the_acp_credential_source() {
-        reset_oauth_providers();
-        let mut manager = manager(McpManagerOptions {
-            auth_storage: auth_storage(),
-            ..Default::default()
-        });
-        let server = AcpMcpServerConfig::Http(crate::core::mcp::acp_mcp_types::AcpMcpHttpServerConfig {
-            name: "acp".to_string(),
-            url: "https://acp.test/mcp".to_string(),
-            headers: Map::new(),
-        });
-        manager.replace_acp_servers(&[server], "a").unwrap();
         let handlers = manager.host_handlers();
         let config = handlers.get("mcp.config").unwrap().clone();
-        let value = config(json!({ "server": "acp" })).await.unwrap();
-        assert_eq!(value.get("credentialSource"), Some(&json!("acp")));
-        assert!(value.get("name").is_none());
-        assert_eq!(value.get("url"), Some(&json!("https://acp.test/mcp")));
-    }
-
-    #[tokio::test]
-    async fn refresh_rejects_acp_servers() {
-        reset_oauth_providers();
-        let mut manager = manager(McpManagerOptions {
-            auth_storage: auth_storage(),
-            ..Default::default()
-        });
-        let server = AcpMcpServerConfig::Http(crate::core::mcp::acp_mcp_types::AcpMcpHttpServerConfig {
-            name: "acp".to_string(),
-            url: "https://acp.test/mcp".to_string(),
-            headers: Map::new(),
-        });
-        manager.replace_acp_servers(&[server], "a").unwrap();
-        let handlers = manager.host_handlers();
+        assert_eq!(
+            config(json!({ "server": "task" })).await.unwrap(),
+            json!({
+                "type": "http",
+                "url": "https://task.example/mcp",
+                "headers": { "Authorization": "Bearer task-token" },
+                "credentialSource": "acp",
+            })
+        );
         let refresh = handlers.get("mcp.refresh").unwrap().clone();
-        let error = refresh(json!({ "server": "acp" })).await.unwrap_err();
+        let error = refresh(json!({ "server": "task" })).await.unwrap_err();
         assert_eq!(
             error.to_string(),
-            "ACP MCP server acp does not use host OAuth"
+            "ACP MCP server task does not use host OAuth"
         );
+        assert!(manager
+            .get_acp_servers()
+            .iter()
+            .any(|server| server.name() == "task"));
+
+        assert!(!manager.replace_acp_servers(&[], "owner-b").unwrap());
+        let other = AcpMcpServerConfig::Http(crate::core::mcp::acp_mcp_types::AcpMcpHttpServerConfig {
+            name: "other".to_string(),
+            url: "https://other.example/mcp".to_string(),
+            headers: Map::new(),
+        });
+        assert!(manager.replace_acp_servers(&[other], "owner-b").is_err());
+        assert_eq!(
+            config(json!({ "server": "task" })).await.unwrap().get("url"),
+            Some(&json!("https://task.example/mcp"))
+        );
+
+        assert!(manager.replace_acp_servers(&[], "owner-a").unwrap());
+        assert_eq!(
+            config(json!({ "server": "task" })).await.unwrap(),
+            json!({ "type": "http", "url": "https://user.example/mcp", "oauth": true })
+        );
+        let stored = storage
+            .try_lock()
+            .unwrap()
+            .get("mcp:task")
+            .expect("stored credential");
+        match stored {
+            AuthCredential::OAuth { credentials } => assert_eq!(credentials.access, "stored-oauth-token"),
+            other => panic!("unexpected credential {other:?}"),
+        }
     }
 
-    #[test]
-    fn stdio_servers_are_authed_by_default() {
-        reset_oauth_providers();
-        let manager = manager(McpManagerOptions {
-            auth_storage: auth_storage(),
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                servers.insert("local".to_string(), stdio_config("node"));
-                Some(servers)
-            })),
-            ..Default::default()
-        });
-        let status = manager
-            .list_status()
-            .into_iter()
-            .find(|status| status.server == "local");
-        assert_eq!(status.map(|status| status.enabled), Some(true));
-    }
-
-    #[test]
-    fn a_disabled_config_is_never_authed() {
-        reset_oauth_providers();
-        let manager = manager(McpManagerOptions {
-            auth_storage: auth_storage(),
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                let mut config = http_mcp_server_config("https://x.test/mcp");
-                if let McpServerConfig::Http(http) = &mut config {
-                    http.enabled = Some(false);
-                }
-                servers.insert("x".to_string(), config);
-                Some(servers)
-            })),
-            ..Default::default()
-        });
-        let status = manager
-            .list_status()
-            .into_iter()
-            .find(|status| status.server == "x");
-        assert_eq!(status.map(|status| status.enabled), Some(false));
-    }
-
-    #[test]
-    fn bearer_token_env_var_marks_a_server_authed() {
-        reset_oauth_providers();
-        std::env::set_var("MCP_MANAGER_TEST_TOKEN", "secret");
-        let manager = manager(McpManagerOptions {
-            auth_storage: auth_storage(),
-            get_user_servers: Some(Arc::new(|| {
-                let mut servers = IndexMap::new();
-                let mut config = oauth_http_server("https://bearer.test/mcp");
-                if let McpServerConfig::Http(http) = &mut config {
-                    http.bearer_token_env_var = Some("MCP_MANAGER_TEST_TOKEN".to_string());
-                }
-                servers.insert("bearer".to_string(), config);
-                Some(servers)
-            })),
-            ..Default::default()
-        });
-        std::env::remove_var("MCP_MANAGER_TEST_TOKEN");
-        let status = manager
-            .list_status()
-            .into_iter()
-            .find(|status| status.server == "bearer");
-        assert_eq!(status.map(|status| status.enabled), Some(true));
+    fn stdio_server(command: &str, enabled: Option<bool>) -> McpServerConfig {
+        McpServerConfig::Stdio(crate::core::settings_manager::StdioMcpServerConfig {
+            command: command.to_string(),
+            args: None,
+            cwd: None,
+            env: None,
+            enabled,
+            enabled_tools: None,
+            disabled_tools: None,
+            startup_timeout_ms: None,
+            call_timeout_ms: None,
+        })
     }
 }

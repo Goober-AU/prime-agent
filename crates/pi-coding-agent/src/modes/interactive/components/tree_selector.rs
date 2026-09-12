@@ -1,6 +1,6 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/tree-selector.ts
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -1682,7 +1682,7 @@ impl TreeSelectorComponent {
         let tree_list = Rc::clone(&self.tree_list);
         let label_change = Rc::clone(&self.on_label_change_callback);
         let pending = Rc::clone(&self.pending_label_edit);
-        let cancelled: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let submit_pending = Rc::clone(&pending);
         label_input.on_submit = Some(Box::new(move |id: String, label: Option<String>| {
             tree_list
                 .borrow_mut()
@@ -1691,10 +1691,13 @@ impl TreeSelectorComponent {
                 callback(id, label);
             }
             // `this.hideLabelInput()`.
-            *pending.borrow_mut() = Some((String::new(), None));
+            *submit_pending.borrow_mut() = Some((String::new(), None));
         }));
-        let cancelled_clone = Rc::clone(&cancelled);
-        label_input.on_cancel = Some(Box::new(move || cancelled_clone.set(true)));
+        // `this.labelInput.onCancel = () => this.hideLabelInput()`.
+        let cancel_pending = Rc::clone(&pending);
+        label_input.on_cancel = Some(Box::new(move || {
+            *cancel_pending.borrow_mut() = Some((String::new(), None));
+        }));
 
         // Propagate current focused state to the new labelInput
         let mut label_input = label_input;

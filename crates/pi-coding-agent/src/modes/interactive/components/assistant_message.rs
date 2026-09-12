@@ -109,7 +109,11 @@ fn clone_tui_markdown_theme(theme_source: &TuiMarkdownTheme) -> TuiMarkdownTheme
 
 /// Port of `getThinkingMarkdownTheme`.
 fn get_thinking_markdown_theme(base_theme: &TuiMarkdownTheme) -> TuiMarkdownTheme {
-    let quiet = |text: &str| theme().fg("thinkingText", text);
+    fn quiet(text: &str) -> String {
+        theme().fg("thinkingText", text)
+    }
+    // The theme holds `Rc` closures, so each field gets its own `Rc` over the
+    // shared function item (the same `quiet` behaviour for every field).
     let mut thinking_theme = clone_tui_markdown_theme(base_theme);
     thinking_theme.heading = Rc::new(quiet);
     thinking_theme.link = Rc::new(quiet);
@@ -317,7 +321,7 @@ pub struct AssistantMessageComponent {
     block_markdowns: HashMap<usize, Rc<RefCell<Markdown>>>,
     last_block_texts: HashMap<usize, String>,
     preceded_by_tool_activity: bool,
-    mermaid_transform: Option<MermaidMarkdownTransform>,
+    mermaid_transform: Option<Rc<MermaidMarkdownTransform>>,
     base_url: Option<String>,
     is_streaming: bool,
     container: Container,
@@ -496,7 +500,6 @@ impl AssistantMessageComponent {
                     // Set paddingY=0 to avoid extra spacing before tool executions.
                     let trimmed = text.text.trim().to_string();
                     let mermaid_transform = self.mermaid_transform.clone();
-                    let _ = &mermaid_transform;
                     let is_streaming = self.is_streaming;
                     let mut options = MarkdownOptions {
                         base_url: self.base_url.clone(),
@@ -505,7 +508,7 @@ impl AssistantMessageComponent {
                     if let Some(mermaid_transform) = mermaid_transform {
                         options.transform =
                             Some(Rc::new(move |markdown: &str, available_width: usize| {
-                                mermaid_transform(
+                                (*mermaid_transform)(
                                     markdown.to_string(),
                                     available_width as f64,
                                     is_streaming,

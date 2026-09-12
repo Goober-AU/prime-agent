@@ -29,16 +29,21 @@ use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, Notify};
 use pi_agent_core::types::AgentMessage;
 
 use crate::core::agent_messages::{
-    build_agent_family_roster, create_agent_session_message, create_agent_session_message_id,
+    agent_family_relationship, assert_agent_family_reach, assert_agent_session_name_available,
+    assert_direct_agent_message_target, build_agent_family_roster, create_agent_session_message,
+    create_agent_session_message_id, create_agent_session_message_prompt,
     create_agent_session_message_receipt, format_agent_session_name_unavailable,
     normalize_agent_session_message, session_name_reservation_key, AgentFamilyCatalogEntry,
     AgentFamilyRelationship, AgentFamilyRosterResult, AgentSessionMessageAgentSummary,
     AgentSessionMessageController, AgentSessionMessageDeliveryStatus, AgentSessionMessageEndpoint,
     AgentSessionMessageListResult, AgentSessionMessagePayload, AgentSessionMessageRateLimiter,
-    AgentSessionMessageReceipt, AgentSessionMessageSender, AGENT_FAMILY_REACH_ERROR,
-    AGENT_MESSAGE_SOURCE, DEFAULT_AGENT_MESSAGE_MAX_CHARS,
-    DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION, DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY,
-    DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
+    AgentSessionMessageReceipt, AgentSessionMessageSender, AgentSessionNameAvailabilityInput,
+    AgentSessionNameScope, RateLimitResult, AGENT_FAMILY_REACH_ERROR, AGENT_MESSAGE_SOURCE,
+    DEFAULT_AGENT_MESSAGE_MAX_CHARS, DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+    DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY, DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
+    DELIVERY_MODE_STEER, DELIVERY_STATUS_DELIVERED, DELIVERY_STATUS_QUEUED,
+    FAMILY_RELATIONSHIP_PARENT, FAMILY_STATUS_IDLE, FAMILY_STATUS_INACTIVE, FAMILY_STATUS_RUNNING,
+    RUNTIME_KIND_SUBAGENT,
 };
 use crate::core::agent_observe::{
     create_agent_observe_message_preview, normalize_observe_limit, normalize_observe_max_chars,
@@ -52,7 +57,7 @@ use crate::core::cron_jobs::{
     AgentCronJobStore, AgentCronScheduler, AgentHeartbeatDeliveryMode,
     AgentHeartbeatManagementAction, AgentHeartbeatUpdateAction, CancelJobsForSessionInput,
     CreateAgentCronJobInput, HeartbeatCronSessionActivity, RlmHeartbeatCreateInput,
-    RlmHeartbeatUpdateInput, DEFAULT_HEARTBEAT_SCHEDULE,
+    RlmHeartbeatUpdateInput, DEFAULT_HEARTBEAT_SCHEDULE, RUN_RESULT_SKIPPED, SOURCE_RLM_HEARTBEAT,
 };
 use crate::core::orphan_process_journal::ORPHAN_PROCESS_JOURNAL_ENV;
 use crate::core::prompt_admission::{wait_for_prompt_admission, PromptAdmissionCancelledError};
@@ -85,24 +90,24 @@ use crate::utils::dir_lock::try_acquire_dir_lock;
 use crate::utils::shell::kill_tracked_detached_children;
 
 use super::active_session_state::{
-    create_active_session_id, resolve_active_session_state, ActiveSessionRuntimeSession,
-    ActiveSessionState, AgentSessionRuntime, AgentSessionRuntimeMetadata,
-    DaemonExtensionUIResponse, DaemonSocketClient,
+    create_active_session_id, resolve_active_session_state, ActiveSessionExtensionUiRequest,
+    ActiveSessionRuntimeSession, ActiveSessionState, AgentSessionRuntime,
+    AgentSessionRuntimeMetadata, DaemonExtensionUIResponse, DaemonSocketClient,
 };
 use super::agent_roster::{
-    passivated_worker_roster_entry, roster_agent_id_for_summary, worker_roster_entry_from_summary,
-    RegisteredHeartbeatFlags, RosterSessionSummary, WorkerRosterEntry,
+    classify_session_roster_status, passivated_worker_roster_entry, roster_agent_id_for_summary,
+    worker_roster_entry_from_summary, RegisteredHeartbeatFlags, RosterSessionSummary,
+    RosterSummaryView, WorkerRosterEntry,
 };
 use super::compact_session_stream::create_compact_assistant_delta;
+// The daemon protocol module is owned by another slice; the wire primitives
+// this module consumes are carried by daemon_client's protocol submodule.
 use super::daemon_client::protocol::{
-    collect_daemon_client_env as collect_daemon_launch_env, create_daemon_event_meta,
-    create_daemon_replay_info, is_daemon_command_envelope, is_daemon_dialog_extension_ui_request,
-    is_daemon_mutating_command, is_session_plane_daemon_command, salvage_daemon_command_id,
-    DaemonCommand, DaemonEventMeta, DaemonHello, DaemonOutbound, DaemonReplayInfo, DaemonResponse,
-    DaemonSavedSessionInfo, DaemonSessionSnapshot, DaemonUpdateRestartManifest,
-    DaemonUpdateRestartSession, DAEMON_DEFAULT_CLIENT_CAPABILITIES,
-    DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
-    DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
+    create_daemon_event_meta, create_daemon_replay_info, is_daemon_command_envelope,
+    is_daemon_dialog_extension_ui_request, is_daemon_mutating_command,
+    is_session_plane_daemon_command, salvage_daemon_command_id, DaemonCommand, DaemonResponse,
+    DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID,
+    DAEMON_SCHEMA_REVISION, DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
 };
 use super::daemon_client::DaemonClient;
 use super::daemon_client_env::{filter_client_env, with_client_env};
@@ -113,23 +118,22 @@ use super::daemon_extension_binding::{
     bind_active_session_state, ActiveSessionBindingCallbacks, DaemonExtensionBindingSession,
 };
 use super::daemon_session_list::{
-    build_rlm_child_snapshots, build_session_list, classify_session_roster_status,
-    has_live_session_work, inactive_lifecycle_for_session, scheduled_job_registrations,
-    summary_for_active_session, SessionLifecycle, SessionSummary,
+    build_session_list, has_live_session_work, inactive_lifecycle_for_session,
+    scheduled_job_registrations, summary_for_active_session, SessionLifecycle, SessionSummary,
 };
 use super::daemon_session_summarizer::DaemonSessionSummarizer;
 use super::daemon_socket::{
     cleanup_daemon_socket_path, default_daemon_socket_path, get_daemon_socket_identity,
-    normalize_socket_path, prepare_daemon_socket_path, restrict_daemon_socket_path,
-    DaemonSocketIdentity,
+    normalize_socket_path_for_daemon as normalize_socket_path, prepare_daemon_socket_path,
+    restrict_daemon_socket_path, DaemonSocketIdentity,
 };
 use super::daemon_supervisor_ownership::{
     assert_daemon_supervisor_owner_current, is_daemon_shutdown_admission_active,
 };
 use super::daemon_worker_client::{encode_private_frame, PrivateFrameDecoder};
 use super::daemon_worker_protocol::{
-    is_daemon_worker_frame_header, DaemonWorkerCommand, DaemonWorkerFrameHeader,
-    DaemonWorkerPeerGrant, DaemonWorkerRosterOutbound, DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+    is_daemon_worker_frame_header, DaemonWorkerFrameHeader, DaemonWorkerPeerGrant,
+    DaemonWorkerRosterOutbound, DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
     DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY, DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
     DAEMON_WORKER_ROLE_ENV, DAEMON_WORKER_ROSTER_CAPABILITY, DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
     DAEMON_WORKER_TOKEN_ENV, ROSTER_HEARTBEAT_INTERVAL_MS,
@@ -462,6 +466,50 @@ pub struct PassiveRlmSubagentEntry {
     pub model: Option<RlmSubagentModel>,
     pub status: String,
     pub created_at: f64,
+}
+
+/// `AgentSessionRuntime`'s session-verb surface (`runtime.newSession`,
+/// `switchSession`, `fork`, `importFromJsonl`). The session slice owns the
+/// concrete implementation; the daemon only names the trait so its handle type
+/// stays independent of it.
+pub trait DaemonRuntimeApi: Send + Sync {
+    fn new_session(
+        &self,
+        options: Option<NewSessionRuntimeOptions>,
+    ) -> BoxFuture<'static, Result<Value, String>>;
+    fn switch_session(
+        &self,
+        session_path: &str,
+        options: SessionPathOptions,
+    ) -> BoxFuture<'static, Result<Value, String>>;
+    fn fork(
+        &self,
+        entry_id: &str,
+        options: ForkOptions,
+    ) -> BoxFuture<'static, Result<Value, String>>;
+    fn import_from_jsonl(
+        &self,
+        input_path: &str,
+        cwd_override: Option<&str>,
+    ) -> BoxFuture<'static, Result<Value, String>>;
+}
+
+/// `recordRlmSubagentState`'s `input` object.
+#[derive(Debug, Clone, Default)]
+pub struct RlmSubagentStateInput {
+    pub child_id: String,
+    pub session_name: String,
+    pub session_dir: String,
+    pub session_file: String,
+    pub rlm_depth: i64,
+    pub rlm_max_depth: i64,
+    pub rlm_parent_node_id: Option<String>,
+    pub prompt: Option<String>,
+    pub spawn_code: Option<String>,
+    pub model: Option<RlmSubagentModel>,
+    /// `"running" | "completed"`.
+    pub status: String,
+    pub created_at: Option<f64>,
 }
 
 /// `PassiveRlmRoot`: either a resident root parent state or a saved root info.
@@ -1909,7 +1957,8 @@ pub struct AgentDaemon {
     pub roster_flush_scheduled: AtomicBool,
     pub roster_heartbeat_timer: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     pub rlm_spawn_ledger_instance: TokioMutex<Option<Arc<RlmSpawnLedger>>>,
-    pub pending_rlm_spawn_appends: StdMutex<HashMap<String, u64>>,
+    pub pending_rlm_spawn_appends:
+        StdMutex<HashMap<String, tokio::task::JoinHandle<Result<(), String>>>>,
     /// `passiveRlmSubagentWalks`: same-shape walks waiting on the in-flight one.
     pub passive_rlm_subagent_walks: StdMutex<HashMap<String, Arc<Notify>>>,
     pub passive_rlm_subagent_memo: StdMutex<HashMap<String, PassiveRlmMemoEntry>>,
@@ -2434,7 +2483,16 @@ impl AgentDaemon {
 
     /// `canConnectToSupervisor(socketPath)`.
     async fn can_connect_to_supervisor(&self, socket_path: &str) -> bool {
-        crate::modes::daemon::daemon_client::probe_daemon_socket_connection(socket_path).await
+        // `createConnection(...)`/`connect` with a 250 ms deadline: true only when
+        // the socket actually accepted this probe.
+        let client = DaemonClient::new(socket_path);
+        match tokio::time::timeout(Duration::from_millis(250), client.connect(250)).await {
+            Ok(Ok(())) => {
+                client.close();
+                true
+            }
+            _ => false,
+        }
     }
 
     /// `launchReplacementSupervisor(supervisorSocketPath)`.
@@ -2485,8 +2543,18 @@ impl AgentDaemon {
             if is_daemon_shutdown_admission_active().await.unwrap_or(false) {
                 return Ok(());
             }
-            let launch = create_cli_subprocess_launch_spec(&["daemon".to_string()], None);
-            let mut env = create_cli_subprocess_env(std::env::vars().collect(), None, &[]);
+            let launch = create_cli_subprocess_launch_spec(
+                &[
+                    "--mode".to_string(),
+                    "daemon".to_string(),
+                    "--daemon-socket".to_string(),
+                    supervisor_socket_path.to_string(),
+                ],
+                None,
+                &[],
+                None,
+            );
+            let mut env = create_cli_subprocess_env(&std::env::vars().collect(), None, &[]);
             if let Some(agent_dir) = &agent_dir {
                 env.insert("PRIME_AGENT_AGENT_DIR".to_string(), agent_dir.clone());
             }
@@ -5923,7 +5991,12 @@ fn serialize_json_line(value: &Value) -> String {
 
 /// Read the `SessionInfo` row for a persisted session file.
 fn read_session_info_sync(path: &str) -> Option<SessionInfo> {
-    crate::core::session_manager::read_session_info_blocking(path)
+    // The session slice exposes only the async reader; the daemon's call sites
+    // already sit on a runtime, so the blocking helper bridges through it.
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current()
+            .block_on(crate::core::session_manager::read_session_info(path))
+    })
 }
 
 /// Serialize an `AgentCronJob` for the wire.
@@ -6253,7 +6326,7 @@ impl AgentDaemon {
             binder,
             ActiveSessionBindingCallbacks {
                 broadcast: Arc::new(
-                    move |target: &ActiveSessionState, message: DaemonOutboundWire| {
+                    move |target: &ActiveSessionState, message: DaemonOutbound| {
                         broadcast_daemon.broadcast_raw_to_session(target, &message);
                     },
                 ),
@@ -10882,11 +10955,7 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .active_session_id
             .clone();
-        let mut snapshots: Vec<Value> =
-            build_rlm_child_snapshots(&root_active_session_id, &self.state_refs())
-                .into_iter()
-                .map(|snapshot| serde_json::to_value(snapshot).unwrap_or(Value::Null))
-                .collect();
+        let mut snapshots = self.build_rlm_child_snapshots_plumbing(&root_active_session_id);
         let mut resident_parent_ids: HashSet<String> = HashSet::new();
         resident_parent_ids.insert(root_active_session_id.clone());
         for snapshot in &snapshots {
@@ -12047,7 +12116,18 @@ impl AgentDaemon {
                 .as_ref()
                 .and_then(|metadata| metadata.parent_session_file.clone()),
             rlm_depth: session.rlm_depth().map(|depth| depth as f64),
-            status: Some(classify_session_roster_status(&summary)),
+            status: Some(
+                classify_session_roster_status(
+                    &RosterSummaryView {
+                        active_session_id: summary.active_session_id.clone(),
+                        activity: Some(summary.activity.clone()),
+                        is_session_active: Some(summary.is_session_active),
+                    },
+                    false,
+                )
+                .as_str()
+                .to_string(),
+            ),
             rlm_child_registry_status: None,
         }
     }
@@ -13599,9 +13679,7 @@ impl AgentDaemon {
             id: session.session_id(),
             name: session.session_name(),
             depth: depth as f64,
-            status: classify_session_roster_status(&Self::summary_for_state(state), false)
-                .as_str()
-                .to_string(),
+            status: crate::core::agent_messages::FAMILY_STATUS_RUNNING.to_string(),
             session_path: session
                 .session_file()
                 .map(|path| canonical_session_path(&path)),
@@ -13900,8 +13978,15 @@ impl AgentDaemon {
     /// The host is a closure bag over this daemon; the extension-binding
     /// boundary carries it as a value, so the daemon hands the parent identity
     /// and the operation names the session slice must route back.
-    fn create_subagent_runtime_host_value(&self, state: &Arc<StdMutex<ActiveSessionState>>) -> Option<Value> {
-        let active_session_id = state.lock().expect("active session poisoned").active_session_id.clone();
+    fn create_subagent_runtime_host_value(
+        &self,
+        state: &Arc<StdMutex<ActiveSessionState>>,
+    ) -> Option<Value> {
+        let active_session_id = state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
         let session = Self::session_of(state);
         Some(serde_json::json!({
             "parentActiveSessionId": active_session_id,
@@ -13916,5 +14001,489 @@ impl AgentDaemon {
                 "disposeRlmSubagentRuntimes",
             ],
         }))
+    }
+}
+
+impl AgentDaemon {
+    /// slice plumbing: `buildRlmChildSnapshots(rootActiveSessionId, activeSessions)`
+    /// from daemon-session-list.ts (that module owns the list projection; the
+    /// daemon needs this one entry point here).
+    fn build_rlm_child_snapshots_plumbing(&self, root_active_session_id: &str) -> Vec<Value> {
+        let states = self.state_refs();
+        let root = states.iter().find(|state| {
+            state
+                .lock()
+                .expect("active session poisoned")
+                .active_session_id
+                == root_active_session_id
+        });
+        let Some(root) = root else {
+            return Vec::new();
+        };
+        let mut active_session_ids: HashMap<String, String> = HashMap::new();
+        for state in &states {
+            let state = state.lock().expect("active session poisoned");
+            let child_id = state
+                .runtime
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.rlm_child_id.clone());
+            if let Some(child_id) = child_id {
+                active_session_ids.insert(child_id, state.active_session_id.clone());
+            }
+        }
+        let root = Arc::clone(root);
+        Self::session_of(&root)
+            .get_rlm_child_snapshots()
+            .into_iter()
+            .map(|mut snapshot| {
+                let child_id = snapshot
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let active_session_id = child_id
+                    .as_ref()
+                    .and_then(|child_id| active_session_ids.get(child_id))
+                    .cloned();
+                if let Some(object) = snapshot.as_object_mut() {
+                    match active_session_id {
+                        Some(active_session_id) => {
+                            object.insert(
+                                "activeSessionId".to_string(),
+                                Value::String(active_session_id),
+                            );
+                        }
+                        None => {
+                            object.remove("activeSessionId");
+                        }
+                    }
+                }
+                snapshot
+            })
+            .collect()
+    }
+}
+
+impl AgentDaemon {
+    /// `recordRlmSubagentState(parentState, input)`.
+    ///
+    /// Spawn admission is the moment the daemon knows the edge firsthand, so the
+    /// ledger append is load-bearing: the promise is stashed per childId for the
+    /// admission path to await (admission fails when the spawn record cannot be
+    /// made durable). Display metadata goes to the child's per-child display file
+    /// at both moments.
+    fn record_rlm_subagent_state(
+        &self,
+        parent_state: &Arc<StdMutex<ActiveSessionState>>,
+        input: RlmSubagentStateInput,
+    ) -> bool {
+        let parent_session_file = Self::session_of(parent_state).session_file();
+        let parent_active_session_id = parent_state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        if input.status == "running" {
+            if let Some(parent_file) = &parent_session_file {
+                let child_id_for_task = input.child_id.clone();
+                let child_file = input.session_file.clone();
+                let depth_for_task = input.rlm_depth;
+                let name_for_task = input.session_name.clone();
+                let parent_file = parent_file.clone();
+                let ledger = Arc::clone(&self.rlm_spawn_ledger());
+                let key = format!("{parent_active_session_id}#{}", input.child_id);
+                // Mark handled so an early rejection cannot surface as an
+                // unhandled-rejection crash before the admission path awaits it.
+                let task = tokio::spawn(async move {
+                    ledger
+                        .append_spawn(RlmSpawnInput {
+                            child_id: child_id_for_task,
+                            parent: parent_file,
+                            child: child_file,
+                            depth: depth_for_task,
+                            name: name_for_task,
+                        })
+                        .await
+                });
+                // Child ids are only unique per parent; the parent scopes the key.
+                self.pending_rlm_spawn_appends
+                    .lock()
+                    .expect("pending rlm spawn appends poisoned")
+                    .insert(key, task);
+            }
+        }
+        let entry = RlmSubagentDisplayEntry {
+            type_: "rlm_subagent".to_string(),
+            child_id: input.child_id.clone(),
+            session_name: input.session_name.clone(),
+            session_dir: input.session_dir.clone(),
+            session_file: input.session_file.clone(),
+            rlm_max_depth: Some(input.rlm_max_depth),
+            rlm_parent_node_id: input.rlm_parent_node_id.clone(),
+            prompt: input.prompt.clone(),
+            spawn_code: input.spawn_code.clone(),
+            model: input.model.clone(),
+            status: input.status.clone(),
+            created_at: input.created_at.unwrap_or_else(now_millis),
+            updated_at: now_iso(),
+        };
+        match write_rlm_subagent_display_entry(&entry) {
+            Ok(written) => {
+                if !written {
+                    self.log(&format!(
+                        "skipped RLM subagent display entry for {}: deleted tombstone exists",
+                        input.child_id
+                    ));
+                }
+                written
+            }
+            Err(error) => {
+                self.log(&format!(
+                    "failed to persist RLM subagent display entry: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    /// Best-effort artifact-dir removal: cache cleanup must never fail a deletion.
+    async fn delete_rlm_subagent_artifacts(&self, child_id: &str, child_session_file: &str) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            delete_session_artifacts(child_session_file);
+        }));
+        if result.is_err() {
+            self.log(&format!(
+                "failed to remove artifact dir for deleted RLM subagent {child_id}"
+            ));
+        }
+    }
+
+    /// `recordRlmSubagentDeletion(parentState, childId, reason = "user")`.
+    async fn record_rlm_subagent_deletion(
+        self: &Arc<Self>,
+        parent_state: &Arc<StdMutex<ActiveSessionState>>,
+        child_id: &str,
+        reason: RlmLedgerDeleteReason,
+    ) -> Result<(), String> {
+        let parent_session_file = Self::session_of(parent_state).session_file();
+        let Some(parent_file) = parent_session_file else {
+            return Ok(());
+        };
+        let parent_session_id = Self::session_of(parent_state).session_id();
+        let parent_path = canonical_session_path(&parent_file);
+        let edges = self
+            .rlm_spawn_ledger()
+            .edges(true)
+            .await
+            .into_iter()
+            .filter(|candidate| {
+                candidate.child_id == child_id
+                    && canonical_session_path(&candidate.child) == parent_path
+            })
+            .collect::<Vec<_>>();
+        let live_edge = edges.iter().find(|candidate| !candidate.deleted).cloned();
+        let entry = if let Some(edge) = live_edge {
+            {
+                let mut cache: HashMap<String, Vec<LegacyRlmSubagentRegistryEntry>> =
+                    HashMap::new();
+                let mut noop = |_path: &str| {};
+                self.passive_rlm_subagent_entry_for_edge(
+                    &edge,
+                    &parent_session_id,
+                    &parent_file,
+                    &mut cache,
+                    &mut noop,
+                )
+                .await
+            }
+        } else if !edges.is_empty() {
+            // Only tombstoned edges: the tombstones are already durable, nothing to
+            // re-append. A prior deletion may have crashed before its artifact sweep,
+            // so restore the display tombstone before sweeping artifacts.
+            for tombstoned in &edges {
+                let display_dir = dirname(&tombstoned.child);
+                let current_display = read_rlm_subagent_display_entry(&display_dir, None)
+                    .await
+                    .unwrap_or(None);
+                if current_display
+                    .as_ref()
+                    .map(|display| display.status != "deleted")
+                    .unwrap_or(true)
+                {
+                    let entry = RlmSubagentDisplayEntry {
+                        type_: "rlm_subagent".to_string(),
+                        child_id: child_id.to_string(),
+                        session_name: current_display
+                            .as_ref()
+                            .map(|display| display.session_name.clone())
+                            .unwrap_or_else(|| tombstoned.name.clone()),
+                        session_dir: display_dir.clone(),
+                        session_file: current_display
+                            .as_ref()
+                            .map(|display| display.session_file.clone())
+                            .unwrap_or_else(|| tombstoned.child.clone()),
+                        rlm_max_depth: current_display
+                            .as_ref()
+                            .and_then(|display| display.rlm_max_depth),
+                        rlm_parent_node_id: current_display
+                            .as_ref()
+                            .and_then(|display| display.rlm_parent_node_id.clone()),
+                        prompt: current_display
+                            .as_ref()
+                            .and_then(|display| display.prompt.clone()),
+                        spawn_code: current_display
+                            .as_ref()
+                            .and_then(|display| display.spawn_code.clone()),
+                        model: current_display
+                            .as_ref()
+                            .and_then(|display| display.model.clone()),
+                        status: "deleted".to_string(),
+                        created_at: current_display
+                            .as_ref()
+                            .map(|display| display.created_at)
+                            .unwrap_or(0.0),
+                        updated_at: now_iso(),
+                    };
+                    // Best-effort: the ledger tombstone is the authority; the display
+                    // file is display-grade and the sweep below removes artifacts.
+                    if write_rlm_subagent_display_entry(&entry).is_err() {
+                        self.log(&format!(
+                            "failed to reconcile display entry for tombstoned RLM subagent {child_id}"
+                        ));
+                    }
+                }
+                self.delete_rlm_subagent_artifacts(child_id, &tombstoned.child)
+                    .await;
+            }
+            return Ok(());
+        } else {
+            // No edge at all. A pre-ledger child the seed missed may still exist in
+            // the legacy registry; an unreadable registry means the durable deletion
+            // boundary cannot be established, so the deletion fails.
+            let legacy = self
+                .read_legacy_rlm_subagent_registry(
+                    &self.legacy_rlm_subagent_registry_path(&parent_file, &parent_session_id),
+                    None,
+                )
+                .await?
+                .into_iter()
+                .find(|candidate| candidate.child_id == child_id);
+            let Some(legacy) = legacy else {
+                return Ok(());
+            };
+            if legacy.status == "deleted" {
+                // The child never existed under this parent, or its tombstone is
+                // already durable.
+                return Ok(());
+            }
+            legacy.to_passive_entry(&parent_session_id, &parent_file)
+        };
+        // Display tombstone first ("deleted deliberately, transcript retained"): a
+        // crash in between leaves a live ledger edge over a deleted display entry,
+        // healed by retrying the deletion; the reverse order could tombstone the
+        // ledger while the display file still claims the child exists.
+        let tombstone = RlmSubagentDisplayEntry {
+            type_: "rlm_subagent".to_string(),
+            child_id: entry.child_id.clone(),
+            session_name: entry.session_name.clone(),
+            session_dir: entry.session_dir.clone(),
+            session_file: entry.session_file.clone(),
+            rlm_max_depth: entry.rlm_max_depth,
+            rlm_parent_node_id: entry.rlm_parent_node_id.clone(),
+            prompt: entry.prompt.clone(),
+            spawn_code: entry.spawn_code.clone(),
+            model: entry.model.clone(),
+            status: "deleted".to_string(),
+            created_at: entry.created_at,
+            updated_at: now_iso(),
+        };
+        write_rlm_subagent_display_entry(&tombstone).map_err(|error| {
+            format!("Failed to persist deletion for RLM subagent {child_id}: {error}")
+        })?;
+        // The ledger delete record is the topology tombstone; unlike the dual-write
+        // era it has no other writer to fall back on, so a failed append is a failed
+        // deletion.
+        self.rlm_spawn_ledger()
+            .append_delete(child_id, &entry.session_file, reason)
+            .await?;
+        if self.is_worker() {
+            let agent_id =
+                self.roster_agent_id_for_rlm_child(child_id, entry.parent_session_file.as_deref());
+            self.roster_reporter
+                .removed_agent_ids
+                .lock()
+                .expect("roster poisoned")
+                .insert(agent_id, basename(&entry.session_file, ".jsonl"));
+            self.schedule_roster_flush();
+        }
+        // Deletion boundary: transcript + display tombstone are the durable record
+        // and stay; the nested artifact dir is a runtime cache and goes.
+        self.delete_rlm_subagent_artifacts(child_id, &entry.session_file)
+            .await;
+        Ok(())
+    }
+
+    /// `appendUpdateRestartMarker(state, restartSession)`.
+    fn append_update_restart_marker(
+        &self,
+        state: &Arc<StdMutex<ActiveSessionState>>,
+        restart_session: &DaemonUpdateRestartSession,
+    ) {
+        if restart_session.should_resume != Some(true) {
+            return;
+        }
+        let session = Self::session_of(state);
+        // `sessionManager.appendCustomMessageEntry(customType, content, display, details)`.
+        let payload = serde_json::json!({
+            "customType": "prime-agent.update_restart",
+            "content": UPDATE_RESTART_MARKER,
+            "display": false,
+            "details": {
+                "activeSessionId": restart_session.active_session_id,
+                "wasStreaming": restart_session.was_streaming,
+                "wasCompacting": restart_session.was_compacting,
+                "wasBashRunning": restart_session.was_bash_running,
+                "hadRunningRlmChildren": restart_session.had_running_rlm_children,
+                "wasRetrying": restart_session.was_retrying,
+                "hadAcceptedPromptInFlight": restart_session.had_accepted_prompt_in_flight,
+            },
+        });
+        let _ = session.send_custom_message(&payload);
+    }
+
+    /// `getUpdateRestartSessionDepth(state)`.
+    fn get_update_restart_session_depth(&self, state: &Arc<StdMutex<ActiveSessionState>>) -> i64 {
+        let active_session_id = state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        let mut metadata = state
+            .lock()
+            .expect("active session poisoned")
+            .runtime
+            .metadata
+            .clone();
+        let mut depth = 0i64;
+        let mut seen: HashSet<String> = HashSet::new();
+        seen.insert(active_session_id);
+        while let Some(parent_active_session_id) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.parent_active_session_id.clone())
+        {
+            if seen.contains(&parent_active_session_id) {
+                break;
+            }
+            let Some(parent) = self.state_refs().into_iter().find(|candidate| {
+                candidate
+                    .lock()
+                    .expect("active session poisoned")
+                    .active_session_id
+                    == parent_active_session_id
+            }) else {
+                break;
+            };
+            seen.insert(parent_active_session_id);
+            depth += 1;
+            metadata = parent
+                .lock()
+                .expect("active session poisoned")
+                .runtime
+                .metadata
+                .clone();
+        }
+        depth
+    }
+
+    /// `writeWorkerSnapshotBuffer(client, buffer, message, purpose, signal?, drainTimeoutMs?)`.
+    ///
+    /// `this.writeSerialized` is synchronous here, so the drain wait is the
+    /// remaining failure mode: the write either lands or the buffer reports it.
+    async fn write_worker_snapshot_buffer(
+        &self,
+        client: &Arc<DaemonClientHandle>,
+        buffer: Vec<u8>,
+        message: &DaemonOutbound,
+        purpose: &str,
+        aborted: bool,
+        drain_timeout_ms: Option<u64>,
+    ) -> bool {
+        if aborted || client.is_destroyed() {
+            return false;
+        }
+        if self.write_serialized(client, buffer, message, "jsonl", purpose) {
+            return true;
+        }
+        let _ = drain_timeout_ms;
+        false
+    }
+
+    /// `createAgentObserveSummary(state, currentState)`.
+    fn create_agent_observe_summary(
+        &self,
+        state: &Arc<StdMutex<ActiveSessionState>>,
+        current_state: &Arc<StdMutex<ActiveSessionState>>,
+    ) -> AgentObserveAgentSummary {
+        let summary = Self::summary_for_state(state);
+        let session = Self::session_of(state);
+        let session_file = session.session_file();
+        let status = if session.is_streaming() {
+            "model".to_string()
+        } else if session.is_compacting() {
+            "compacting".to_string()
+        } else if session.is_session_active() || session.has_running_rlm_children() {
+            "busy".to_string()
+        } else if !state
+            .lock()
+            .expect("active session poisoned")
+            .clients
+            .is_empty()
+        {
+            "attached_idle".to_string()
+        } else {
+            "idle".to_string()
+        };
+        let current_active_session_id = current_state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        let session_name = session.session_name();
+        AgentObserveAgentSummary {
+            active_session_id: summary.active_session_id.clone().unwrap_or_default(),
+            session_id: summary.session_id.clone(),
+            name: session_name.clone(),
+            session_name,
+            runtime_kind: summary.runtime_kind.clone(),
+            cwd: summary.cwd.clone(),
+            status,
+            is_current: state
+                .lock()
+                .expect("active session poisoned")
+                .active_session_id
+                == current_active_session_id,
+            is_streaming: summary.is_streaming,
+            is_compacting: summary.is_compacting,
+            attached_clients: summary.attached_clients as f64,
+            message_count: summary.message_count as f64,
+            transcript_entry_count: session_file.as_ref().map(|_| summary.message_count as f64),
+            last_activity_at: Some(summary.last_activity_at.as_ref().and_then(|value| {
+                chrono::DateTime::parse_from_rfc3339(value)
+                    .ok()
+                    .map(|parsed| parsed.timestamp_millis() as f64)
+            })),
+            queued_count: summary
+                .session_actions
+                .as_ref()
+                .and_then(|actions| actions.get("queuedCount"))
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0),
+            is_session_active: summary.is_session_active,
+            parent_active_session_id: summary.parent_active_session_id.clone(),
+            parent_session_id: summary.parent_session_id.clone(),
+            rlm_child_id: summary.rlm_child_id.clone(),
+            rlm_parent_node_id: summary.rlm_parent_node_id.clone(),
+            ..AgentObserveAgentSummary::default()
+        }
     }
 }

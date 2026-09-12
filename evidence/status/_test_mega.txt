@@ -1,0 +1,21 @@
+crates\pi-ai\src\mcp\oauth.rs:516:17: warning: unused variable: `state`: help: if this is intentional, prefix it with an underscore: `_state`
+crates\pi-ai\src\mcp\oauth.rs:885:25: warning: unused variable: `state`: help: if this is intentional, prefix it with an underscore: `_state`
+crates\pi-ai\src\providers\amazon_bedrock.rs:1944:6: warning: variable does not need to be mutable
+crates\pi-ai\src\providers\amazon_bedrock.rs:1900:1: warning: type `BlockMeta` is more private than the item `handle_content_block_start`: function `handle_content_block_start` is reachable at visibility `pub`
+crates\pi-ai\src\providers\amazon_bedrock.rs:1936:1: warning: type `BlockMeta` is more private than the item `handle_content_block_delta`: function `handle_content_block_delta` is reachable at visibility `pub`
+crates\pi-ai\src\providers\amazon_bedrock.rs:2068:1: warning: type `BlockMeta` is more private than the item `handle_content_block_stop`: function `handle_content_block_stop` is reachable at visibility `pub`
+crates\pi-ai\src\providers\openai_completions.rs:527:1: warning: type `ResolvedCompat` is more private than the item `openai_completions::convert_messages`: function `openai_completions::convert_messages` is reachable at visibility `pub(crate)`
+crates\pi-ai\src\providers\anthropic.rs:482:5: warning: method `message` is never used
+crates\pi-ai\src\providers\anthropic.rs:2106:5: warning: method `get` is never used
+crates\pi-ai\src\providers\register_builtins.rs:254:4: warning: function `create_lazy_load_error_message` is never used
+warning: `pi-ai` (lib) generated 10 warnings (run `cargo fix --lib -p pi-ai` to apply 3 suggestions)
+crates\pi-tui\src\components\editor.rs:452:5: warning: field `theme` is never read
+crates\pi-tui\src\components\editor.rs:791:8: warning: method `render_autocomplete_overlay` is never used
+crates\pi-tui\src\components\markdown.rs:26:7: warning: constant `STRICT_STRIKETHROUGH_REGEX` is never used
+crates\pi-tui\src\components\markdown.rs:369:26: warning: field `text` is never read
+warning: `pi-tui` (lib) generated 4 warnings
+   Compiling pi-coding-agent v0.9.3 (C:\Users\openclawuser\optimus-rust-port\crates\pi-coding-agent)
+crates\pi-coding-agent\src\core\agent_session.rs:8022:7: error: this file contains an unclosed delimiter
+error: could not compile `pi-coding-agent` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `pi-coding-agent` (lib test) due to 1 previous error

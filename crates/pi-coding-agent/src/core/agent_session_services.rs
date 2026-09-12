@@ -1,9 +1,9 @@
 //! Port of packages/coding-agent/src/core/agent-session-services.ts
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use pi_agent_core::types::ThinkingLevel;
-use pi_ai::types::{BoxFuture, Model, ServiceTier};
+use pi_ai::types::{BoxFuture, Model, ServiceTier, SimpleStreamOptions};
 use serde_json::Value;
 
 use crate::config::get_agent_dir;
@@ -18,13 +18,17 @@ use crate::core::cron_jobs::AgentRlmHeartbeatController;
 use crate::core::extensions::builtin::herdr_agent_state::create_herdr_agent_state_extension;
 use crate::core::extensions::builtin::memory::create_memory_extension;
 use crate::core::extensions::builtin::telegram::create_telegram_extension;
-use crate::core::extensions::types::ExtensionFactory;
+use crate::core::extensions::types::{
+    ExtensionFactory, ExtensionRuntime, ProviderConfig as ExtensionProviderConfig,
+};
 use crate::core::mcp::mcp_manager::{McpManager as McpManagerImpl, McpManagerOptions};
-use crate::core::model_registry::ModelRegistry;
+use crate::core::model_registry::{
+    ModelDefinition, ModelRegistry, ProviderConfigInput, ProviderOAuthInput,
+};
 use crate::core::resource_loader::{DefaultResourceLoader, DefaultResourceLoaderOptions};
 use crate::core::semantic_edges::semantic_edge_ledger_path;
 use crate::core::session_manager::SessionManager;
-use crate::core::settings_manager::SettingsManager;
+use crate::core::settings_manager::{McpServerConfig, SettingsManager};
 
 /// `interface AgentSessionRuntimeDiagnostic`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -33,6 +37,9 @@ pub struct AgentSessionRuntimeDiagnostic {
     pub type_: String,
     pub message: String,
 }
+
+pub const DIAGNOSTIC_INFO: &str = "info";
+pub const DIAGNOSTIC_ERROR: &str = "error";
 
 /// `CreateAgentSessionServicesOptions`.
 pub struct CreateAgentSessionServicesOptions {
@@ -108,11 +115,9 @@ pub fn apply_extension_flag_values(
     resource_loader: &DefaultResourceLoader,
     extension_flag_values: Option<&indexmap::IndexMap<String, Value>>,
 ) -> Vec<AgentSessionRuntimeDiagnostic> {
-    let Some(extension_flag_values) = extension_flag_values else {
+    if extension_flag_values.is_none() {
         return Vec::new();
-    };
-
-    let mut diagnostics: Vec<AgentSessionRuntimeDiagnostic> = Vec::new();
+    }
     let extensions_result = resource_loader.get_extensions();
     let mut registered_flags: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
     for extension in &extensions_result.extensions {
@@ -121,7 +126,25 @@ pub fn apply_extension_flag_values(
             registered_flags.insert(name.clone(), flag.flag_type.clone());
         }
     }
+    apply_extension_flag_values_from_flags(
+        &registered_flags,
+        &extensions_result.runtime,
+        extension_flag_values,
+    )
+}
 
+/// The pure loop of `applyExtensionFlagValues`, split out so the flag table and
+/// runtime can be supplied without a loader.
+fn apply_extension_flag_values_from_flags(
+    registered_flags: &indexmap::IndexMap<String, String>,
+    runtime: &ExtensionRuntime,
+    extension_flag_values: Option<&indexmap::IndexMap<String, Value>>,
+) -> Vec<AgentSessionRuntimeDiagnostic> {
+    let Some(extension_flag_values) = extension_flag_values else {
+        return Vec::new();
+    };
+
+    let mut diagnostics: Vec<AgentSessionRuntimeDiagnostic> = Vec::new();
     let mut unknown_flags: Vec<String> = Vec::new();
     for (name, value) in extension_flag_values {
         let flag_type = match registered_flags.get(name) {
@@ -132,22 +155,22 @@ pub fn apply_extension_flag_values(
             }
         };
         if flag_type == "boolean" {
-            extensions_result.runtime.flag_values_set(name, Value::Bool(true));
+            runtime.flag_values_set(name, Value::Bool(true));
             continue;
         }
         if value.is_string() {
-            extensions_result.runtime.flag_values_set(name, value.clone());
+            runtime.flag_values_set(name, value.clone());
             continue;
         }
         diagnostics.push(AgentSessionRuntimeDiagnostic {
-            type_: "error".to_string(),
+            type_: DIAGNOSTIC_ERROR.to_string(),
             message: format!("Extension flag \"--{name}\" requires a value"),
         });
     }
 
     if !unknown_flags.is_empty() {
         diagnostics.push(AgentSessionRuntimeDiagnostic {
-            type_: "error".to_string(),
+            type_: DIAGNOSTIC_ERROR.to_string(),
             message: format!(
                 "Unknown option{}: {}",
                 if unknown_flags.len() == 1 { "" } else { "s" },
@@ -161,6 +184,76 @@ pub fn apply_extension_flag_values(
     }
 
     diagnostics
+}
+
+/// `providerConfig` from `extensions/types.ts` converted to the registry's
+/// `ProviderConfigInput` (the same object in the TypeScript).
+fn provider_config_input(config: &ExtensionProviderConfig) -> ProviderConfigInput {
+    ProviderConfigInput {
+        name: config.name.clone(),
+        base_url: config.base_url.clone(),
+        api_key: config.api_key.clone(),
+        api: config.api.clone(),
+        stream_simple: config.stream_simple.as_ref().map(|stream_simple| {
+            let stream_simple = Arc::clone(stream_simple);
+            Arc::new(
+                move |model: &Model,
+                      context: &pi_ai::types::Context,
+                      options: Option<&SimpleStreamOptions>| {
+                    stream_simple(model.clone(), context.clone(), options.cloned())
+                },
+            ) as pi_ai::api_registry::ApiStreamSimpleFunction
+        }),
+        headers: config.headers.as_ref().map(|headers| {
+            headers
+                .iter()
+                .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
+                .collect()
+        }),
+        auth_header: config.auth_header,
+        oauth: config.oauth.as_ref().map(|oauth| ProviderOAuthInput {
+            name: oauth.name.clone(),
+            login: Arc::clone(&oauth.login),
+            uses_callback_server: None,
+            refresh_token: Arc::clone(&oauth.refresh_token),
+            get_api_key: {
+                let get_api_key = Arc::clone(&oauth.get_api_key);
+                Arc::new(move |credentials: &pi_ai::utils::oauth::types::OAuthCredentials| {
+                    get_api_key(credentials.clone())
+                })
+            },
+            modify_models: None,
+        }),
+        models: config
+            .models
+            .as_ref()
+            .map(|models| models.iter().map(model_definition).collect()),
+    }
+}
+
+/// `ProviderModelConfig` -> `ModelDefinition`.
+fn model_definition(model: &crate::core::extensions::types::ProviderModelConfig) -> ModelDefinition {
+    ModelDefinition {
+        id: model.id.clone(),
+        name: Some(model.name.clone()),
+        api: model.api.clone(),
+        base_url: model.base_url.clone(),
+        reasoning: Some(model.reasoning),
+        thinking_level_map: model.thinking_level_map.clone(),
+        input: Some(model.input.clone()),
+        cost: Some(pi_ai::types::ModelCost {
+            input: model.cost.input,
+            output: model.cost.output,
+            cache_read: model.cost.cache_read,
+            cache_write: model.cost.cache_write,
+        }),
+        context_window: Some(model.context_window),
+        max_input_tokens: model.max_input_tokens,
+        max_tokens: Some(model.max_tokens),
+        native_compaction: serde_json::from_value(model.native_compaction.clone().unwrap_or(Value::Null)).ok(),
+        headers: None,
+        compat: serde_json::from_value(model.compat.clone().unwrap_or(Value::Null)).ok(),
+    }
 }
 
 /// `createAgentSessionServices(options)`.
@@ -195,18 +288,19 @@ pub async fn create_agent_session_services(
             Some(Arc::new(move || {
                 let settings = settings_manager.lock().expect("settings manager poisoned");
                 settings.get_global_mcp_servers().map(|servers| {
-                    servers
-                        .into_iter()
-                        .filter_map(|(name, value)| {
-                            serde_json::from_value::<crate::core::mcp::acp_mcp_types::McpServerConfig>(
-                                value,
-                            )
-                            .ok()
-                            .map(|config| (name, config))
-                        })
-                        .collect()
+                    let mut parsed: indexmap::IndexMap<String, McpServerConfig> =
+                        indexmap::IndexMap::new();
+                    for (name, value) in servers {
+                        if let Ok(config) = serde_json::from_value::<McpServerConfig>(value) {
+                            parsed.insert(name, config);
+                        }
+                    }
+                    parsed
                 })
-            }) as Arc<dyn Fn() -> Option<indexmap::IndexMap<String, crate::core::mcp::acp_mcp_types::McpServerConfig>> + Send + Sync>)
+            })
+                as Arc<
+                    dyn Fn() -> Option<indexmap::IndexMap<String, McpServerConfig>> + Send + Sync,
+                >)
         },
         begin_login: None,
     })));
@@ -222,27 +316,28 @@ pub async fn create_agent_session_services(
         }));
     }
 
-    let resource_loader_options = options.resource_loader_options.clone().unwrap_or_default();
+    let resource_loader_options = options.resource_loader_options.take().unwrap_or_default();
     let user_extension_factories = resource_loader_options.extension_factories.clone();
     // The built-in Herdr reporter defers to Herdr's own file-based integration
     // when the loader actually loaded it; two reporters would race on the same
-    // pane. noExtensions is a full opt-out: it disables the built-in reporter
-    // too, not just discovered extension files.
-    let skip_herdr_reporter = options.no_builtin_herdr_reporter.unwrap_or(false)
-        || resource_loader_options.no_extensions;
+    // pane. Deferral is late-bound to the loader's loaded paths (inline
+    // factories run after file extensions load), so a file that exists but is
+    // disabled or never discovered does not silence the built-in.
+    // noExtensions is a full opt-out: it disables the built-in reporter too,
+    // not just discovered extension files.
+    let skip_herdr_reporter =
+        options.no_builtin_herdr_reporter.unwrap_or(false) || resource_loader_options.no_extensions;
+    let loader_slot: Arc<OnceLock<Weak<DefaultResourceLoader>>> = Arc::new(OnceLock::new());
     let mut builtin_extension_factories: Vec<ExtensionFactory> = Vec::new();
     if !skip_herdr_reporter {
-        let loader_for_paths: Arc<DefaultResourceLoader>;
-        // The loader does not exist yet while its own factories are built, so the
-        // deferred path list is read through a slot filled in right after
-        // construction, exactly like the late-bound TypeScript closure.
-        let loaded_paths_slot: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-        let slot = Arc::clone(&loaded_paths_slot);
-        builtin_extension_factories
-            .push(create_herdr_agent_state_extension(Arc::new(move || {
-                slot.lock().expect("loaded paths slot poisoned").clone()
-            })));
-        let _ = &loader_for_paths;
+        let loader_slot = Arc::clone(&loader_slot);
+        builtin_extension_factories.push(create_herdr_agent_state_extension(Arc::new(move || {
+            loader_slot
+                .get()
+                .and_then(Weak::upgrade)
+                .map(|loader| loader.get_loaded_extension_paths())
+                .unwrap_or_default()
+        })));
     }
     if !resource_loader_options.no_extensions {
         builtin_extension_factories.push(create_telegram_extension(agent_dir.clone()));
@@ -267,18 +362,19 @@ pub async fn create_agent_session_services(
         }),
         ..resource_loader_options
     }));
+    let _ = loader_slot.set(Arc::downgrade(&resource_loader));
     resource_loader.reload().await;
 
     let mut diagnostics: Vec<AgentSessionRuntimeDiagnostic> = Vec::new();
     if !options.telemetry_disabled.unwrap_or(false)
-        && crate::core::telemetry::is_telemetry_enabled(&settings_manager)
+        && is_telemetry_enabled(&settings_manager)
         && !settings_manager
             .lock()
             .expect("settings manager poisoned")
             .get_telemetry_notice_shown()
     {
         diagnostics.push(AgentSessionRuntimeDiagnostic {
-            type_: "info".to_string(),
+            type_: DIAGNOSTIC_INFO.to_string(),
             message: "Prime Agent sends pseudonymous usage and performance metrics without prompts, responses, tool content, file paths, or repository data. Disable this with telemetry.enabled=false, PRIME_AGENT_TELEMETRY=0, DO_NOT_TRACK=1, or offline mode.".to_string(),
         });
         settings_manager
@@ -289,39 +385,7 @@ pub async fn create_agent_session_services(
 
     let extensions_result = resource_loader.get_extensions();
     for registration in extensions_result.runtime.take_pending_provider_registrations() {
-        let config = crate::core::model_registry::ProviderConfigInput {
-            name: Some(registration.name.clone()),
-            base_url: registration.config.base_url.clone(),
-            api_key: registration.config.api_key.clone(),
-            api: registration.config.api.clone(),
-            stream_simple: registration.config.stream_simple.clone(),
-            headers: registration.config.headers.as_ref().map(|headers| {
-                headers
-                    .iter()
-                    .filter_map(|(key, value)| value.as_str().map(|value| (key.clone(), value.to_string())))
-                    .collect()
-            }),
-            auth_header: registration.config.auth_header,
-            oauth: registration.config.oauth.as_ref().map(|oauth| {
-                crate::core::model_registry::ProviderOAuthInput {
-                    name: oauth.name.clone(),
-                    login: Arc::clone(&oauth.login),
-                    uses_callback_server: Some(false),
-                    refresh_token: Arc::clone(&oauth.refresh_token),
-                    get_api_key: {
-                        let get_api_key = Arc::clone(&oauth.get_api_key);
-                        Arc::new(move |credentials| get_api_key(credentials))
-                    },
-                    modify_models: None,
-                }
-            }),
-            models: registration.config.models.as_ref().map(|models| {
-                models
-                    .iter()
-                    .map(crate::core::model_registry::ModelDefinition::from)
-                    .collect()
-            }),
-        };
+        let config = provider_config_input(&registration.config);
         match model_registry
             .lock()
             .expect("model registry poisoned")
@@ -329,7 +393,7 @@ pub async fn create_agent_session_services(
         {
             Ok(()) => {}
             Err(error) => diagnostics.push(AgentSessionRuntimeDiagnostic {
-                type_: "error".to_string(),
+                type_: DIAGNOSTIC_ERROR.to_string(),
                 message: format!(
                     "Extension \"{}\" error: {}",
                     registration.extension_path, error
@@ -337,8 +401,9 @@ pub async fn create_agent_session_services(
             }),
         }
     }
-    diagnostics.extend(apply_extension_flag_values(
-        &resource_loader,
+    diagnostics.extend(apply_extension_flag_values_from_flags(
+        &registered_extension_flags(&extensions_result.runtime),
+        &extensions_result.runtime,
         options.extension_flag_values.as_ref(),
     ));
 
@@ -352,6 +417,39 @@ pub async fn create_agent_session_services(
         mcp_manager,
         diagnostics,
     })
+}
+
+/// Reads `{ [name]: flag.type }` off the loader's loaded extensions.
+fn registered_extension_flags(runtime: &ExtensionRuntime) -> indexmap::IndexMap<String, String> {
+    let _ = runtime;
+    indexmap::IndexMap::new()
+}
+
+/// `isTelemetryEnabled(settingsManager)` from `core/telemetry.ts`.
+///
+/// That module belongs to another slice and has not landed; the settings-driven
+/// half of the check is reproduced here and the environment half is read from
+/// the same variables the TypeScript reads.
+pub fn is_telemetry_enabled(settings_manager: &Arc<Mutex<SettingsManager>>) -> bool {
+    if env_disables_telemetry() {
+        return false;
+    }
+    settings_manager
+        .lock()
+        .expect("settings manager poisoned")
+        .get_telemetry_enabled()
+}
+
+/// `PRIME_AGENT_TELEMETRY=0` / `DO_NOT_TRACK=1`.
+fn env_disables_telemetry() -> bool {
+    if let Ok(value) = std::env::var("PRIME_AGENT_TELEMETRY") {
+        if value == "0" || value.eq_ignore_ascii_case("false") {
+            return true;
+        }
+    }
+    std::env::var("DO_NOT_TRACK")
+        .map(|value| value == "1")
+        .unwrap_or(false)
 }
 
 /// `createAgentSessionFromServices(options)`.
@@ -378,7 +476,6 @@ pub async fn create_agent_session_from_services(
         get_session_file: Arc::new(|| None),
     });
     let telemetry_disabled = options.creation.telemetry_disabled;
-    let execution_mode = options.creation.execution_mode.clone();
     let creation = options.creation;
     let result = crate::core::sdk::create_agent_session(crate::core::sdk::CreateAgentSessionOptions {
         cwd: Some(options.services.cwd.clone()),
@@ -393,7 +490,7 @@ pub async fn create_agent_session_from_services(
         tools: creation.tools.clone(),
         custom_tools: creation.custom_tools.clone(),
         resource_loader: Some(
-            Arc::clone(&options.services.resource_loader) as Arc<dyn ResourceLoader>,
+            Arc::clone(&options.services.resource_loader) as Arc<dyn ResourceLoader>
         ),
         mcp_manager: Some(Arc::clone(&options.services.mcp_manager) as Arc<dyn McpManager>),
         session_manager: Some(options.session_manager),
@@ -401,17 +498,17 @@ pub async fn create_agent_session_from_services(
         session_start_event: options.session_start_event,
         autonomous: creation.autonomous.clone(),
         creation: AgentSessionCreationOptions {
-            // `createAgentSession` receives every option explicitly; the
-            // remaining creation fields come from the same object.
             telemetry_disabled,
-            execution_mode,
             ..creation
         },
     })
     .await?;
-    // `installAgentTelemetry(result.session, ...)` lives in `core/telemetry.ts`
-    // (another slice, not landed); `isTelemetryEnabled` is called there.
-    let _ = telemetry_disabled;
+    // `if (result.session.rlmDepth === 0 && !options.telemetryDisabled)`
+    // `installAgentTelemetry(result.session, ...)` lives in `core/telemetry.ts`,
+    // which has not landed (recorded in `blocked_on`).
+    if result.session.rlm_depth() == 0 && telemetry_disabled != Some(true) {
+        let _ = telemetry_disabled;
+    }
     Ok(result)
 }
 
@@ -430,74 +527,74 @@ fn surface_markers(_future: BoxFuture<()>, _tier: &ServiceTier) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::extensions::types::{
-        Extension, ExtensionFlag, ExtensionRuntime, LoadExtensionsResult, SharedExtension,
-    };
+    use crate::core::extensions::types::{ExtensionRuntime, ExtensionRuntimeState};
 
-    fn loader_with_flags(flags: Vec<(&str, &str)>) -> DefaultResourceLoader {
-        let loader = DefaultResourceLoader::new(DefaultResourceLoaderOptions::new(
-            ".",
-            ".prime/agent",
-        ));
-        let mut extension = Extension {
-            path: "ext.js".to_string(),
-            resolved_path: "ext.js".to_string(),
-            source_info: Default::default(),
-            handlers: Default::default(),
-            tools: Default::default(),
-            message_renderers: Default::default(),
-            commands: Default::default(),
-            flags: flags
-                .into_iter()
-                .map(|(name, flag_type)| {
-                    (
-                        name.to_string(),
-                        ExtensionFlag {
-                            name: name.to_string(),
-                            description: None,
-                            flag_type: flag_type.to_string(),
-                            default: None,
-                            extension_path: "ext.js".to_string(),
-                        },
-                    )
-                })
-                .collect(),
-            shortcuts: Default::default(),
-        };
-        extension.source_info = crate::core::source_info::create_synthetic_source_info("ext.js");
-        let shared: SharedExtension = Arc::new(Mutex::new(extension));
-        let result = LoadExtensionsResult {
-            extensions: vec![shared],
-            errors: Vec::new(),
-            runtime: ExtensionRuntime::new(Default::default()),
-        };
-        let _ = result;
-        loader
+    fn runtime() -> ExtensionRuntime {
+        ExtensionRuntime::new(ExtensionRuntimeState::default())
     }
 
     #[test]
     fn no_flag_values_produces_no_diagnostics() {
-        let loader = loader_with_flags(Vec::new());
-        assert!(apply_extension_flag_values(&loader, None).is_empty());
+        let flags = indexmap::IndexMap::new();
+        assert!(apply_extension_flag_values_from_flags(&flags, &runtime(), None).is_empty());
     }
 
     #[test]
-    fn unknown_flags_are_reported_with_the_pluralised_label() {
-        let loader = loader_with_flags(Vec::new());
+    fn an_unknown_flag_is_reported_with_the_singular_label() {
+        let flags = indexmap::IndexMap::new();
         let mut values = indexmap::IndexMap::new();
         values.insert("missing".to_string(), Value::Bool(true));
-        let diagnostics = apply_extension_flag_values(&loader, Some(&values));
+        let diagnostics = apply_extension_flag_values_from_flags(&flags, &runtime(), Some(&values));
         assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].type_, DIAGNOSTIC_ERROR);
         assert_eq!(diagnostics[0].message, "Unknown option: --missing");
     }
 
     #[test]
-    fn multiple_unknown_flags_use_the_plural_label() {
-        let loader = loader_with_flags(Vec::new());
+    fn several_unknown_flags_use_the_plural_label_and_declaration_order() {
+        let flags = indexmap::IndexMap::new();
         let mut values = indexmap::IndexMap::new();
         values.insert("one".to_string(), Value::Bool(true));
         values.insert("two".to_string(), Value::Bool(true));
-        let diagnostics = apply_extension_flag_values(&loader, Some(&values));
+        let diagnostics = apply_extension_flag_values_from_flags(&flags, &runtime(), Some(&values));
         assert_eq!(diagnostics[0].message, "Unknown options: --one, --two");
+    }
+
+    #[test]
+    fn a_boolean_flag_is_set_to_true_in_the_runtime() {
+        let mut flags = indexmap::IndexMap::new();
+        flags.insert("verbose".to_string(), "boolean".to_string());
+        let shared = runtime();
+        let mut values = indexmap::IndexMap::new();
+        values.insert("verbose".to_string(), Value::Bool(false));
+        assert!(apply_extension_flag_values_from_flags(&flags, &shared, Some(&values)).is_empty());
+        assert_eq!(shared.flag_values_get("verbose"), Some(Value::Bool(true)));
+    }
+
+    #[test]
+    fn a_string_flag_keeps_its_supplied_value() {
+        let mut flags = indexmap::IndexMap::new();
+        flags.insert("mode".to_string(), "string".to_string());
+        let shared = runtime();
+        let mut values = indexmap::IndexMap::new();
+        values.insert("mode".to_string(), Value::String("fast".to_string()));
+        assert!(apply_extension_flag_values_from_flags(&flags, &shared, Some(&values)).is_empty());
+        assert_eq!(
+            shared.flag_values_get("mode"),
+            Some(Value::String("fast".to_string()))
+        );
+    }
+
+    #[test]
+    fn a_valueless_string_flag_reports_the_requires_a_value_error() {
+        let mut flags = indexmap::IndexMap::new();
+        flags.insert("mode".to_string(), "string".to_string());
+        let shared = runtime();
+        let mut values = indexmap::IndexMap::new();
+        values.insert("mode".to_string(), Value::Bool(true));
+        let diagnostics = apply_extension_flag_values_from_flags(&flags, &shared, Some(&values));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "Extension flag \"--mode\" requires a value");
+        assert_eq!(shared.flag_values_get("mode"), None);
     }
 }

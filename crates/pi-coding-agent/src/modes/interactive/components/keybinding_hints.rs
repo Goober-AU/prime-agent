@@ -63,7 +63,8 @@ fn format_key_part(part: &str, platform: &str) -> String {
 /// Port of `formatKeyText`. `platform` is the TypeScript default parameter
 /// (`= process.platform`); `None` means "use the current platform".
 pub fn format_key_text(key: &str, platform: Option<&str>) -> String {
-    let platform = platform.unwrap_or_else(current_platform);
+    let current = current_platform();
+    let platform: &str = platform.unwrap_or(&current);
     key.split('/')
         .map(|binding| {
             binding
@@ -98,7 +99,8 @@ pub fn key_text(keybinding: &str, options: &KeyTextOptions) -> String {
 
 /// Port of `keyHint`.
 pub fn key_hint(keybinding: &str, description: &str, options: &KeyTextOptions) -> String {
-    theme().fg("dim", &key_text(keybinding, options)) + &theme().fg("muted", &format!(" {description}"))
+    theme().fg("dim", &key_text(keybinding, options))
+        + &theme().fg("muted", &format!(" {description}"))
 }
 
 /// Canonical bracketed expand/collapse hint, e.g. `(Ctrl+O to expand)`, fully dim.
@@ -115,7 +117,8 @@ pub fn expand_collapse_hint(keybinding: &str, expanded: bool) -> String {
 
 /// Port of `rawKeyHint`.
 pub fn raw_key_hint(key: &str, description: &str) -> String {
-    theme().fg("dim", &format_key_text(key, None)) + &theme().fg("muted", &format!(" {description}"))
+    theme().fg("dim", &format_key_text(key, None))
+        + &theme().fg("muted", &format!(" {description}"))
 }
 
 #[cfg(test)]
@@ -137,22 +140,33 @@ mod tests {
 
     #[test]
     fn joins_alternative_bindings_with_slashes() {
-        assert_eq!(format_key_text("ctrl+c/escape", Some("linux")), "Ctrl+C/Esc");
+        assert_eq!(
+            format_key_text("ctrl+c/escape", Some("linux")),
+            "Ctrl+C/Esc"
+        );
     }
 
     #[test]
     fn primary_only_keeps_the_first_binding() {
         let keys = vec!["ctrl+a".to_string(), "ctrl+b".to_string()];
-        assert_eq!(format_keys(&keys, &KeyTextOptions { primary_only: true }), "Ctrl+A");
-        assert_eq!(format_keys(&keys, &KeyTextOptions::default()), "Ctrl+A/Ctrl+B");
+        assert_eq!(
+            format_keys(&keys, &KeyTextOptions { primary_only: true }),
+            "Ctrl+A"
+        );
+        assert_eq!(
+            format_keys(&keys, &KeyTextOptions::default()),
+            "Ctrl+A/Ctrl+B"
+        );
         assert_eq!(format_keys(&[], &KeyTextOptions::default()), "");
     }
 
     #[test]
     fn key_text_reads_the_registered_keybindings() {
         assert!(!key_text("tui.select.cancel", &KeyTextOptions { primary_only: true }).is_empty());
-        assert!(key_text("tui.select.cancel", &KeyTextOptions { primary_only: true })
-            .chars()
-            .any(|c| c.is_ascii_alphabetic()));
+        assert!(
+            key_text("tui.select.cancel", &KeyTextOptions { primary_only: true })
+                .chars()
+                .any(|c| c.is_ascii_alphabetic())
+        );
     }
 }

@@ -1,15 +1,9 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/prime-team-selector.ts
-//!
-//! `MenuPanel`, `MenuList`, `MenuRow`, `MenuSearchInput` and `getMenuListLayout`
-//! belong to the `menu-panel.ts` slice. This module drives the shared panel
-//! through the private local `MenuPanelChild` shape defined in
-//! `heartbeat_manager.rs` and a private local renderer, so it never appends to
-//! another slice's file. See `blocked_on` in the slice status entry.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use pi_tui::components::input::Input;
+use pi_tui::components::spacer::Spacer;
 use pi_tui::components::truncated_text::TruncatedText;
 use pi_tui::fuzzy::fuzzy_filter;
 use pi_tui::keybindings::get_keybindings;
@@ -18,14 +12,18 @@ use pi_tui::tui::{Component, Container, Focusable};
 use crate::core::prime_inference_auth::PrimeTeam;
 
 use super::super::theme::theme::theme;
-use super::heartbeat_manager::{
-    get_menu_list_layout, LocalMenuPanelRenderer, MenuList, MenuListItem, MenuListLayout,
-    MenuListLayoutOptions, MenuPanel, MenuPanelApi, MenuPanelChild, MenuRow,
+use super::menu_panel::{
+    get_menu_list_layout, MenuList, MenuListLayout, MenuListLayoutOptions, MenuPanel,
+    MenuPanelOptions, MenuRow, MenuRowOptions, MenuSearchInput, MenuViewportProvider,
 };
 
 type PrimeTeamOptionType = &'static str;
 const OPTION_PERSONAL: PrimeTeamOptionType = "personal";
 const OPTION_TEAM: PrimeTeamOptionType = "team";
+
+const PREFERRED_VISIBLE_TEAMS: usize = 8;
+const TEAM_LIST_RESERVED_ROWS: usize = 7;
+const TEAM_SCROLL_INDICATOR_ROWS: usize = 1;
 
 /// `type PrimeTeamOption`.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,65 +32,11 @@ pub struct PrimeTeamOption {
     pub team: Option<PrimeTeam>,
 }
 
-/// `MenuViewportProvider` (menu-panel.ts).
-#[derive(Clone, Default)]
-pub struct MenuViewportProvider {
-    pub get_rows: Option<Rc<dyn Fn() -> f64>>,
-}
-
-const PREFERRED_VISIBLE_TEAMS: usize = 8;
-const TEAM_LIST_RESERVED_ROWS: usize = 7;
-const TEAM_SCROLL_INDICATOR_ROWS: usize = 1;
-
-/// Port of `MenuSearchInput` (menu-panel.ts) as used by this component.
-pub struct MenuSearchInput {
-    input: Input,
-    placeholder: String,
-}
-
-impl MenuSearchInput {
-    pub fn new(placeholder: &str) -> Self {
-        Self {
-            input: Input::new(),
-            placeholder: placeholder.to_string(),
-        }
-    }
-
-    pub fn get_value(&self) -> String {
-        self.input.get_value().to_string()
-    }
-
-    pub fn set_value(&mut self, value: &str) {
-        self.input.set_value(value.to_string());
-    }
-
-    pub fn get_cursor(&self) -> usize {
-        self.input.get_cursor()
-    }
-
-    pub fn handle_input(&mut self, data: &str) {
-        Component::handle_input(&mut self.input, data);
-    }
-
-    pub fn on_submit(&mut self, handler: Box<dyn FnMut(&str)>) {
-        self.input.on_submit = Some(handler);
-    }
-
-    pub fn focused(&self) -> bool {
-        Focusable::focused(&self.input)
-    }
-
-    /// The component keeps the placeholder for the unfocused render pass.
-    pub fn placeholder(&self) -> &str {
-        &self.placeholder
-    }
-}
-
 /// Port of `PrimeTeamSelectorComponent`.
 pub struct PrimeTeamSelectorComponent {
     container: Container,
-    search_input: MenuSearchInput,
-    list_container: MenuList,
+    search_input: Rc<RefCell<MenuSearchInput>>,
+    list_container: Rc<RefCell<MenuList>>,
     all_options: Vec<PrimeTeamOption>,
     filtered_options: Vec<PrimeTeamOption>,
     selected_index: usize,
@@ -103,6 +47,15 @@ pub struct PrimeTeamSelectorComponent {
     on_select: Box<dyn FnMut(Option<PrimeTeam>)>,
     on_cancel: Box<dyn FnMut()>,
     viewport: MenuViewportProvider,
+    /// `new MenuList({ compact: () => this.listLayout.compact })`: the list reads
+    /// the component's current layout on every render, so the flag is shared.
+    compact_flag: Rc<Cell<bool>>,
+    /// `this.searchInput.onSubmit = () => {... this.onSelect(...) }`.
+    ///
+    /// The submit handler cannot borrow the component, so it records the request
+    /// and `handle_input` performs the same selection right after the search
+    /// input consumed the key.
+    confirm_request: Rc<Cell<bool>>,
 }
 
 impl PrimeTeamSelectorComponent {
@@ -121,27 +74,46 @@ impl PrimeTeamSelectorComponent {
             type_: OPTION_TEAM,
             team: Some(team),
         }));
+        let filtered_options = all_options.clone();
+
+        let mut panel = MenuPanel::new(MenuPanelOptions {
+            title: "Prime Team".to_string(),
+            subtitle: Some("Choose which account pays for Prime Inference usage.".to_string()),
+        });
+
+        let confirm_request: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let mut search_input = MenuSearchInput::new("Search teams".to_string());
+        {
+            let request = Rc::clone(&confirm_request);
+            search_input.set_on_submit(Some(Box::new(move |_value: &str| request.set(true))));
+        }
+        let search_input = Rc::new(RefCell::new(search_input));
+        panel.add_full_width_child(Rc::clone(&search_input) as Rc<RefCell<dyn Component>>);
+        panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
 
         let list_layout = get_menu_list_layout(MenuListLayoutOptions {
-            get_rows: None,
             preferred_visible_items: PREFERRED_VISIBLE_TEAMS,
-            min_visible_items: None,
-            total_items: None,
             reserved_rows: TEAM_LIST_RESERVED_ROWS,
             comfortable_item_rows: 3,
             compact_item_rows: Some(2),
-            scroll_indicator_rows: Some(TEAM_SCROLL_INDICATOR_ROWS),
-            comfortable_list_padding_rows: None,
-            compact_list_padding_rows: None,
+            ..Default::default()
         });
+        let compact_flag = Rc::new(Cell::new(list_layout.compact));
+        let list_container = Rc::new(RefCell::new(MenuList::new({
+            let compact_flag = Rc::clone(&compact_flag);
+            Some(Box::new(move || compact_flag.get()))
+        })));
+        panel.add_full_width_child(Rc::clone(&list_container) as Rc<RefCell<dyn Component>>);
 
-        let search_input = MenuSearchInput::new("Search teams");
+        let mut container = Container::new();
+        container.add_child(Rc::new(RefCell::new(panel)) as Rc<RefCell<dyn Component>>);
+
         let mut component = Self {
-            container: Container::new(),
+            container,
             search_input,
-            list_container: MenuList::new(list_layout.compact),
-            all_options: all_options.clone(),
-            filtered_options: all_options,
+            list_container,
+            all_options,
+            filtered_options,
             selected_index: 0,
             search_query: String::new(),
             focused: false,
@@ -150,11 +122,9 @@ impl PrimeTeamSelectorComponent {
             on_select,
             on_cancel,
             viewport,
+            compact_flag,
+            confirm_request,
         };
-        component.search_input.on_submit(Box::new(|_value: &str| {
-            // `this.filteredOptions[this.selectedIndex]` is read from the
-            // component; the submitted value is handled in `handle_input`.
-        }));
         component.filter_options("");
         component
     }
@@ -163,24 +133,25 @@ impl PrimeTeamSelectorComponent {
     pub fn filter_options(&mut self, query: &str) {
         let query_changed = query != self.search_query;
         self.search_query = query.to_string();
-        self.filtered_options = if !query.is_empty() {
+        self.filtered_options = if query.is_empty() {
+            self.all_options.clone()
+        } else {
             let all = self.all_options.clone();
             fuzzy_filter(&all, query, &|option: &PrimeTeamOption| {
-                self.get_search_text(option)
+                Self::get_search_text(option)
             })
-        } else {
-            self.all_options.clone()
         };
+        let last_index = self.filtered_options.len().saturating_sub(1);
         self.selected_index = if query_changed {
             0
         } else {
-            self.selected_index
-                .min(self.filtered_options.len().saturating_sub(1))
+            self.selected_index.min(last_index)
         };
         self.update_list();
     }
 
-    fn get_search_text(&self, option: &PrimeTeamOption) -> String {
+    /// Port of `getSearchText(option)`.
+    fn get_search_text(option: &PrimeTeamOption) -> String {
         if option.type_ == OPTION_PERSONAL {
             return "personal account".to_string();
         }
@@ -205,115 +176,68 @@ impl PrimeTeamSelectorComponent {
         {
             self.update_list();
         }
-        let mut panel = self.build_panel();
-        let mut renderer = LocalMenuPanelRenderer;
-        renderer.render_panel(&mut panel, width.max(1.0) as usize)
-    }
-
-    fn build_panel(&self) -> MenuPanel {
-        let mut panel = MenuPanel::new(
-            "Prime Team",
-            Some("Choose which account pays for Prime Inference usage."),
-        );
-        panel.add_child(MenuPanelChild::Text(self.search_input.get_value()));
-        panel.add_child(MenuPanelChild::Spacer(1));
-        panel.add_child(MenuPanelChild::List(self.list_container_rows()));
-        panel
-    }
-
-    /// Snapshot of the list container rows for the panel render. The panel owns
-    /// the rows, so the port rebuilds the same row set from the filtered options.
-    fn list_container_rows(&self) -> MenuList {
-        let mut list = MenuList::new(self.list_layout.compact);
-        let max_visible = self.list_layout.visible_items;
-        let start_index = self
-            .selected_index
-            .saturating_sub(max_visible / 2)
-            .min(self.filtered_options.len().saturating_sub(max_visible));
-        let end_index = (start_index + max_visible).min(self.filtered_options.len());
-        for i in start_index..end_index {
-            let Some(option) = self.filtered_options.get(i) else {
-                continue;
-            };
-            list.add_row(MenuRow::new(
-                &self.get_primary(option),
-                Some(&self.get_secondary(option)),
-                Some(&self.get_meta(option)),
-                i == self.selected_index,
-            ));
-        }
-        if start_index > 0 || end_index < self.filtered_options.len() {
-            list.add_child(Box::new(TruncatedText::new(
-                theme().fg(
-                    "muted",
-                    &format!(
-                        "  ({}/{})",
-                        self.selected_index + 1,
-                        self.filtered_options.len()
-                    ),
-                ),
-                1,
-                0,
-            )));
-        }
-        if self.filtered_options.is_empty() {
-            list.add_child(Box::new(TruncatedText::new(
-                theme().fg("muted", "No matching teams"),
-                1,
-                0,
-            )));
-        }
-        list
+        Component::render(&mut self.container, width)
     }
 
     /// Port of `updateList()`.
     fn update_list(&mut self) {
         self.update_layout();
-        self.list_container = MenuList::new(self.list_layout.compact);
-
         let max_visible = self.list_layout.visible_items;
         let start_index = self
             .selected_index
             .saturating_sub(max_visible / 2)
             .min(self.filtered_options.len().saturating_sub(max_visible));
         let end_index = (start_index + max_visible).min(self.filtered_options.len());
-
-        for i in start_index..end_index {
-            let Some(option) = self.filtered_options.get(i) else {
-                continue;
-            };
-            self.list_container.add_row(MenuRow::new(
-                &self.get_primary(option),
-                Some(&self.get_secondary(option)),
-                Some(&self.get_meta(option)),
-                i == self.selected_index,
-            ));
-        }
-
-        if start_index > 0 || end_index < self.filtered_options.len() {
-            self.list_container.add_child(Box::new(TruncatedText::new(
-                theme().fg(
-                    "muted",
-                    &format!(
-                        "  ({}/{})",
-                        self.selected_index + 1,
-                        self.filtered_options.len()
-                    ),
+        let rows: Vec<MenuRow> = self.filtered_options[start_index..end_index]
+            .iter()
+            .enumerate()
+            .map(|(offset, option)| {
+                MenuRow::new(MenuRowOptions {
+                    primary: self.get_primary(option),
+                    secondary: Some(self.get_secondary(option)),
+                    meta: Some(self.get_meta(option)),
+                    selected: start_index + offset == self.selected_index,
+                })
+            })
+            .collect();
+        let scroll_indicator = if start_index > 0 || end_index < self.filtered_options.len() {
+            Some(theme().fg(
+                "muted",
+                &format!(
+                    "  ({}/{})",
+                    self.selected_index + 1,
+                    self.filtered_options.len()
                 ),
-                1,
-                0,
-            )));
-        }
+            ))
+        } else {
+            None
+        };
+        let empty_state = self.filtered_options.is_empty();
 
-        if self.filtered_options.is_empty() {
-            self.list_container.add_child(Box::new(TruncatedText::new(
-                theme().fg("muted", "No matching teams"),
-                1,
-                0,
-            )));
+        let mut list = self.list_container.borrow_mut();
+        list.clear();
+        for row in rows {
+            list.add_row(Rc::new(RefCell::new(row)));
+        }
+        if let Some(scroll_indicator) = scroll_indicator {
+            list.add_child(
+                Rc::new(RefCell::new(TruncatedText::new(scroll_indicator, 1, 0))),
+                false,
+            );
+        }
+        if empty_state {
+            list.add_child(
+                Rc::new(RefCell::new(TruncatedText::new(
+                    theme().fg("muted", "No matching teams"),
+                    1,
+                    0,
+                ))),
+                false,
+            );
         }
     }
 
+    /// Port of `getPrimary(option)`.
     fn get_primary(&self, option: &PrimeTeamOption) -> String {
         match &option.team {
             Some(team) => team.name.clone(),
@@ -321,6 +245,7 @@ impl PrimeTeamSelectorComponent {
         }
     }
 
+    /// Port of `getSecondary(option)`.
     fn get_secondary(&self, option: &PrimeTeamOption) -> String {
         let Some(team) = &option.team else {
             return "personal account".to_string();
@@ -336,6 +261,7 @@ impl PrimeTeamSelectorComponent {
         }
     }
 
+    /// Port of `getMeta(option)`.
     fn get_meta(&self, option: &PrimeTeamOption) -> String {
         let is_current = match &option.team {
             Some(team) => Some(&team.team_id) == self.current_team_id.as_ref(),
@@ -364,33 +290,45 @@ impl PrimeTeamSelectorComponent {
             self.selected_index = (self.selected_index + 1).min(self.filtered_options.len() - 1);
             self.update_list();
         } else if kb.matches(key_data, "tui.select.confirm") {
-            let selected = self.filtered_options.get(self.selected_index).cloned();
-            if let Some(selected) = selected {
-                (self.on_select)(selected.team);
-            }
+            self.confirm_selection();
         } else if kb.matches(key_data, "tui.select.cancel") {
             (self.on_cancel)();
         } else {
-            self.search_input.handle_input(key_data);
-            let value = self.search_input.get_value();
+            Component::handle_input(&mut *self.search_input.borrow_mut(), key_data);
+            if self.confirm_request.replace(false) {
+                // `this.searchInput.onSubmit` selects the current option.
+                self.confirm_selection();
+            }
+            let value = self.search_input.borrow().get_value();
             self.filter_options(&value);
         }
     }
 
+    /// The shared body of `tui.select.confirm` and `searchInput.onSubmit`.
+    fn confirm_selection(&mut self) {
+        let selected = self.filtered_options.get(self.selected_index).cloned();
+        if let Some(selected) = selected {
+            (self.on_select)(selected.team);
+        }
+    }
+
+    /// Port of `updateLayout()`.
     fn update_layout(&mut self) {
-        let get_rows = self.viewport.get_rows.clone();
-        self.list_layout = get_menu_list_layout(MenuListLayoutOptions {
-            get_rows,
+        self.list_layout = self.compute_layout();
+        self.compact_flag.set(self.list_layout.compact);
+    }
+
+    fn compute_layout(&self) -> MenuListLayout {
+        get_menu_list_layout(MenuListLayoutOptions {
+            get_rows: self.viewport.get_rows.clone(),
             preferred_visible_items: PREFERRED_VISIBLE_TEAMS,
-            min_visible_items: None,
             total_items: Some(self.filtered_options.len()),
             reserved_rows: TEAM_LIST_RESERVED_ROWS,
             comfortable_item_rows: 3,
             compact_item_rows: Some(2),
             scroll_indicator_rows: Some(TEAM_SCROLL_INDICATOR_ROWS),
-            comfortable_list_padding_rows: None,
-            compact_list_padding_rows: None,
-        });
+            ..Default::default()
+        })
     }
 
     pub fn selected_index(&self) -> usize {
@@ -418,7 +356,7 @@ impl Focusable for PrimeTeamSelectorComponent {
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
-        Focusable::set_focused(&mut self.search_input.input, focused);
+        Focusable::set_focused(&mut *self.search_input.borrow_mut(), focused);
     }
 }
 

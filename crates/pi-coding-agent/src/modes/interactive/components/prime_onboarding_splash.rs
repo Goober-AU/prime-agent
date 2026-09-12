@@ -135,7 +135,8 @@ impl PrimeOnboardingSplashComponent {
             // advances the shared frame counter; the TUI reads it while rendering,
             // exactly like the pi-tui `Loader` port does for its animation.
             component.animation_task = Some(tokio::spawn(async move {
-                let mut ticker = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+                let mut ticker =
+                    tokio::time::interval(std::time::Duration::from_millis(interval_ms));
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 ticker.tick().await;
                 loop {
@@ -192,7 +193,10 @@ impl PrimeOnboardingSplashComponent {
 
     /// Port of `formatBrandLine`.
     fn format_brand_line(&self) -> PanelTextLine {
-        vec![styled("Welcome to ", "text"), styled_bold("OPTIMUS", "brand")]
+        vec![
+            styled("Welcome to ", "text"),
+            styled_bold("OPTIMUS", "brand"),
+        ]
     }
 
     /// Port of `renderPanel`.
@@ -218,7 +222,11 @@ impl PrimeOnboardingSplashComponent {
 
     /// Port of `renderLogoBlock`.
     fn render_logo_block(&self, logo: &[String]) -> Vec<PanelTextLine> {
-        let logo_width = logo.iter().map(|line| visible_width(line)).max().unwrap_or(0);
+        let logo_width = logo
+            .iter()
+            .map(|line| visible_width(line))
+            .max()
+            .unwrap_or(0);
         logo.iter()
             .map(|line| {
                 let padded_line = format!(
@@ -237,9 +245,15 @@ impl PrimeOnboardingSplashComponent {
     }
 
     /// Port of `renderBackdrop`.
-    fn render_backdrop(&self, width: usize, rows: usize, quiet_zone: Option<QuietZone>) -> Vec<Vec<SplashCell>> {
-        let mut canvas: Vec<Vec<SplashCell>> =
-            (0..rows).map(|_| vec![SplashCell::blank(); width]).collect();
+    fn render_backdrop(
+        &self,
+        width: usize,
+        rows: usize,
+        quiet_zone: Option<QuietZone>,
+    ) -> Vec<Vec<SplashCell>> {
+        let mut canvas: Vec<Vec<SplashCell>> = (0..rows)
+            .map(|_| vec![SplashCell::blank(); width])
+            .collect();
 
         self.draw_lab_field(&mut canvas, width, rows, quiet_zone);
 
@@ -323,7 +337,11 @@ impl PrimeOnboardingSplashComponent {
         let contour = (x_i - center_x).abs() + (y_i - center_y).abs() * 4 + x_i / 6 - frame;
         if x_i < (width_i * 82) / 100 && mod_js(contour, 24) == 12 {
             set_cell(
-                if (x_i + y_i) % 5 == 0 { "\u{254c}" } else { "\u{00b7}" },
+                if (x_i + y_i) % 5 == 0 {
+                    "\u{254c}"
+                } else {
+                    "\u{00b7}"
+                },
                 "borderMuted",
                 2,
             );
@@ -333,7 +351,11 @@ impl PrimeOnboardingSplashComponent {
         if y_i == horizon_y && x_i % 2 == 0 && mod_js(x_i + frame, 13) < 2 {
             set_cell(
                 "\u{2500}",
-                if x_i > (width_i * 60) / 100 { "accent" } else { "dim" },
+                if x_i > (width_i * 60) / 100 {
+                    "accent"
+                } else {
+                    "dim"
+                },
                 3,
             );
         }
@@ -346,7 +368,11 @@ impl PrimeOnboardingSplashComponent {
                 let segment = mod_js(y_i + scan_index * 2 + frame / 2, 6);
                 if y_i > 0 && y_i < height_i - 1 && segment < 2 {
                     set_cell(
-                        if (scan_index + y_i) % 4 == 0 { "\u{2503}" } else { "\u{254e}" },
+                        if (scan_index + y_i) % 4 == 0 {
+                            "\u{2503}"
+                        } else {
+                            "\u{254e}"
+                        },
                         "mdLink",
                         4,
                     );
@@ -488,7 +514,11 @@ impl PrimeOnboardingSplashComponent {
         rows: usize,
         logo: &[String],
     ) -> Option<QuietZone> {
-        let logo_width = logo.iter().map(|line| visible_width(line)).max().unwrap_or(0);
+        let logo_width = logo
+            .iter()
+            .map(|line| visible_width(line))
+            .max()
+            .unwrap_or(0);
         if logo_width < 1 || rows < 1 {
             return None;
         }
@@ -728,7 +758,10 @@ mod tests {
             },
         ];
         let rendered = splash.render_cells(&cells);
-        assert_eq!(rendered, format!("{}ab{}", "\x1b[39m", "\x1b[0m").replace("ab", "ab"));
+        assert_eq!(
+            rendered,
+            format!("{}ab{}", "\x1b[39m", "\x1b[0m").replace("ab", "ab")
+        );
     }
 
     #[test]

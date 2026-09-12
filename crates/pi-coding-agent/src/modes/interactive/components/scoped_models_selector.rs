@@ -7,11 +7,10 @@ use pi_tui::components::input::Input;
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
 use pi_tui::keys::{key, key_ctrl, matches_key};
-use pi_tui::tui::{Component, Focusable};
+use pi_tui::tui::{Component, Container, Focusable};
 
 use crate::modes::interactive::theme::theme::theme;
 
-use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{key_text, KeyTextOptions};
 
 /// `type EnabledIds = string[] | null`
@@ -158,10 +157,16 @@ pub struct ScopedModelsSelectorComponent {
     search_query: String,
     search_input: Input,
     focused: bool,
-    /// The list/footer are rendered as plain lines in the port; this keeps the
-    /// same visible window the TypeScript computes.
+    /// The list/footer mirror `listContainer` / `footerText` as their rendered
+    /// lines, which keeps the same visible window the TypeScript computes.
     pub visible_range: (usize, usize),
     pub footer_text: String,
+    /// `extends Container`: the children the constructor adds, in order.
+    children: Container,
+    /// `listContainer` - the rows rebuilt by `updateList`.
+    list_container: Container,
+    /// `footerText` - the `Text` child updated by `refresh`.
+    footer_text_component: Rc<RefCell<Text>>,
     callbacks: ModelsCallbacks,
     max_visible: usize,
     is_dirty: bool,
@@ -194,6 +199,47 @@ impl ScopedModelsSelectorComponent {
             is_dirty: false,
         };
         component.filtered_items = component.build_items();
+
+        // `addChild(new DynamicBorder()); addChild(new Spacer(1)); addChild(new Text(...)); ...`
+        let mut children = Container::new();
+        children.add_child(Rc::new(RefCell::new(DynamicBorder::default())) as Rc<RefCell<dyn Component>>);
+        children.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
+        children.add_child(Rc::new(RefCell::new(Text::new(
+            theme().fg("accent", &theme().bold("Model Configuration")),
+            0,
+            0,
+            None,
+        ))) as Rc<RefCell<dyn Component>>);
+        children.add_child(Rc::new(RefCell::new(Text::new(
+            theme().fg(
+                "muted",
+                &format!(
+                    "Session-only. {} to save to settings.",
+                    key_text("app.models.save", &KeyTextOptions::default())
+                ),
+            ),
+            0,
+            0,
+            None,
+        ))) as Rc<RefCell<dyn Component>>);
+        children.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
+        children.add_child(Rc::new(RefCell::new(component.search_input.clone()))
+            as Rc<RefCell<dyn Component>>);
+        children.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
+        let list_container = Container::new();
+        children.add_child(Rc::new(RefCell::new(Placeholder)) as Rc<RefCell<dyn Component>>);
+        children.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
+        let footer_text_component = Rc::new(RefCell::new(Text::new(
+            component.get_footer_text(),
+            0,
+            0,
+            None,
+        )));
+        children.add_child(Rc::clone(&footer_text_component) as Rc<RefCell<dyn Component>>);
+        children.add_child(Rc::new(RefCell::new(DynamicBorder::default())) as Rc<RefCell<dyn Component>>);
+        component.children = children;
+        component.list_container = list_container;
+        component.footer_text_component = footer_text_component;
         component.footer_text = component.get_footer_text();
         component.update_list();
         component

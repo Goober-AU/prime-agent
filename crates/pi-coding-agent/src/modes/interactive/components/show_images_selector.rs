@@ -7,8 +7,6 @@ use pi_tui::tui::Component;
 
 use crate::modes::interactive::theme::theme::{get_select_list_theme, theme};
 
-use super::keybinding_hints::KeyTextOptions;
-
 /// `SHOW_IMAGES_SELECT_LIST_LAYOUT`.
 pub fn show_images_select_list_layout() -> SelectListLayoutOptions {
     SelectListLayoutOptions {
@@ -44,10 +42,13 @@ impl Component for DynamicBorder {
     }
 }
 
-/// The `SelectListTheme` of `theme.ts` carries `Send + Sync` closures; the
-/// `pi-tui` component takes the same closures without those bounds.
-fn to_tui_select_list_theme(theme: crate::modes::interactive::theme::theme::SelectListTheme) -> TuiSelectListTheme {
-    crate::modes::interactive::theme::theme::SelectListTheme {
+/// The `SelectListTheme` of `theme.ts` carries `Send + Sync` closures and
+/// non-optional hint closures; the `pi-tui` component takes the same closures
+/// without those bounds and models both hints as optional.
+pub(crate) fn to_tui_select_list_theme(
+    theme: crate::modes::interactive::theme::theme::SelectListTheme,
+) -> TuiSelectListTheme {
+    TuiSelectListTheme {
         selected_prefix: theme.selected_prefix,
         selected_text: theme.selected_text,
         description: theme.description,
@@ -62,9 +63,6 @@ fn to_tui_select_list_theme(theme: crate::modes::interactive::theme::theme::Sele
 pub struct ShowImagesSelectorComponent {
     children: Vec<Box<dyn Component>>,
     select_list: SelectList,
-    /// The theme conversion above is only possible for the component types the
-    /// module converts; keep the unused import surface honest.
-    _options: KeyTextOptions,
 }
 
 impl ShowImagesSelectorComponent {
@@ -110,11 +108,9 @@ impl ShowImagesSelectorComponent {
         Self {
             children: vec![
                 Box::new(DynamicBorder::new(None)),
-                Box::new(SelectListRef),
                 Box::new(DynamicBorder::new(None)),
             ],
             select_list,
-            _options: KeyTextOptions::default(),
         }
     }
 
@@ -124,23 +120,11 @@ impl ShowImagesSelectorComponent {
     }
 }
 
-/// Stands in for `this.addChild(this.selectList)`: the list is a field so the
-/// accessor can hand it out; this child renders nothing extra.
-struct SelectListRef;
-
-impl Component for SelectListRef {
-    fn render(&mut self, _width: f64) -> Vec<String> {
-        Vec::new()
-    }
-
-    fn invalidate(&mut self) {}
-}
-
 impl Component for ShowImagesSelectorComponent {
     fn render(&mut self, width: f64) -> Vec<String> {
         let mut lines = self.children[0].render(width);
         lines.extend(self.select_list.render(width));
-        lines.extend(self.children[2].render(width));
+        lines.extend(self.children[1].render(width));
         lines
     }
 

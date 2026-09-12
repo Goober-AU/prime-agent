@@ -1,0 +1,49 @@
+{
+ "slice": "ca-extensions-b",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/resource-loader.ts",
+   "rust": "crates/pi-coding-agent/src/core/resource_loader.rs",
+   "status": "ported",
+   "functions_mapped": 30,
+   "notes": "938 TS LOC -> ~2000 Rust lines incl. tests. Ports ResourceExtensionPaths, loadProjectContextFiles, the ResourceLoader interface (trait), DefaultResourceLoaderOptions, DefaultResourceLoader (as DefaultResourceLoader handle + LoaderInner state), reload(), extendResources(), updateSkills/Prompts/ThemesFromPaths, applyExtensionSourceInfo, findSourceInfoForPath, getDefaultSourceInfoForPath, mergePaths, resolveResourcePath, loadThemes/FromDir/FromFile, loadExtensionFactories, dedupePrompts, dedupeThemes, discoverSystemPromptFile, discoverAppendSystemPromptFile, isUnderPath, detectExtensionConflicts. Also implements the core/agent-session ResourceLoader seam (declared in another slice's file). 10 Rust tests ported from test/resource-loader.test.ts behaviours.",
+   "gaps": "CONFIG_DIR_NAME is now in crate::config but resource_loader keeps a private copy (private helper allowed by the brief); Theme is not Clone so themes are Arc-shared and themesOverride takes an owned list; utils::paths has no public resolve_absolute, so the module carries a local Node-compatible resolver (private helper)."
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/herdr-agent-state.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/herdr_agent_state.rs",
+   "status": "ported (verified only)",
+   "functions_mapped": 24,
+   "notes": "858 Rust lines already present before this slice; verified 1:1 against herdr-agent-state.ts (AgentState, hasFileBasedHerdrIntegration, herdrSocketTarget, parseDurationEnv, eventValue, lastAssistantMessage, errorHoldMessage, nowMs, nextReportSeq, randomSuffix, sendRequest, connectSocket (unix + windows named pipe), scheduleTimeout, Reporter class incl. queueState/spawnDrain/publishState/scheduleIdle/holdForRetry, createHerdrAgentStateExtension). No edits were needed; 6 TS behaviours already had Rust tests.",
+   "gaps": "None found. Only warning is an unused `std::pin::Pin` import (line 20), pre-existing."
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/memory.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/memory.rs",
+   "status": "ported",
+   "functions_mapped": 14,
+   "notes": "996 Rust lines incl. tests. Ports createMemoryExtension, sessionKey, service (per-session MemoryService map), evidence (branch -> Evidence with file URI + entry id), extractor (planRefinement with the exact TypeScript instructions), the /memory command (17-action list, argument completions, recall/learning on|off, per-action payload shapes, status + autoRefine merge, bind eviction, memory-control + memory-result messages, appendEntry), before_agent_start, context (recall cache keyed by user timestamp + query + settings, recall note anchored before the current user turn, try/catch-equivalent failure diagnostic), session_before_refine (skip + proposal) and refine_complete (local harness promotion via getLocalHarnessStateDir/loadHarnessState/MemoryStore.apply with eventId project_<id>).",
+   "gaps": "blocked_on: RefineOptions has no onUsage/signal counterpart (core/refinement, another slice), so ExtractionResult input/output stay 0 and the cancellation signal is not forwarded; provider_retry_policy comes from modes/daemon/daemon_session_summarizer.rs because core/provider-retry.ts is not ported."
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/telegram.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/telegram.rs",
+   "status": "ported",
+   "functions_mapped": 10,
+   "notes": "455 Rust lines incl. tests. Ports TELEGRAM_SETUP_INSTRUCTIONS, sessionBinding, the /telegram command with the 7-item menu (setup/status/pair/here/restart/pause/disconnect) and session_start handler, pairing-code + connection-link flow via createPairing/store.write, worker start/stop through withTelegramManagement, and the notify messages.",
+   "gaps": "The crate has no default TelegramFetcher and no TelegramWorkerLaunch builder, so the module carries private helpers (ReqwestTelegramFetcher, telegram_worker_launch) built from config::get_package_dir + cli::subprocess_launch, matching the TypeScript's global fetch + createCliSubprocessEnv."
+  },
+  {
+   "src": "packages/coding-agent/src/core/mcp/mcp-manager.ts",
+   "rust": "crates/pi-coding-agent/src/core/mcp/mcp_manager.rs",
+   "status": "ported",
+   "functions_mapped": 12,
+   "notes": "1039 Rust lines incl. tests. Ports McpManagerOptions, ResolvedIntegration, McpManager with refresh, canReleaseAcpServers, replaceAcpServers (owner guard + duplicate + JSON-unchanged check), resolveIntegrations, registerProviders/registerUserProviders (builtin catalog + user mcp:<server> providers, drops removed ones), isAuthed (enabled flag, user-declared catalog shadowing, stdio, bearerTokenEnvVar, stored credential endpoint binding), getDisabledBuiltinSkillOverrides, hostHandlers (mcp.refresh, mcp.config, conditional mcp.begin_login), getAcpServers, getEnabledPersistentGenericServers (name-pattern gated, sorted), listStatus. 18 Rust tests ported from test/mcp-manager.test.ts.",
+   "gaps": "blocked_on: AuthStorage::get is synchronous in Rust but the storage is held behind a tokio Mutex by callers, so isAuthed uses a non-blocking try_lock, matching the TypeScript's synchronous read when uncontended."
+  }
+ ],
+ "build": "FAILS, all 58 (lib) / 63 (lib test) errors are outside this slice: crates/pi-coding-agent/src/core/extensions/mod.rs never declares its submodules (builtin/bundled_modules/loader/runner/types/wrapper), so the whole extensions tree is unresolved (4 errors + every consumer), and there are pre-existing syntax/type failures in core/agent_session.rs (truncated file, 78 errors), package_manager_cli.rs (53), modes/daemon/daemon_mode.rs (45), core/performance_metrics.rs (11), modes/telegram/store.rs + api.rs (once_cell missing from Cargo.toml), core/extensions/loader.rs, core/package_manager.rs (settings_manager Arc<Mutex<SettingsManager>> vs Arc<tokio::sync::Mutex<...>>) and others. Zero errors belong to the 5 files of this slice.",
+ "tests": "NOT RUN to green: `cargo test -p pi-coding-agent` cannot link while the crate has 57 lib errors from the files above. In an isolated probe copy of the workspace (only OUT-OF-SLICE blockers patched: extensions/mod.rs submodule declarations, the truncated agent_session.rs brace, package_manager_cli/daemon_mode/performance_metrics/telegram once_cell) all 5 slice files type-check clean under both `cargo check` and `cargo check --tests`, with zero errors and zero warnings in slice files. The slice's own test bodies were compiled by that probe but could not be executed because the crate still fails to build in the real repo.",
+ "blocked_on": "1) core/extensions/mod.rs does not declare `pub mod builtin; pub mod bundled_modules; pub mod loader; pub mod runner; pub mod types; pub mod wrapper;` (out-of-slice file) - this single omission is why the extension tree and every one of its consumers fails to resolve. 2) core/agent_session.rs is truncated (unclosed `impl AgentSession` at line 2203) and also references many helper items it never defines (now_ms, now_iso, PreparedTurnActionOptions, RlmChildTurnOutcome, agent_message_key_of, ...) - owned by the finish-the-file slice. 3) modes/daemon/daemon_mode.rs has an unexpected closing delimiter; modes/acp/acp_mode.rs has `expected expression, found ;`; snapshot_transcript_cache.rs has two unescaped `}` in format strings. 4) once_cell is used by modes/telegram/{store,api}.rs and daemon_client_env.rs but is not a dependency of pi-coding-agent. 5) core/provider-retry.ts and RefineOptions.onUsage/signal are not ported, so memory.ts' usage accounting and cancellation stay stubbed.",
+ "honest_summary": "All five mapped files are written 1:1 with the TypeScript and verified by an isolated workspace probe to type-check clean (lib + tests). The real `cargo check -p pi-coding-agent` cannot succeed: 58 errors remain, all in other slices' files, dominated by core/extensions/mod.rs missing its six `pub mod` lines (which makes the entire extension system, including the two builtin extensions this slice verified, unresolvable) plus a truncated core/agent_session.rs and a broken daemon_mode.rs. `cargo test -p pi-coding-agent` therefore cannot link/run; the slice's ported tests are compiled but not executed. No slice file needed an out-of-slice edit, and the slice's own tests in the probe report no errors and no warnings."
+}

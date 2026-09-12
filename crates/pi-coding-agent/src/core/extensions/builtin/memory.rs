@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::core::extensions::types::{
     AutocompleteItem, CustomMessagePayload, ExtensionApi, ExtensionCommandContext, ExtensionContext,
-    ExtensionFactory, ExtensionHandler, RegisterCommandOptions, SendMessageOptions,
+    ExtensionEvent, ExtensionFactory, ExtensionHandler, RegisterCommandOptions, SendMessageOptions,
 };
 use crate::core::memory::evidence::{
     collect_evidence, hash, message_evidence, Evidence, MEMORY_RECALL_TYPE,
@@ -369,6 +369,13 @@ fn extractor(
     })
 }
 
+/// Outcome of the `context` hook's recall step.
+enum RecallOutcome {
+    /// `!memory.store.settings().recall` - return the digest-filtered messages.
+    Disabled,
+    Done,
+}
+
 fn create_memory_extension_impl(
     pi: Arc<dyn ExtensionApi>,
     agent_dir: String,
@@ -524,77 +531,98 @@ fn create_memory_extension_impl(
                         }) if custom_type == MEMORY_RECALL_TYPE
                     )
                 });
-                let Ok(memory) = service(&ctx, &agent_dir, &services) else {
-                    return Some(serde_json::json!({
-                        "messages": serialize_messages(&without_harness_digests_for_compaction(&messages)),
-                    }));
-                };
-                if !memory.store.settings().recall {
-                    return Some(serde_json::json!({
-                        "messages": serialize_messages(&without_harness_digests_for_compaction(&messages)),
-                    }));
-                }
-                let user = messages.iter().rev().find(|message| {
-                    matches!(
-                        message,
-                        AgentMessage::Message(pi_ai::types::Message::User(_))
-                    )
-                }).cloned();
-                let query = user
-                    .as_ref()
-                    .and_then(|user| collect_evidence(std::slice::from_ref(user)).into_iter().next())
-                    .map(|evidence| evidence.text)
-                    .unwrap_or_default();
-                let key = hash(&format!(
-                    "{}:{}:{}",
-                    user_timestamp(&user).map(|value| crate::core::memory::evidence::js_number(value)).unwrap_or_else(|| "undefined".to_string()),
-                    query,
-                    serde_json::to_string(&memory.store.settings()).unwrap_or_default(),
-                ));
-                let cached = recalled_turns
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .get(&session_key(&ctx))
-                    .cloned();
-                let recalled = match cached {
-                    Some((cached_key, recall)) if cached_key == key => recall,
-                    _ if !query.is_empty() => memory.recall(&query),
-                    _ => crate::core::memory::search::RecallResult {
-                        text: String::new(),
-                        ids: Vec::new(),
-                        chars: 0,
-                    },
-                };
-                recalled_turns
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(session_key(&ctx), (key, recalled.clone()));
-                if !recalled.text.is_empty() {
-                    let note: AgentMessage =
-                        AgentMessage::Custom(pi_agent_core::types::CustomAgentMessage::Custom {
-                            custom_type: MEMORY_RECALL_TYPE.to_string(),
-                            content: pi_agent_core::types::CustomMessageContent::Text(recalled.text.clone()),
-                            display: false,
-                            details: Some(serde_json::json!({ "ids": recalled.ids })),
-                            timestamp: user_timestamp(&user).map(|value| value as i64).unwrap_or(0),
-                        });
-                    // Anchor recall before the current user turn, preserving it across subsequent tool requests.
-                    let index = user
+                // TS wraps the body in try/catch: a throw still returns the filtered
+                // messages, and reports a failed recall diagnostic.
+                let recalled = (|| -> Result<RecallOutcome, String> {
+                    let memory = service(&ctx, &agent_dir, &services)?;
+                    if !memory.store.settings().recall {
+                        return Ok(RecallOutcome::Disabled);
+                    }
+                    let user = messages
+                        .iter()
+                        .rev()
+                        .find(|message| matches!(message, AgentMessage::Message(pi_ai::types::Message::User(_))))
+                        .cloned();
+                    let query = user
                         .as_ref()
-                        .and_then(|user| messages.iter().rposition(|message| message == user))
-                        .unwrap_or(messages.len());
-                    messages.insert(index, note);
+                        .and_then(|user| collect_evidence(std::slice::from_ref(user)).into_iter().next())
+                        .map(|evidence| evidence.text)
+                        .unwrap_or_default();
+                    let key = hash(&format!(
+                        "{}:{}:{}",
+                        user_timestamp(&user)
+                            .map(crate::core::memory::evidence::js_number)
+                            .unwrap_or_else(|| "undefined".to_string()),
+                        query,
+                        serde_json::to_string(&memory.store.settings()).unwrap_or_default(),
+                    ));
+                    let cached = recalled_turns
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .get(&session_key(&ctx))
+                        .cloned();
+                    let recalled = match cached {
+                        Some((cached_key, recall)) if cached_key == key => recall,
+                        _ if !query.is_empty() => memory.recall(&query),
+                        _ => crate::core::memory::search::RecallResult {
+                            text: String::new(),
+                            ids: Vec::new(),
+                            chars: 0,
+                        },
+                    };
+                    recalled_turns
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .insert(session_key(&ctx), (key, recalled.clone()));
+                    if !recalled.text.is_empty() {
+                        let note: AgentMessage =
+                            AgentMessage::Custom(pi_agent_core::types::CustomAgentMessage::Custom {
+                                custom_type: MEMORY_RECALL_TYPE.to_string(),
+                                content: pi_agent_core::types::CustomMessageContent::Text(recalled.text.clone()),
+                                display: false,
+                                details: Some(serde_json::json!({ "ids": recalled.ids })),
+                                timestamp: user_timestamp(&user).map(|value| value as i64).unwrap_or(0),
+                            });
+                        // Anchor recall before the current user turn, preserving it across
+                        // subsequent tool requests.
+                        let index = user
+                            .as_ref()
+                            .and_then(|user| messages.iter().rposition(|message| message == user))
+                            .unwrap_or(messages.len());
+                        messages.insert(index, note);
+                    }
+                    diagnostic(
+                        &pi,
+                        serde_json::json!({
+                            "operation": "recall",
+                            "projectId": memory.store.project.id,
+                            "ids": recalled.ids,
+                            "chars": recalled.chars,
+                            "latencyMs": performance_now() - started,
+                        }),
+                    );
+                    Ok(RecallOutcome::Done)
+                })();
+
+                match recalled {
+                    Ok(RecallOutcome::Disabled) => Some(serde_json::json!({
+                        "messages": serialize_messages(&without_harness_digests_for_compaction(&messages)),
+                    })),
+                    Ok(RecallOutcome::Done) => {
+                        Some(serde_json::json!({ "messages": serialize_messages(&messages) }))
+                    }
+                    Err(_) => {
+                        diagnostic(
+                            &pi,
+                            serde_json::json!({
+                                "operation": "recall",
+                                "status": "failed",
+                                "latencyMs": performance_now() - started,
+                            }),
+                        );
+                        Some(serde_json::json!({ "messages": serialize_messages(&messages) }))
+                    }
                 }
-                diagnostic(
-                    &pi,
-                    serde_json::json!({
-                        "operation": "recall",
-                        "projectId": memory.store.project.id,
-                        "ids": recalled.ids,
-                        "chars": recalled.chars,
-                        "latencyMs": performance_now() - started,
-                    }),
-                );
                 Some(serde_json::json!({ "messages": serialize_messages(&messages) }))
             })
         });

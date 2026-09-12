@@ -1,7 +1,5 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/ipython-cell.ts
 
-use std::collections::HashMap;
-
 use pi_tui::render_cache::VersionedRenderCache;
 use pi_tui::tui::Component;
 use pi_tui::utils::{truncate_to_width, visible_width, wrap_text_with_ansi};
@@ -12,7 +10,7 @@ use crate::core::agent_messages::{
     format_agent_message_participant, AgentMessageDirection, AgentSessionMessageSender,
 };
 use crate::core::kernel::shared::{
-    KernelDeliveryStatus, KernelDiffDisplay, KernelReceiverRole, KernelSentAgentMessage,
+    KernelDeliveryStatus, KernelReceiverRole, KernelSentAgentMessage,
 };
 use crate::core::tools::code_preview::preview_ipython_code;
 use crate::core::tools::edit_diff::generate_diff_string;
@@ -1045,7 +1043,7 @@ impl IPythonCellComponent {
             };
             let recipient = format_agent_message_participant(
                 &direction,
-                receiver_role.as_deref(),
+                receiver_role.as_ref(),
                 Some(&endpoint),
             );
             let hint = expand_collapse_hint(

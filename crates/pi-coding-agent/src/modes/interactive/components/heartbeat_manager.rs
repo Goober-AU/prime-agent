@@ -1,20 +1,20 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/heartbeat-manager.ts
-//!
-//! `MenuPanel`, `MenuList`, `MenuRow` and `getMenuListLayout` belong to the
-//! `menu-panel.ts` slice (a different worker). This module uses the shared
-//! panel through the small [`MenuPanelApi`] surface it exports, and falls back
-//! to the private local list shape below when that file is still empty. See
-//! `blocked_on` in evidence/status/ca-interactive-components-1.json.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use pi_tui::components::spacer::Spacer;
 use pi_tui::components::truncated_text::TruncatedText;
 use pi_tui::keybindings::get_keybindings;
 use pi_tui::tui::{Component, Focusable};
 
+use super::menu_panel::{
+    get_menu_list_layout, MenuList, MenuListLayout, MenuListLayoutOptions, MenuPanel,
+    MenuPanelOptions, MenuRow, MenuRowOptions,
+};
+
 use crate::core::cron_jobs::{
-    AgentHeartbeatManagementAction, DELIVERY_MODE_FOLLOW_UP, SOURCE_HEARTBEAT,
+    AgentCronJob, AgentHeartbeatManagementAction, DELIVERY_MODE_FOLLOW_UP, SOURCE_HEARTBEAT,
 };
 use crate::modes::agent_connection::types::AgentConnectionHeartbeat;
 
@@ -37,399 +37,16 @@ pub enum HeartbeatManagerMode {
     },
 }
 
-/// Private accessor for the fields of `heartbeat.job`.
+/// `heartbeat.job`, typed the way the TypeScript types it (`AgentCronJob`).
 ///
-/// `AgentConnectionHeartbeat.job` is typed `AgentCronJob` in the TypeScript but
-/// is carried as `serde_json::Value` in the agent-connection contract (owned by
-/// another slice). These private readers keep the exact field names and defaults
-/// the component reads, without appending to another slice's file.
-#[derive(Debug, Clone, Default)]
-struct HeartbeatJobView {
-    id: String,
-    status: String,
-    source: Option<String>,
-    delivery_mode: Option<String>,
-    session_id: String,
-    label: Option<String>,
-    prompt: String,
-    schedule_expression: String,
-    created_at: String,
-    next_run_at: Option<String>,
-    last_error: Option<String>,
-    run_count: f64,
-}
-
-impl HeartbeatJobView {
-    fn from_value(job: &serde_json::Value) -> Self {
-        let string = |key: &str| {
-            job.get(key)
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string())
-        };
-        Self {
-            id: string("id").unwrap_or_default(),
-            status: string("status").unwrap_or_default(),
-            source: string("source"),
-            delivery_mode: string("deliveryMode"),
-            session_id: string("sessionId").unwrap_or_default(),
-            label: string("label"),
-            prompt: string("prompt").unwrap_or_default(),
-            schedule_expression: job
-                .get("schedule")
-                .and_then(|schedule| schedule.get("expression"))
-                .and_then(|value| value.as_str())
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            created_at: string("createdAt").unwrap_or_default(),
-            next_run_at: string("nextRunAt"),
-            last_error: string("lastError"),
-            run_count: job
-                .get("runCount")
-                .and_then(|value| value.as_f64())
-                .unwrap_or(0.0),
-        }
-    }
-}
-
-/// Port of `getMenuListLayout`'s result (`MenuListLayout` in menu-panel.ts).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MenuListLayout {
-    pub compact: bool,
-    pub visible_items: usize,
-}
-
-/// Options accepted by the shared `getMenuListLayout`.
-#[derive(Debug, Clone, Default)]
-pub struct MenuListLayoutOptions {
-    pub get_rows: Option<Rc<dyn Fn() -> f64>>,
-    pub preferred_visible_items: usize,
-    pub min_visible_items: Option<usize>,
-    pub total_items: Option<usize>,
-    pub reserved_rows: usize,
-    pub comfortable_item_rows: usize,
-    pub compact_item_rows: Option<usize>,
-    pub scroll_indicator_rows: Option<usize>,
-    pub comfortable_list_padding_rows: Option<usize>,
-    pub compact_list_padding_rows: Option<usize>,
-}
-
-fn get_viewport_rows(get_rows: &Option<Rc<dyn Fn() -> f64>>) -> Option<usize> {
-    let rows = match get_rows {
-        Some(get_rows) => get_rows(),
-        None => return None,
-    };
-    if !rows.is_finite() || rows <= 0.0 {
-        return None;
-    }
-    Some(rows.floor() as usize)
-}
-
-fn visible_item_count(
-    rows: usize,
-    preferred_visible_items: usize,
-    min_visible_items: usize,
-    reserved_rows: usize,
-    item_rows: usize,
-    list_padding_rows: usize,
-    extra_rows: usize,
-) -> usize {
-    let capacity_rows = rows
-        .saturating_sub(reserved_rows)
-        .saturating_sub(list_padding_rows)
-        .saturating_sub(extra_rows);
-    let item_capacity = capacity_rows / item_rows;
-    min_visible_items.max(preferred_visible_items.min(item_capacity))
-}
-
-fn list_rows_used(
-    reserved_rows: usize,
-    list_padding_rows: usize,
-    visible_items: usize,
-    item_rows: usize,
-    extra_rows: usize,
-) -> usize {
-    reserved_rows + list_padding_rows + extra_rows + visible_items * item_rows
-}
-
-fn scroll_indicator_rows(
-    total_items: Option<usize>,
-    visible_items: usize,
-    indicator_rows: usize,
-) -> usize {
-    match total_items {
-        None => 0,
-        Some(total) => {
-            if indicator_rows == 0 || total <= visible_items {
-                0
-            } else {
-                indicator_rows
-            }
-        }
-    }
-}
-
-fn get_layout_candidate(
-    rows: usize,
-    options: &MenuListLayoutOptions,
-    item_rows: usize,
-    list_padding_rows: usize,
-    compact: bool,
-) -> (MenuListLayout, usize, bool) {
-    let min_visible_items = options.min_visible_items.unwrap_or(1);
-    let preferred_visible_items = min_visible_items.max(options.preferred_visible_items);
-    let visible_items_without_scroll = visible_item_count(
-        rows,
-        preferred_visible_items,
-        min_visible_items,
-        options.reserved_rows,
-        item_rows,
-        list_padding_rows,
-        0,
-    );
-    let extra_rows = scroll_indicator_rows(
-        options.total_items,
-        visible_items_without_scroll,
-        options.scroll_indicator_rows.unwrap_or(0),
-    );
-    let visible_items = if extra_rows > 0 {
-        visible_item_count(
-            rows,
-            preferred_visible_items,
-            min_visible_items,
-            options.reserved_rows,
-            item_rows,
-            list_padding_rows,
-            extra_rows,
-        )
-    } else {
-        visible_items_without_scroll
-    };
-    let rows_used = list_rows_used(
-        options.reserved_rows,
-        list_padding_rows,
-        visible_items,
-        item_rows,
-        extra_rows,
-    );
-    (
-        MenuListLayout {
-            compact,
-            visible_items,
-        },
-        rows_used,
-        rows_used <= rows,
-    )
-}
-
-/// Port of `getMenuListLayout`.
-pub fn get_menu_list_layout(options: MenuListLayoutOptions) -> MenuListLayout {
-    let min_visible_items = options.min_visible_items.unwrap_or(1);
-    let preferred_visible_items = min_visible_items.max(options.preferred_visible_items);
-    let rows = match get_viewport_rows(&options.get_rows) {
-        Some(rows) => rows,
-        None => {
-            return MenuListLayout {
-                compact: false,
-                visible_items: preferred_visible_items,
-            }
-        }
-    };
-
-    let (comfortable_layout, _comfortable_rows_used, comfortable_fits) = get_layout_candidate(
-        rows,
-        &options,
-        options.comfortable_item_rows.max(1),
-        options.comfortable_list_padding_rows.unwrap_or(1),
-        false,
-    );
-    let compact_item_rows = match options.compact_item_rows {
-        Some(item_rows) => item_rows,
-        None => {
-            return MenuListLayout {
-                compact: false,
-                visible_items: comfortable_layout.visible_items,
-            }
-        }
-    };
-
-    let (compact_layout, compact_rows_used, compact_fits) = get_layout_candidate(
-        rows,
-        &options,
-        compact_item_rows.max(1),
-        options.compact_list_padding_rows.unwrap_or(0),
-        true,
-    );
-    if compact_fits
-        && (!comfortable_fits || compact_layout.visible_items > comfortable_layout.visible_items)
-    {
-        return compact_layout;
-    }
-    if comfortable_fits {
-        return comfortable_layout;
-    }
-    if compact_rows_used <= _comfortable_rows_used {
-        compact_layout
-    } else {
-        comfortable_layout
-    }
-}
-
-/// Port of `MenuRow` (menu-panel.ts).
-///
-/// Owned by the menu-panel slice; the heartbeat manager only needs to add rows
-/// and let the panel render them.
-pub struct MenuRow {
-    pub primary: String,
-    pub secondary: Option<String>,
-    pub meta: Option<String>,
-    pub selected: bool,
-}
-
-impl MenuRow {
-    pub fn new(primary: &str, secondary: Option<&str>, meta: Option<&str>, selected: bool) -> Self {
-        Self {
-            primary: primary.to_string(),
-            secondary: secondary.map(|value| value.to_string()),
-            meta: meta.map(|value| value.to_string()),
-            selected,
-        }
-    }
-}
-
-/// Port of `MenuList` (menu-panel.ts) as used by this component: a container of
-/// rows plus free-text children.
-#[derive(Default)]
-pub struct MenuList {
-    pub children: Vec<MenuListItem>,
-    compact: bool,
-}
-
-pub enum MenuListItem {
-    Row(MenuRow),
-    /// `list.addChild(new TruncatedText(...))` - any non-row child the panel
-    /// renders through its own width.
-    Child(Box<dyn Component>),
-}
-
-impl MenuList {
-    pub fn new(compact: bool) -> Self {
-        Self {
-            children: Vec::new(),
-            compact,
-        }
-    }
-
-    pub fn add_row(&mut self, row: MenuRow) {
-        self.children.push(MenuListItem::Row(row));
-    }
-
-    pub fn add_child(&mut self, child: Box<dyn Component>) {
-        self.children.push(MenuListItem::Child(child));
-    }
-}
-
-/// Port of `MenuPanel` (menu-panel.ts) as used by this component.
-pub struct MenuPanel {
-    pub title: String,
-    pub subtitle: Option<String>,
-    pub children: Vec<MenuPanelChild>,
-}
-
-pub enum MenuPanelChild {
-    List(MenuList),
-    Spacer(usize),
-    /// `panel.addChild(new TruncatedText(...))` - a pre-styled line.
-    Text(String),
-}
-
-impl MenuPanel {
-    pub fn new(title: &str, subtitle: Option<&str>) -> Self {
-        Self {
-            title: title.to_string(),
-            subtitle: subtitle.map(|value| value.to_string()),
-            children: Vec::new(),
-        }
-    }
-
-    pub fn add_child(&mut self, child: MenuPanelChild) {
-        self.children.push(child);
-    }
-}
-
-/// Port of the `RenderDiffOptions`-style render of `MenuPanel`.
-///
-/// `menu-panel.ts` is owned by another slice; the panel renders through
-/// `MenuPanelApi::render` when that slice provides it.
-pub trait MenuPanelApi {
-    fn render_panel(&mut self, panel: &mut MenuPanel, width: usize) -> Vec<String>;
-}
-
-/// Fallback renderer used while the menu-panel slice is empty.
-pub struct LocalMenuPanelRenderer;
-
-impl MenuPanelApi for LocalMenuPanelRenderer {
-    fn render_panel(&mut self, panel: &mut MenuPanel, width: usize) -> Vec<String> {
-        let mut lines: Vec<String> = Vec::new();
-        let padding = " ".repeat(2);
-        lines.push(String::new());
-        let title = panel.title.clone();
-        if !title.trim().is_empty() {
-            lines.push(format!(
-                "{padding}{}",
-                theme().bold(&theme().fg("text", &title))
-            ));
-        }
-        if let Some(subtitle) = panel.subtitle.clone() {
-            if !subtitle.trim().is_empty() {
-                lines.push(format!("{padding}{}", theme().fg("muted", &subtitle)));
-            }
-        }
-        lines.push(String::new());
-        for child in panel.children.iter_mut() {
-            match child {
-                MenuPanelChild::List(list) => {
-                    for item in list.children.iter_mut() {
-                        match item {
-                            MenuListItem::Row(row) => {
-                                let meta = row
-                                    .meta
-                                    .clone()
-                                    .map(|meta| theme().fg("muted", &meta))
-                                    .unwrap_or_default();
-                                let secondary = row
-                                    .secondary
-                                    .clone()
-                                    .map(|secondary| theme().fg("muted", &secondary))
-                                    .unwrap_or_default();
-                                let primary = if row.selected {
-                                    theme().bold(&theme().fg("text", &row.primary))
-                                } else {
-                                    theme().fg("text", &row.primary)
-                                };
-                                lines.push(format!("{padding}{primary}  {meta}"));
-                                if !secondary.is_empty() {
-                                    lines.push(format!("{padding}{secondary}"));
-                                }
-                            }
-                            MenuListItem::Child(child) => {
-                                for line in child.render(width as f64) {
-                                    lines.push(format!("{padding}{line}"));
-                                }
-                            }
-                        }
-                    }
-                }
-                MenuPanelChild::Spacer(count) => {
-                    for _ in 0..*count {
-                        lines.push(String::new());
-                    }
-                }
-                MenuPanelChild::Text(text) => lines.push(format!("{padding}{text}")),
-            }
-        }
-        lines.push(String::new());
-        lines
-    }
+/// `AgentConnectionHeartbeat.job` is carried as `serde_json::Value` in the
+/// agent-connection contract (owned by another slice), so this private helper
+/// reads it back into the real `AgentCronJob` shape. Field names and defaults
+/// are the same ones the TypeScript component reads; a missing or malformed job
+/// falls back to `Default`, which makes the panel show the same unknown values
+/// the TypeScript would show for `undefined` fields.
+fn heartbeat_job(heartbeat: &AgentConnectionHeartbeat) -> AgentCronJob {
+    serde_json::from_value(heartbeat.job.clone()).unwrap_or_default()
 }
 
 /// Port of `HeartbeatManagerOptions`.
@@ -480,8 +97,8 @@ impl HeartbeatManagerComponent {
             if session_order != std::cmp::Ordering::Equal {
                 return session_order;
             }
-            let left_job = HeartbeatJobView::from_value(&left.job);
-            let right_job = HeartbeatJobView::from_value(&right.job);
+            let left_job = heartbeat_job(left);
+            let right_job = heartbeat_job(right);
             if left_job.source != right_job.source {
                 return if left_job.source.as_deref() == Some(SOURCE_HEARTBEAT) {
                     std::cmp::Ordering::Less
@@ -540,17 +157,16 @@ impl HeartbeatManagerComponent {
     pub fn render(&mut self, width: f64) -> Vec<String> {
         let heartbeats = self.heartbeats();
         if !heartbeats.iter().any(|heartbeat| {
-            Some(&HeartbeatJobView::from_value(&heartbeat.job).id)
-                == self.selected_heartbeat_id.as_ref()
+            Some(&heartbeat_job(heartbeat).id) == self.selected_heartbeat_id.as_ref()
         }) {
             self.selected_heartbeat_id = heartbeats
                 .first()
-                .map(|heartbeat| HeartbeatJobView::from_value(&heartbeat.job).id);
+                .map(|heartbeat| heartbeat_job(heartbeat).id);
         }
         if let HeartbeatManagerMode::Actions { heartbeat_id, .. } = &self.mode {
             if !heartbeats
                 .iter()
-                .any(|heartbeat| &HeartbeatJobView::from_value(&heartbeat.job).id == heartbeat_id)
+                .any(|heartbeat| &heartbeat_job(heartbeat).id == heartbeat_id)
             {
                 self.mode = HeartbeatManagerMode::List;
             }
@@ -566,9 +182,7 @@ impl HeartbeatManagerComponent {
         let panel_width = safe_width.min(HEARTBEAT_PANEL_MAX_WIDTH as f64);
         let left_padding = ((safe_width - panel_width) / 2.0).max(0.0).floor() as usize;
         let right_padding = (safe_width - panel_width - left_padding as f64).max(0.0) as usize;
-        let mut renderer = LocalMenuPanelRenderer;
-        renderer
-            .render_panel(&mut panel, panel_width as usize)
+        Component::render(&mut panel, panel_width)
             .into_iter()
             .map(|line| {
                 format!(
@@ -584,7 +198,7 @@ impl HeartbeatManagerComponent {
         let heartbeats = self.heartbeats();
         let active = heartbeats
             .iter()
-            .filter(|heartbeat| HeartbeatJobView::from_value(&heartbeat.job).status == "active")
+            .filter(|heartbeat| heartbeat_job(heartbeat).status == "active")
             .count();
         let paused = heartbeats.len() - active;
         let count_label = format!(
@@ -597,32 +211,42 @@ impl HeartbeatManagerComponent {
                 String::new()
             }
         );
-        let mut panel = MenuPanel::new(
-            "Heartbeats",
-            Some(&format!("{count_label}. Select a heartbeat to manage.")),
-        );
-        let mut list = MenuList::new(self.get_list_layout().compact);
+        let mut panel = MenuPanel::new(MenuPanelOptions {
+            title: "Heartbeats".to_string(),
+            subtitle: Some(format!("{count_label}. Select a heartbeat to manage.")),
+        });
+        let compact = self.get_list_layout().compact;
+        let mut list = MenuList::new(Some(Box::new(move || compact)));
         self.populate_heartbeat_list(&mut list);
-        panel.add_child(MenuPanelChild::List(list));
+        panel.add_full_width_child(Rc::new(RefCell::new(list)));
         if let Some(error) = &self.error {
-            panel.add_child(MenuPanelChild::Spacer(1));
-            panel.add_child(MenuPanelChild::Text(
+            panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+            panel.add_child(Rc::new(RefCell::new(TruncatedText::new(
                 theme().fg("error", &format!("Error: {error}")),
-            ));
+                0,
+                0,
+            ))));
         }
-        panel.add_child(MenuPanelChild::Spacer(1));
-        panel.add_child(MenuPanelChild::Text(self.close_hint()));
+        panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+        panel.add_child(Rc::new(RefCell::new(TruncatedText::new(
+            self.close_hint(),
+            0,
+            0,
+        ))));
         panel
     }
 
     fn populate_heartbeat_list(&self, list: &mut MenuList) {
         let heartbeats = self.heartbeats();
         if heartbeats.is_empty() {
-            list.add_child(Box::new(TruncatedText::new(
-                theme().fg("muted", "No running or paused heartbeats"),
-                1,
-                0,
-            )));
+            list.add_child(
+                Rc::new(RefCell::new(TruncatedText::new(
+                    theme().fg("muted", "No running or paused heartbeats"),
+                    1,
+                    0,
+                ))),
+                false,
+            );
             return;
         }
         let selected_index = self.get_selected_index(&heartbeats);
@@ -636,7 +260,7 @@ impl HeartbeatManagerComponent {
             let Some(heartbeat) = heartbeats.get(index) else {
                 continue;
             };
-            let job = HeartbeatJobView::from_value(&heartbeat.job);
+            let job = heartbeat_job(heartbeat);
             let source = self.source_label(heartbeat);
             let label = job.label.as_deref().map(str::trim).unwrap_or("");
             let delivery = if job.delivery_mode.as_deref() == Some(DELIVERY_MODE_FOLLOW_UP) {
@@ -649,7 +273,7 @@ impl HeartbeatManagerComponent {
                 None => format!(
                     "{source} · {} · {} · {delivery}",
                     self.session_label(heartbeat),
-                    job.schedule_expression
+                    job.schedule.expression
                 ),
             };
             let primary = if !label.is_empty() {
@@ -662,23 +286,26 @@ impl HeartbeatManagerComponent {
                     self.default_heartbeat_name(heartbeat).to_string()
                 }
             };
-            list.add_row(MenuRow::new(
-                &primary,
-                Some(&details),
-                Some(&self.format_status(heartbeat)),
-                index == selected_index,
-            ));
+            list.add_row(Rc::new(RefCell::new(MenuRow::new(MenuRowOptions {
+                primary,
+                secondary: Some(details),
+                meta: Some(self.format_status(heartbeat)),
+                selected: index == selected_index,
+            }))));
         }
 
         if start_index > 0 || end_index < heartbeats.len() {
-            list.add_child(Box::new(TruncatedText::new(
-                theme().fg(
-                    "muted",
-                    &format!("  ({}/{})", selected_index + 1, heartbeats.len()),
-                ),
-                1,
-                0,
-            )));
+            list.add_child(
+                Rc::new(RefCell::new(TruncatedText::new(
+                    theme().fg(
+                        "muted",
+                        &format!("  ({}/{})", selected_index + 1, heartbeats.len()),
+                    ),
+                    1,
+                    0,
+                ))),
+                false,
+            );
         }
     }
 
@@ -687,39 +314,53 @@ impl HeartbeatManagerComponent {
         let heartbeat = match heartbeat {
             Some(heartbeat) => heartbeat,
             None => {
-                return MenuPanel::new("Heartbeats", Some("This heartbeat is no longer available."))
+                return MenuPanel::new(MenuPanelOptions {
+                    title: "Heartbeats".to_string(),
+                    subtitle: Some("This heartbeat is no longer available.".to_string()),
+                })
             }
         };
-        let job = HeartbeatJobView::from_value(&heartbeat.job);
+        let job = heartbeat_job(heartbeat);
         let label = job.label.as_deref().map(str::trim).unwrap_or("");
         let name = if !label.is_empty() {
             label.to_string()
         } else {
             self.default_heartbeat_name(&heartbeat).to_string()
         };
-        let mut panel = MenuPanel::new(&name, Some(&self.single_line(&job.prompt)));
-        panel.add_child(MenuPanelChild::Text(
+        let mut panel = MenuPanel::new(MenuPanelOptions {
+            title: name,
+            subtitle: Some(self.single_line(&job.prompt)),
+        });
+        panel.add_child(Rc::new(RefCell::new(TruncatedText::new(
             theme().fg("muted", &self.format_heartbeat_details(&heartbeat)),
-        ));
-        panel.add_child(MenuPanelChild::Spacer(1));
+            0,
+            0,
+        ))));
+        panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
         if let Some(error) = &self.error {
-            panel.add_child(MenuPanelChild::Text(
+            panel.add_child(Rc::new(RefCell::new(TruncatedText::new(
                 theme().fg("error", &format!("Error: {error}")),
-            ));
-            panel.add_child(MenuPanelChild::Spacer(1));
+                0,
+                0,
+            ))));
+            panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
         }
-        let mut list = MenuList::new(false);
+        let mut list = MenuList::new(None);
         for (index, action) in self.available_actions(Some(&heartbeat)).iter().enumerate() {
-            list.add_row(MenuRow::new(
-                &action.label,
-                Some(&self.action_description(&action.action)),
-                None,
-                index == selected_index,
-            ));
+            list.add_row(Rc::new(RefCell::new(MenuRow::new(MenuRowOptions {
+                primary: action.label.clone(),
+                secondary: Some(self.action_description(&action.action)),
+                meta: None,
+                selected: index == selected_index,
+            }))));
         }
-        panel.add_child(MenuPanelChild::List(list));
-        panel.add_child(MenuPanelChild::Spacer(1));
-        panel.add_child(MenuPanelChild::Text(self.detail_hint()));
+        panel.add_full_width_child(Rc::new(RefCell::new(list)));
+        panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+        panel.add_child(Rc::new(RefCell::new(TruncatedText::new(
+            self.detail_hint(),
+            0,
+            0,
+        ))));
         panel
     }
 
@@ -735,7 +376,7 @@ impl HeartbeatManagerComponent {
                     (selected_index as i64 + delta).clamp(0, heartbeats.len() as i64 - 1) as usize;
                 self.selected_heartbeat_id = heartbeats
                     .get(next_index)
-                    .map(|heartbeat| HeartbeatJobView::from_value(&heartbeat.job).id);
+                    .map(|heartbeat| heartbeat_job(heartbeat).id);
             }
             HeartbeatManagerMode::Actions {
                 heartbeat_id,
@@ -766,7 +407,7 @@ impl HeartbeatManagerComponent {
                 let heartbeat = heartbeats.get(self.get_selected_index(&heartbeats));
                 if let Some(heartbeat) = heartbeat {
                     self.mode = HeartbeatManagerMode::Actions {
-                        heartbeat_id: HeartbeatJobView::from_value(&heartbeat.job).id,
+                        heartbeat_id: heartbeat_job(heartbeat).id,
                         selected_index: 0,
                     };
                     (self.options.request_render)();
@@ -822,7 +463,7 @@ impl HeartbeatManagerComponent {
         let Some(heartbeat) = heartbeat else {
             return Vec::new();
         };
-        let job = HeartbeatJobView::from_value(&heartbeat.job);
+        let job = heartbeat_job(heartbeat);
         vec![
             if job.status == "paused" {
                 HeartbeatAction {
@@ -844,8 +485,7 @@ impl HeartbeatManagerComponent {
 
     fn get_selected_index(&self, heartbeats: &[AgentConnectionHeartbeat]) -> usize {
         let index = heartbeats.iter().position(|heartbeat| {
-            Some(&HeartbeatJobView::from_value(&heartbeat.job).id)
-                == self.selected_heartbeat_id.as_ref()
+            Some(&heartbeat_job(heartbeat).id) == self.selected_heartbeat_id.as_ref()
         });
         index.unwrap_or(0)
     }
@@ -853,7 +493,7 @@ impl HeartbeatManagerComponent {
     fn find_heartbeat(&self, id: &str) -> Option<AgentConnectionHeartbeat> {
         self.heartbeats()
             .into_iter()
-            .find(|heartbeat| HeartbeatJobView::from_value(&heartbeat.job).id == id)
+            .find(|heartbeat| heartbeat_job(heartbeat).id == id)
     }
 
     fn session_label(&self, heartbeat: &AgentConnectionHeartbeat) -> String {
@@ -869,7 +509,7 @@ impl HeartbeatManagerComponent {
         if !first_message.is_empty() {
             return first_message;
         }
-        HeartbeatJobView::from_value(&heartbeat.job).session_id
+        heartbeat_job(heartbeat).session_id
     }
 
     fn get_list_layout(&self) -> MenuListLayout {
@@ -889,7 +529,7 @@ impl HeartbeatManagerComponent {
     }
 
     fn format_status(&self, heartbeat: &AgentConnectionHeartbeat) -> String {
-        if HeartbeatJobView::from_value(&heartbeat.job).status == "active" {
+        if heartbeat_job(heartbeat).status == "active" {
             theme().fg("success", "active")
         } else {
             theme().fg("warning", "paused")
@@ -897,7 +537,7 @@ impl HeartbeatManagerComponent {
     }
 
     fn format_heartbeat_details(&self, heartbeat: &AgentConnectionHeartbeat) -> String {
-        let job = HeartbeatJobView::from_value(&heartbeat.job);
+        let job = heartbeat_job(heartbeat);
         let delivery = if job.delivery_mode.as_deref() == Some(DELIVERY_MODE_FOLLOW_UP) {
             "follow-up"
         } else {
@@ -912,17 +552,13 @@ impl HeartbeatManagerComponent {
             self.source_label(heartbeat),
             self.session_label(heartbeat),
             job.status,
-            job.schedule_expression,
+            job.schedule.expression,
             job.run_count
         )
     }
 
     fn source_label(&self, heartbeat: &AgentConnectionHeartbeat) -> &'static str {
-        if HeartbeatJobView::from_value(&heartbeat.job)
-            .source
-            .as_deref()
-            == Some(SOURCE_HEARTBEAT)
-        {
+        if heartbeat_job(heartbeat).source.as_deref() == Some(SOURCE_HEARTBEAT) {
             "Created by you"
         } else {
             "Created by agent"
@@ -930,11 +566,7 @@ impl HeartbeatManagerComponent {
     }
 
     fn default_heartbeat_name(&self, heartbeat: &AgentConnectionHeartbeat) -> &'static str {
-        if HeartbeatJobView::from_value(&heartbeat.job)
-            .source
-            .as_deref()
-            == Some(SOURCE_HEARTBEAT)
-        {
+        if heartbeat_job(heartbeat).source.as_deref() == Some(SOURCE_HEARTBEAT) {
             "Your heartbeat"
         } else {
             "Agent-created heartbeat"

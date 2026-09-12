@@ -34,7 +34,7 @@ impl Default for ExtensionInputOptions {
 pub struct ExtensionInputComponent {
     input: Rc<RefCell<Input>>,
     on_submit_callback: Box<dyn FnMut(&str)>,
-    on_cancel_callback: Box<dyn FnMut()>,
+    on_cancel_callback: Rc<RefCell<Box<dyn FnMut()>>>,
     title_text: Text,
     base_title: String,
     countdown: Option<CountdownTimer>,
@@ -66,6 +66,9 @@ impl ExtensionInputComponent {
         container.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
 
         let title_slot: Rc<RefCell<String>> = Rc::new(RefCell::new(theme().fg("accent", title)));
+        // Shared with the timer's expire callback so the countdown and the cancel
+        // key call the same `onCancelCallback`.
+        let on_cancel_cell: Rc<RefCell<Box<dyn FnMut()>>> = Rc::new(RefCell::new(on_cancel));
 
         let mut countdown = None;
         if let Some(timeout) = opts.timeout {
@@ -73,6 +76,9 @@ impl ExtensionInputComponent {
                 if let Some(tui) = opts.tui {
                     let base_title_for_tick = base_title.clone();
                     let slot = Rc::clone(&title_slot);
+                    // `() => this.onCancelCallback()` - the timer calls the same
+                    // callback the cancel key does, so both share the box.
+                    let on_expire = Rc::clone(&on_cancel_cell);
                     countdown = Some(CountdownTimer::new(
                         timeout,
                         Some(tui),
@@ -80,7 +86,7 @@ impl ExtensionInputComponent {
                             *slot.borrow_mut() = theme()
                                 .fg("accent", &format!("{base_title_for_tick} ({seconds}s)"));
                         }),
-                        Box::new(move || {}),
+                        Box::new(move || (on_expire.borrow_mut())()),
                     ));
                 }
             }
@@ -106,11 +112,15 @@ impl ExtensionInputComponent {
             Rc::new(RefCell::new(DynamicBorder::default())) as Rc<RefCell<dyn Component>>
         );
 
+        // Read the slot's value into an owned string before the struct literal:
+        // the temporary `Ref` borrow must end before the slot is moved.
+        let initial_title = title_slot.borrow().clone();
+
         Self {
             input: Rc::clone(&input_cell),
             on_submit_callback: on_submit,
-            on_cancel_callback: on_cancel,
-            title_text: Text::new(title_slot.borrow().clone(), 1, 0, None),
+            on_cancel_callback: Rc::clone(&on_cancel_cell),
+            title_text: Text::new(initial_title, 1, 0, None),
             base_title,
             countdown,
             focused: false,
@@ -122,6 +132,11 @@ impl ExtensionInputComponent {
 
 impl Component for ExtensionInputComponent {
     fn render(&mut self, width: f64) -> Vec<String> {
+        // The timer posts its ticks to the owner (see `CountdownTimer`), so the
+        // render pass drains them before producing output.
+        if let Some(countdown) = self.countdown.as_mut() {
+            countdown.poll();
+        }
         self.container.render(width)
     }
 
@@ -135,7 +150,7 @@ impl Component for ExtensionInputComponent {
             let value = self.input.borrow().get_value().to_string();
             (self.on_submit_callback)(&value);
         } else if kb.matches(key_data, "tui.select.cancel") {
-            (self.on_cancel_callback)();
+            (self.on_cancel_callback.borrow_mut())();
         } else {
             self.input.borrow_mut().handle_input(key_data);
         }

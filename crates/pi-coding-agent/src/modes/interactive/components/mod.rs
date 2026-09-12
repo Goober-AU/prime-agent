@@ -65,25 +65,48 @@ pub mod visual_truncate;
 // target resolves to the same path segment.
 // ---------------------------------------------------------------------------
 
+pub use agent_message::AgentMessageComponent;
 pub use armin::ArminComponent;
+pub use assistant_message::AssistantMessageComponent;
+pub use bash_execution::BashExecutionComponent;
+pub use bordered_loader::BorderedLoader;
+pub use branch_summary_message::BranchSummaryMessageComponent;
+pub use compaction_outcome_message::{
+    CompactionOutcomeMessageComponent, MalformedCompactionOutcomeMessageComponent,
+};
+pub use compaction_summary_message::CompactionSummaryMessageComponent;
+pub use configuration_menu::{ConfigurationMenuComponent, ConfigurationMenuTab};
+pub use custom_editor::CustomEditor;
+pub use custom_message::CustomMessageComponent;
 pub use daxnuts::DaxnutsComponent;
-pub use expandable_custom_message::{custom_message_label, ExpandableCustomMessageBox};
+pub use diff::{render_diff, RenderDiffOptions};
+pub use dynamic_border::DynamicBorder;
 pub use extension_editor::ExtensionEditorComponent;
-pub use heartbeat_manager::{
-    get_menu_list_layout, HeartbeatManagerComponent, HeartbeatManagerOptions,
+pub use extension_input::ExtensionInputComponent;
+pub use extension_selector::ExtensionSelectorComponent;
+pub use footer::FooterComponent;
+pub use injected_prompt_message::{is_injected_prompt_message, InjectedPromptMessageComponent};
+pub use ipython_cell::{
+    get_ipython_code_from_args, IPythonCellComponent, IPythonCellContentBlock, IPythonCellState,
 };
-pub use mermaid::{create_mermaid_markdown_transform, MermaidMarkdownTransform};
-pub use modal_back::{should_treat_as_back, BackGuardInput};
-pub use prime_team_selector::PrimeTeamSelectorComponent;
-pub use prompt_highlight::{style_argument_tokens, PromptTokenMask};
-pub use refinement_outcome_message::{
-    MalformedRefinementOutcomeMessageComponent, RefinementOutcomeMessageComponent,
-};
-pub use slash_command_message::{
-    is_leading_slash_command, style_slash_command_text, SlashCommandMessageComponent,
-};
+pub use keybinding_hints::{key_hint, key_text, raw_key_hint};
+pub use login_dialog::LoginDialogComponent;
+pub use model_selector::ModelSelectorComponent;
+pub use oauth_selector::OAuthSelectorComponent;
+pub use prime_onboarding_splash::PrimeOnboardingSplashComponent;
+pub use scoped_models_selector::{ModelsCallbacks, ModelsConfig, ScopedModelsSelectorComponent};
+pub use settings_selector::{SettingsCallbacks, SettingsConfig, SettingsSelectorComponent};
+pub use show_images_selector::ShowImagesSelectorComponent;
+pub use skill_invocation_message::SkillInvocationMessageComponent;
+pub use subagent_summary_line::SubagentSummaryLine;
+pub use theme_selector::ThemeSelectorComponent;
 pub use thinking_selector::ThinkingSelectorComponent;
-pub use tree_selector::{FilterMode, TreeList, TreeSelectorComponent, FILTER_MODES};
+pub use tool_execution::{ToolExecutionComponent, ToolExecutionOptions};
+pub use tool_panel::{tool_panel_content_width, tool_panel_line, ToolPanel, TOOL_PANEL_PADDING_X};
+pub use tree_selector::TreeSelectorComponent;
+pub use user_message::UserMessageComponent;
+pub use user_message_selector::UserMessageSelectorComponent;
+pub use visual_truncate::{truncate_to_visual_lines, VisualTruncateResult};
 
 #[cfg(test)]
 mod tests {
@@ -91,19 +114,24 @@ mod tests {
 
     #[test]
     fn index_re_exports_resolve() {
-        // The TypeScript index.ts re-exports these names; assert the port keeps
-        // the same names at the same module path.
+        // index.ts re-exports these names; the port keeps the same names at the
+        // same module path so every `components/<file>.js` import target resolves.
         let _ = std::any::type_name::<ArminComponent>();
         let _ = std::any::type_name::<DaxnutsComponent>();
         let _ = std::any::type_name::<ExtensionEditorComponent>();
-        let _ = std::any::type_name::<HeartbeatManagerComponent>();
-        let _ = std::any::type_name::<PrimeTeamSelectorComponent>();
-        let _ = std::any::type_name::<RefinementOutcomeMessageComponent>();
-        let _ = std::any::type_name::<MalformedRefinementOutcomeMessageComponent>();
-        let _ = std::any::type_name::<SlashCommandMessageComponent>();
         let _ = std::any::type_name::<ThinkingSelectorComponent>();
         let _ = std::any::type_name::<TreeSelectorComponent>();
-        let _ = std::any::type_name::<TreeList>();
+        let _ = std::any::type_name::<heartbeat_manager::HeartbeatManagerComponent>();
+        let _ = std::any::type_name::<heartbeat_manager::HeartbeatManagerOptions>();
+        let _ = std::any::type_name::<prime_team_selector::PrimeTeamSelectorComponent>();
+        let _ =
+            std::any::type_name::<refinement_outcome_message::RefinementOutcomeMessageComponent>();
+        let _ = std::any::type_name::<
+            refinement_outcome_message::MalformedRefinementOutcomeMessageComponent,
+        >();
+        let _ = std::any::type_name::<slash_command_message::SlashCommandMessageComponent>();
+        let _ = std::any::type_name::<expandable_custom_message::ExpandableCustomMessageBox>();
+        let _ = std::any::type_name::<modal_back::BackGuardInput>();
         assert_eq!(
             FILTER_MODES,
             ["default", "no-tools", "user-only", "labeled-only", "all"]

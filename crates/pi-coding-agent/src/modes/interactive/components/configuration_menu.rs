@@ -145,11 +145,7 @@ impl ConfigurationMenuTabBar {
         let items: Vec<String> = std::iter::once(theme().bold(&theme().fg("muted", "Tabs:")))
             .chain(labels)
             .collect();
-        let mut lines = self.wrap_items(
-            items,
-            &theme().fg("muted", "  "),
-            safe_width,
-        );
+        let mut lines = self.wrap_items(items, &theme().fg("muted", "  "), safe_width);
         let tab_key = key_text("tui.input.tab", &KeyTextOptions { primary_only: true });
         let shift_tab_key = key_text(
             "app.configuration.previousTab",
@@ -226,7 +222,9 @@ pub struct ConfigurationMenuComponent {
 
 impl ConfigurationMenuComponent {
     pub fn new(options: ConfigurationMenuOptions, bodies: ConfigurationMenuBodies) -> Self {
-        let tab_bar = Rc::new(RefCell::new(ConfigurationMenuTabBar::new(options.initial_tab)));
+        let tab_bar = Rc::new(RefCell::new(ConfigurationMenuTabBar::new(
+            options.initial_tab,
+        )));
         let active_tab = options.initial_tab;
         Self {
             bodies,
@@ -311,9 +309,8 @@ impl ConfigurationMenuComponent {
             .iter()
             .position(|tab| *tab == self.active_tab)
             .unwrap_or(0) as i64;
-        let next_index =
-            (current_index + direction + CONFIGURATION_MENU_TABS.len() as i64)
-                % CONFIGURATION_MENU_TABS.len() as i64;
+        let next_index = (current_index + direction + CONFIGURATION_MENU_TABS.len() as i64)
+            % CONFIGURATION_MENU_TABS.len() as i64;
         let next = CONFIGURATION_MENU_TABS
             .get(next_index as usize)
             .copied()
@@ -335,8 +332,16 @@ impl ConfigurationMenuComponent {
     fn handle_active_body_input(&mut self, key_data: &str) {
         match self.active_tab {
             "models" => self.bodies.models.get_search_input().handle_input(key_data),
-            "mcp-connections" => self.bodies.mcp_connections.get_search_input().handle_input(key_data),
-            _ => self.bodies.providers.get_search_input().handle_input(key_data),
+            "mcp-connections" => self
+                .bodies
+                .mcp_connections
+                .get_search_input()
+                .handle_input(key_data),
+            _ => self
+                .bodies
+                .providers
+                .get_search_input()
+                .handle_input(key_data),
         }
     }
 
@@ -357,8 +362,11 @@ impl Component for ConfigurationMenuComponent {
         // `super.render(width)` renders the tab bar header, then the active body.
         let mut lines = self.tab_bar.borrow_mut().render(width);
         // `getHeaderRows()` is `tabBar.getRowCount(innerWidth) + 1`.
-        let expected_rows =
-            self.tab_bar.borrow().get_row_count(get_menu_panel_inner_width(width) as f64) + 1;
+        let expected_rows = self
+            .tab_bar
+            .borrow()
+            .get_row_count(get_menu_panel_inner_width(width) as f64)
+            + 1;
         while lines.len() < expected_rows {
             lines.push(String::new());
         }
@@ -447,7 +455,7 @@ mod tests {
 
     /// `getRowCount` re-renders, so the helper mirrors that on a fresh bar.
     fn rows_for(bar: &ConfigurationMenuTabBar, width: f64) -> usize {
-        let mut probe = ConfigurationMenuTabBar::new(bar.active_tab);
+        let probe = ConfigurationMenuTabBar::new(bar.active_tab);
         let _ = width;
         probe.get_row_count(width)
     }
@@ -468,7 +476,13 @@ mod tests {
         )))
     }
 
-    fn menu(initial_tab: ConfigurationMenuTab) -> (ConfigurationMenuComponent, Rc<RefCell<usize>>, Rc<RefCell<usize>>) {
+    fn menu(
+        initial_tab: ConfigurationMenuTab,
+    ) -> (
+        ConfigurationMenuComponent,
+        Rc<RefCell<usize>>,
+        Rc<RefCell<usize>>,
+    ) {
         let provider_refreshes = Rc::new(RefCell::new(0));
         let model_updates = Rc::new(RefCell::new(0));
         let options = ConfigurationMenuOptions {
@@ -514,12 +528,19 @@ mod tests {
                 refreshes: Rc::clone(&provider_refreshes),
             }),
         };
-        (ConfigurationMenuComponent::new(options, bodies), provider_refreshes, model_updates)
+        (
+            ConfigurationMenuComponent::new(options, bodies),
+            provider_refreshes,
+            model_updates,
+        )
     }
 
     #[test]
     fn tab_constants_and_labels_match_typescript() {
-        assert_eq!(CONFIGURATION_MENU_TABS, ["providers", "models", "mcp-connections"]);
+        assert_eq!(
+            CONFIGURATION_MENU_TABS,
+            ["providers", "models", "mcp-connections"]
+        );
         assert_eq!(tab_label("providers"), "Providers");
         assert_eq!(tab_label("models"), "Models");
         assert_eq!(tab_label("mcp-connections"), "MCP Connections");

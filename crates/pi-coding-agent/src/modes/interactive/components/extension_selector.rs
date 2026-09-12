@@ -8,7 +8,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::modes::interactive::components::countdown_timer::CountdownTimer;
-use crate::modes::interactive::components::keybinding_hints::{key_hint, raw_key_hint};
+use crate::modes::interactive::components::keybinding_hints::{
+    key_hint, raw_key_hint, KeyTextOptions,
+};
 use crate::modes::interactive::components::menu_panel::{
     get_menu_list_layout, MenuList, MenuListLayout, MenuListLayoutOptions, MenuPanel,
     MenuPanelOptions, MenuRow, MenuRowOptions, MenuViewportProvider,
@@ -84,7 +86,7 @@ pub struct ExtensionSelectorComponent {
     selected_index: usize,
     list_container: Rc<RefCell<MenuList>>,
     on_select_callback: Box<dyn FnMut(&str)>,
-    on_cancel_callback: Box<dyn FnMut()>,
+    on_cancel_callback: Rc<RefCell<Box<dyn FnMut()>>>,
     base_title: String,
     countdown: Option<CountdownTimer>,
     panel: Rc<RefCell<MenuPanel>>,
@@ -129,8 +131,8 @@ impl ExtensionSelectorComponent {
                 format!(
                     "{}  {}  {}",
                     raw_key_hint("\u{2191}\u{2193}", "navigate"),
-                    key_hint("tui.select.confirm", "select"),
-                    key_hint("tui.select.cancel", "cancel")
+                    key_hint("tui.select.confirm", "select", &KeyTextOptions::default()),
+                    key_hint("tui.select.cancel", "cancel", &KeyTextOptions::default())
                 ),
                 1,
                 0,
@@ -145,7 +147,7 @@ impl ExtensionSelectorComponent {
             selected_index: 0,
             list_container,
             on_select_callback: on_select,
-            on_cancel_callback: on_cancel,
+            on_cancel_callback: Rc::new(RefCell::new(on_cancel)),
             base_title,
             countdown: None,
             panel,
@@ -163,13 +165,16 @@ impl ExtensionSelectorComponent {
                 if let Some(tui) = tui {
                     let base_title = selector.base_title.clone();
                     let panel_title = Rc::clone(selector.panel.borrow().title_slot());
+                    // `() => this.onCancelCallback()` - the timer calls the same
+                    // callback the cancel key does, so both share the box.
+                    let on_expire = Rc::clone(&selector.on_cancel_callback);
                     let timer = CountdownTimer::new(
                         timeout,
                         Some(tui),
                         Box::new(move |seconds| {
                             *panel_title.borrow_mut() = format!("{base_title} ({seconds}s)");
                         }),
-                        Box::new(move || {}),
+                        Box::new(move || (on_expire.borrow_mut())()),
                     );
                     selector.countdown = Some(timer);
                 }
@@ -183,6 +188,11 @@ impl ExtensionSelectorComponent {
 
 impl Component for ExtensionSelectorComponent {
     fn render(&mut self, width: f64) -> Vec<String> {
+        // The timer posts its ticks to the owner (see `CountdownTimer`), so the
+        // render pass drains them before producing output.
+        if let Some(countdown) = self.countdown.as_mut() {
+            countdown.poll();
+        }
         let previous_layout = self.list_layout;
         self.update_layout();
         if self.list_layout.compact != previous_layout.compact
@@ -213,7 +223,7 @@ impl Component for ExtensionSelectorComponent {
                 (self.on_select_callback)(&selected);
             }
         } else if kb.matches(key_data, "tui.select.cancel") {
-            (self.on_cancel_callback)();
+            (self.on_cancel_callback.borrow_mut())();
         }
     }
 

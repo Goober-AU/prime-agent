@@ -3,9 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pi_tui::tui::{
-    Component, Focusable, OverlayHandle, OverlayOptions, SizeValue, TUI,
-};
+use pi_tui::tui::{Component, Focusable, OverlayHandle, OverlayOptions, SizeValue, TUI};
 use pi_tui::utils::{truncate_to_width, visible_width};
 
 /// Port of `CenteredOverlayOptions`.
@@ -202,7 +200,11 @@ mod tests {
         fn invalidate(&mut self) {}
     }
 
-    fn options(rows: f64, max_content_width: Option<f64>, vertical_offset: Option<f64>) -> CenteredOverlayOptions {
+    fn options(
+        rows: f64,
+        max_content_width: Option<f64>,
+        vertical_offset: Option<f64>,
+    ) -> CenteredOverlayOptions {
         CenteredOverlayOptions {
             get_rows: Rc::new(move || rows),
             max_content_width,
@@ -212,7 +214,9 @@ mod tests {
 
     fn component(lines: Vec<&str>, options: CenteredOverlayOptions) -> CenteredOverlayComponent {
         CenteredOverlayComponent::new(
-            Rc::new(RefCell::new(Lines(lines.into_iter().map(|l| l.to_string()).collect()))),
+            Rc::new(RefCell::new(Lines(
+                lines.into_iter().map(|l| l.to_string()).collect(),
+            ))),
             options,
         )
     }

@@ -531,14 +531,23 @@ impl Component for CustomEditor {
 
         // Check all other app actions. A raw "\n" is Shift+Enter's newline in some
         // terminals, so it goes to the editor even though it decodes as ctrl+j.
+        // `keybindingsMatch` reads only the keybindings, so resolve the matches
+        // before taking the mutable borrow of the handler map.
+        let text_is_empty = self.editor.get_text().is_empty();
+        let matching_action = self
+            .action_handlers
+            .keys()
+            .find(|action| {
+                data != "\n"
+                    && *action != "app.input.clear"
+                    && *action != "app.exit"
+                    && (*action != "app.shortcuts" || text_is_empty)
+                    && self.keybindings_match(data, action)
+            })
+            .cloned();
         let mut handled = false;
         for (action, handler) in self.action_handlers.iter_mut() {
-            if data != "\n"
-                && action != "app.input.clear"
-                && action != "app.exit"
-                && (action != "app.shortcuts" || self.editor.get_text().is_empty())
-                && self.keybindings_match(data, action)
-            {
+            if Some(action.as_str()) == matching_action.as_deref() {
                 if (action == "app.clear" || action == "app.interrupt")
                     && self.editor.is_showing_autocomplete()
                 {

@@ -77,7 +77,10 @@ mod tests {
     fn takes_the_last_visual_lines_and_counts_the_skipped_ones() {
         let text = "one\ntwo\nthree\nfour";
         let result = truncate_to_visual_lines(text, 2, 10.0, 0);
-        assert_eq!(result.visual_lines, vec!["three".to_string(), "four".to_string()]);
+        assert_eq!(
+            result.visual_lines,
+            vec!["three".to_string(), "four".to_string()]
+        );
         assert_eq!(result.skipped_count, 2);
     }
 

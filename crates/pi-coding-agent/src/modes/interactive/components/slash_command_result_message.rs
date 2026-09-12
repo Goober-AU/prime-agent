@@ -60,8 +60,9 @@ impl Component for SlashCommandResultMessageComponent {
 mod tests {
     use super::*;
     use crate::core::messages::{
-        create_session_slash_command_result_message, SessionSlashCommandResultDetails, SessionSlashCommand,
+        create_session_slash_command_result_message, SessionSlashCommandResultDetails,
     };
+    use crate::core::slash_commands::SessionSlashCommand;
 
     fn message(content: &str) -> CustomMessage {
         create_session_slash_command_result_message(

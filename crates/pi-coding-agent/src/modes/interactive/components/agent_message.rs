@@ -174,7 +174,7 @@ impl AgentMessageComponent {
         let direction: AgentMessageDirection = AGENT_MESSAGE_DIRECTION_RECEIVED.to_string();
         let participant = format_agent_message_participant(
             &direction,
-            self.message.from_relationship.as_deref(),
+            self.message.from_relationship.as_ref(),
             self.message.from.as_ref(),
         );
         let hint = expand_collapse_hint("app.messages.expand", self.expanded);

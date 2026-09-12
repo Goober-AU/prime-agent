@@ -8,9 +8,10 @@ use pi_tui::components::text::Text;
 use pi_tui::tui::Component;
 
 use crate::core::skill_blocks::ParsedSkillBlock;
-use crate::modes::interactive::theme::theme::{get_markdown_theme, theme, MarkdownTheme};
+use crate::modes::interactive::theme::theme::{theme, MarkdownTheme};
 
 use super::expandable_custom_message::{custom_message_label, ExpandableCustomMessageBox};
+use super::keybinding_hints::expand_collapse_hint;
 
 /// Skill invocation card; the user message is rendered separately.
 pub struct SkillInvocationMessageComponent {

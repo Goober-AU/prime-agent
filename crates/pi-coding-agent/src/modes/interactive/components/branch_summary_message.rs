@@ -8,10 +8,70 @@ use pi_tui::components::markdown::{Markdown, MarkdownOptions, MarkdownTheme};
 use pi_tui::components::r#box::Box_;
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
-use pi_tui::tui::{Component, Container};
+use pi_tui::tui::Component;
 
 use crate::modes::interactive::components::keybinding_hints::expand_collapse_hint;
 use crate::modes::interactive::theme::theme::theme;
+
+/// `pi-tui`'s `MarkdownTheme` holds `Rc` closures; `theme.ts`'s holds `Box`
+/// closures with `Send + Sync`. This is the same conversion as
+/// `toTuiMarkdownTheme` in the other message components.
+fn to_tui_markdown_theme(
+    source: crate::modes::interactive::theme::theme::MarkdownTheme,
+) -> MarkdownTheme {
+    fn rc(value: Box<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
+        Rc::new(move |text: &str| value(text))
+    }
+
+    MarkdownTheme {
+        heading: rc(source.heading),
+        link: rc(source.link),
+        link_url: rc(source.link_url),
+        code: rc(source.code),
+        code_block: rc(source.code_block),
+        code_block_border: rc(source.code_block_border),
+        quote: rc(source.quote),
+        quote_border: rc(source.quote_border),
+        hr: rc(source.hr),
+        list_bullet: rc(source.list_bullet),
+        bold: rc(source.bold),
+        italic: rc(source.italic),
+        strikethrough: rc(source.strikethrough),
+        underline: rc(source.underline),
+        highlight_code: Some(Rc::new(move |code: &str, language: Option<&str>| {
+            (source.highlight_code)(code, language)
+        })),
+        code_block_indent: source.code_block_indent,
+        math: Some(rc(source.math)),
+        math_block: Some(rc(source.math_block)),
+    }
+}
+
+/// The converted theme holds `Rc` closures, so a fresh owned theme can share them
+/// (`pi-tui`'s `MarkdownTheme` is not `Clone`, like the TypeScript object which is
+/// reused by reference on every `updateDisplay`).
+fn clone_tui_markdown_theme(source: &MarkdownTheme) -> MarkdownTheme {
+    MarkdownTheme {
+        heading: Rc::clone(&source.heading),
+        link: Rc::clone(&source.link),
+        link_url: Rc::clone(&source.link_url),
+        code: Rc::clone(&source.code),
+        code_block: Rc::clone(&source.code_block),
+        code_block_border: Rc::clone(&source.code_block_border),
+        quote: Rc::clone(&source.quote),
+        quote_border: Rc::clone(&source.quote_border),
+        hr: Rc::clone(&source.hr),
+        list_bullet: Rc::clone(&source.list_bullet),
+        bold: Rc::clone(&source.bold),
+        italic: Rc::clone(&source.italic),
+        strikethrough: Rc::clone(&source.strikethrough),
+        underline: Rc::clone(&source.underline),
+        highlight_code: source.highlight_code.clone(),
+        code_block_indent: source.code_block_indent.clone(),
+        math: source.math.clone(),
+        math_block: source.math_block.clone(),
+    }
+}
 
 /// Component that renders a branch summary message with collapsed/expanded state.
 /// Uses same background color as custom messages for visual consistency.
@@ -85,7 +145,7 @@ impl BranchSummaryMessageComponent {
                 text,
                 0,
                 0,
-                self.markdown_theme.clone(),
+                clone_tui_markdown_theme(&self.markdown_theme),
                 Some(default_style),
                 MarkdownOptions::default(),
             )));

@@ -93,7 +93,13 @@ impl BorderedLoader {
                 None,
             ))
         } else {
-            LoaderKind::Plain(Loader::new(tui, muted_spinner, muted_message, message, None))
+            LoaderKind::Plain(Loader::new(
+                tui,
+                muted_spinner,
+                muted_message,
+                message,
+                None,
+            ))
         };
 
         let (spacer_before_hint, hint) = if cancellable {

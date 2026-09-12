@@ -40,11 +40,13 @@ fn flatten_context_tree(root: &ContextTreeNode) -> Vec<ContextTreeRow> {
         prefix: String::new(),
     }];
     let mut index = 1usize;
-    let walk = |children: &[ContextTreeNode],
-                ancestors: &str,
-                rows: &mut Vec<ContextTreeRow>,
-                index: &mut usize| {
-        for (child_index, _) in children.iter().enumerate() {
+    fn walk(
+        children: &[ContextTreeNode],
+        ancestors: &str,
+        rows: &mut Vec<ContextTreeRow>,
+        index: &mut usize,
+    ) {
+        for (child_index, child) in children.iter().enumerate() {
             let is_last = child_index == children.len() - 1;
             rows.push(ContextTreeRow {
                 node_index: *index,
@@ -59,13 +61,13 @@ fn flatten_context_tree(root: &ContextTreeNode) -> Vec<ContextTreeRow> {
             });
             *index += 1;
             walk(
-                &children[child_index].children,
+                &child.children,
                 &format!("{ancestors}{}", if is_last { "   " } else { "\u{2502}  " }),
                 rows,
                 index,
             );
         }
-    };
+    }
     walk(&root.children, "", &mut rows, &mut index);
     rows
 }

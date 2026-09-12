@@ -8,6 +8,23 @@ use std::rc::Rc;
 use crate::modes::interactive::components::dynamic_border::DynamicBorder;
 use crate::modes::interactive::theme::theme::{get_available_themes, get_select_list_theme};
 
+/// `theme.ts`'s `SelectListTheme` carries `Send + Sync` closures; the `pi-tui`
+/// component takes the same closures without those bounds. Private port of the
+/// conversion the other selectors apply.
+fn to_tui_select_list_theme(
+    source: crate::modes::interactive::theme::theme::SelectListTheme,
+) -> pi_tui::components::select_list::SelectListTheme {
+    pi_tui::components::select_list::SelectListTheme {
+        selected_prefix: source.selected_prefix,
+        selected_text: source.selected_text,
+        description: source.description,
+        argument_hint: Some(source.argument_hint),
+        source_tag: Some(source.source_tag),
+        scroll_info: source.scroll_info,
+        no_match: source.no_match,
+    }
+}
+
 /// `THEME_SELECT_LIST_LAYOUT`
 fn theme_select_list_layout() -> SelectListLayoutOptions {
     SelectListLayoutOptions {
@@ -54,7 +71,7 @@ impl ThemeSelectorComponent {
         let select_list = Rc::new(RefCell::new(SelectList::new(
             theme_items,
             10,
-            get_select_list_theme(),
+            to_tui_select_list_theme(get_select_list_theme()),
             theme_select_list_layout(),
         )));
 
