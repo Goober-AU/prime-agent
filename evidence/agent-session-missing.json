@@ -1,0 +1,65 @@
+{
+ "PreparedTurnActionOptions": [],
+ "COMPACTION_SKIPPED_ERROR_MESSAGE": [],
+ "RlmChildTurnOutcome": [],
+ "SessionActionPhase": [
+  "core\\session_action_store.rs"
+ ],
+ "agent_message_key_of_delivery": [],
+ "normalize_heartbeat_delivery_mode": [
+  "core\\cron_jobs.rs"
+ ],
+ "TurnExecutionPolicyOptions": [],
+ "DEFERRED_SESSION_INPUT_ERROR_MESSAGE": [],
+ "SessionSlashCommandResultDetails": [
+  "core\\messages.rs"
+ ],
+ "SessionActionSnapshotKind": [
+  "core\\session_action_store.rs"
+ ],
+ "RestoreResult": [
+  "core\\kernel\\state_snapshot.rs",
+  "core\\tools\\ipython.rs"
+ ],
+ "HostRequestHandlers": [
+  "core\\agent_messages.rs",
+  "core\\agent_observe.rs",
+  "core\\kernel\\shared.rs",
+  "core\\mcp\\mcp_manager.rs",
+  "core\\memory\\service.rs"
+ ],
+ "RlmCreateSubagentRuntimeOptions": [],
+ "COMPACTION_CANCELLED_ERROR_MESSAGE": [],
+ "get_supported_thinking_levels": [
+  "..\\..\\pi-ai\\src\\models.rs"
+ ],
+ "now_iso": [
+  "modes\\agent_connection\\daemon_agent_connection.rs"
+ ],
+ "image_to_value": [],
+ "CompactOptions": [
+  "core\\extensions\\types.rs"
+ ],
+ "compaction_entry_from_session_entry": [],
+ "rlm_heartbeat_host_response": [],
+ "REFINEMENT_SOURCE_SELF": [
+  "core\\messages.rs"
+ ],
+ "agent_message_timestamp": [],
+ "RollbackProof": [
+  "core\\session_action_store.rs"
+ ],
+ "SessionActionSnapshotActive": [
+  "core\\session_action_store.rs"
+ ],
+ "ResourceExtensionEntry": [
+  "modes\\agent_connection\\snapshot.rs"
+ ],
+ "builtin_tool_registry": [],
+ "create_builtin_tools": [],
+ "BuiltinToolOptions": [],
+ "execute_bash": [],
+ "BashExecutionOptions": [
+  "modes\\interactive\\components\\bash_execution.rs"
+ ]
+}
