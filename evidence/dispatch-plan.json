@@ -14,14 +14,10 @@
   "ca-cli-b": 2
  },
  "queue_order": [
+  "mega-daemon-supervisor",
   "ca-cli-b",
   "ca-modes-rest-b",
-  "ca-modes-telegram-b",
-  "ca-kernel-b",
-  "ca-settings-b",
-  "ca-extensions-b",
-  "ca-daemon-a",
-  "ca-session-core",
-  "ca-root"
- ]
+  "ca-session-core-b"
+ ],
+ "notes": "mega-daemon-supervisor is a RE-RUN: its file on disk is a placeholder (2 of 29 functions) and must be deleted and re-ported in 7 sequential passes. ca-kernel-c is running repl-manager.ts with the 4-pass method. Cap: 1 lead + N children <= 15, so N <= 14. Dispatch only when a slot frees."
 }
