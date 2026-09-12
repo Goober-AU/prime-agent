@@ -1,0 +1,30 @@
+{
+ "slice": "agent-core-missing",
+ "files": [
+  {
+   "src": "packages/agent/src/agent.ts",
+   "rust": "crates/pi-agent-core/src/agent.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "reconnaissance only; still 0 bytes. TypeScript read in full. Not written before the output limit."
+  },
+  {
+   "src": "packages/agent/src/proxy.ts",
+   "rust": "crates/pi-agent-core/src/proxy.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "reconnaissance only; still 0 bytes. TypeScript read in full. Not written before the output limit."
+  },
+  {
+   "src": "packages/agent/src/index.ts",
+   "rust": "crates/pi-agent-core/src/mod.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "reconnaissance only; still 0 bytes. index.ts is 5 `export * from` lines."
+  }
+ ],
+ "build": "not run (no files written; cargo check deliberately skipped per the no-cargo-between/one-check rule)",
+ "tests": "not run",
+ "blocked_on": "worker output limit reached during reconnaissance. No Rust was written this session. pi-agent-core is still 68-error state; the agent-core-repair worker owns types.rs/agent_loop.rs/performance_metrics.rs.",
+ "honest_summary": "I did not port the slice. I spent the whole budget reading PORT-RULES.md, BASELINE.md, the slice JSON, the three TypeScript sources, and the existing pi-agent-core/pi-ai Rust APIs needed for a correct 1:1 port, then hit the output limit. agent.rs, proxy.rs and mod.rs are still 0 bytes. A fresh worker with the same brief should start writing immediately: the API recon is done and recorded below."
+}

@@ -3,6 +3,11 @@
  "crate": "pi-agent-core",
  "files": [
   {
+   "src": "packages/agent/src/types.ts",
+   "rust": "crates/pi-agent-core/src/types.rs",
+   "loc": 409
+  },
+  {
    "src": "packages/agent/src/agent-loop.ts",
    "rust": "crates/pi-agent-core/src/agent_loop.rs",
    "loc": 1287
@@ -13,11 +18,21 @@
    "loc": 187
   },
   {
-   "src": "packages/agent/src/types.ts",
-   "rust": "crates/pi-agent-core/src/types.rs",
-   "loc": 409
+   "src": "packages/agent/src/agent.ts",
+   "rust": "crates/pi-agent-core/src/agent.rs",
+   "loc": 605
+  },
+  {
+   "src": "packages/agent/src/proxy.ts",
+   "rust": "crates/pi-agent-core/src/proxy.rs",
+   "loc": 348
+  },
+  {
+   "src": "packages/agent/src/index.ts",
+   "rust": "crates/pi-agent-core/src/mod.rs",
+   "loc": 5
   }
  ],
- "note": "REPAIR slice (post-crash). All 6 files are written. pi-ai and pi-tui both COMPILE CLEAN now. pi-agent-core has 68 errors: agent_loop.rs 60, performance_metrics.rs 7, types.rs 1.\nROOT CAUSE (confirmed by grep): types.rs still defines the temporary `pub mod pi_ai_shim` (13 references) and agent_loop.rs still has `use self::pi_ai_shim as pi_ai;` (1 reference). The shim was only needed because pi-ai was empty when the file was written. DELETE the whole `pub mod pi_ai_shim { ... }` block (starts ~line 754 in types.rs, runs to the end of that file) and replace `use self::pi_ai_shim as pi_ai;` in types.rs:23 and agent_loop.rs:16 with real `use pi_ai::types::{...}` / `use pi_ai::utils::...` imports.\nThen fix the fallout: agent_loop.rs uses AgentMessage::Assistant / ::ToolResult variants that do not exist (the enum is `AgentMessage::Message(Message) | Custom(CustomAgentMessage)`; use Message variants + message.role()); AssistantMessage has no `tool_calls` field (tool calls live in `content` as ContentBlock entries).\nThen ONE cargo check -p pi-agent-core + ONE cargo test -p pi-agent-core. SCOPE NOW: only types.rs, agent_loop.rs and performance_metrics.rs. agent.rs/proxy.rs/mod.rs are handled by the agent-core-missing slice - do not touch them.",
- "loc": 1883
+ "note": "REPAIR slice (post-crash). All 6 files are written. pi-ai and pi-tui both COMPILE CLEAN now. pi-agent-core has 68 errors: agent_loop.rs 60, performance_metrics.rs 7, types.rs 1.\nROOT CAUSE (confirmed by grep): types.rs still defines the temporary `pub mod pi_ai_shim` (13 references) and agent_loop.rs still has `use self::pi_ai_shim as pi_ai;` (1 reference). The shim was only needed because pi-ai was empty when the file was written. DELETE the whole `pub mod pi_ai_shim { ... }` block (starts ~line 754 in types.rs, runs to the end of that file) and replace `use self::pi_ai_shim as pi_ai;` in types.rs:23 and agent_loop.rs:16 with real `use pi_ai::types::{...}` / `use pi_ai::utils::...` imports.\nThen fix the fallout: agent_loop.rs uses AgentMessage::Assistant / ::ToolResult variants that do not exist (the enum is `AgentMessage::Message(Message) | Custom(CustomAgentMessage)`; use Message variants + message.role()); AssistantMessage has no `tool_calls` field (tool calls live in `content` as ContentBlock entries).\nThen ONE cargo check -p pi-agent-core + ONE cargo test -p pi-agent-core. SCOPE NOW: only types.rs, agent_loop.rs and performance_metrics.rs. agent.rs/proxy.rs/mod.rs are handled by the agent-core-missing slice - do not touch them. SCOPE EXPANDED: this slice now owns ALL SIX packages/agent/src files (agent-core-missing died at its output limit and was deleted). agent.rs, proxy.rs and mod.rs are now written but still have errors; keep fixing them.",
+ "loc": 2841
 }

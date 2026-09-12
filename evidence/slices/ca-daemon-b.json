@@ -38,11 +38,6 @@
    "loc": 97
   },
   {
-   "src": "packages/coding-agent/src/modes/daemon/daemon-client.ts",
-   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_client.rs",
-   "loc": 750
-  },
-  {
    "src": "packages/coding-agent/src/modes/daemon/daemon-extension-binding.ts",
    "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_extension_binding.rs",
    "loc": 254
@@ -88,11 +83,6 @@
    "loc": 280
   },
   {
-   "src": "packages/coding-agent/src/modes/daemon/heartbeat-catalog.ts",
-   "rust": "crates/pi-coding-agent/src/modes/daemon/heartbeat_catalog.rs",
-   "loc": 25
-  },
-  {
    "src": "packages/coding-agent/src/modes/daemon/mutation-drain-latch.ts",
    "rust": "crates/pi-coding-agent/src/modes/daemon/mutation_drain_latch.rs",
    "loc": 37
@@ -106,11 +96,6 @@
    "src": "packages/coding-agent/src/modes/daemon/rlm-subagent-display.ts",
    "rust": "crates/pi-coding-agent/src/modes/daemon/rlm_subagent_display.rs",
    "loc": 100
-  },
-  {
-   "src": "packages/coding-agent/src/modes/daemon/saved-session-catalog.ts",
-   "rust": "crates/pi-coding-agent/src/modes/daemon/saved_session_catalog.rs",
-   "loc": 77
   },
   {
    "src": "packages/coding-agent/src/modes/daemon/saved-session-info.ts",
@@ -128,5 +113,6 @@
    "loc": 114
   }
  ],
- "loc": 6992
+ "loc": 6140,
+ "note": " NOTE: daemon_client.rs, heartbeat_catalog.rs and saved_session_catalog.rs moved to the ca-daemon-consolidate repair slice."
 }
