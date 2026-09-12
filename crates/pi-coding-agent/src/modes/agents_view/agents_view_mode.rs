@@ -8,10 +8,9 @@
 //! behaviour is testable without a terminal.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
-use tokio::sync::Mutex;
 
 use super::agents_view_state::{
     build_unified_session_index, collapse_whitespace, compute_recursive_rollups,
@@ -50,6 +49,16 @@ pub const CODE_ROW_MARKER: &str = "\u{0}agents-view-code-row\u{0}";
 /// `WORKING_ICON_INTERVAL_MS` from modes/interactive/theme/working-icon.ts.
 pub const WORKING_ICON_INTERVAL_MS: u64 = 250;
 pub const WORKING_ICON_FRAMES: [&str; 4] = ["◇", "◈", "◆", "◈"];
+
+/// The port split the TypeScript `{ sessionId, activeSessionId }` key into a
+/// selection key and a scope key with the same shape; `hasUnifiedSessionChildren`
+/// takes the scope one.
+fn scope_key_from_selection(selection: &AgentsViewSelectionKey) -> AgentsViewScopeKey {
+    AgentsViewScopeKey {
+        session_id: selection.session_id.clone(),
+        active_session_id: selection.active_session_id.clone(),
+    }
+}
 
 pub fn working_icon_frame(frame: i64) -> &'static str {
     let len = WORKING_ICON_FRAMES.len() as i64;
@@ -1503,7 +1512,7 @@ pub async fn run_agents_view_mode(
         options,
         persistent_state,
         terminal,
-        editor,
+        editor: Some(editor),
         theme,
         transport,
         factory,
@@ -1520,7 +1529,9 @@ struct AgentsViewRunner<'a> {
     options: AgentsViewModeOptions,
     persistent_state: AgentsViewPersistentState,
     terminal: Arc<dyn AgentsViewTerminal>,
-    editor: Box<dyn AgentsViewEditor>,
+    /// `AgentsViewMode` owns the editor for the duration of one view, so the
+    /// runner parks it here between iterations.
+    editor: Option<Box<dyn AgentsViewEditor>>,
     theme: Arc<dyn AgentsViewTheme>,
     transport: Arc<dyn super::roster_store::DaemonTransport>,
     /// Concrete handle to the scripted transport, for test hooks only.
@@ -1552,12 +1563,16 @@ impl AgentsViewRunner<'_> {
             // The view borrows the editor and the interactive factory, so its
             // borrows are scoped to this block; `take_persistent_state` carries the
             // mutable state back out, matching the reference's shared object.
-            let (view_result, persistent_state) = {
+            let editor = self
+                .editor
+                .take()
+                .ok_or_else(|| "Agents view editor is not available".to_string())?;
+            let (view_result, persistent_state, editor) = {
                 let mut view = AgentsViewMode::new(
                     self.options.clone(),
                     self.persistent_state.clone(),
                     self.terminal.clone(),
-                    &mut *self.editor,
+                    editor,
                     self.theme.clone(),
                     self.transport.clone(),
                     self.factory,
@@ -1565,8 +1580,10 @@ impl AgentsViewRunner<'_> {
                     self.recover_daemon.clone(),
                 );
                 let view_result = view.run().await?;
-                (view_result, view.take_persistent_state())
+                let persistent_state = view.take_persistent_state();
+                (view_result, persistent_state, view.editor)
             };
+            self.editor = Some(editor);
             self.persistent_state = persistent_state;
             let result = match view_result {
                 AgentsViewRunResult::ScopeBack {
@@ -1814,8 +1831,7 @@ pub struct AgentsViewMode<'a> {
     options: AgentsViewModeOptions,
     persistent_state: AgentsViewPersistentState,
     terminal: Arc<dyn AgentsViewTerminal>,
-    /// Borrowed: the run loop owns the editor for the process lifetime.
-    editor: &'a mut dyn AgentsViewEditor,
+    editor: Box<dyn AgentsViewEditor>,
     theme: Arc<dyn AgentsViewTheme>,
     transport: Arc<dyn super::roster_store::DaemonTransport>,
     /// Concrete handle to the scripted transport, for test hooks only.
@@ -1920,7 +1936,7 @@ impl<'a> AgentsViewMode<'a> {
         options: AgentsViewModeOptions,
         persistent_state: AgentsViewPersistentState,
         terminal: Arc<dyn AgentsViewTerminal>,
-        editor: &'a mut dyn AgentsViewEditor,
+        editor: Box<dyn AgentsViewEditor>,
         theme: Arc<dyn AgentsViewTheme>,
         transport: Arc<dyn super::roster_store::DaemonTransport>,
         factory: &'a dyn DaemonAgentConnectionFactory,
@@ -1955,6 +1971,7 @@ impl<'a> AgentsViewMode<'a> {
         let saved_catalog_ready = persistent_state.saved_catalog_loaded == Some(true);
         let heartbeats = persistent_state.heartbeats.clone().unwrap_or_default();
         let saved_catalog_generation = persistent_state.saved_catalog_generation.unwrap_or(0);
+        let mut editor = editor;
         editor.set_text(persistent_state.query.clone().unwrap_or_default().as_str());
         editor.set_placeholder(SEARCH_PROMPT_PLACEHOLDER);
         let editor_placeholder_for_test = Some(SEARCH_PROMPT_PLACEHOLDER.to_string());
@@ -2134,7 +2151,7 @@ impl<'a> AgentsViewMode<'a> {
             Some(result) => {
                 let has_children = has_unified_session_children(
                     &self.unified_records,
-                    &get_agents_view_selection_key(&result.selection),
+                    &scope_key_from_selection(&get_agents_view_selection_key(&result.selection)),
                     Some(&self.unified_index),
                 );
                 AgentsViewRunResult::ScopeBack {
@@ -2417,7 +2434,7 @@ impl<'a> AgentsViewMode<'a> {
         let reason_holder = Arc::new(Mutex::new(None::<String>));
         let holder = reason_holder.clone();
         let unsubscribe = client.on_close(Box::new(move |reason| {
-            *holder.lock().unwrap() = Some(reason.to_string());
+            *holder.lock().expect("close reason poisoned") = Some(reason.to_string());
         }));
         self.unsubscribe_client_close = Some(unsubscribe);
         // The reference dispatches on `getDaemonSocketCloseReason(error)`; the
@@ -3226,7 +3243,7 @@ impl<'a> AgentsViewMode<'a> {
         }
         let has_children = has_unified_session_children(
             &self.unified_records,
-            &get_agents_view_selection_key(&row.summary),
+            &scope_key_from_selection(&get_agents_view_selection_key(&row.summary)),
             Some(&self.unified_index),
         );
         self.finish(AgentsViewRunResult::Open {
@@ -3244,7 +3261,7 @@ impl<'a> AgentsViewMode<'a> {
         if row.summary.active_session_id.is_some() || row.summary.session_file.is_some() {
             let has_children = has_unified_session_children(
                 &self.unified_records,
-                &get_agents_view_selection_key(&row.summary),
+                &scope_key_from_selection(&get_agents_view_selection_key(&row.summary)),
                 Some(&self.unified_index),
             );
             self.finish(AgentsViewRunResult::Open {
@@ -3277,7 +3294,7 @@ impl<'a> AgentsViewMode<'a> {
         }
         let has_children = has_unified_session_children(
             &self.unified_records,
-            &get_agents_view_selection_key(&root.summary),
+            &scope_key_from_selection(&get_agents_view_selection_key(&root.summary)),
             Some(&self.unified_index),
         );
         let result = create_unattachable_child_open_result(

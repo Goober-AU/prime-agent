@@ -1,0 +1,1552 @@
+[
+ [
+  "core/agent_session_runtime.rs",
+  33,
+  "file not found for module `daemon_adapter`"
+ ],
+ [
+  "core/agent_session_runtime.rs",
+  34,
+  "file not found for module `in_process_adapter`"
+ ],
+ [
+  "core/agent_session.rs",
+  162,
+  "unresolved import `crate::core::refinement::refinement::AutoRefineReviewer`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  8,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  9,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  10,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  493,
+  "no field `agents` on type `rlm_runtime::RlmListSubagentsResult`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  509,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  510,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  511,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  518,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  519,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  520,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  540,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  541,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  542,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  588,
+  "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `child_id`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  591,
+  "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `label`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  591,
+  "no field `label` on type `&agent_session::RlmChildRun`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  592,
+  "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `model`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  679,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  680,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  681,
+  "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  782,
+  "this function takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  809,
+  "`match` arms have incompatible types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  814,
+  "struct `agent_session::RlmSubagentModelSelection` has no field named `thinking_level`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  828,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  832,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  826,
+  "missing fields `id`, `spawn_code` and `spawned_by_request_id` in initializer of `agent_session::RlmSubagentRuntimeOptionsInput`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  842,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  844,
+  "struct `rlm_runtime::RlmCreateSessionResult` has no field named `child_id`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  844,
+  "no field `runtime_id` on type `rlm_runtime::RlmSubagentRuntime`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  845,
+  "struct `rlm_runtime::RlmCreateSessionResult` has no field named `session_dir`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  845,
+  "no field `session_dir` on type `rlm_runtime::RlmSubagentRuntime`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  846,
+  "struct `rlm_runtime::RlmCreateSessionResult` has no field named `session_name`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  858,
+  "struct `rlm_runtime::RlmSpawnHandle` has no field named `child_id`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  858,
+  "no field `child_id` on type `rlm_runtime::RlmCreateSessionResult`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  859,
+  "no field `session_dir` on type `rlm_runtime::RlmCreateSessionResult`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  860,
+  "struct `rlm_runtime::RlmSpawnHandle` has no field named `session_name`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  860,
+  "no field `session_name` on type `rlm_runtime::RlmCreateSessionResult`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  975,
+  "no field `max_attempts` on type `ResolvedRetrySettings`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  985,
+  "no field `max_attempts` on type `ResolvedRetrySettings`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  991,
+  "no field `delay_ms` on type `ResolvedRetrySettings`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1003,
+  "no field `max_attempts` on type `ResolvedRetrySettings`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1023,
+  "the method `clone` exists for struct `MutexGuard<'_, Option<Pin<Box<dyn Future<Output = ...> + Send>>>>`, but its trait bounds were not satisfied"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1209,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1216,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1216,
+  "struct `agent_session::SetRlmMaxDepthResult` has no field named `global`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1251,
+  "this function takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1252,
+  "no method named `is_empty` found for struct `BranchPreparation` in the current scope"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1256,
+  "struct `branch_summarization::GenerateBranchSummaryOptions` has no field named `messages`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1255,
+  "this function takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1261,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  1293,
+  "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied"
+ ],
+ [
+  "core/agent_session.rs",
+  2560,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  2579,
+  "arguments to this method are incorrect"
+ ],
+ [
+  "core/agent_session.rs",
+  2599,
+  "the `?` operator can only be applied to values that implement `Try`"
+ ],
+ [
+  "core/agent_session.rs",
+  2628,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  2627,
+  "`?` couldn't convert the error to `std::string::String`"
+ ],
+ [
+  "core/agent_session.rs",
+  3583,
+  "no method named `get_required_request_auth` found for reference `&agent_session::AgentSession` in the current scope"
+ ],
+ [
+  "core/agent_session.rs",
+  3584,
+  "the size for values of type `str` cannot be known at compilation time"
+ ],
+ [
+  "core/agent_session.rs",
+  3584,
+  "the size for values of type `str` cannot be known at compilation time"
+ ],
+ [
+  "core/agent_session.rs",
+  3583,
+  "the size for values of type `str` cannot be known at compilation time"
+ ],
+ [
+  "core/agent_session.rs",
+  3716,
+  "this method takes 1 argument but 0 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  3767,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  3768,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  3806,
+  "this method takes 1 argument but 3 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  3823,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  3820,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  3837,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  4450,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  4453,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  4781,
+  "no field `relationship` on type `&&AgentSessionMessageAgentSummary`"
+ ],
+ [
+  "core/agent_session.rs",
+  5350,
+  "the trait bound `std::collections::HashSet<usize>: Extend<std::string::String>` is not satisfied"
+ ],
+ [
+  "core/agent_session.rs",
+  5355,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  5499,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  5500,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  5522,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  5572,
+  "this method takes 1 argument but 3 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  5571,
+  "the `?` operator can only be applied to values that implement `Try`"
+ ],
+ [
+  "core/agent_session.rs",
+  5573,
+  "the `?` operator can only be used in an async function that returns `Result` or `Option` (or another type that implements `FromResidual`)"
+ ],
+ [
+  "core/agent_session.rs",
+  5580,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  5580,
+  "the `?` operator can only be used in an async function that returns `Result` or `Option` (or another type that implements `FromResidual`)"
+ ],
+ [
+  "core/agent_session.rs",
+  5917,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  5937,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  5949,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  5974,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  6510,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  6516,
+  "this method takes 1 argument but 2 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  6549,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  6635,
+  "no field `return_after_accepted` on type `PromptOptions`"
+ ],
+ [
+  "core/agent_session.rs",
+  6777,
+  "the `?` operator can only be applied to values that implement `Try`"
+ ],
+ [
+  "core/agent_session.rs",
+  6791,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  7007,
+  "this method takes 0 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  7116,
+  "no field `return_after_accepted` on type `PromptOptions`"
+ ],
+ [
+  "core/agent_session.rs",
+  7164,
+  "this method takes 0 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  7559,
+  "the `?` operator can only be applied to values that implement `Try`"
+ ],
+ [
+  "core/agent_session.rs",
+  7602,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  7681,
+  "struct `PreparedTurnActionOptions` has no field named `records`"
+ ],
+ [
+  "core/agent_session.rs",
+  8200,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  8217,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  8464,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  8540,
+  "the method `as_deref` exists for enum `std::option::Option<ActionLifecycleState>`, but its trait bounds were not satisfied"
+ ],
+ [
+  "core/agent_session.rs",
+  8571,
+  "`{closure@crates\\pi-coding-agent\\src\\core\\agent_session.rs:8575:21: 8575:68}` is not a future"
+ ],
+ [
+  "core/agent_session.rs",
+  8569,
+  "this method takes 3 arguments but 2 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  8568,
+  "`{closure@crates\\pi-coding-agent\\src\\core\\agent_session.rs:8575:21: 8575:68}` is not a future"
+ ],
+ [
+  "core/agent_session.rs",
+  8586,
+  "`{closure@crates\\pi-coding-agent\\src\\core\\agent_session.rs:8575:21: 8575:68}` is not a future"
+ ],
+ [
+  "core/agent_session.rs",
+  8597,
+  "cannot apply unary operator `!` to type `std::option::Option<PreparedPromptPreparation>`"
+ ],
+ [
+  "core/agent_session.rs",
+  8699,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  8756,
+  "this method takes 1 argument but 2 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  8757,
+  "this method takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  8814,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  8819,
+  "no method named `emit_refine_failed` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session.rs",
+  8837,
+  "this method takes 1 argument but 2 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  8840,
+  "no method named `is_empty` found for enum `std::option::Option<T>` in the current scope"
+ ],
+ [
+  "core/agent_session.rs",
+  8841,
+  "`std::option::Option<std::string::String>` doesn't implement `std::fmt::Display`"
+ ],
+ [
+  "core/agent_session.rs",
+  8985,
+  "the trait bound `messages::CustomMessage: std::default::Default` is not satisfied"
+ ],
+ [
+  "core/agent_session.rs",
+  8993,
+  "no method named `content_as_parts` found for struct `messages::CustomMessage` in the current scope"
+ ],
+ [
+  "core/agent_session.rs",
+  9015,
+  "no method named `content_as_parts` found for struct `messages::CustomMessage` in the current scope"
+ ],
+ [
+  "core/agent_session.rs",
+  9054,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  9090,
+  "no method named `prompt_with_options` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session.rs",
+  9096,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  9703,
+  "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied"
+ ],
+ [
+  "core/agent_session.rs",
+  9923,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  9924,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  9953,
+  "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied"
+ ],
+ [
+  "core/agent_session.rs",
+  9983,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  9991,
+  "missing fields `is_scoped` and `service_tier` in initializer of `ModelCycleResult`"
+ ],
+ [
+  "core/agent_session.rs",
+  10010,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  10015,
+  "missing fields `is_scoped` and `service_tier` in initializer of `ModelCycleResult`"
+ ],
+ [
+  "core/agent_session.rs",
+  10173,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  10513,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  10524,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  10644,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  10652,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  10707,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  10841,
+  "cannot find function `options_source` in this scope"
+ ],
+ [
+  "core/agent_session.rs",
+  10841,
+  "expected `{closure@agent_session.rs:10837:13}` to return `Pin<Box<dyn Future<Output = Result<RefinementResult, String>> + Send>>`, but it returns `Pin<Box<{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:10841:26: 10841:36}>>`"
+ ],
+ [
+  "core/agent_session.rs",
+  11106,
+  "binary operation `<` cannot be applied to type `ContextUsageEstimate`"
+ ],
+ [
+  "core/agent_session.rs",
+  11734,
+  "no field `id` on type `std::option::Option<pi_ai::index::Model>`"
+ ],
+ [
+  "core/agent_session.rs",
+  11737,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  11739,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  11803,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  11823,
+  "this function takes 3 arguments but 2 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  11838,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  11851,
+  "this method takes 8 arguments but 7 arguments were supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  11910,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12048,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12056,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12282,
+  "this method takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session.rs",
+  12288,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12294,
+  "missing field `options` in initializer of `SerializedBackgroundPlanResult`"
+ ],
+ [
+  "core/agent_session.rs",
+  12301,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12327,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12333,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12335,
+  "no associated function or constant named `SelfOnly` found for struct `std::string::String` in the current scope"
+ ],
+ [
+  "core/agent_session.rs",
+  12337,
+  "no associated function or constant named `Auto` found for struct `std::string::String` in the current scope"
+ ],
+ [
+  "core/agent_session.rs",
+  12331,
+  "missing fields `abort` and `options` in initializer of `SerializedBackgroundPlanResult`"
+ ],
+ [
+  "core/agent_session.rs",
+  12340,
+  "missing field `options` in initializer of `SerializedBackgroundPlanResult`"
+ ],
+ [
+  "core/kernel/repl_manager.rs",
+  671,
+  "cycle detected when computing type of opaque `core::kernel::repl_manager::<impl at crates\\pi-coding-agent\\src\\core\\kernel\\repl_manager.rs:631:1: 631:17>::start_with_options::{opaque#0}`"
+ ],
+ [
+  "core/sdk.rs",
+  726,
+  "mismatched types"
+ ],
+ [
+  "core/sdk.rs",
+  727,
+  "mismatched types"
+ ],
+ [
+  "core/sdk.rs",
+  740,
+  "mismatched types"
+ ],
+ [
+  "main_entry.rs",
+  1584,
+  "the trait bound `DaemonClient: daemon_agent_connection::DaemonTransportClient` is not satisfied"
+ ],
+ [
+  "main_entry.rs",
+  2368,
+  "the trait bound `settings_manager::SettingsManager: OnboardingSettingsReader` is not satisfied"
+ ],
+ [
+  "main_entry.rs",
+  2369,
+  "the trait bound `model_registry::ModelRegistry: OnboardingModelRegistryReader` is not satisfied"
+ ],
+ [
+  "main_entry.rs",
+  2560,
+  "no method named `dispose` found for struct `std::sync::Arc<DaemonAgentConnection>` in the current scope"
+ ],
+ [
+  "main_entry.rs",
+  2572,
+  "no method named `dispose` found for struct `std::sync::Arc<DaemonAgentConnection>` in the current scope"
+ ],
+ [
+  "main_entry.rs",
+  2895,
+  "type mismatch in closure arguments"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  3986,
+  "no method named `contains_key` found for reference `&serde_json::Value` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4002,
+  "arguments to this method are incorrect"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4017,
+  "this function takes 3 arguments but 2 arguments were supplied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4019,
+  "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4021,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4023,
+  "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4025,
+  "arguments to this method are incorrect"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4048,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4122,
+  "no associated function or constant named `list_with_callbacks` found for struct `session_manager::SessionManager` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4126,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4127,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4133,
+  "no associated function or constant named `list_all_with_callbacks` found for struct `session_manager::SessionManager` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4135,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4136,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4146,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4201,
+  "a value of type `&std::collections::HashSet<std::string::String>` cannot be built from an iterator over elements of type `std::string::String`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4225,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4255,
+  "binary operation `!=` cannot be applied to type `std::option::Option<&std::sync::Arc<DaemonSessionState>>`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4279,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4458,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4469,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4524,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4578,
+  "the trait bound `session_file_actions::DeleteSessionFileResult: serde::Serialize` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5039,
+  "the method `clone` exists for struct `Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>`, but its trait bounds were not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5075,
+  "no method named `lock` found for reference `&std::sync::Arc<DaemonSessionState>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5278,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5281,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5307,
+  "this function takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "C:/Users/openclawuser/optimus-rust-toolchain/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.151/src/macros.rs",
+  279,
+  "the trait bound `ModelIdentity: serde::Serialize` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5458,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5582,
+  "the trait bound `ModelIdentity: serde::Serialize` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5600,
+  "the trait bound `ModelIdentity: serde::Serialize` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5648,
+  "no method named `lock` found for struct `std::sync::Arc<settings_manager::SettingsManager>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5769,
+  "no method named `runtime_switch_session` found for reference `&std::sync::Arc<AgentDaemon>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5792,
+  "no method named `runtime_fork` found for reference `&std::sync::Arc<AgentDaemon>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5837,
+  "no method named `runtime_import_from_jsonl` found for reference `&std::sync::Arc<AgentDaemon>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5927,
+  "the trait bound `SessionTreeFlatNode: serde::Serialize` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5979,
+  "the trait bound `tool_definition::ToolDefinition: serde::de::DeserializeOwned` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5987,
+  "no method named `append_label_change` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6198,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6200,
+  "this function takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6202,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6204,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6199,
+  "`if` and `else` have incompatible types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6207,
+  "this function takes 3 arguments but 2 arguments were supplied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6207,
+  "`Result<std::option::Option<SessionLease>, AcquireSessionLeaseError>` is not a future"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6260,
+  "cannot borrow `lease` as mutable, as it is not declared as mutable"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6392,
+  "this method takes 1 argument but 2 arguments were supplied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6419,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6417,
+  "type mismatch in closure arguments"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8096,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8198,
+  "attempted to take value of method `role` on type `&pi_agent_core::types::AgentMessage`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8198,
+  "attempted to take value of method `role` on type `&pi_agent_core::types::AgentMessage`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8198,
+  "no field `timestamp` on type `&pi_agent_core::types::AgentMessage`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8198,
+  "no field `timestamp` on type `&pi_agent_core::types::AgentMessage`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8205,
+  "this function takes 1 argument but 2 arguments were supplied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8530,
+  "use of unstable library feature `iter_next_chunk`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8530,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8543,
+  "the size for values of type `[u8]` cannot be known at compilation time"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8544,
+  "the size for values of type `[u8]` cannot be known at compilation time"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8544,
+  "the size for values of type `[u8]` cannot be known at compilation time"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8576,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9030,
+  "no method named `acquire` found for struct `MutationDrainLatch` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9234,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9439,
+  "no method named `abort_for_update_restart` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9468,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9479,
+  "no field `state` on type `&std::sync::Arc<DaemonSocketClient>`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9484,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9523,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9525,
+  "`session_file_actions::DeleteSessionFileResult` is not a future"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  10289,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  10504,
+  "no method named `rlm_spawn_ledger` found for reference `&AgentDaemon` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  10578,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  10732,
+  "cannot move out of an `Arc`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  10971,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  11205,
+  "arguments to this function are incorrect"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  11335,
+  "cannot move out of an `Arc`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  11762,
+  "no field `last_activity_at` on type `SessionPassivationSnapshot`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  11763,
+  "no field `last_activity_at` on type `SessionPassivationSnapshot`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12410,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12412,
+  "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12527,
+  "no method named `in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12534,
+  "no method named `set_in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12536,
+  "no method named `set_in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12647,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12685,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12713,
+  "arguments to this function are incorrect"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12734,
+  "the trait bound `pi_agent_core::types::AgentMessage: std::default::Default` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12770,
+  "arguments to this function are incorrect"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  12935,
+  "the trait bound `pi_agent_core::types::AgentMessage: std::default::Default` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13319,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13377,
+  "the trait bound `active_session_state::AgentSessionRuntimeMetadata: serde::de::DeserializeOwned` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13384,
+  "the trait bound `active_session_state::AgentSessionRuntimeMetadata: serde::Serialize` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13709,
+  "no method named `as_deref` found for enum `SessionStateStatus` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13712,
+  "no method named `cancel_scheduled_jobs_for_session_file` found for reference `&AgentDaemon` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13592,
+  "no method named `as_deref` found for enum `SessionStateStatus` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13922,
+  "cannot move out of an `Arc`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14077,
+  "lifetime may not live long enough"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14314,
+  "cannot apply unary operator `!` to type `std::option::Option<RlmLedgerDeleteReason>`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14337,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14339,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14347,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14352,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14356,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14359,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14362,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14365,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14368,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14372,
+  "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14398,
+  "`?` couldn't convert the error to `std::string::String`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14467,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14467,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14562,
+  "no method named `is_destroyed` found for reference `&std::sync::Arc<DaemonClientHandle>` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  14565,
+  "this method takes 3 arguments but 5 arguments were supplied"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  529,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  559,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  647,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  651,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  663,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  668,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  681,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  703,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  726,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  824,
+  "cannot borrow data in an `Arc` as mutable"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  847,
+  "mismatched types"
+ ],
+ [
+  "modes/interactive/auth_flows.rs",
+  864,
+  "mismatched types"
+ ],
+ [
+  "modes/interactive/interactive_mode.rs",
+  3026,
+  "cannot move out of `self.agents_view_request` which is behind a mutable reference"
+ ],
+ [
+  "modes/interactive/interactive_mode.rs",
+  3053,
+  "no method named `get_fullscreen` found for reference `&std::sync::Arc<interactive_mode_services::SettingsManager>` in the current scope"
+ ],
+ [
+  "modes/rpc/rpc_mode.rs",
+  1057,
+  "use of moved value: `observed`"
+ ],
+ [
+  "modes/rpc/rpc_mode.rs",
+  131,
+  "cannot move out of `signal` because it is borrowed"
+ ],
+ [
+  "modes/rpc/rpc_mode.rs",
+  141,
+  "the type `Arc` does not implement `Copy`"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  68,
+  "cannot find function `runtime_extension_actions` in this scope"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  68,
+  "cannot find function `runtime_extension_context_actions` in this scope"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  81,
+  "cannot find function `runtime_source_info` in this scope"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  85,
+  "cannot find function `runtime_source_info` in this scope"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  124,
+  "cannot find function, tuple struct or tuple variant `RuntimeModelRegistry` in this scope"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  837,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  9993,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  10017,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12296,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session.rs",
+  12342,
+  "mismatched types"
+ ]
+]

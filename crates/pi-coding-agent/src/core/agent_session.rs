@@ -2016,7 +2016,8 @@ pub struct AgentSession {
     scoped_models: Vec<ScopedModel>,
     event_listeners: Mutex<Vec<AgentSessionEventListener>>,
     last_session_action_snapshot: Mutex<SessionActionSnapshot>,
-    agent_event_queue: Mutex<BoxFuture<Result<(), String>>>,
+    /// `_agentEventQueue` - the serialized tail of agent-event work.
+    agent_event_queue: Mutex<Option<BoxFuture<Result<(), String>>>>,
     action_store: Mutex<ActionStore<QueuedSessionAction>>,
     session_input_pump: Mutex<BoxFuture<Result<(), String>>>,
     session_input_pump_requested: AtomicBool,
@@ -2271,7 +2272,7 @@ impl AgentSession {
                 follow_ups: Vec::new(),
                 active: None,
             }),
-            agent_event_queue: Mutex::new(Box::pin(async { Ok(()) })),
+            agent_event_queue: Mutex::new(Some(Box::pin(async { Ok(()) }))),
             action_store: Mutex::new(ActionStore::new()),
             session_input_pump: Mutex::new(Box::pin(async { Ok(()) })),
             session_input_pump_requested: AtomicBool::new(false),
@@ -2489,7 +2490,7 @@ impl AgentSession {
     /// Refreshes MCP provider registrations without rebuilding the session runtime.
     pub fn refresh_mcp_providers(&self) {
         if let Some(manager) = &self.mcp_manager {
-            manager.refresh();
+            manager.lock().unwrap().refresh();
         }
     }
 
@@ -2536,7 +2537,7 @@ impl AgentSession {
         }
         let names = crate::core::tools::acp_mcp::acp_mcp_tool_names(servers)?;
         self.assert_acp_mcp_tool_names_available(&names)?;
-        if !manager.replace_acp_servers(servers, owner_id) {
+        if !manager.lock().unwrap().replace_acp_servers(servers, owner_id) {
             return Ok(());
         }
         self.rebuild_runtime_for_acp_mcp_servers();
@@ -2553,10 +2554,10 @@ impl AgentSession {
             Some(manager) => manager.clone(),
             None => return Ok(()),
         };
-        if !manager.can_release_acp_servers(owner_id) {
+        if !manager.lock().unwrap().can_release_acp_servers(owner_id) {
             return Ok(());
         }
-        if manager.replace_acp_servers(&[], owner_id) {
+        if manager.lock().unwrap().replace_acp_servers(&[], owner_id) {
             let removed_tool_names: HashSet<String> = self
                 .acp_mcp_tools
                 .lock()
@@ -2596,7 +2597,7 @@ impl AgentSession {
             // Do not rebuild or kill the notebook. Wait for the current turn, then ask
             // the kernel-owned MCP registry to close only these cached transports.
             self.agent.wait_for_idle().await?;
-            self.agent_event_queue.lock().unwrap().await?;
+            self.await_agent_event_queue().await;
             let provisioner = self.ipython_kernel_provisioner.lock().unwrap().clone();
             let manager = match provisioner.as_ref().and_then(|provisioner| provisioner.manager()) {
                 Some(manager) => manager,
@@ -2675,7 +2676,7 @@ impl AgentSession {
         let servers = self
             .mcp_manager
             .as_ref()
-            .map(|manager| manager.get_acp_servers())
+            .map(|manager| manager.lock().unwrap().get_acp_servers())
             .unwrap_or_default();
         let next_tool_names = crate::core::tools::acp_mcp::acp_mcp_tool_names(&servers).unwrap_or_default();
         let _ = self.assert_acp_mcp_tool_names_available(&next_tool_names);
@@ -2724,7 +2725,7 @@ impl AgentSession {
                         return Ok(None);
                     }
 
-                    session.agent_event_queue.lock().unwrap().await?;
+                    session.await_agent_event_queue().await;
 
                     runner
                         .emit_tool_call(
@@ -3708,11 +3709,45 @@ impl AgentSession {
 
     /// `_shouldStopAfterTurn`.
     async fn should_stop_after_turn(self: &Arc<Self>, context: ShouldStopAfterTurnContext) -> bool {
-        let _ = context;
-        if self.steering_stop_pending() {
+        if self.stop_goal_continuation_for_terminal_message(&context.message) {
             return true;
         }
-        if self.should_stop_for_threshold_compaction().await {
+        if self.account_goal_usage_for_assistant_message(&context.message) {
+            if let Ok(message) = create_goal_context_message(
+                &self.goal_state(),
+                GoalContextKind::BudgetLimit,
+                None,
+            ) {
+                let normalized = normalize_message_content(&CustomMessageContent::Text(
+                    message
+                        .content
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_default(),
+                ));
+                self.queue_prepared_prompt(
+                    "steer",
+                    &normalized.0,
+                    normalized.1,
+                    Some(PreparedTurnActionOptions {
+                        custom_message: Some(message),
+                        resume_if_idle: Some(true),
+                        ..Default::default()
+                    }),
+                )
+                .await;
+            }
+        }
+        if self.serialized_refine {
+            self.await_agent_event_queue().await;
+            self.run_serialized_refine_checkpoint().await;
+        }
+        if self.should_stop_for_threshold_compaction(&context).await {
+            return true;
+        }
+        // Steering stops continuation only after mandatory serialized checkpoints.
+        self.steering_stop_pending()
+        if self.should_stop_for_threshold_compaction(&context).await {
             return true;
         }
         if self.goal_state.lock().unwrap().status != GoalStatus::Active {
@@ -3745,33 +3780,99 @@ impl AgentSession {
         true
     }
 
-    /// `_shouldStopForThresholdCompaction`.
-    async fn should_stop_for_threshold_compaction(&self) -> bool {
-        let context_tokens = match self.threshold_context_tokens() {
-            Some(tokens) => tokens,
-            None => return false,
-        };
-        let state = self.agent.state();
-        let model = state.model.clone();
+    /// `_shouldStopForThresholdCompaction(context)`.
+    async fn should_stop_for_threshold_compaction(
+        self: &Arc<Self>,
+        context: &ShouldStopAfterTurnContext,
+    ) -> bool {
+        self.continue_after_threshold_compaction.store(false, Ordering::SeqCst);
+        if self.pending_requested_compaction.lock().unwrap().is_none()
+            && !self.threshold_compaction_needed(context).await
+        {
+            return false;
+        }
+
+        let last_message = self.agent.state().messages.last().cloned();
+        if self.pending_requested_compaction.lock().unwrap().is_some() {
+            self.await_agent_event_queue().await;
+            let continuation = self
+                .handle_rlm_child_turn_outcome(&context.message, true, Some("requested"))
+                .map(|outcome| outcome.continuation)
+                .unwrap_or(false);
+            if continuation {
+                self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+            }
+        }
+        // A queued continuation disproves the assistant-last "task finished" heuristic,
+        // so preserve a true set above.
+        let last_is_assistant = last_message
+            .as_ref()
+            .map(|message| message.role() == "assistant")
+            .unwrap_or(false);
+        if !last_is_assistant
+            && self.continue_after_threshold_compaction.load(Ordering::SeqCst) == false
+        {
+            self.continue_after_threshold_compaction
+                .store(true, Ordering::SeqCst);
+        }
+        true
+    }
+
+    /// `_thresholdCompactionNeeded(context)`.
+    async fn threshold_compaction_needed(
+        self: &Arc<Self>,
+        context: &ShouldStopAfterTurnContext,
+    ) -> bool {
         let settings = self.compaction_settings();
+        if !settings.enabled {
+            return false;
+        }
+
+        let compaction_timestamp = self.active_compaction_timestamp();
+        if let Some(compaction_timestamp) = compaction_timestamp {
+            if (context.message.timestamp as f64) <= compaction_timestamp {
+                return false;
+            }
+        }
+
+        let messages = self.agent.state().messages;
+        let context_tokens =
+            self.get_threshold_context_tokens(&settings, &context.message, compaction_timestamp);
+        let model = self.model();
+        if context_tokens.is_none() || model.is_none() {
+            return false;
+        }
+        let context_tokens = context_tokens.unwrap_or(0.0);
+        let model = model.unwrap_or_default();
         if !should_compact_for_model(context_tokens, &model, &settings) {
             return false;
         }
-        if self.continue_after_threshold_compaction.swap(false, Ordering::SeqCst) {
-            return false;
-        }
-        let review = self.maybe_auto_refine(AutoRefineReason::Compact).await;
-        let _ = review;
-        self.schedule_auto_refine_after_compaction(true);
-        self.compact(None, true)
-            .await
-            .is_err()
-            || true
-    }
+        let _ = messages;
 
-    /// `_thresholdCompactionNeeded`.
-    async fn threshold_compaction_needed(self: &Arc<Self>, _context: ShouldStopAfterTurnContext) -> bool {
-        self.should_stop_for_threshold_compaction().await
+        self.await_agent_event_queue().await;
+        let rlm_outcome = self.handle_rlm_child_turn_outcome(&context.message, true, Some("threshold"));
+        if rlm_outcome
+            .as_ref()
+            .map(|outcome| outcome.continuation)
+            .unwrap_or(false)
+        {
+            self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+        } else if !rlm_outcome
+            .as_ref()
+            .map(|outcome| outcome.terminal)
+            .unwrap_or(false)
+            && self.queue_goal_continuation_for_threshold_compaction(&context.message)
+        {
+            self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+        } else if !rlm_outcome
+            .as_ref()
+            .map(|outcome| outcome.terminal)
+            .unwrap_or(false)
+            && self.queue_autonomous_continuation_for_threshold_compaction(&context.message)
+        {
+            self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+        }
+        true
     }
 
     /// `_snapshotAutonomousRuntimeState`.
@@ -4793,7 +4894,7 @@ impl AgentSession {
     /// `_runRlmReloadBackstop`.
     async fn run_rlm_reload_backstop(self: &Arc<Self>) {
         let _ = self.agent.wait_for_idle().await;
-        let _ = self.agent_event_queue.lock().unwrap().await;
+        self.await_agent_event_queue().await;
         if self.disposed.load(Ordering::SeqCst)
             || self.disposing.load(Ordering::SeqCst)
             || self.session_input_pump_suspended.load(Ordering::SeqCst)
@@ -4846,7 +4947,7 @@ impl AgentSession {
         // not: waiting here would let a cancelled dispatch's held extension event
         // prevent unrelated root work from completing.
         if self.rlm_depth > 0 {
-            self.agent_event_queue.lock().unwrap().await?;
+            self.await_agent_event_queue().await;
         }
         let message = context
             .messages
@@ -10454,7 +10555,7 @@ impl AgentSession {
                 reason: context.reason,
                 turns_since_last_review: context.turns_since_last_review,
             },
-            headers: auth.headers,
+            headers: auth.headers.clone(),
             thinking_level: Some(thinking_level_name(&self.thinking_level())),
             retry: Some(self.provider_retry_policy()),
             complete: self.refinement_completion_fn(model),
@@ -10506,7 +10607,10 @@ impl AgentSession {
 
     /// `_loadMergedHarnessState()`.
     fn load_merged_harness_state(&self) -> HarnessState {
-        let global = load_harness_state(&get_global_harness_state_dir(), HarnessScope::Global);
+        let global = load_harness_state(
+            &get_global_harness_state_dir(&self.agent_dir.clone().unwrap_or_default()),
+            HarnessScope::Global,
+        );
         match self.local_harness_state_dir() {
             Some(dir) => merge_harness_states(&global, Some(&load_harness_state(&dir, HarnessScope::Local))),
             None => global,
@@ -10526,7 +10630,7 @@ impl AgentSession {
             None => return Err(format_no_model_selected_message()),
         };
         let auth = self.get_required_request_auth(&model).await?;
-        let global_dir = get_global_harness_state_dir();
+        let global_dir = get_global_harness_state_dir(&self.agent_dir.clone().unwrap_or_default());
         let local_dir = self.local_harness_state_dir();
         let global_state = load_harness_state(&global_dir, HarnessScope::Global);
         let local_state = local_dir
@@ -10546,29 +10650,32 @@ impl AgentSession {
             HarnessScope::Local => local_dir.clone(),
         };
         if let Some(target) = rollback_target {
-            if let Some(path) = &target.harness_state_path {
-                let parent = Path::new(path)
-                    .parent()
-                    .map(|parent| parent.to_string_lossy().to_string());
-                if let Some(parent) = parent {
-                    baseline_scope = if Path::new(&parent) == Path::new(&global_dir) {
-                        HarnessScope::Global
-                    } else {
-                        HarnessScope::Local
-                    };
-                    baseline_dir = Some(parent);
-                }
+            let path = &target.harness_state_path;
+            let parent = Path::new(path)
+                .parent()
+                .map(|parent| parent.to_string_lossy().to_string());
+            if let Some(parent) = parent {
+                baseline_scope = if Path::new(&parent) == Path::new(&global_dir) {
+                    HarnessScope::Global
+                } else {
+                    HarnessScope::Local
+                };
+                baseline_dir = Some(parent);
             }
         }
         let baseline_state = match rollback_target {
             Some(_) => load_harness_state(&baseline_dir.unwrap_or_default(), baseline_scope),
             None => match baseline_scope {
                 HarnessScope::Global => global_state.clone(),
-                HarnessScope::Local => local_state.clone().unwrap_or_default(),
+                HarnessScope::Local => local_state.clone().unwrap_or(HarnessState {
+                    schema: 1.0,
+                    entries: indexmap::IndexMap::new(),
+                    refinements: Vec::new(),
+                }),
             },
         };
         let plan = plan_refinement(PlanRefinementRequest {
-            messages: &self.agent.state().messages,
+            messages: &self.agent.state().messages[..],
             state: &planning_state,
             history: &history,
             model: RefineModel {
@@ -10576,7 +10683,7 @@ impl AgentSession {
             },
             api_key: auth.api_key,
             options: options.clone(),
-            headers: auth.headers,
+            headers: auth.headers.clone(),
             thinking_level: Some(thinking_level_name(&self.thinking_level())),
             complete: self.refinement_completion_fn(model.clone()),
         })
@@ -10613,7 +10720,7 @@ impl AgentSession {
         options: &RefineOptions,
         source: &str,
     ) -> Result<RefinementResult, String> {
-        let global_dir = get_global_harness_state_dir();
+        let global_dir = get_global_harness_state_dir(&self.agent_dir.clone().unwrap_or_default());
         let local_dir = self.local_harness_state_dir();
         let requested_scope = if options.global.unwrap_or(false) {
             HarnessScope::Global
@@ -10685,7 +10792,7 @@ impl AgentSession {
                 baseline_state: plan.baseline_state.clone(),
             },
         );
-        result.harness_state_path = Some(save_harness_state(&target_dir, &state)?);
+        result.harness_state_path = save_harness_state(&target_dir, &state)?;
         if target_scope == HarnessScope::Global {
             append_global_refinement(&global_dir, &result);
         }
@@ -10697,7 +10804,7 @@ impl AgentSession {
         self.record_refinement_outcome(&result);
         self.record_refinement_notice(&result, source);
         self.emit(AgentSessionEvent::RefineComplete {
-            result: serde_json::to_value(&result).unwrap_or(Value::Null),
+            result: result.clone(),
         });
         Ok(result)
     }
@@ -12110,9 +12217,19 @@ impl AgentSession {
     }
 
     /// `await this._agentEventQueue`.
-    async fn await_agent_event_queue(self: &Arc<Self>) {
-        let queued = self.agent_event_queue.lock().unwrap().clone();
+    ///
+    /// The queued future lives inside the mutex, so it is moved out, awaited and
+    /// then stored back; an empty slot uses the completed unit future.
+    async fn await_agent_event_queue(&self) {
+        let queued = { self.agent_event_queue.lock().unwrap().take() };
+        let Some(queued) = queued else {
+            return;
+        };
         let _ = queued.await;
+        let mut slot = self.agent_event_queue.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(Box::pin(async { Ok(()) }));
+        }
     }
 
     /// `this._agentEventQueue = this._agentEventQueue.then(task, task)`.
@@ -12120,23 +12237,15 @@ impl AgentSession {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let previous = self.agent_event_queue.lock().unwrap().clone();
+        let previous = self.agent_event_queue.lock().unwrap().take();
         let next: BoxFuture<Result<(), String>> = Box::pin(async move {
-            let _ = previous.await;
+            if let Some(previous) = previous {
+                let _ = previous.await;
+            }
             task.await;
             Ok(())
         });
-        *self.agent_event_queue.lock().unwrap() = next;
-    }
-
-    /// `_waitForRefineIdle()`.
-    async fn wait_for_refine_idle(self: &Arc<Self>) {
-        while self.refine_in_flight.lock().unwrap().is_some() {
-            let in_flight = self.refine_in_flight.lock().unwrap().take();
-            if let Some(in_flight) = in_flight {
-                let _ = in_flight.await;
-            }
-        }
+        *self.agent_event_queue.lock().unwrap() = Some(next);
     }
 
     /// `_maybeStartSerializedBackgroundPlan()`.

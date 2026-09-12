@@ -2870,11 +2870,11 @@ pub async fn create_agent_session_runtime_port(
             Err(error) => return Err(error.to_string()),
         },
     };
-    let lease_failed = |error: String| {
+    let lease_failed = |error: MissingSessionCwdError| {
         if let Some(lease) = &lease {
             lease.lock().unwrap().release();
         }
-        error
+        error.to_string()
     };
     crate::core::session_cwd::assert_session_cwd_exists(
         &SessionManagerCwdSource { session_manager: &*session_manager.lock().unwrap() },

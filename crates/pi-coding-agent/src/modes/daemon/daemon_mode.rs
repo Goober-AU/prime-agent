@@ -14406,7 +14406,28 @@ impl AgentDaemon {
                 // already durable.
                 return Ok(());
             }
-            legacy.to_passive_entry(&parent_session_id, &parent_file)
+            // `entry = { childId, sessionName, ..., ...rlmSubagentMetadataFields(legacy),
+            // status, createdAt }` (daemon-mode.ts 1215-1226). The TypeScript spreads the
+            // metadata helper; the port builds the same record explicitly.
+            PassiveRlmSubagentEntry {
+                child_id: legacy.child_id.clone(),
+                session_name: legacy.session_name.clone(),
+                session_dir: legacy.session_dir.clone(),
+                session_file: legacy.session_file.clone(),
+                parent_session_id: parent_session_id.clone(),
+                parent_session_file: Some(parent_file.clone()),
+                rlm_depth: legacy.rlm_depth,
+                rlm_max_depth: legacy.rlm_max_depth,
+                rlm_parent_node_id: legacy.rlm_parent_node_id.clone(),
+                prompt: legacy.prompt.clone(),
+                spawn_code: legacy.spawn_code.clone(),
+                model: legacy
+                    .model
+                    .clone()
+                    .and_then(|value| serde_json::from_value(value).ok()),
+                status: legacy.status.clone(),
+                created_at: legacy.created_at,
+            }
         };
         // Display tombstone first ("deleted deliberately, transcript retained"): a
         // crash in between leaves a live ledger edge over a deleted display entry,

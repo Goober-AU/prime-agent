@@ -913,7 +913,7 @@ impl TelegramBridge {
         } else if pending.request.method == "confirm" {
             let lowered = value.to_lowercase();
             if lowered != "yes" && lowered != "no" {
-                let _ = self.enqueue_reply(format!("Use /answer {question_id} yes or no."));
+                let _ = self.enqueue_reply(&format!("Use /answer {question_id} yes or no."));
                 return;
             }
             AgentConnectionExtensionUiResponse::Confirmed { confirmed: lowered == "yes" }
