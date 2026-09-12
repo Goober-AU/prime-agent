@@ -10,7 +10,7 @@ use crate::config::get_agent_dir;
 use crate::core::agent_messages::AgentSessionMessageController;
 use crate::core::agent_observe::AgentObserveController;
 use crate::core::agent_session::{
-    AgentHandle, AgentSession, AgentSessionConfig, ExtensionRunnerRef, ResourceLoader, ScopedModel,
+    AgentHandle, AgentSession, AgentSessionConfig, ExtensionRunnerRef, ScopedModel,
     SubagentRuntimeHost,
 };
 use crate::core::agent_session_services::AgentSessionCreationOptions;
@@ -21,6 +21,8 @@ use crate::core::cron_jobs::AgentRlmHeartbeatController;
 use crate::core::extensions::types::LoadExtensionsResult;
 use crate::core::messages::convert_to_llm;
 use crate::core::model_registry::ModelRegistry;
+use crate::core::mcp::mcp_manager::{McpManager, McpManagerOptions};
+use crate::core::resource_loader::{DefaultResourceLoader, ResourceLoader};
 use crate::core::model_resolver::{find_initial_model, FindInitialModelOptions, DEFAULT_THINKING_LEVEL};
 use crate::core::model_tool_output_policy::{
     resolve_model_tool_output_policy, ModelToolOutputPolicyOptions, ModelToolOutputScope,
@@ -28,15 +30,6 @@ use crate::core::model_tool_output_policy::{
 use crate::core::session_manager::{get_default_session_dir, SessionManager};
 
 pub type BoxFuture<T> = pi_ai::types::BoxFuture<T>;
-
-/// `createAgentSession` needs `new McpManager({...})`, which lives in
-/// `core/mcp/mcp-manager.ts` (another slice). Without an injected factory the
-/// call reports the blocker instead of inventing manager behaviour.
-const MCP_MANAGER_NOT_LANDED: &str =
-    "createAgentSession needs a McpManager factory (core/mcp/mcp-manager.ts)";
-/// `new DefaultResourceLoader({...})` lives in `core/resource-loader.ts` (another slice).
-const RESOURCE_LOADER_NOT_LANDED: &str =
-    "core/resource-loader.ts (DefaultResourceLoader) has not landed; pass a resourceLoader or a resourceLoaderFactory";
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -69,7 +62,7 @@ pub struct CreateAgentSessionOptions {
     pub tools: Option<Vec<String>>,
     pub custom_tools: Option<Vec<crate::core::extensions::types::ToolDefinition>>,
     pub resource_loader: Option<Arc<dyn ResourceLoader>>,
-    pub mcp_manager: Option<Arc<dyn crate::core::agent_session::McpManager>>,
+    pub mcp_manager: Option<Arc<Mutex<McpManager>>>,
     pub session_manager: Option<Arc<Mutex<SessionManager>>>,
     pub settings_manager: Option<Arc<Mutex<crate::core::settings_manager::SettingsManager>>>,
     pub session_start_event: Option<Value>,
@@ -125,7 +118,7 @@ pub type McpManagerFactory = Arc<
     dyn Fn(
             Arc<tokio::sync::Mutex<AuthStorage>>,
             Arc<Mutex<crate::core::settings_manager::SettingsManager>>,
-        ) -> Arc<dyn crate::core::agent_session::McpManager>
+        ) -> Arc<Mutex<McpManager>>
         + Send
         + Sync,
 >;
@@ -166,6 +159,19 @@ pub async fn close_performance_metric_recorder_best_effort(
     }
 }
 
+/// Run a registry operation without blocking a Tokio worker on its synchronous lock.
+pub(crate) async fn with_model_registry<T: Send + 'static>(
+    registry: Arc<Mutex<ModelRegistry>>,
+    operation: impl for<'a> FnOnce(&'a mut ModelRegistry) -> futures::future::BoxFuture<'a, T>
+        + Send + 'static,
+) -> Result<T, String> {
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        let mut registry = registry.lock().map_err(|_| "model registry poisoned".to_string())?;
+        Ok(runtime.block_on(operation(&mut registry)))
+    }).await.map_err(|error| error.to_string())?
+}
+
 /// `createAgentSession(options = {})`.
 pub async fn create_agent_session(
     options: CreateAgentSessionOptions,
@@ -201,7 +207,7 @@ pub async fn create_agent_session_with_factories(
     });
     let model_registry = options.model_registry.clone().unwrap_or_else(|| {
         Arc::new(Mutex::new(ModelRegistry::create(
-            AuthStorage::create(models_path.clone(), None),
+            AuthStorage::create(auth_path.clone(), None),
             models_path.clone(),
         )))
     });
@@ -225,34 +231,64 @@ pub async fn create_agent_session_with_factories(
         Some(manager) => manager,
         None => match &mcp_manager_factory {
             Some(factory) => factory(Arc::clone(&auth_storage), Arc::clone(&settings_manager)),
-            None => return Err(MCP_MANAGER_NOT_LANDED.to_string()),
+            None => Arc::new(Mutex::new(McpManager::new(McpManagerOptions {
+                auth_storage: Arc::clone(&auth_storage),
+                get_user_servers: Some({
+                    let settings_manager = Arc::clone(&settings_manager);
+                    Arc::new(move || {
+                        settings_manager.lock().expect("settings manager poisoned")
+                            .get_global_mcp_servers().map(|servers| {
+                                servers.into_iter().filter_map(|(name, config)| {
+                                    serde_json::from_value(config).ok().map(|config| (name, config))
+                                }).collect()
+                            })
+                    })
+                }),
+                begin_login: None,
+            }))),
         },
     };
     {
         let mut registry = model_registry.lock().expect("model registry poisoned");
-        registry.set_on_oauth_providers_reset(Arc::new(|| {}));
+        let mcp_manager = Arc::clone(&mcp_manager);
+        registry.set_on_oauth_providers_reset(Arc::new(move || {
+            mcp_manager.lock().expect("mcp manager poisoned").register_user_providers();
+        }));
     }
 
     if resource_loader.is_none() {
-        let factory = resource_loader_factory
-            .as_ref()
-            .ok_or_else(|| RESOURCE_LOADER_NOT_LANDED.to_string())?;
-        let loader = factory(DefaultResourceLoaderOptions {
+        let loader_options = DefaultResourceLoaderOptions {
             cwd: cwd.clone(),
             agent_dir: agent_dir.clone(),
             settings_manager: Arc::clone(&settings_manager),
-            extra_builtin_skill_overrides: Arc::new(Vec::new),
-        });
+            extra_builtin_skill_overrides: {
+                let mcp_manager = Arc::clone(&mcp_manager);
+                Arc::new(move || mcp_manager.lock().expect("mcp manager poisoned")
+                    .get_disabled_builtin_skill_overrides())
+            },
+        };
+        let loader: Arc<dyn ResourceLoader> = match resource_loader_factory {
+            Some(factory) => factory(loader_options),
+            None => Arc::new(DefaultResourceLoader::new(
+                crate::core::resource_loader::DefaultResourceLoaderOptions {
+                    cwd: loader_options.cwd,
+                    agent_dir: loader_options.agent_dir,
+                    settings_manager: Some(loader_options.settings_manager),
+                    extra_builtin_skill_overrides: Some(loader_options.extra_builtin_skill_overrides),
+                    ..Default::default()
+                },
+            )),
+        };
         loader.reload().await;
         crate::core::timings::time("resourceLoader.reload");
         resource_loader = Some(loader);
     }
-    let resource_loader = resource_loader.ok_or_else(|| RESOURCE_LOADER_NOT_LANDED.to_string())?;
+    let resource_loader = resource_loader.expect("resource loader initialized");
 
     let existing_session = session_manager
         .lock()
         .expect("session manager poisoned")
-        .build_session_context();
+        .build_session_context(None);
     let (has_thinking_entry, has_service_tier_entry) = {
         let manager = session_manager.lock().expect("session manager poisoned");
         let branch = manager.get_branch(None);
@@ -303,19 +339,18 @@ pub async fn create_agent_session_with_factories(
                 settings.get_default_thinking_level(),
             )
         };
-        let result = find_initial_model(
-            &FindInitialModelOptions {
-                cli_provider: None,
-                cli_model: None,
-                scoped_models: Vec::new(),
-                is_continuing: has_existing_session,
-                default_provider,
-                default_model_id,
-                default_thinking_level,
-            },
-            &mut model_registry.lock().expect("model registry poisoned"),
-        )
-        .await?;
+        let resolution_options = FindInitialModelOptions {
+            cli_provider: None,
+            cli_model: None,
+            scoped_models: Vec::new(),
+            is_continuing: has_existing_session,
+            default_provider,
+            default_model_id,
+            default_thinking_level,
+        };
+        let result = with_model_registry(Arc::clone(&model_registry), move |registry| {
+            Box::pin(async move { find_initial_model(&resolution_options, registry).await })
+        }).await??;
         model = result.model;
         if model.is_none() {
             model_fallback_message = Some(format_no_models_available_message());
@@ -325,7 +360,7 @@ pub async fn create_agent_session_with_factories(
         }
     }
 
-    let mut thinking_level = options.thinking_level.clone();
+    let mut thinking_level = options.thinking_level.as_ref().map(|level| level.as_str().to_string());
 
     if thinking_level.is_none() && has_existing_session {
         thinking_level = Some(if has_thinking_entry {
@@ -361,12 +396,12 @@ pub async fn create_agent_session_with_factories(
         if has_service_tier_entry {
             existing_session.service_tier.clone()
         } else {
-            Some(
+            Some(Some(
                 settings_manager
                     .lock()
                     .expect("settings manager poisoned")
                     .get_default_service_tier(),
-            )
+            ))
         }
     });
     let service_tier = if service_tier_preference.as_ref().and_then(|tier| tier.as_deref())
@@ -430,7 +465,7 @@ pub async fn create_agent_session_with_factories(
                 (
                     manager.get_session_artifact_dir(),
                     manager.get_session_id(),
-                    resolve_model_tool_output_policy(settings.get_model_tool_output_policy().as_deref()),
+                    resolve_model_tool_output_policy(Some(&settings.get_model_tool_output_policy())),
                     settings.get_block_images(),
                 )
             };
@@ -459,7 +494,7 @@ pub async fn create_agent_session_with_factories(
             settings.get_steering_mode(),
             settings.get_follow_up_mode(),
             settings.get_transport(),
-            settings.get_thinking_budgets(),
+            settings.get_thinking_budgets().and_then(|value| serde_json::from_value(value).ok()),
         )
     };
 
@@ -472,11 +507,12 @@ pub async fn create_agent_session_with_factories(
                 let model_registry = Arc::clone(&model_registry);
                 let settings_manager = Arc::clone(&settings_manager);
                 Box::pin(async move {
-                    let auth = model_registry
-                        .lock()
-                        .expect("model registry poisoned")
-                        .get_api_key_and_headers(&model)
-                        .await;
+                    let request_model = model.clone();
+                    let auth = with_model_registry(model_registry, move |registry| {
+                        Box::pin(async move { registry.get_api_key_and_headers(&request_model).await })
+                    }).await.unwrap_or_else(|error| crate::core::model_registry::ResolvedRequestAuth {
+                        ok: false, api_key: None, headers: None, error: Some(error),
+                    });
                     if !auth.ok {
                         // `throw new Error(auth.error)`; the stream contract reports request
                         // failures through a terminal assistant message instead.
@@ -526,17 +562,10 @@ pub async fn create_agent_session_with_factories(
             if !runner.has_handlers("before_provider_request") {
                 return Box::pin(async move { Some(payload) }) as BoxFuture<Option<Value>>;
             }
-            let next = runner.emit_before_provider_request(payload.clone());
-            Box::pin(async move { next.await.unwrap_or(payload) }) as BoxFuture<Option<Value>>
+            Box::pin(async move { Some(runner.emit_before_provider_request(payload).await) }) as BoxFuture<Option<Value>>
         })
     };
 
-    // `onResponse: async (response, _model) => { ... await runner.emit({ type: "after_provider_response", status, headers }) }`
-    //
-    // blocked_on: `core::agent_session::ExtensionRunner` exposes the typed
-    // emitters but not the generic `emit(event)`, so `after_provider_response`
-    // cannot be dispatched from this slice. `hasHandlers` still gates the hook
-    // and the event payload keeps its TypeScript shape.
     let on_response: pi_ai::types::OnResponse = {
         let extension_runner_ref = Arc::clone(&extension_runner_ref);
         Arc::new(move |response: pi_ai::types::ProviderResponse, _model: &Model| {
@@ -547,12 +576,15 @@ pub async fn create_agent_session_with_factories(
             if !runner.has_handlers("after_provider_response") {
                 return Box::pin(async {}) as BoxFuture<()>;
             }
-            let _event = serde_json::json!({
-                "type": "after_provider_response",
-                "status": response.status,
-                "headers": response.headers,
-            });
-            Box::pin(async {}) as BoxFuture<()>
+            Box::pin(async move {
+                runner.emit(crate::core::extensions::types::ExtensionEvent::AfterProviderResponse(
+                    crate::core::extensions::types::AfterProviderResponsePayload {
+                        status: response.status,
+                        headers: response.headers.into_iter()
+                            .map(|(key, value)| (key, Value::String(value))).collect(),
+                    },
+                )).await;
+            }) as BoxFuture<()>
         })
     };
 
@@ -585,9 +617,26 @@ pub async fn create_agent_session_with_factories(
         >
     };
 
-    let agent_factory = agent_factory.ok_or_else(|| {
-        "pi-agent-core Agent has not landed; pass an agentFactory to createAgentSession".to_string()
-    })?;
+    let agent_factory = agent_factory.unwrap_or_else(|| Arc::new(|options| {
+        Arc::new(pi_agent_core::agent::Agent::new(pi_agent_core::agent::AgentOptions {
+            initial_state: Some(options.initial_state),
+            convert_to_llm: Some(options.convert_to_llm),
+            stream_fn: Some(options.stream_fn),
+            on_payload: Some(options.on_payload),
+            on_response: Some(options.on_response),
+            session_id: Some(options.session_id),
+            transform_context: Some(options.transform_context),
+            steering_mode: Some(if options.steering_mode == "all" {
+                pi_agent_core::agent::QueueMode::All
+            } else { pi_agent_core::agent::QueueMode::OneAtATime }),
+            follow_up_mode: Some(if options.follow_up_mode == "all" {
+                pi_agent_core::agent::QueueMode::All
+            } else { pi_agent_core::agent::QueueMode::OneAtATime }),
+            transport: Some(options.transport),
+            thinking_budgets: options.thinking_budgets,
+            ..Default::default()
+        }))
+    }));
     let agent = agent_factory(CreateAgentSessionAgentOptions {
         initial_state: AgentState {
             system_prompt: String::new(),
@@ -634,7 +683,7 @@ pub async fn create_agent_session_with_factories(
         agent: Arc::clone(&agent),
         session_manager: Arc::clone(&session_manager),
         settings_manager: Arc::clone(&settings_manager),
-        service_tier_preference: service_tier_preference.clone(),
+        service_tier_preference: Some(service_tier_preference.clone()),
         cwd: cwd.clone(),
         // Only the explicit dir - the default may not match injected custom storage.
         agent_dir: options.agent_dir.clone(),
@@ -667,7 +716,8 @@ pub async fn create_agent_session_with_factories(
             .or_else(|| options.creation.autonomous.clone()),
         serialized_refine: options.creation.serialized_refine,
         initial_goal: options.creation.initial_goal.clone(),
-        ..Default::default()
+        base_tools_override: None,
+        auto_refine_reviewer: None,
     })?;
 
     // `getActiveSessionManager = () => session.sessionManager`.

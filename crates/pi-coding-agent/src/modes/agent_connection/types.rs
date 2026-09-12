@@ -5,8 +5,6 @@
 //! contract. Fields that the TypeScript marks optional are `Option` and are
 //! skipped when serializing, preserving absent-vs-null.
 
-use std::collections::BTreeMap;
-
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -845,6 +843,7 @@ pub struct AgentConnectionUserMessage {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AgentConnectionQueueState {
     pub steering: Vec<String>,
     pub follow_up: Vec<String>,
@@ -1491,52 +1490,10 @@ pub trait AgentConnection: Send + Sync {
     fn dispose(&self) -> pi_ai::types::BoxFuture<Result<(), String>>;
 }
 
-/// Autonomous status the connection returns from `waitForHeadlessCompletion`.
-///
-/// The owning slice (core/autonomous.ts) has not landed; this minimal shape
-/// carries the fields this slice reads.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentAutonomousStatus {
-    pub enabled: bool,
-    pub continuations_used: i64,
-    pub turns_used: i64,
-    pub tokens_used: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub started_at: Option<i64>,
-    pub limits: AgentAutonomousLimits,
-    pub gates: AgentAutonomousGateStatus,
-    #[serde(default)]
-    pub gate_attempts: BTreeMap<String, i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_gate_failure: Option<AgentAutonomousGateFailure>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentAutonomousLimits {
-    pub max_continuations: i64,
-    pub max_turns: i64,
-    pub max_tokens: i64,
-    pub timeout_ms: i64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentAutonomousGateStatus {
-    pub commands: Vec<String>,
-    pub max_retries: i64,
-    pub timeout_ms: i64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentAutonomousGateFailure {
-    pub command: String,
-    pub attempt: i64,
-    pub exit_text: String,
-    pub output: String,
-}
+pub use crate::core::autonomous::{
+    AgentAutonomousGateFailure, AgentAutonomousGates as AgentAutonomousGateStatus,
+    AgentAutonomousLimits, AgentAutonomousStatus,
+};
 
 pub const LIMIT_MAX_CONTINUATIONS: &str = "maxContinuations";
 pub const LIMIT_MAX_TURNS: &str = "maxTurns";
@@ -1551,21 +1508,16 @@ pub fn autonomous_limit_reason(state: &AgentAutonomousStatus) -> Option<Autonomo
 }
 
 pub fn autonomous_limit_reason_at(state: &AgentAutonomousStatus, now: i64) -> Option<AutonomousLimitReason> {
-    if state.continuations_used >= state.limits.max_continuations {
-        return Some(LIMIT_MAX_CONTINUATIONS);
-    }
-    if state.turns_used >= state.limits.max_turns {
-        return Some(LIMIT_MAX_TURNS);
-    }
-    if state.tokens_used >= state.limits.max_tokens {
-        return Some(LIMIT_MAX_TOKENS);
-    }
-    if let Some(started_at) = state.started_at {
-        if now - started_at >= state.limits.timeout_ms {
-            return Some(LIMIT_TIMEOUT_MS);
-        }
-    }
-    None
+    crate::core::autonomous::autonomous_limit_reason_for(
+        &crate::core::autonomous::AutonomousLimitState {
+            continuations_used: state.continuations_used,
+            turns_used: state.turns_used,
+            tokens_used: state.tokens_used,
+            started_at: state.started_at,
+            limits: state.limits.clone(),
+        },
+        now as f64,
+    )
 }
 
 /// `Date.now()`.
@@ -1628,24 +1580,26 @@ mod tests {
     fn autonomous_limit_reason_order_matches_typescript() {
         let mut status = AgentAutonomousStatus {
             limits: AgentAutonomousLimits {
-                max_continuations: 3,
-                max_turns: 12,
-                max_tokens: 80_000,
-                timeout_ms: 1000,
+                max_continuations: 3.0,
+                max_turns: 12.0,
+                max_tokens: 80_000.0,
+                timeout_ms: 1000.0,
             },
-            started_at: Some(0),
-            ..Default::default()
+            started_at: Some(0.0),
+            ..crate::core::autonomous::autonomous_status(
+                &crate::core::autonomous::create_autonomous_runtime_state(None),
+            )
         };
         assert_eq!(autonomous_limit_reason_at(&status, 0), None);
-        status.continuations_used = 3;
+        status.continuations_used = 3.0;
         assert_eq!(autonomous_limit_reason_at(&status, 0), Some("maxContinuations"));
-        status.continuations_used = 0;
-        status.turns_used = 12;
+        status.continuations_used = 0.0;
+        status.turns_used = 12.0;
         assert_eq!(autonomous_limit_reason_at(&status, 0), Some("maxTurns"));
-        status.turns_used = 0;
-        status.tokens_used = 80_000;
+        status.turns_used = 0.0;
+        status.tokens_used = 80_000.0;
         assert_eq!(autonomous_limit_reason_at(&status, 0), Some("maxTokens"));
-        status.tokens_used = 0;
+        status.tokens_used = 0.0;
         assert_eq!(autonomous_limit_reason_at(&status, 1000), Some("timeoutMs"));
     }
 

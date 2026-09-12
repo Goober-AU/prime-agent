@@ -201,9 +201,9 @@ async fn send_request(target: &str, request: Value) -> Result<(), String> {
     let line = format!("{}\n", request);
     let connect = connect_socket(target);
     let exchange = async move {
-        let mut stream = connect?;
+        let mut stream = connect.await?;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        stream.write_all(line.as_bytes()).await?;
+        stream.write_all(line.as_bytes()).await.map_err(|error| error.to_string())?;
         let mut buffer = [0u8; 1024];
         // Resolve on the first response byte, like `socket.on("data", finish)`.
         let _ = stream.read(&mut buffer).await;
@@ -282,7 +282,7 @@ const AGENT_LABEL: &str = "prime-agent";
 
 fn session_manager_ptr(context: &Arc<dyn ExtensionContext>) -> Option<usize> {
     let manager = context.session_manager();
-    Some(Arc::as_ptr(&manager) as usize)
+    Some(Arc::as_ptr(&manager) as *const () as usize)
 }
 
 impl Reporter {
@@ -298,7 +298,7 @@ impl Reporter {
         let manager = context.session_manager();
         let mut state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         state.current_agent_session_path = manager.get_session_file().filter(|file| file.starts_with('/'));
-        state.current_agent_session_id = manager.get_session_id().filter(|id| !id.is_empty());
+        state.current_agent_session_id = Some(manager.get_session_id()).filter(|id| !id.is_empty());
     }
 
     fn with_session_ref(&self, params: Map<String, Value>) -> Map<String, Value> {
@@ -655,7 +655,7 @@ fn herdr_agent_state_extension_impl(
             reporter.publish_state(false);
         })
     };
-    let unsubscribe_blocked = pi.events().on("herdr:blocked", blocked_handler);
+    let unsubscribe_blocked: Arc<dyn Fn() + Send + Sync> = Arc::from(pi.events().on("herdr:blocked", blocked_handler));
 
     {
         let reporter = reporter.clone();
@@ -734,6 +734,7 @@ fn herdr_agent_state_extension_impl(
         let reporter = reporter.clone();
         let handler: ExtensionHandler = Arc::new(move |event, ctx| {
             let reporter = reporter.clone();
+            let unsubscribe_blocked = unsubscribe_blocked.clone();
             Box::pin(async move {
                 if !reporter.is_bound_session(&ctx) {
                     return None;

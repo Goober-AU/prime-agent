@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::config::get_agent_dir;
 use crate::core::agent_messages::AgentSessionMessageController;
 use crate::core::agent_observe::AgentObserveController;
-use crate::core::agent_session::{McpManager, ResourceLoader, SubagentRuntimeHost};
+use crate::core::agent_session::{ResourceLoader, SubagentRuntimeHost};
 use crate::core::agent_session_config::AgentExecutionMode;
 use crate::core::agent_traces::{install_agent_trace_upload, AgentTraceUploadInstallOptions};
 use crate::core::auth_storage::AuthStorage;
@@ -57,7 +57,7 @@ pub struct CreateAgentSessionServicesOptions {
 }
 
 /// `interface AgentSessionCreationOptions`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct AgentSessionCreationOptions {
     pub model: Option<Model>,
     pub thinking_level: Option<ThinkingLevel>,
@@ -188,7 +188,7 @@ fn apply_extension_flag_values_from_flags(
 
 /// `providerConfig` from `extensions/types.ts` converted to the registry's
 /// `ProviderConfigInput` (the same object in the TypeScript).
-fn provider_config_input(config: &ExtensionProviderConfig) -> ProviderConfigInput {
+pub(crate) fn provider_config_input(config: &ExtensionProviderConfig) -> ProviderConfigInput {
     ProviderConfigInput {
         name: config.name.clone(),
         base_url: config.base_url.clone(),
@@ -258,7 +258,7 @@ fn model_definition(model: &crate::core::extensions::types::ProviderModelConfig)
 
 /// `createAgentSessionServices(options)`.
 pub async fn create_agent_session_services(
-    options: CreateAgentSessionServicesOptions,
+    mut options: CreateAgentSessionServicesOptions,
 ) -> Result<AgentSessionServices, String> {
     let cwd = options.cwd.clone();
     let agent_dir = options.agent_dir.clone().unwrap_or_else(get_agent_dir);
@@ -350,6 +350,9 @@ pub async fn create_agent_session_services(
     let mut extension_factories = builtin_extension_factories;
     extension_factories.extend(user_extension_factories);
     let resource_loader = Arc::new(DefaultResourceLoader::new(DefaultResourceLoaderOptions {
+        cwd: cwd.clone(),
+        agent_dir: agent_dir.clone(),
+        settings_manager: Some(Arc::clone(&settings_manager)),
         extension_factories,
         extra_builtin_skill_overrides: Some({
             let mcp_manager = Arc::clone(&mcp_manager);
@@ -401,9 +404,8 @@ pub async fn create_agent_session_services(
             }),
         }
     }
-    diagnostics.extend(apply_extension_flag_values_from_flags(
-        &registered_extension_flags(&extensions_result.runtime),
-        &extensions_result.runtime,
+    diagnostics.extend(apply_extension_flag_values(
+        &resource_loader,
         options.extension_flag_values.as_ref(),
     ));
 
@@ -417,12 +419,6 @@ pub async fn create_agent_session_services(
         mcp_manager,
         diagnostics,
     })
-}
-
-/// Reads `{ [name]: flag.type }` off the loader's loaded extensions.
-fn registered_extension_flags(runtime: &ExtensionRuntime) -> indexmap::IndexMap<String, String> {
-    let _ = runtime;
-    indexmap::IndexMap::new()
 }
 
 /// `isTelemetryEnabled(settingsManager)` from `core/telemetry.ts`.
@@ -471,9 +467,25 @@ pub async fn create_agent_session_from_services(
             options.creation.rlm_session_dir.as_deref(),
             artifact_dir.as_deref(),
         ),
-        agent_traces_enabled: Arc::new(|| true),
-        reload_settings: Arc::new(|| Box::pin(async { Ok(()) })),
-        get_session_file: Arc::new(|| None),
+        agent_traces_enabled: {
+            let settings = Arc::clone(&options.services.settings_manager);
+            Arc::new(move || settings.lock().expect("settings manager poisoned").get_agent_traces_enabled())
+        },
+        reload_settings: {
+            let settings = Arc::clone(&options.services.settings_manager);
+            Arc::new(move || {
+                let settings = Arc::clone(&settings);
+                Box::pin(async move {
+                    tokio::task::spawn_blocking(move || {
+                        settings.lock().expect("settings manager poisoned").reload_sync();
+                    }).await.map_err(|error| error.to_string())
+                })
+            })
+        },
+        get_session_file: {
+            let manager = Arc::clone(&options.session_manager);
+            Arc::new(move || manager.lock().expect("session manager poisoned").get_session_file())
+        },
     });
     let telemetry_disabled = options.creation.telemetry_disabled;
     let creation = options.creation;
@@ -492,7 +504,7 @@ pub async fn create_agent_session_from_services(
         resource_loader: Some(
             Arc::clone(&options.services.resource_loader) as Arc<dyn ResourceLoader>
         ),
-        mcp_manager: Some(Arc::clone(&options.services.mcp_manager) as Arc<dyn McpManager>),
+        mcp_manager: Some(Arc::clone(&options.services.mcp_manager)),
         session_manager: Some(options.session_manager),
         settings_manager: Some(Arc::clone(&options.services.settings_manager)),
         session_start_event: options.session_start_event,

@@ -184,7 +184,7 @@ pub fn load_project_context_files(cwd: &str, agent_dir: &str) -> Vec<ContextFile
 pub struct DefaultResourceLoaderOptions {
     pub cwd: String,
     pub agent_dir: String,
-    pub settings_manager: Option<Arc<tokio::sync::Mutex<SettingsManager>>>,
+    pub settings_manager: Option<Arc<Mutex<SettingsManager>>>,
     pub event_bus: Option<Arc<dyn EventBus>>,
     pub additional_extension_paths: Vec<String>,
     pub additional_skill_paths: Vec<String>,
@@ -278,12 +278,11 @@ struct LoaderState {
 /// The mutable state behind [`DefaultResourceLoader`].
 ///
 /// TypeScript's `DefaultResourceLoader` is one object that `reload()` mutates;
-/// Rust shares it through an `Arc` so `reload()` can return a `'static` future
-/// for the `agent-session` seam while the loader itself stays immutable.
+/// Rust shares it through an `Arc` so cloned handles reload the same state.
 pub struct LoaderInner {
     cwd: String,
     agent_dir: String,
-    settings_manager: Arc<tokio::sync::Mutex<SettingsManager>>,
+    settings_manager: Arc<Mutex<SettingsManager>>,
     event_bus: Arc<dyn EventBus>,
     package_manager: DefaultPackageManager,
     bundled_skills_dir: Option<String>,
@@ -325,7 +324,7 @@ impl LoaderInner {
     pub fn new(options: DefaultResourceLoaderOptions) -> Self {
         let settings_manager = options
             .settings_manager
-            .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(SettingsManager::create(&options.cwd, Some(&options.agent_dir)))));
+            .unwrap_or_else(|| Arc::new(Mutex::new(SettingsManager::create(&options.cwd, Some(&options.agent_dir)))));
         let bundled_skills_dir = match options.bundled_skills_dir {
             None => Some(get_bundled_skills_dir()),
             Some(inner) => inner,
@@ -375,7 +374,7 @@ impl LoaderInner {
     }
 
     /// The settings manager this loader (and its package manager) reads.
-    pub fn settings_manager(&self) -> Arc<tokio::sync::Mutex<SettingsManager>> {
+    pub fn settings_manager(&self) -> Arc<Mutex<SettingsManager>> {
         self.settings_manager.clone()
     }
 
@@ -580,7 +579,7 @@ impl ResourceLoader for LoaderInner {
         // The TypeScript mutates `this`; the Rust object owns its state behind a
         // mutex, so the reload future borrows the loader for its whole duration.
         async move {
-            self.settings_manager.lock().await.reload().await;
+            self.settings_manager.lock().expect("settings manager poisoned").reload_sync();
             self.reload_inner().await;
         }
         .boxed()
@@ -629,7 +628,7 @@ impl LoaderInner {
         } else {
             trimmed.to_string()
         };
-        resolve_absolute(&join_path(&self.cwd, &expanded))
+        resolve_absolute(&Path::new(&self.cwd).join(&expanded).to_string_lossy())
     }
 }
 
@@ -1286,7 +1285,7 @@ impl LoaderInner {
         }
 
         for p in paths {
-            let resolved = resolve_absolute(&join_path(&self.cwd, p));
+            let resolved = resolve_absolute(&Path::new(&self.cwd).join(p).to_string_lossy());
             if !Path::new(&resolved).exists() {
                 diagnostics.push(ResourceDiagnostic {
                     diagnostic_type: RESOURCE_DIAGNOSTIC_WARNING.to_string(),
@@ -1894,7 +1893,7 @@ impl DefaultResourceLoader {
         self.inner.get_loaded_extension_paths()
     }
 
-    pub fn settings_manager(&self) -> Arc<tokio::sync::Mutex<SettingsManager>> {
+    pub fn settings_manager(&self) -> Arc<Mutex<SettingsManager>> {
         self.inner.settings_manager()
     }
 
@@ -1938,62 +1937,5 @@ impl ResourceLoader for DefaultResourceLoader {
 
     fn reload(&self) -> BoxFuture<'_, ()> {
         self.inner.reload()
-    }
-}
-
-/// `ResourceLoader` from `core/agent-session.ts` - the seam the session uses.
-///
-/// The session's seam declares `get_prompt_templates`/`get_context_files`/
-/// `get_system_prompt_override`/`get_append_system_prompt() -> Option<String>`,
-/// so the loader adapts its own `ResourceLoader` surface to it here.
-/// blocked_on: `core/agent-session.ts` owns the seam trait; this impl is the
-/// only Rust counterpart the loader can supply without editing that file.
-impl crate::core::agent_session::ResourceLoader for DefaultResourceLoader {
-    fn get_extensions(&self) -> Vec<crate::core::agent_session::ResourceExtensionPaths> {
-        self.inner
-            .get_extensions()
-            .extensions
-            .iter()
-            .map(|extension| {
-                let extension = extension.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                crate::core::agent_session::ResourceExtensionPaths {
-                    path: extension.resolved_path.clone(),
-                    extension_path: extension.path.clone(),
-                }
-            })
-            .collect()
-    }
-
-    fn get_skills(&self) -> Vec<Skill> {
-        self.inner.get_skills().skills
-    }
-
-    fn get_prompt_templates(&self) -> Vec<PromptTemplate> {
-        self.inner.get_prompts().prompts
-    }
-
-    fn get_context_files(&self) -> Vec<ContextFile> {
-        self.inner.get_agents_files().agents_files
-    }
-
-    fn get_system_prompt_override(&self) -> Option<String> {
-        self.inner.get_system_prompt()
-    }
-
-    fn get_append_system_prompt(&self) -> Option<String> {
-        let append = self.inner.get_append_system_prompt();
-        if append.is_empty() {
-            None
-        } else {
-            Some(append.join("\n\n"))
-        }
-    }
-
-    fn reload(&self) -> BoxFuture<()> {
-        let inner = self.inner.clone();
-        async move {
-            inner.reload().await;
-        }
-        .boxed()
     }
 }

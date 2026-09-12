@@ -16,7 +16,8 @@ use pi_tui::tui::Component;
 use serde_json::Value;
 
 use crate::core::extensions::types as extension_types;
-use crate::core::extensions::types::{ToolDefinition, ToolRenderContext};
+use crate::core::extensions::types::ToolRenderContext;
+use crate::core::tools::ToolDefinition;
 use crate::core::kernel::shared::KernelSentAgentMessage;
 use crate::core::tools::bash::{create_bash_tool_definition, BashToolDetails};
 use crate::core::tools::create_all_tool_definitions;

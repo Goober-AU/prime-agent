@@ -78,6 +78,7 @@ pub struct BeforeToolCallResult {
 /// Omitted fields keep the original executed tool result values.
 /// There is no deep merge for `content` or `details`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AfterToolCallResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<Vec<ContentBlock>>,
@@ -174,7 +175,7 @@ impl ThinkingLevel {
 }
 
 /// Final or partial result produced by a tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToolResult {
     /// Text or image content returned to the model.
     pub content: Vec<ContentBlock>,
@@ -452,7 +453,8 @@ impl Default for AgentState {
 /// `agent_end` is the last event emitted for a run, but awaited `Agent.subscribe()`
 /// listeners for that event are still part of run settlement. The agent becomes
 /// idle only after those listeners finish.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum AgentEvent {
     /// Starts and ends one agent run; `agent_end` carries all messages produced by that run.
     AgentStart,
@@ -596,11 +598,11 @@ pub struct AgentLoopConfig {
     /// Converts `AgentMessage[]` to LLM-compatible `Message[]` before each LLM call.
     ///
     /// Contract: must not throw or reject. Return a safe fallback value instead.
-    pub convert_to_llm: Option<Arc<dyn Fn(Vec<AgentMessage>) -> Vec<Message> + Send + Sync>>,
+    pub convert_to_llm: Option<Arc<dyn Fn(Vec<AgentMessage>) -> futures::future::BoxFuture<'static, Vec<Message>> + Send + Sync>>,
     /// Optional transform applied to the context before `convertToLlm`.
     pub transform_context: Option<
         Arc<
-            dyn Fn(Vec<AgentMessage>, Option<tokio_util::sync::CancellationToken>) -> Vec<AgentMessage>
+            dyn Fn(Vec<AgentMessage>, Option<tokio_util::sync::CancellationToken>) -> futures::future::BoxFuture<'static, Vec<AgentMessage>>
                 + Send
                 + Sync,
         >,
@@ -610,23 +612,28 @@ pub struct AgentLoopConfig {
     /// Resolves an API key dynamically for each LLM call.
     ///
     /// Contract: must not throw or reject. Return `None` when no key is available.
-    pub get_api_key: Option<Arc<dyn Fn(String) -> Option<String> + Send + Sync>>,
+    pub get_api_key: Option<Arc<dyn Fn(String) -> futures::future::BoxFuture<'static, Option<String>> + Send + Sync>>,
     /// Called after each turn fully completes and `turn_end` has been emitted.
-    pub should_stop_after_turn:
-        Option<Arc<dyn Fn(ShouldStopAfterTurnContext) -> bool + Send + Sync>>,
+    pub should_stop_after_turn: Option<
+        Arc<
+            dyn Fn(ShouldStopAfterTurnContext) -> futures::future::BoxFuture<'static, bool>
+                + Send
+                + Sync,
+        >,
+    >,
     /// Called synchronously after a completed turn and before polling work for another turn.
     pub should_stop_before_turn: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     /// Returns steering messages to inject into the conversation mid-run.
-    pub get_steering_messages: Option<Arc<dyn Fn() -> Vec<AgentMessage> + Send + Sync>>,
+    pub get_steering_messages: Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>>,
     /// Returns follow-up messages to process after the agent would otherwise stop.
-    pub get_follow_up_messages: Option<Arc<dyn Fn() -> Vec<AgentMessage> + Send + Sync>>,
+    pub get_follow_up_messages: Option<Arc<dyn Fn() -> futures::future::BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>>,
     /// Returns continuation messages when the agent would otherwise stop.
     pub get_continuation_messages: Option<
         Arc<
             dyn Fn(
                     GetContinuationMessagesContext,
                     Option<tokio_util::sync::CancellationToken>,
-                ) -> Vec<AgentMessage>
+                ) -> futures::future::BoxFuture<'static, Vec<AgentMessage>>
                 + Send
                 + Sync,
         >,
@@ -639,7 +646,7 @@ pub struct AgentLoopConfig {
             dyn Fn(
                     BeforeToolCallContext,
                     Option<tokio_util::sync::CancellationToken>,
-                ) -> Option<BeforeToolCallResult>
+                ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<BeforeToolCallResult>>>
                 + Send
                 + Sync,
         >,
@@ -651,7 +658,7 @@ pub struct AgentLoopConfig {
             dyn Fn(
                     AfterToolCallContext,
                     Option<tokio_util::sync::CancellationToken>,
-                ) -> Option<AfterToolCallResult>
+                ) -> futures::future::BoxFuture<'static, anyhow::Result<Option<AfterToolCallResult>>>
                 + Send
                 + Sync,
         >,
@@ -754,5 +761,41 @@ mod tests {
             .type_name(),
             "tool_execution_end"
         );
+    }
+
+    #[test]
+    fn agent_events_round_trip_the_flat_typescript_wire_shape() {
+        let message = AssistantMessage::new("faux", "faux", "faux-1", 1);
+        let agent_message = AgentMessage::from(message.clone());
+        let result = AgentToolResult::new(vec![ContentBlock::text("done")], serde_json::json!({}));
+        let events = vec![
+            AgentEvent::AgentStart,
+            AgentEvent::AgentEnd { messages: vec![agent_message.clone()] },
+            AgentEvent::TurnStart,
+            AgentEvent::TurnEnd { message: agent_message.clone(), tool_results: Vec::new() },
+            AgentEvent::MessageStart { message: agent_message.clone() },
+            AgentEvent::MessageUpdate {
+                message: agent_message.clone(),
+                assistant_message_event: AssistantMessageEvent::Start { partial: message },
+            },
+            AgentEvent::MessageEnd { message: agent_message },
+            AgentEvent::ToolExecutionStart {
+                tool_call_id: "call-1".into(), tool_name: "echo".into(), args: serde_json::json!({}),
+            },
+            AgentEvent::ToolExecutionUpdate {
+                tool_call_id: "call-1".into(), tool_name: "echo".into(), args: serde_json::json!({}),
+                partial_result: result.clone(),
+            },
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id: "call-1".into(), tool_name: "echo".into(), result, is_error: false,
+            },
+        ];
+        for event in events {
+            let value = serde_json::to_value(&event).unwrap();
+            assert_eq!(value, event.to_json());
+            assert_eq!(serde_json::from_value::<AgentEvent>(value).unwrap(), event);
+        }
+        let result: AfterToolCallResult = serde_json::from_value(serde_json::json!({"isError": true})).unwrap();
+        assert_eq!(result.is_error, Some(true));
     }
 }

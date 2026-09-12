@@ -1,36 +1,18 @@
 //! Port of packages/coding-agent/src/core/session-action-store.ts
-//!
-//! Cross-slice types are replaced by minimal local stand-ins (see blocked_on):
-//!   - `InputSource` / `ContextUsage` (core/extensions/types.ts)
-//!   - `CustomMessage` (core/messages.ts)
-//!   - `SessionSlashCommand` (core/slash-commands.ts)
-//! `UserMessage` and `ImageContent` come from pi-ai.
 
 #![allow(clippy::too_many_arguments)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use pi_ai::types::{ImageContent, UserMessage};
 use tokio::sync::oneshot;
+use futures::future::{BoxFuture, FutureExt, Shared};
+use serde::{Deserialize, Serialize};
 
-/// Local stand-in for `InputSource` from core/extensions/types.ts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InputSource {
-    Interactive,
-    Rpc,
-    Extension,
-}
-
-impl InputSource {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            InputSource::Interactive => "interactive",
-            InputSource::Rpc => "rpc",
-            InputSource::Extension => "extension",
-        }
-    }
-}
+pub use crate::core::extensions::types::InputSource;
+pub use crate::core::messages::CustomMessage;
+pub use crate::core::slash_commands::SessionSlashCommand;
 
 /// `InputSource | "internal"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,45 +30,34 @@ impl ActionSource {
     }
 }
 
-/// Local stand-in for `CustomMessage` from core/messages.ts.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CustomMessage {
-    pub role: String,
-    pub custom_type: String,
-    pub content: CustomMessageContentValue,
-    pub display: bool,
-    pub details: Option<serde_json::Value>,
-    pub timestamp: i64,
+impl Serialize for ActionSource {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum CustomMessageContentValue {
-    Text(String),
-    Blocks(Vec<CustomMessageBlock>),
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum CustomMessageBlock {
-    Text(pi_ai::types::TextContent),
-    Image(ImageContent),
-}
-
-/// Local stand-in for `SessionSlashCommand` from core/slash-commands.ts.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionSlashCommand {
-    pub name: String,
-    pub args: String,
-    pub text: String,
+impl<'de> Deserialize<'de> for ActionSource {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match String::deserialize(deserializer)?.as_str() {
+            "interactive" => Ok(Self::Input(InputSource::Interactive)),
+            "rpc" => Ok(Self::Input(InputSource::Rpc)),
+            "extension" => Ok(Self::Input(InputSource::Extension)),
+            "internal" => Ok(Self::Internal),
+            value => Err(serde::de::Error::unknown_variant(value, &["interactive", "rpc", "extension", "internal"])),
+        }
+    }
 }
 
 /// `DeliveryRecord["message"]`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum DeliveryMessage {
-    User(UserMessage),
     Custom(CustomMessage),
+    User(UserMessage),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeliveryPolicy {
     NextTurnBoundary,
     WhenRunIdle,
@@ -101,7 +72,8 @@ impl DeliveryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum WakePolicy {
     Immediate,
     OnLowerBoundary,
@@ -118,7 +90,8 @@ impl WakePolicy {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum QueuedMessageLane {
     Steering,
     FollowUp,
@@ -141,7 +114,8 @@ pub fn queued_message_lane_delivery_policy(lane: QueuedMessageLane) -> DeliveryP
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum QueuedMessageMutation {
     Delete,
     Move {
@@ -150,12 +124,14 @@ pub enum QueuedMessageMutation {
     },
     Replace {
         text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
         images: Option<Vec<ImageContent>>,
         lane: QueuedMessageLane,
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum QueuedMessageMutationStatus {
     Applied,
     Rejected,
@@ -172,36 +148,43 @@ impl QueuedMessageMutationStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionActionSnapshot {
     pub queued_count: i64,
     pub steering: Vec<String>,
     pub follow_ups: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub active: Option<SessionActionSnapshotActive>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionActionSnapshotActive {
     pub kind: SessionActionSnapshotKind,
     pub phase: SessionActionPhase,
     /// `label?`
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionActionSnapshotKind {
     Turn,
     SessionCommand,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionActionPhase {
     Preparing,
     Committing,
     Running,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeliveryRecord {
     pub id: String,
     pub role: DeliveryRecordRole,
@@ -211,28 +194,33 @@ pub struct DeliveryRecord {
     pub owner_action_id: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeliveryRecordRole {
     Primary,
     Prefix,
     NextTurn,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionTurnPayload {
     pub records: Vec<DeliveryRecord>,
     pub text: String,
     /// `preview?`
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionCommandPayload {
     pub command: SessionSlashCommand,
     pub text: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SessionActionPayload {
     Turn(SessionTurnPayload),
     SessionCommand(SessionCommandPayload),
@@ -249,12 +237,14 @@ impl SessionActionPayload {
 }
 
 /// `ActionLifecycle` - the `state` discriminant plus per-state fields.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
 pub enum ActionLifecycle {
     Queued,
     Selected,
     Preparing {
         /// `preparation?: object`
+        #[serde(skip_serializing_if = "Option::is_none")]
         preparation: Option<serde_json::Value>,
     },
     Committing,
@@ -268,13 +258,15 @@ pub enum ActionLifecycle {
     Cancelled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionExecution {
     AgentTurn,
     SessionCommand,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionLifecycleState {
     Queued,
     Selected,
@@ -316,19 +308,23 @@ impl ActionLifecycleState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct SessionAction {
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAction<TPayload = SessionActionPayload> {
     pub id: String,
     pub source: ActionSource,
     pub delivery: DeliveryPolicy,
     pub wake: WakePolicy,
-    pub payload: SessionActionPayload,
+    pub payload: TPayload,
     pub lifecycle: ActionLifecycle,
     /// `queueKey?`
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_key: Option<String>,
     /// `agentMessageId?`
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_message_id: Option<String>,
     /// `suppressAutonomousContinuation?`
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub suppress_autonomous_continuation: Option<bool>,
 }
 
@@ -364,7 +360,7 @@ fn is_active(state: ActionLifecycleState) -> bool {
     ACTIVE_STATES.contains(&state)
 }
 
-fn is_clearable(action: &SessionAction) -> bool {
+fn is_clearable<TPayload>(action: &SessionAction<TPayload>) -> bool {
     CLEARABLE_STATES.contains(&action.lifecycle.state())
 }
 
@@ -405,16 +401,32 @@ fn legal_transitions(state: ActionLifecycleState) -> &'static [ActionLifecycleSt
     }
 }
 
-fn primary_records(action: &SessionAction) -> Vec<DeliveryRecord> {
-    match &action.payload {
-        SessionActionPayload::Turn(turn) => turn
-            .records
-            .iter()
-            .filter(|record| record.role == DeliveryRecordRole::Primary)
-            .cloned()
-            .collect(),
-        SessionActionPayload::SessionCommand(_) => Vec::new(),
+/// The shared fields required by TypeScript's `TPayload extends SessionActionPayload`.
+pub trait SessionPayload {
+    fn records(&self) -> &[DeliveryRecord];
+    fn preview(&self) -> &str;
+}
+
+impl SessionPayload for SessionActionPayload {
+    fn records(&self) -> &[DeliveryRecord] {
+        match self {
+            Self::Turn(turn) => &turn.records,
+            Self::SessionCommand(_) => &[],
+        }
     }
+
+    fn preview(&self) -> &str {
+        match self {
+            Self::Turn(turn) => turn.preview.as_deref().unwrap_or(&turn.text),
+            Self::SessionCommand(command) => &command.text,
+        }
+    }
+}
+
+fn primary_records<TPayload: SessionPayload>(action: &SessionAction<TPayload>) -> Vec<&DeliveryRecord> {
+    action.payload.records().iter()
+        .filter(|record| record.role == DeliveryRecordRole::Primary)
+        .collect()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -422,8 +434,8 @@ pub struct TransitionOptions {
     pub rollback_proof: Option<RollbackProof>,
 }
 
-pub fn transition_session_action(
-    action: &mut SessionAction,
+pub fn transition_session_action<TPayload: SessionPayload>(
+    action: &mut SessionAction<TPayload>,
     next: ActionLifecycle,
     options: &TransitionOptions,
 ) -> Result<(), String> {
@@ -463,7 +475,9 @@ pub fn transition_session_action(
                             if user == message
                     )
                 }),
-                DeliveryMessage::Custom(_) => false,
+                DeliveryMessage::Custom(message) => transcript.iter().any(|candidate| {
+                    **candidate == crate::core::messages::custom_message_to_agent_message(message.clone())
+                }),
             });
         if durable {
             return Err(
@@ -476,7 +490,8 @@ pub fn transition_session_action(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AdmissionDisposition {
     StartsWhenAdmitted,
     Queued,
@@ -540,49 +555,50 @@ impl PartialEq for SubmissionOutcome {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum DeliveryOutcome {
     Delivered,
     NotApplicable,
 }
 
-/// `ActionTicket` - the three promises are oneshot receivers; `completed`
-/// resolves on success and errors on failure, exactly like a JS promise.
+/// Cloneable promises preserve repeated awaiting and retain the original rejection.
+#[derive(Clone)]
 pub struct ActionTicket {
     pub id: String,
-    pub accepted: oneshot::Receiver<SubmissionOutcome>,
-    pub delivered: oneshot::Receiver<DeliveryOutcome>,
-    pub completed: oneshot::Receiver<()>,
+    pub accepted: Shared<BoxFuture<'static, Result<SubmissionOutcome, String>>>,
+    pub delivered: Shared<BoxFuture<'static, Result<DeliveryOutcome, String>>>,
+    pub completed: Shared<BoxFuture<'static, Result<(), String>>>,
 }
 
 struct Deferred<T> {
-    sender: Option<oneshot::Sender<T>>,
+    sender: Option<oneshot::Sender<Result<T, String>>>,
     settled: bool,
-    /// `void promise.catch(() => undefined)` - an unobserved rejection is dropped.
     rejected: Option<String>,
 }
 
 impl<T> Deferred<T> {
     fn settle(&mut self, value: T) -> bool {
-        if self.settled {
-            return false;
-        }
+        if self.settled { return false; }
         self.settled = true;
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(value);
-        }
+        if let Some(sender) = self.sender.take() { let _ = sender.send(Ok(value)); }
         true
     }
 
     fn reject(&mut self, error: String) -> bool {
-        if self.settled {
-            return false;
-        }
+        if self.settled { return false; }
         self.settled = true;
-        self.rejected = Some(error);
-        self.sender.take();
+        self.rejected = Some(error.clone());
+        if let Some(sender) = self.sender.take() { let _ = sender.send(Err(error)); }
         true
     }
+}
+
+fn deferred_promise<T: Clone + Send + Sync + 'static>(receiver: oneshot::Receiver<Result<T, String>>)
+    -> Shared<BoxFuture<'static, Result<T, String>>>
+{
+    async move { receiver.await.unwrap_or_else(|_| Err("Session action ticket was dropped before settlement".to_string())) }
+        .boxed().shared()
 }
 
 pub struct ActionTicketController {
@@ -601,9 +617,9 @@ impl ActionTicketController {
         ActionTicketController {
             ticket: ActionTicket {
                 id: id.to_string(),
-                accepted: accepted_rx,
-                delivered: delivered_rx,
-                completed: completed_rx,
+                accepted: deferred_promise(accepted_rx),
+                delivered: deferred_promise(delivered_rx),
+                completed: deferred_promise(completed_rx),
             },
             accepted: Mutex::new(Deferred {
                 sender: Some(accepted_tx),
@@ -647,22 +663,16 @@ impl ActionTicketController {
 
     /// `settleCompleted(error?)` - the error is stored for the awaiting side.
     pub fn settle_completed(&self, error: Option<String>) -> bool {
+        let mut completed = self.completed.lock().unwrap_or_else(|lock| lock.into_inner());
         match error {
             Some(error) => {
-                *self
-                    .completed_error
-                    .lock()
-                    .unwrap_or_else(|lock| lock.into_inner()) = Some(error.clone());
-                self.completed
-                    .lock()
-                    .unwrap_or_else(|lock| lock.into_inner())
-                    .reject(error)
+                let settled = completed.reject(error.clone());
+                if settled {
+                    *self.completed_error.lock().unwrap_or_else(|lock| lock.into_inner()) = Some(error);
+                }
+                settled
             }
-            None => self
-                .completed
-                .lock()
-                .unwrap_or_else(|lock| lock.into_inner())
-                .settle(()),
+            None => completed.settle(()),
         }
     }
 
@@ -688,7 +698,7 @@ pub struct ActionStore<TAction: Clone = SessionAction> {
 impl<TAction: Clone> ActionStore<TAction> {
     /// `TAction extends SessionAction`: the accessors make the store usable with
     /// any action shape while keeping one implementation.
-    pub fn new(
+    fn with_accessors(
         id_of: Arc<dyn Fn(&TAction) -> String + Send + Sync>,
         delivery_of: Arc<dyn Fn(&TAction) -> DeliveryPolicy + Send + Sync>,
         state_of: Arc<dyn Fn(&TAction) -> ActionLifecycleState + Send + Sync>,
@@ -802,36 +812,19 @@ impl<TAction: Clone> ActionStore<TAction> {
         predicate: &dyn Fn(&TAction) -> bool,
         candidates: Option<&[TAction]>,
     ) -> Result<Vec<TAction>, String> {
-        let transition = Arc::clone(&self.transition);
-        let state_of = Arc::clone(&self.state_of);
-        let id_of = Arc::clone(&self.id_of);
-        // `candidates` names the actions to consider; the store still owns the
-        // instances that get transitioned, exactly like the TypeScript.
-        let candidate_ids: Option<HashSet<String>> = candidates.map(|candidates| {
-            candidates
-                .iter()
-                .map(|action| (self.id_of)(action))
-                .collect()
-        });
-        let mut removed: Vec<TAction> = Vec::new();
-        for policy in [
-            DeliveryPolicy::NextTurnBoundary,
-            DeliveryPolicy::WhenRunIdle,
-        ] {
-            let list = self.list(policy);
-            let mut index = 0usize;
-            while index < list.len() {
-                let eligible = CLEARABLE_STATES.contains(&state_of(&list[index]))
-                    && candidate_ids
-                        .as_ref()
-                        .map(|ids| ids.contains(&id_of(&list[index])))
-                        .unwrap_or(true);
-                if eligible && predicate(&list[index]) {
-                    transition(&mut list[index], ActionLifecycle::Cancelled)?;
-                    removed.push(list[index].clone());
-                }
-                index += 1;
-            }
+        let candidates = candidates.map(<[TAction]>::to_vec)
+            .unwrap_or_else(|| self.clearable_actions(None));
+        let mut removed = Vec::new();
+        for candidate in candidates.into_iter().filter(|action| predicate(action)) {
+            let id = self.id(&candidate);
+            let transition = Arc::clone(&self.transition);
+            let id_of = Arc::clone(&self.id_of);
+            let action = self.next_turn_boundary.iter_mut()
+                .chain(self.when_run_idle.iter_mut())
+                .find(|action| id_of(action) == id)
+                .ok_or_else(|| format!("Session action {id} is not owned by this store"))?;
+            transition(action, ActionLifecycle::Cancelled)?;
+            removed.push(action.clone());
         }
         Ok(removed)
     }
@@ -963,7 +956,7 @@ impl<TAction: Clone> ActionStore<TAction> {
 
     /// The caller supplies the preview projection because the payload shape is
     /// owned by the action type (`turn.preview ?? turn.text` or `command.text`).
-    pub fn queue_preview(
+    fn queue_preview_with(
         &self,
         policy: DeliveryPolicy,
         preview_of: &dyn Fn(&TAction) -> String,
@@ -1005,142 +998,53 @@ impl<TAction: Clone> ActionStore<TAction> {
     }
 }
 
-/// Port of `ActionStore` specialised to `SessionAction` with the same public API.
-pub struct SessionActionStore {
-    inner: ActionStore<SessionAction>,
+/// The default `SessionAction` specialization of the TypeScript store.
+pub type SessionActionStore = ActionStore<SessionAction>;
+
+impl<TPayload: SessionPayload + Clone + 'static> Default for ActionStore<SessionAction<TPayload>> {
+    fn default() -> Self { Self::new() }
 }
 
-impl Default for SessionActionStore {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SessionActionStore {
+impl<TPayload: SessionPayload + Clone + 'static> ActionStore<SessionAction<TPayload>> {
     pub fn new() -> Self {
-        SessionActionStore {
-            inner: ActionStore::new(
-                Arc::new(|action: &SessionAction| action.id.clone()),
-                Arc::new(|action: &SessionAction| action.delivery),
-                Arc::new(|action: &SessionAction| action.lifecycle.state()),
-                Arc::new(|action: &mut SessionAction, delivery: DeliveryPolicy| {
-                    action.delivery = delivery
-                }),
-                Arc::new(
-                    |action: &mut SessionAction, next: ActionLifecycle| -> Result<(), String> {
-                        transition_session_action(action, next, &TransitionOptions::default())
-                    },
-                ),
-            ),
-        }
-    }
-
-    pub fn enqueue(&mut self, action: SessionAction) -> Result<(), String> {
-        self.inner.enqueue(action)
-    }
-
-    pub fn enqueue_front(&mut self, action: SessionAction) -> Result<(), String> {
-        self.inner.enqueue_front(action)
-    }
-
-    pub fn select_first(&mut self) -> Result<Option<SessionAction>, String> {
-        self.inner.select_first()
-    }
-
-    pub fn remove(
-        &mut self,
-        predicate: &dyn Fn(&SessionAction) -> bool,
-        candidates: Option<&[SessionAction]>,
-    ) -> Result<Vec<SessionAction>, String> {
-        self.inner.remove(predicate, candidates)
+        Self::with_accessors(
+            Arc::new(|action: &SessionAction<TPayload>| action.id.clone()),
+            Arc::new(|action: &SessionAction<TPayload>| action.delivery),
+            Arc::new(|action: &SessionAction<TPayload>| action.lifecycle.state()),
+            Arc::new(|action: &mut SessionAction<TPayload>, delivery| action.delivery = delivery),
+            Arc::new(|action: &mut SessionAction<TPayload>, next| {
+                transition_session_action(action, next, &TransitionOptions::default())
+            }),
+        )
     }
 
     pub fn rollback(
         &mut self,
-        action: &mut SessionAction,
+        action: &mut SessionAction<TPayload>,
         proof: Option<RollbackProof>,
     ) -> Result<(), String> {
-        let transition = TransitionOptions {
-            rollback_proof: proof,
-        };
-        transition_session_action(action, ActionLifecycle::Queued, &transition)
-    }
-
-    pub fn swap_queued(
-        &mut self,
-        left: &SessionAction,
-        right: &SessionAction,
-    ) -> Result<(), String> {
-        self.inner.swap_queued(left, right)
-    }
-
-    pub fn move_queued(
-        &mut self,
-        action: &mut SessionAction,
-        delivery: DeliveryPolicy,
-        index: usize,
-    ) -> Result<(), String> {
-        self.inner.move_queued(action, delivery, index)
-    }
-
-    pub fn queued_actions(&self, policy: Option<DeliveryPolicy>) -> Vec<SessionAction> {
-        self.inner.queued_actions(policy)
-    }
-
-    pub fn clearable_actions(&self, policy: Option<DeliveryPolicy>) -> Vec<SessionAction> {
-        self.inner.clearable_actions(policy)
-    }
-
-    pub fn snapshot_actions(&self) -> Vec<SessionAction> {
-        self.inner.snapshot_actions()
-    }
-
-    pub fn unfinished_actions(&self, policy: Option<DeliveryPolicy>) -> Vec<SessionAction> {
-        self.inner.unfinished_actions(policy)
-    }
-
-    pub fn active_actions(&self, policy: Option<DeliveryPolicy>) -> Vec<SessionAction> {
-        self.inner.active_actions(policy)
+        transition_session_action(action, ActionLifecycle::Queued, &TransitionOptions { rollback_proof: proof })?;
+        self.update_action(action)
     }
 
     pub fn queue_preview(&self, policy: DeliveryPolicy) -> Vec<String> {
-        self.inner
-            .queued_actions(Some(policy))
-            .into_iter()
-            .map(|action| match action.payload {
-                SessionActionPayload::Turn(turn) => turn.preview.unwrap_or(turn.text),
-                SessionActionPayload::SessionCommand(command) => command.text,
-            })
+        self.queue_preview_with(policy, &|action| action.payload.preview().to_string())
+    }
+
+    pub fn actions_for_message(&self, message: &DeliveryMessage) -> Vec<SessionAction<TPayload>> {
+        self.actions(None).into_iter()
+            .filter(|action| action.payload.records().iter().any(|record| messages_equal(&record.message, message)))
             .collect()
     }
 
-    pub fn ticket_for(
-        &self,
-        action: &SessionAction,
-    ) -> Result<Arc<ActionTicketController>, String> {
-        self.inner.ticket_for(action)
-    }
-
-    pub fn owned_actions(&self) -> Vec<SessionAction> {
-        self.inner.owned_actions()
-    }
-
-    pub fn actions_for_message(&self, message: &DeliveryMessage) -> Vec<SessionAction> {
-        self.inner
-            .actions(None)
-            .into_iter()
-            .filter(|action| match &action.payload {
-                SessionActionPayload::Turn(turn) => turn
-                    .records
-                    .iter()
-                    .any(|record| messages_equal(&record.message, message)),
-                SessionActionPayload::SessionCommand(_) => false,
-            })
-            .collect()
-    }
-
-    pub fn release_terminal(&mut self, action: &SessionAction) -> Result<(), String> {
-        self.inner.release_terminal(action)
+    // Rust action snapshots are values; write back mutations that TypeScript
+    // observes through its shared action object before the next scheduling step.
+    pub(crate) fn update_action(&mut self, action: &SessionAction<TPayload>) -> Result<(), String> {
+        let stored = self.next_turn_boundary.iter_mut().chain(self.when_run_idle.iter_mut())
+            .find(|candidate| candidate.id == action.id)
+            .ok_or_else(|| format!("Session action {} is not owned by this store", action.id))?;
+        *stored = action.clone();
+        Ok(())
     }
 }
 
@@ -1152,7 +1056,8 @@ fn messages_equal(left: &DeliveryMessage, right: &DeliveryMessage) -> bool {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeActivity {
     pub lower_agent_run: bool,
     pub compaction: bool,
@@ -1464,6 +1369,9 @@ mod tests {
             removed[0].lifecycle.state(),
             ActionLifecycleState::Cancelled
         );
+        assert_eq!(store.owned_actions().len(), 2);
+        assert_eq!(store.queued_actions(None).len(), 1);
+        store.release_terminal(&removed[0]).unwrap();
         assert_eq!(store.owned_actions().len(), 1);
     }
 
@@ -1539,6 +1447,99 @@ mod tests {
         assert!(!controller.settle_delivered(DeliveryOutcome::NotApplicable));
         assert!(controller.settle_completed(None));
         assert!(!controller.settle_completed(None));
+        assert!(!controller.settle_completed(Some("late error".to_string())));
+        assert_eq!(controller.completed_error(), None);
+    }
+
+    #[tokio::test]
+    async fn ticket_promises_retain_rejections_for_every_awaiter() {
+        let controller = Arc::new(ActionTicketController::new("a"));
+        let first = controller.ticket.clone();
+        let second = controller.ticket.clone();
+        assert!(controller.reject_delivered("delivery failed".to_string()));
+        assert!(controller.settle_completed(Some("completion failed".to_string())));
+        assert!(!controller.settle_completed(Some("late error".to_string())));
+        assert_eq!(first.delivered.await, Err("delivery failed".to_string()));
+        assert_eq!(second.delivered.await, Err("delivery failed".to_string()));
+        assert_eq!(first.completed.await, Err("completion failed".to_string()));
+        assert_eq!(second.completed.await, Err("completion failed".to_string()));
+        assert_eq!(controller.completed_error().as_deref(), Some("completion failed"));
+    }
+
+    #[test]
+    fn generic_actions_keep_preparation_and_rollback_the_stored_action() {
+        #[derive(Clone)]
+        struct Prepared {
+            payload: SessionActionPayload,
+            preparation: String,
+        }
+        impl SessionPayload for Prepared {
+            fn records(&self) -> &[DeliveryRecord] { self.payload.records() }
+            fn preview(&self) -> &str { self.payload.preview() }
+        }
+        let original = turn_action("prepared", DeliveryPolicy::WhenRunIdle, "prompt");
+        let mut store = ActionStore::new();
+        store.enqueue(SessionAction {
+            id: original.id,
+            source: original.source,
+            delivery: original.delivery,
+            wake: original.wake,
+            payload: Prepared { payload: original.payload, preparation: "prepared content".to_string() },
+            lifecycle: original.lifecycle,
+            queue_key: original.queue_key,
+            agent_message_id: original.agent_message_id,
+            suppress_autonomous_continuation: original.suppress_autonomous_continuation,
+        }).unwrap();
+        let mut selected = store.select_first().unwrap().unwrap();
+        assert_eq!(selected.payload.preparation, "prepared content");
+        store.rollback(&mut selected, None).unwrap();
+        assert_eq!(store.queued_actions(None).len(), 1);
+        assert_eq!(store.queue_preview(DeliveryPolicy::WhenRunIdle), vec!["prompt"]);
+        assert_eq!(store.select_first().unwrap().unwrap().payload.preparation, "prepared content");
+    }
+
+    #[test]
+    fn explicit_remove_candidates_keep_order_and_include_running_actions() {
+        let mut store = SessionActionStore::new();
+        store.enqueue(turn_action("a", DeliveryPolicy::WhenRunIdle, "first")).unwrap();
+        store.enqueue(turn_action("b", DeliveryPolicy::WhenRunIdle, "second")).unwrap();
+        let mut first = store.select_first().unwrap().unwrap();
+        transition_session_action(&mut first, ActionLifecycle::Running { execution: ActionExecution::AgentTurn }, &TransitionOptions::default()).unwrap();
+        store.update_action(&first).unwrap();
+        let second = store.queued_actions(None).pop().unwrap();
+        let removed = store.remove(&|_| true, Some(&[second, first])).unwrap();
+        assert_eq!(removed.iter().map(|action| action.id.as_str()).collect::<Vec<_>>(), vec!["b", "a"]);
+        assert!(store.unfinished_actions(None).is_empty());
+        assert_eq!(store.owned_actions().len(), 2);
+    }
+
+    #[test]
+    fn action_serialization_uses_shared_custom_message_and_typescript_fields() {
+        let message = CustomMessage {
+            role: "custom".to_string(),
+            custom_type: "notice".to_string(),
+            content: pi_agent_core::types::CustomMessageContent::Text("notice".to_string()),
+            display: true,
+            details: None,
+            timestamp: 1,
+        };
+        let mut action = turn_action("a", DeliveryPolicy::WhenRunIdle, "notice");
+        if let SessionActionPayload::Turn(turn) = &mut action.payload {
+            turn.records[0].message = DeliveryMessage::Custom(message.clone());
+        }
+        let value = serde_json::to_value(&action).unwrap();
+        assert_eq!(value["payload"]["kind"], "turn");
+        assert_eq!(value["payload"]["records"][0]["ownerActionId"], "a");
+        assert!(value.get("queueKey").is_none());
+        assert_eq!(serde_json::from_value::<SessionAction>(value).unwrap(), action);
+        action.lifecycle = ActionLifecycle::Committing;
+        let error = transition_session_action(&mut action, ActionLifecycle::Queued, &TransitionOptions {
+            rollback_proof: Some(RollbackProof {
+                dispatch_settled: true,
+                transcript: vec![crate::core::messages::custom_message_to_agent_message(message)],
+            }),
+        }).unwrap_err();
+        assert!(error.contains("primary message is durable"));
     }
 
     #[test]

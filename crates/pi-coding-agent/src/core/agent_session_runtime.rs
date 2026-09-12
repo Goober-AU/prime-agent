@@ -30,6 +30,9 @@ use crate::core::session_manager::{NewSessionOptions, SessionManager};
 
 pub type BoxFuture<T> = pi_ai::types::BoxFuture<T>;
 
+mod daemon_adapter;
+mod in_process_adapter;
+
 // ---------------------------------------------------------------------------
 // Re-exports (`export { ... } from "./agent-session-services.js"`)
 // ---------------------------------------------------------------------------
@@ -386,7 +389,7 @@ impl AgentSessionRuntime {
     async fn scoped_build<F, Fut>(&self, build: F) -> Result<CreateAgentSessionRuntimeResult, String>
     where
         F: FnOnce() -> Fut,
-        Fut: std::future::Future<Output = Result<CreateAgentSessionRuntimeResult, String>> + 'static,
+        Fut: std::future::Future<Output = Result<CreateAgentSessionRuntimeResult, String>> + Send + 'static,
     {
         let scope = self
             .runtime_env_scope
@@ -540,22 +543,20 @@ impl AgentSessionRuntime {
         // `this._session.setSubagentRuntimeHost(this.subagentRuntimeHost ?? this)`:
         // without an installed host the runtime hosts subagents itself, so the
         // session gets an adapter that forwards to this runtime.
-        let session_host: Arc<dyn crate::core::agent_session::SubagentRuntimeHost> = match host {
-            Some(host) => Arc::new(SessionRuntimeHostAdapter::Host(host)),
-            None => Arc::new(SessionRuntimeHostAdapter::Runtime(Arc::downgrade(self))),
-        };
+        let session_host: Arc<dyn SubagentRuntimeHost> = host
+            .unwrap_or_else(|| Arc::clone(self) as Arc<dyn SubagentRuntimeHost>);
         self.session().set_subagent_runtime_host(Some(session_host));
     }
 
     /// `apply(result)`.
     fn apply(self: &Arc<Self>, result: CreateAgentSessionRuntimeResult) {
-        *self.session.lock().expect("session poisoned") = Arc::clone(&result.session);
+        *self.session.lock().expect("session poisoned") = Arc::clone(&result.result.session);
         *self.services.lock().expect("services poisoned") = Arc::clone(&result.services);
         *self.diagnostics.lock().expect("diagnostics poisoned") = result.diagnostics;
         *self
             .model_fallback_message
             .lock()
-            .expect("model fallback message poisoned") = result.model_fallback_message;
+            .expect("model fallback message poisoned") = result.result.model_fallback_message;
         self.bind_runtime_host();
     }
 
@@ -764,7 +765,7 @@ impl AgentSessionRuntime {
         let agent_dir = self.services().agent_dir.clone();
         let session_config = self.session_config.clone();
         let runtime = self
-            .scoped_build(move || {
+            .scoped_build(|| {
                 let create_runtime = Arc::clone(&self.create_runtime);
                 let session_manager = Arc::clone(&session_manager);
                 let input = CreateAgentSessionRuntimeInput {
@@ -829,7 +830,27 @@ impl AgentSessionRuntime {
                 async move { create_runtime(input).await }
             })
             .await?;
-        let runtime = Arc::new(runtime);
+        let runtime = AgentSessionRuntime::new(
+            runtime.result.session,
+            runtime.services,
+            Arc::clone(&self.create_runtime),
+            runtime.diagnostics,
+            runtime.result.model_fallback_message,
+            self.session_config.clone(),
+            AgentSessionRuntimeMetadata {
+                kind: AGENT_SESSION_RUNTIME_KIND_SUBAGENT.to_string(),
+                created_at: now_millis(),
+                parent_session_id: Some(options.parent_session.session_id()),
+                parent_session_file: options.parent_session.session_file(),
+                rlm_child_id: Some(options.id.clone()),
+                rlm_parent_node_id: Some(options.rlm_parent_node_id.clone()),
+                prompt: Some(options.prompt.clone()),
+                spawn_code: options.spawn_code.clone(),
+                session_dir: Some(options.session_dir.clone()),
+                ..Default::default()
+            },
+            None,
+        );
         self.subagent_runtimes
             .lock()
             .expect("subagent runtimes poisoned")
@@ -912,13 +933,9 @@ impl AgentSessionRuntime {
 
     /// `finishSessionReplacement(withSession?)`.
     async fn finish_session_replacement(&self, with_session: Option<WithSessionCallback>) -> Result<(), String> {
-        if let Some(rebind_session) = self
-            .rebind_session
-            .lock()
-            .expect("rebind session poisoned")
-            .clone()
-        {
-            rebind_session(Arc::clone(&self.session)).await;
+        let rebind_session = self.rebind_session.lock().expect("rebind session poisoned").clone();
+        if let Some(rebind_session) = rebind_session {
+            rebind_session(self.session()).await;
         }
         // `for (const listener of this.sessionReplacedListeners)`: the TypeScript
         // reads the live Set, so listeners added during the loop also run.
@@ -933,7 +950,7 @@ impl AgentSessionRuntime {
             let Some(listener) = listener else {
                 break;
             };
-            listener(Arc::clone(&self.session)).await;
+            listener(self.session()).await;
             index += 1;
         }
         if let Some(with_session) = with_session {
@@ -995,7 +1012,7 @@ impl AgentSessionRuntime {
                         let this = Arc::clone(&this);
                         let session_manager = Arc::clone(&session_manager);
                         async move {
-                            this.scoped_build(move || {
+                            this.clone().scoped_build(move || {
                                 let create_runtime = Arc::clone(&this.create_runtime);
                                 let session_manager = Arc::clone(&session_manager);
                                 async move {
@@ -1085,7 +1102,7 @@ impl AgentSessionRuntime {
                         let this = Arc::clone(&this);
                         let session_manager = Arc::clone(&session_manager);
                         async move {
-                            this.scoped_build(move || {
+                            this.clone().scoped_build(move || {
                                 let create_runtime = Arc::clone(&this.create_runtime);
                                 let session_manager = Arc::clone(&session_manager);
                                 async move {
@@ -1351,7 +1368,7 @@ impl AgentSessionRuntime {
                     let this = Arc::clone(&this);
                     let session_manager = Arc::clone(&session_manager);
                     async move {
-                        this.scoped_build(move || {
+                        this.clone().scoped_build(move || {
                             let create_runtime = Arc::clone(&this.create_runtime);
                             let session_manager = Arc::clone(&session_manager);
                             async move {
@@ -1451,7 +1468,6 @@ impl AgentSessionRuntime {
             .get_session_file();
         self.teardown_for_replacement("resume", file, lease.clone())
             .await?;
-        let session_manager = Arc::new(session_manager);
         let agent_dir = self.services().agent_dir.clone();
         let session_config = self.session_config.clone();
         let cwd = session_manager.lock().expect("session manager poisoned").get_cwd();
@@ -1462,7 +1478,7 @@ impl AgentSessionRuntime {
                     let this = Arc::clone(&this);
                     let session_manager = Arc::clone(&session_manager);
                     async move {
-                        this.scoped_build(move || {
+                        this.clone().scoped_build(move || {
                             let create_runtime = Arc::clone(&this.create_runtime);
                             let session_manager = Arc::clone(&session_manager);
                             async move {
@@ -1554,7 +1570,7 @@ impl AgentSessionRuntime {
                 None => {
                     let this = Arc::clone(self);
                     let options = options.unwrap_or_default();
-                    let future = Box::pin(async move { this.dispose_once(options).await });
+                    let future: BoxFuture<Result<(), String>> = Box::pin(async move { this.dispose_once(options).await });
                     let shared = future.shared();
                     *slot = Some(shared.clone());
                     shared
@@ -1638,79 +1654,6 @@ fn join_path(base: &str, name: &str) -> String {
         .to_string()
 }
 
-/// `this.subagentRuntimeHost ?? this`, as `AgentSession` sees it.
-///
-/// `AgentSession::set_subagent_runtime_host` accepts
-/// `core::agent_session::SubagentRuntimeHost`, whose options struct carries only
-/// `prompt`, `session_name`, `session_dir`, `model`, `thinking_level`,
-/// `parent_session_id`, `parent_session_path` and `inline`. `agent-session-runtime.ts`
-/// receives `CreateRlmSubagentRuntimeOptions`, which additionally carries
-/// `parentSession`, `id`, `serviceTier`, `scopedModels`, `activeToolNames`,
-/// `allowedToolNames`, `customTools`, `includeGoals`, `includeCompactSkill`,
-/// `rlmDepth`, `rlmMaxDepth`, `rlmParentNodeId`, `spawnedByRequestId` and
-/// `spawnCode`. Rebuilding those here would invent a child id (breaking
-/// `getRlmChildRunStatus` and `deleteRlmSubagentRuntime`) and a tool/model scope
-/// the session never supplied, so the adapter refuses the call and names the gap.
-/// Recorded in `blocked_on`.
-enum SessionRuntimeHostAdapter {
-    /// `this.subagentRuntimeHost`.
-    Host(Arc<dyn SubagentRuntimeHost>),
-    /// `this.subagentRuntimeHost ?? this`.
-    Runtime(Weak<AgentSessionRuntime>),
-}
-
-impl crate::core::agent_session::SubagentRuntimeHost for SessionRuntimeHostAdapter {
-    fn create_subagent_runtime(
-        &self,
-        options: crate::core::agent_session::CreateRlmSubagentRuntimeOptions,
-    ) -> BoxFuture<Result<crate::core::agent_session::RlmSubagentRuntime, String>> {
-        // Keep the seam honest: no member of this path may fabricate the child id.
-        let _ = options;
-        let _ = match self {
-            SessionRuntimeHostAdapter::Host(_) => (),
-            SessionRuntimeHostAdapter::Runtime(_) => (),
-        };
-        Box::pin(async { Err(SESSION_HOST_SEAM_OPTIONS_INCOMPLETE.to_string()) })
-    }
-
-    /// The remaining members of `core::agent_session::SubagentRuntimeHost` do not
-    /// exist on `agent-session-runtime.ts`'s host interface; they are the RLM
-    /// handler surface other modules implement.
-    fn list_subagents(&self) -> BoxFuture<Result<Value, String>> {
-        Box::pin(async { Err(HOST_NOT_LANDED.to_string()) })
-    }
-
-    fn delete_subagent(&self, selector: &str) -> BoxFuture<Result<Value, String>> {
-        let _ = selector;
-        Box::pin(async { Err(HOST_NOT_LANDED.to_string()) })
-    }
-
-    fn find_models(&self, query: &str, limit: i64) -> BoxFuture<Result<Value, String>> {
-        let _ = (query, limit);
-        Box::pin(async { Err(HOST_NOT_LANDED.to_string()) })
-    }
-
-    fn run(&self, payload: Value) -> BoxFuture<Result<Value, String>> {
-        let _ = payload;
-        Box::pin(async { Err(HOST_NOT_LANDED.to_string()) })
-    }
-
-    fn create_session(&self, payload: Value) -> BoxFuture<Result<Value, String>> {
-        let _ = payload;
-        Box::pin(async { Err(HOST_NOT_LANDED.to_string()) })
-    }
-}
-
-/// The session-side seam cannot supply the runtime-side options; see the adapter.
-const SESSION_HOST_SEAM_OPTIONS_INCOMPLETE: &str =
-    "blocked_on: core::agent_session::SubagentRuntimeHost options lack parentSession/id/serviceTier/scopedModels/activeToolNames/customTools/rlmMaxDepth/... (agent-session slice)";
-
-/// The agent-session slice's host seam carries list/find/run/create-session
-/// members that `agent-session-runtime.ts` implements through RLM handlers owned
-/// by other modules (`rlm-runtime.ts`, `daemon-mode.ts`).
-const HOST_NOT_LANDED: &str =
-    "blocked_on: rlm-runtime host handlers (listSubagents/findModels/run/createSession) are another slice";
-
 /// `export async function createAgentSessionRuntime(createRuntime, options)`.
 pub async fn create_agent_session_runtime(
     create_runtime: CreateAgentSessionRuntimeFactory,
@@ -1770,7 +1713,7 @@ pub async fn create_agent_session_runtime(
                 result.diagnostics,
                 result.result.model_fallback_message.clone(),
                 session_config,
-                runtime_metadata.unwrap_or_default(),
+                runtime_metadata.unwrap_or_else(AgentSessionRuntimeMetadata::top_level),
                 lease,
             ))
         }
@@ -1789,8 +1732,9 @@ impl SubagentRuntimeHost for AgentSessionRuntime {
         &self,
         options: CreateRlmSubagentRuntimeOptions,
     ) -> BoxFuture<Result<RlmSubagentRuntime, String>> {
+        let runtime = self.self_arc();
         Box::pin(async move {
-            let Some(runtime) = self.self_arc() else {
+            let Some(runtime) = runtime else {
                 return Err("AgentSessionRuntime has been dropped".to_string());
             };
             let created = runtime.build_rlm_subagent_runtime(options).await?;
@@ -1806,12 +1750,22 @@ impl SubagentRuntimeHost for AgentSessionRuntime {
         child_id: &str,
         session: Option<&Arc<AgentSession>>,
     ) -> BoxFuture<Result<(), String>> {
-        Box::pin(async move { self.dispose_subagent_runtime(child_id, session).await })
+        let runtime = self.self_arc();
+        let child_id = child_id.to_string();
+        let session = session.cloned();
+        Box::pin(async move {
+            let runtime = runtime.ok_or_else(|| "AgentSessionRuntime has been dropped".to_string())?;
+            runtime.dispose_subagent_runtime(&child_id, session.as_ref()).await
+        })
     }
 
     /// `disposeRlmSubagentRuntimes?()` - `disposeSubagentRuntimes()` in the class.
     fn dispose_rlm_subagent_runtimes(&self) -> BoxFuture<Result<(), String>> {
-        Box::pin(async move { self.dispose_subagent_runtimes().await })
+        let runtime = self.self_arc();
+        Box::pin(async move {
+            let runtime = runtime.ok_or_else(|| "AgentSessionRuntime has been dropped".to_string())?;
+            runtime.dispose_subagent_runtimes().await
+        })
     }
 }
 

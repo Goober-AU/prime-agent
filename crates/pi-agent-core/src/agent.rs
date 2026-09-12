@@ -144,21 +144,22 @@ impl PendingMessageQueue {
 #[derive(Clone)]
 pub struct AgentOptions {
     pub initial_state: Option<AgentState>,
-    pub convert_to_llm: Option<Arc<dyn Fn(Vec<AgentMessage>) -> Vec<Message> + Send + Sync>>,
+    pub convert_to_llm: Option<Arc<dyn Fn(Vec<AgentMessage>) -> BoxFuture<'static, Vec<Message>> + Send + Sync>>,
     pub transform_context:
-        Option<Arc<dyn Fn(Vec<AgentMessage>, Option<CancellationToken>) -> Vec<AgentMessage> + Send + Sync>>,
+        Option<Arc<dyn Fn(Vec<AgentMessage>, Option<CancellationToken>) -> BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>>,
     pub stream_fn: Option<StreamFn>,
-    pub get_api_key: Option<Arc<dyn Fn(String) -> Option<String> + Send + Sync>>,
+    pub get_api_key: Option<Arc<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>>,
     pub on_payload: Option<pi_ai::types::OnPayload>,
     pub on_response: Option<pi_ai::types::OnResponse>,
     pub before_tool_call:
-        Option<Arc<dyn Fn(BeforeToolCallContext, Option<CancellationToken>) -> Option<BeforeToolCallResult> + Send + Sync>>,
+        Option<Arc<dyn Fn(BeforeToolCallContext, Option<CancellationToken>) -> BoxFuture<'static, anyhow::Result<Option<BeforeToolCallResult>>> + Send + Sync>>,
     pub after_tool_call:
-        Option<Arc<dyn Fn(AfterToolCallContext, Option<CancellationToken>) -> Option<AfterToolCallResult> + Send + Sync>>,
-    pub should_stop_after_turn: Option<Arc<dyn Fn(ShouldStopAfterTurnContext) -> bool + Send + Sync>>,
+        Option<Arc<dyn Fn(AfterToolCallContext, Option<CancellationToken>) -> BoxFuture<'static, anyhow::Result<Option<AfterToolCallResult>>> + Send + Sync>>,
+    pub should_stop_after_turn:
+        Option<Arc<dyn Fn(ShouldStopAfterTurnContext) -> BoxFuture<'static, bool> + Send + Sync>>,
     pub should_stop_before_turn: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     pub get_continuation_messages: Option<
-        Arc<dyn Fn(GetContinuationMessagesContext, Option<CancellationToken>) -> Vec<AgentMessage> + Send + Sync>,
+        Arc<dyn Fn(GetContinuationMessagesContext, Option<CancellationToken>) -> BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>,
     >,
     pub steering_mode: Option<QueueMode>,
     pub follow_up_mode: Option<QueueMode>,
@@ -233,23 +234,24 @@ pub struct Agent {
     listeners: Mutex<Vec<ListenerEntry>>,
     steering_queue: Arc<Mutex<PendingMessageQueue>>,
     follow_up_queue: Arc<Mutex<PendingMessageQueue>>,
-    pub convert_to_llm: Mutex<Arc<dyn Fn(Vec<AgentMessage>) -> Vec<Message> + Send + Sync>>,
+    pub convert_to_llm: Mutex<Arc<dyn Fn(Vec<AgentMessage>) -> BoxFuture<'static, Vec<Message>> + Send + Sync>>,
     pub transform_context:
-        Mutex<Option<Arc<dyn Fn(Vec<AgentMessage>, Option<CancellationToken>) -> Vec<AgentMessage> + Send + Sync>>>,
+        Mutex<Option<Arc<dyn Fn(Vec<AgentMessage>, Option<CancellationToken>) -> BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>>>,
     pub stream_fn: Mutex<StreamFn>,
-    pub get_api_key: Mutex<Option<Arc<dyn Fn(String) -> Option<String> + Send + Sync>>>,
+    pub get_api_key: Mutex<Option<Arc<dyn Fn(String) -> BoxFuture<'static, Option<String>> + Send + Sync>>>,
     pub on_payload: Mutex<Option<pi_ai::types::OnPayload>>,
     pub on_response: Mutex<Option<pi_ai::types::OnResponse>>,
     pub before_tool_call: Mutex<
-        Option<Arc<dyn Fn(BeforeToolCallContext, Option<CancellationToken>) -> Option<BeforeToolCallResult> + Send + Sync>>,
+        Option<Arc<dyn Fn(BeforeToolCallContext, Option<CancellationToken>) -> BoxFuture<'static, anyhow::Result<Option<BeforeToolCallResult>>> + Send + Sync>>,
     >,
     pub after_tool_call: Mutex<
-        Option<Arc<dyn Fn(AfterToolCallContext, Option<CancellationToken>) -> Option<AfterToolCallResult> + Send + Sync>>,
+        Option<Arc<dyn Fn(AfterToolCallContext, Option<CancellationToken>) -> BoxFuture<'static, anyhow::Result<Option<AfterToolCallResult>>> + Send + Sync>>,
     >,
-    pub should_stop_after_turn: Mutex<Option<Arc<dyn Fn(ShouldStopAfterTurnContext) -> bool + Send + Sync>>>,
+    pub should_stop_after_turn:
+        Mutex<Option<Arc<dyn Fn(ShouldStopAfterTurnContext) -> BoxFuture<'static, bool> + Send + Sync>>>,
     pub should_stop_before_turn: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,
     pub get_continuation_messages: Mutex<
-        Option<Arc<dyn Fn(GetContinuationMessagesContext, Option<CancellationToken>) -> Vec<AgentMessage> + Send + Sync>>,
+        Option<Arc<dyn Fn(GetContinuationMessagesContext, Option<CancellationToken>) -> BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>>,
     >,
     active_run: Mutex<Option<Arc<ActiveRun>>>,
     pub session_id: Mutex<Option<String>>,
@@ -293,7 +295,9 @@ impl Agent {
             convert_to_llm: Mutex::new(
                 options
                     .convert_to_llm
-                    .unwrap_or_else(|| Arc::new(default_convert_to_llm)),
+                    .unwrap_or_else(|| Arc::new(|messages| {
+                        Box::pin(async move { default_convert_to_llm(messages) })
+                    })),
             ),
             transform_context: Mutex::new(options.transform_context),
             // `options.streamFn ?? streamSimple` - the loop resolves the default.
@@ -990,7 +994,10 @@ impl Agent {
                 .clone();
             // `async (context) => this.shouldStopAfterTurn?.(context) ?? false`
             config.should_stop_after_turn = Some(Arc::new(move |context: ShouldStopAfterTurnContext| {
-                hook.as_ref().map(|hook| hook(context)).unwrap_or(false)
+                match hook.as_ref() {
+                    Some(hook) => hook(context),
+                    None => Box::pin(async { false }),
+                }
             }));
         }
         {
@@ -1018,22 +1025,29 @@ impl Agent {
             let steering_queue = self.steering_queue.clone();
             let skip = skip_initial_steering_poll.clone();
             config.get_steering_messages = Some(Arc::new(move || {
-                if skip.swap(false, AtomicOrdering::SeqCst) {
-                    return Vec::new();
-                }
-                steering_queue
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .drain()
+                let steering_queue = steering_queue.clone();
+                let skip = skip.clone();
+                Box::pin(async move {
+                    if skip.swap(false, AtomicOrdering::SeqCst) {
+                        return Vec::new();
+                    }
+                    steering_queue
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .drain()
+                })
             }));
         }
         {
             let follow_up_queue = self.follow_up_queue.clone();
             config.get_follow_up_messages = Some(Arc::new(move || {
-                follow_up_queue
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .drain()
+                let follow_up_queue = follow_up_queue.clone();
+                Box::pin(async move {
+                    follow_up_queue
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .drain()
+                })
             }));
         }
         {
@@ -1044,7 +1058,10 @@ impl Agent {
                 .clone();
             config.get_continuation_messages = Some(Arc::new(
                 move |context: GetContinuationMessagesContext, signal: Option<CancellationToken>| {
-                    hook.as_ref().map(|hook| hook(context, signal)).unwrap_or_default()
+                    match hook.as_ref() {
+                        Some(hook) => hook(context, signal),
+                        None => Box::pin(async { Vec::new() }),
+                    }
                 },
             ));
         }
@@ -1057,7 +1074,14 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::types::{AgentToolResult, ThinkingLevel};
+    use pi_ai::providers::faux::{
+        faux_assistant_message, register_faux_provider, FauxAssistantMessageOptions,
+        FauxResponseStep,
+    };
     use serde_json::json;
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+    use tokio::time::timeout;
 
     fn test_agent() -> Arc<Agent> {
         Agent::new(AgentOptions::default())
@@ -1256,6 +1280,305 @@ mod tests {
         agent.update_state(|state| state.messages.push(AgentMessage::from(assistant("a"))));
         let error = runtime.block_on(agent.continue_()).unwrap_err();
         assert_eq!(error.message, "Cannot continue from message role: assistant");
+    }
+
+    async fn assert_async_stop_hook(first_stop: Option<bool>) {
+        let provider = register_faux_provider(None);
+        provider.set_responses(vec![
+            FauxResponseStep::Message(faux_assistant_message(
+                pi_ai::types::ContentBlock::ToolCall(pi_ai::types::ToolCall::new(
+                    "echo-1",
+                    "echo",
+                    serde_json::Map::new(),
+                ))
+                .into(),
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some("toolUse".to_string()),
+                    ..Default::default()
+                }),
+            )),
+            FauxResponseStep::Message(faux_assistant_message("complete".into(), None)),
+        ]);
+        let started = Arc::new(Semaphore::new(0));
+        let release = Arc::new(Semaphore::new(0));
+        let contexts = Arc::new(Mutex::new(Vec::<ShouldStopAfterTurnContext>::new()));
+        let agent = Agent::new(AgentOptions {
+            initial_state: Some(AgentState {
+                model: provider.get_model(),
+                tools: Some(vec![crate::types::AgentTool {
+                    name: "echo".to_string(),
+                    description: "Echo tool".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                    label: "Echo".to_string(),
+                    prepare_arguments: None,
+                    execute: Arc::new(|_, _, _, _| {
+                        Box::pin(async {
+                            Ok(AgentToolResult::new(
+                                vec![crate::types::ContentBlock::text("echoed")],
+                                json!({}),
+                            ))
+                        })
+                    }),
+                    execution_mode: None,
+                }]),
+                ..Default::default()
+            }),
+            should_stop_after_turn: Some(Arc::new({
+                let contexts = contexts.clone();
+                let started = started.clone();
+                let release = release.clone();
+                move |context| {
+                    let contexts = contexts.clone();
+                    let started = started.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        let first_turn = {
+                            let mut contexts = contexts.lock().unwrap();
+                            contexts.push(context);
+                            contexts.len() == 1
+                        };
+                        if !first_turn {
+                            return true;
+                        }
+                        started.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                        first_stop.unwrap_or(false)
+                    })
+                }
+            })),
+            ..Default::default()
+        });
+        agent.follow_up(vec![AgentMessage::from(UserMessage {
+            role: "user".to_string(),
+            content: UserContent::Text("follow up should stay queued".to_string()),
+            provider_context: None,
+            timestamp: 2,
+        })]);
+        let events = Arc::new(Mutex::new(Vec::<AgentEvent>::new()));
+        let _subscription = agent.subscribe(Arc::new({
+            let events = events.clone();
+            move |event, _| {
+                let events = events.clone();
+                Box::pin(async move {
+                    events.lock().unwrap().push(event);
+                })
+            }
+        }));
+        let run = tokio::spawn({
+            let agent = agent.clone();
+            async move {
+                agent.prompt(PromptInput::Text {
+                    input: "echo something".to_string(),
+                    images: Vec::new(),
+                }).await
+            }
+        });
+        timeout(Duration::from_secs(5), started.acquire())
+            .await.expect("async stop hook did not start").unwrap().forget();
+
+        assert!(!run.is_finished(), "the run must await the pending hook");
+        assert!(agent.state().is_streaming);
+        assert_eq!(provider.call_count(), 1);
+        assert!(matches!(events.lock().unwrap().last(), Some(AgentEvent::TurnEnd { .. })));
+        {
+            let contexts = contexts.lock().unwrap();
+            let context = &contexts[0];
+            assert_eq!(context.message.stop_reason, "toolUse");
+            assert_eq!(context.tool_results.len(), 1);
+            assert_eq!(context.tool_results[0].tool_call_id, "echo-1");
+            assert!(!context.tool_results[0].is_error);
+            assert_eq!(
+                context.context.messages.iter().map(AgentMessage::role).collect::<Vec<_>>(),
+                ["user", "assistant", "toolResult"],
+            );
+            assert_eq!(context.new_messages, context.context.messages);
+            assert_eq!(context.new_messages, agent.state().messages);
+        }
+
+        if first_stop.is_none() {
+            agent.abort();
+        } else {
+            release.add_permits(1);
+        }
+        timeout(Duration::from_secs(5), run)
+            .await.expect("pending hook blocked run settlement").unwrap().unwrap();
+        let expected_turns = if first_stop == Some(false) { 2 } else { 1 };
+        assert_eq!(provider.call_count(), expected_turns);
+        assert_eq!(contexts.lock().unwrap().len(), expected_turns as usize);
+        let state = agent.state();
+        assert!(!state.is_streaming);
+        assert!(state.error_message.is_none());
+        assert!(state.pending_tool_calls.is_empty());
+        assert_eq!(state.messages.len(), expected_turns as usize + 2);
+        assert!(agent.has_queued_messages(), "stopping must retain queued follow-ups");
+        let events = events.lock().unwrap();
+        assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::TurnEnd { .. })).count(), expected_turns as usize);
+        assert_eq!(events.iter().filter(|event| matches!(event, AgentEvent::AgentEnd { .. })).count(), 1);
+        match events.last().unwrap() {
+            AgentEvent::AgentEnd { messages } => assert_eq!(messages, &state.messages),
+            event => panic!("expected agent_end, got {event:?}"),
+        }
+        assert!(!state.messages.iter().any(|message| matches!(
+            message,
+            AgentMessage::Message(Message::Assistant(message))
+                if message.stop_reason == "aborted" || message.stop_reason == "error"
+        )), "post-turn cancellation must not append an aborted assistant");
+        provider.unregister();
+    }
+
+    #[tokio::test]
+    async fn async_stop_after_turn_false_waits_then_continues_tool_cycle() {
+        assert_async_stop_hook(Some(false)).await;
+    }
+
+    #[tokio::test]
+    async fn async_stop_after_turn_true_waits_then_preserves_queued_work() {
+        assert_async_stop_hook(Some(true)).await;
+    }
+
+    #[tokio::test]
+    async fn async_stop_after_turn_cancellation_settles_completed_turn() {
+        assert_async_stop_hook(None).await;
+    }
+
+    #[tokio::test]
+    async fn async_context_auth_tool_and_continuation_hooks_keep_turn_order() {
+        let provider = register_faux_provider(None);
+        provider.set_responses(vec![
+            FauxResponseStep::Message(faux_assistant_message(
+                pi_ai::types::ContentBlock::ToolCall(pi_ai::types::ToolCall::new(
+                    "echo-1", "echo", serde_json::Map::new(),
+                )).into(),
+                Some(FauxAssistantMessageOptions {
+                    stop_reason: Some("toolUse".to_string()),
+                    ..Default::default()
+                }),
+            )),
+            FauxResponseStep::Message(faux_assistant_message("complete".into(), None)),
+        ]);
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let agent = Agent::new(AgentOptions {
+            initial_state: Some(AgentState {
+                model: provider.get_model(),
+                tools: Some(vec![crate::types::AgentTool {
+                    name: "echo".to_string(),
+                    description: "Echo tool".to_string(),
+                    label: "Echo".to_string(),
+                    parameters: json!({"type": "object", "properties": {}}),
+                    prepare_arguments: None,
+                    execute: Arc::new(|_, _, _, _| Box::pin(async {
+                        Ok(AgentToolResult::new(vec![crate::types::ContentBlock::text("original")], json!({})))
+                    })),
+                    execution_mode: None,
+                }]),
+                ..Default::default()
+            }),
+            transform_context: Some(Arc::new({
+                let trace = trace.clone();
+                move |messages, signal| {
+                    let trace = trace.clone();
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        assert!(signal.is_some());
+                        trace.lock().unwrap().push("transform");
+                        messages
+                    })
+                }
+            })),
+            convert_to_llm: Some(Arc::new({
+                let trace = trace.clone();
+                move |messages| {
+                    let trace = trace.clone();
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        trace.lock().unwrap().push("convert");
+                        default_convert_to_llm(messages)
+                    })
+                }
+            })),
+            get_api_key: Some(Arc::new({
+                let trace = trace.clone();
+                move |provider| {
+                    let trace = trace.clone();
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        assert_eq!(provider, "faux");
+                        trace.lock().unwrap().push("auth");
+                        None
+                    })
+                }
+            })),
+            before_tool_call: Some(Arc::new({
+                let trace = trace.clone();
+                move |context, signal| {
+                    let trace = trace.clone();
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        assert!(signal.is_some());
+                        assert_eq!(context.tool_call.id, "echo-1");
+                        assert_eq!(context.assistant_message.stop_reason, "toolUse");
+                        trace.lock().unwrap().push("before");
+                        Ok(None)
+                    })
+                }
+            })),
+            after_tool_call: Some(Arc::new({
+                let trace = trace.clone();
+                move |context, signal| {
+                    let trace = trace.clone();
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        assert!(signal.is_some());
+                        assert_eq!(context.result.content[0].as_text(), Some("original"));
+                        trace.lock().unwrap().push("after");
+                        Ok(Some(AfterToolCallResult {
+                            content: Some(vec![crate::types::ContentBlock::text("overridden")]),
+                            details: Some(json!({"changed": true})),
+                            is_error: Some(true),
+                            terminate: Some(true),
+                        }))
+                    })
+                }
+            })),
+            get_continuation_messages: Some(Arc::new({
+                let trace = trace.clone();
+                move |context, signal| {
+                    let trace = trace.clone();
+                    Box::pin(async move {
+                        tokio::task::yield_now().await;
+                        assert!(signal.is_some());
+                        trace.lock().unwrap().push("continuation");
+                        if context.tool_results.is_empty() {
+                            return Vec::new();
+                        }
+                        assert_eq!(context.new_messages.len(), 3);
+                        assert!(context.tool_results[0].is_error);
+                        assert_eq!(context.tool_results[0].details, Some(json!({"changed": true})));
+                        assert!(matches!(&context.tool_results[0].content[0], ImageOrTextContent::Text(text) if text.text == "overridden"));
+                        vec![AgentMessage::from(UserMessage {
+                            role: "user".to_string(),
+                            content: UserContent::Text("continue".to_string()),
+                            provider_context: None,
+                            timestamp: 2,
+                        })]
+                    })
+                }
+            })),
+            ..Default::default()
+        });
+        timeout(Duration::from_secs(5), agent.prompt(PromptInput::Text {
+            input: "start".to_string(), images: Vec::new(),
+        })).await.expect("async hook pipeline did not settle").unwrap();
+        assert_eq!(provider.call_count(), 2);
+        assert!(agent.state().error_message.is_none());
+        assert_eq!(*trace.lock().unwrap(), [
+            "transform", "convert", "auth", "before", "after", "continuation",
+            "transform", "convert", "auth", "continuation",
+        ]);
+        assert_eq!(agent.state().messages.iter().map(AgentMessage::role).collect::<Vec<_>>(), [
+            "user", "assistant", "toolResult", "user", "assistant",
+        ]);
+        provider.unregister();
     }
 
     fn assistant(text: &str) -> AssistantMessage {

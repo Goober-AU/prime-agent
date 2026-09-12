@@ -282,7 +282,7 @@ async fn run_telegram_command(
         Box::pin(async move { run_telegram_action(&store, &ctx, &action).await })
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())
 }
 
 /// Everything `withTelegramManagement(store, async () => { ... })` runs.

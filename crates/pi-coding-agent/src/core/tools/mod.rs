@@ -1,9 +1,7 @@
 //! Port of packages/coding-agent/src/core/tools/index.ts
 //!
-//! The TypeScript barrel re-exports `ToolDefinition`, `ToolRenderContext` and
-//! `ExtensionContext` from `../extensions/types.ts`. That module belongs to a
-//! different slice and is still empty in this workspace, so the minimal
-//! shapes this tool package needs live here until that slice lands.
+//! Built-in definitions retain typed details locally and convert into the
+//! canonical extension definition when registered with an AgentSession.
 
 pub mod acp_mcp;
 pub mod bash;
@@ -244,6 +242,51 @@ impl<TDetails> Default for ToolDefinition<TDetails> {
     }
 }
 
+impl<TDetails: 'static> From<ToolDefinition<TDetails>> for crate::core::extensions::types::ToolDefinition {
+    fn from(definition: ToolDefinition<TDetails>) -> Self {
+        let execute = definition.execute;
+        Self {
+            name: definition.name,
+            label: definition.label,
+            description: definition.description,
+            prompt_snippet: definition.prompt_snippet,
+            prompt_guidelines: if definition.prompt_guidelines.is_empty() {
+                None
+            } else {
+                Some(definition.prompt_guidelines)
+            },
+            parameters: definition.parameters,
+            render_shell: definition.render_shell,
+            replay_built_in_tool_name: definition.replay_built_in_tool_name,
+            prepare_arguments: definition.prepare_arguments,
+            execution_mode: definition.execution_mode,
+            execute: Arc::new(move |id, params, signal, update, context| {
+                let execute = execute.clone();
+                let working_ui = context.ui();
+                let select_ui = context.ui();
+                let context = ExtensionContext {
+                    has_ui: context.has_ui(),
+                    cwd: context.cwd(),
+                    ui: ExtensionUiContext {
+                        set_working_message: Some(Arc::new(move |message| working_ui.set_working_message(message))),
+                        select: Some(Arc::new(move |title, choices, options| {
+                            select_ui.select(title, choices, Some(crate::core::extensions::types::ExtensionUIDialogOptions {
+                                signal: options.signal,
+                                timeout: options.timeout,
+                            }))
+                        })),
+                    },
+                };
+                Box::pin(async move {
+                    execute(id, params, signal, update, context).await.map_err(|error| error.to_string())
+                })
+            }),
+            render_call: None,
+            render_result: None,
+        }
+    }
+}
+
 /// TypeScript `createAllToolDefinitions`.
 pub fn create_all_tool_definitions(
     cwd: &str,
@@ -255,4 +298,40 @@ pub fn create_all_tool_definitions(
         create_ipython_tool_definition_inner(cwd, options.and_then(|options| options.ipython.clone())),
     );
     definitions
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::core::extensions::runner::{ExtensionRunner, NullModelRegistry, NullSessionManager};
+    use crate::core::extensions::types::{ExtensionRuntime, ExtensionRuntimeState};
+
+    #[tokio::test]
+    async fn builtin_conversion_preserves_metadata_and_live_extension_context() {
+        let builtin = ToolDefinition::<Value> {
+            name: "fixture".to_string(),
+            label: "Fixture".to_string(),
+            description: "Fixture tool".to_string(),
+            prompt_snippet: Some("fixture prompt".to_string()),
+            prompt_guidelines: vec!["fixture guideline".to_string()],
+            parameters: serde_json::json!({"type": "object"}),
+            execute: Arc::new(|_, _, _, _, context| Box::pin(async move {
+                Ok(tool_definition_wrapper::text_tool_result(context.cwd, Value::Null))
+            })),
+            ..ToolDefinition::default()
+        };
+        let definition: crate::core::extensions::types::ToolDefinition = builtin.into();
+        assert_eq!(definition.prompt_snippet.as_deref(), Some("fixture prompt"));
+        assert_eq!(definition.prompt_guidelines, Some(vec!["fixture guideline".to_string()]));
+        assert_eq!(definition.parameters, serde_json::json!({"type": "object"}));
+        let runner = Arc::new(ExtensionRunner::new(
+            Vec::new(),
+            ExtensionRuntime::new(ExtensionRuntimeState::default()),
+            "fixture-directory".to_string(),
+            Arc::new(NullSessionManager),
+            Arc::new(NullModelRegistry),
+        ));
+        let result = (definition.execute)("call".to_string(), Value::Null, None, None, runner.create_context()).await.unwrap();
+        assert_eq!(result.content[0].as_text(), Some("fixture-directory"));
+    }
 }

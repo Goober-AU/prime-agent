@@ -26,7 +26,7 @@ pub enum SearchMode {
     Regex,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ParsedSearchQuery {
     pub mode: SearchMode,
     pub tokens: Vec<SearchToken>,
@@ -288,6 +288,45 @@ fn split_exact(value: &str, digits_first: bool) -> Option<(String, String)> {
     Some((letters, digits))
 }
 
+const STRICT_FUZZY_MAX_TOKEN_SCORE: f64 = 25.0;
+
+/// Match any precomputed search corpus using the resume picker's query language.
+pub fn match_search_text(text: &str, parsed: &ParsedSearchQuery) -> MatchResult {
+    let no_match = MatchResult { matches: false, score: 0.0 };
+    if parsed.mode == SearchMode::Regex {
+        return parsed.regex.as_ref().and_then(|regex| regex.find(text)).map_or(no_match, |found| {
+            MatchResult { matches: true, score: text[..found.start()].encode_utf16().count() as f64 * 0.1 }
+        });
+    }
+
+    let normalized_text = normalize_whitespace_lower(text);
+    let mut total_score = 0.0;
+    for token in &parsed.tokens {
+        let needle = normalize_whitespace_lower(&token.value);
+        if needle.is_empty() {
+            continue;
+        }
+        if let Some(index) = normalized_text.find(&needle) {
+            total_score += normalized_text[..index].encode_utf16().count() as f64 * 0.1;
+            continue;
+        }
+        if token.kind == SearchTokenKind::Phrase {
+            return no_match;
+        }
+        let result = fuzzy_match(&token.value, text);
+        if !result.matches || result.score > STRICT_FUZZY_MAX_TOKEN_SCORE {
+            return no_match;
+        }
+        total_score += result.score;
+    }
+    MatchResult { matches: true, score: total_score }
+}
+
+pub fn matches_search_text(text: &str, query: &str) -> bool {
+    let parsed = parse_search_query(query);
+    parsed.error.is_none() && match_search_text(text, &parsed).matches
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,7 +366,7 @@ mod tests {
         assert_eq!(parsed.tokens[1].kind, SearchTokenKind::Phrase);
         assert_eq!(parsed.tokens[1].value, "node cve");
         assert_eq!(parsed.tokens[2].value, "bar");
-        assert!(match_search_text("a node cve report", &parsed).matches);
+        assert!(match_search_text("foo a node cve report bar", &parsed).matches);
         assert!(!match_search_text("a node report", &parsed).matches);
     }
 
@@ -336,7 +375,7 @@ mod tests {
         let parsed = parse_search_query("foo \"bar baz");
         assert_eq!(parsed.tokens.len(), 3);
         assert!(parsed.tokens.iter().all(|token| token.kind == SearchTokenKind::Fuzzy));
-        assert_eq!(parsed.tokens[1].value, "bar");
+        assert_eq!(parsed.tokens[1].value, "\"bar");
     }
 
     #[test]

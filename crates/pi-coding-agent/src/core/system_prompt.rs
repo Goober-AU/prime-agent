@@ -92,7 +92,7 @@ pub fn build_system_prompt(options: &BuildSystemPromptOptions) -> String {
 
     let context_files = provided_context_files.unwrap_or_default();
     let skills = provided_skills.unwrap_or_default();
-    let tools = selected_tools.unwrap_or_else(|| vec!["ipython".to_string()]);
+    let tools = selected_tools.clone().unwrap_or_else(|| vec!["ipython".to_string()]);
     let has_ipython = tools.iter().any(|tool| tool == "ipython");
     let has_bash = tools.iter().any(|tool| tool == "bash");
     let visible_skills: Vec<Skill> = skills
@@ -139,7 +139,7 @@ pub fn build_system_prompt(options: &BuildSystemPromptOptions) -> String {
         prompt.push_str(&format!("\nCurrent working directory: {prompt_cwd}"));
 
         let child_doctrine = build_child_agent_doctrine(ChildAgentDoctrineOptions {
-            depth: options.rlm_depth,
+            depth: options.rlm_depth.map(|depth| depth as i64),
             parent_agent: options.rlm_parent_agent.clone(),
             installed_skills: Some(visible_python_skill_import_names.clone()),
             active_tools: Some(tools.clone()),
@@ -182,7 +182,7 @@ pub fn build_system_prompt(options: &BuildSystemPromptOptions) -> String {
         installed_skills: Some(visible_python_skill_import_names.clone()),
         messages_path: prompt_messages_path,
         allow_recursion,
-        depth: options.rlm_depth,
+        depth: options.rlm_depth.map(|depth| depth as i64),
         parent_agent: options.rlm_parent_agent.clone(),
         active_tools: Some(
             tools
@@ -204,9 +204,9 @@ pub fn build_system_prompt(options: &BuildSystemPromptOptions) -> String {
         prompt.push_str(&format!(
             "\n\n{}",
             build_subagent_guidance(SubagentGuidanceOptions {
-                include_refine_examples: has_refine_skill,
-                has_agent_message: visible_python_skill_names.contains("agent_message"),
-                has_agent_observe: visible_python_skill_names.contains("agent_observe"),
+                include_refine_examples: Some(has_refine_skill),
+                has_agent_message: Some(visible_python_skill_names.contains("agent_message")),
+                has_agent_observe: Some(visible_python_skill_names.contains("agent_observe")),
             })
         ));
     }

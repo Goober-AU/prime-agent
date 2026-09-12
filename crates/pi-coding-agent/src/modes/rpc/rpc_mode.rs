@@ -15,7 +15,7 @@ use crate::modes::rpc::jsonl::{serialize_json_line, JsonlLineReader, JsonlLineRe
 use crate::modes::rpc::rpc_extension_ui_context::{create_rpc_extension_ui_bridge, RpcExtensionUiBridge};
 use crate::modes::rpc::rpc_types::{RpcCommand, RpcExtensionUiResponse, RpcResponse, RpcSessionState};
 
-pub use crate::modes::rpc::rpc_types::{RpcExtensionUIRequest, RpcObservedSessionEvent};
+pub use crate::modes::rpc::rpc_types::{RpcExtensionUiRequest, RpcObservedSessionEvent};
 
 /// `RpcModeConnectionOptions`.
 pub struct RpcModeConnectionOptions {

@@ -22,6 +22,12 @@ use crate::modes::agent_connection::types::*;
 /// Every method name mirrors the TypeScript member it replaces.
 pub trait InProcessRuntimeHost: Send + Sync {
     fn snapshot_source(&self) -> AgentSessionRuntimeSnapshotSource;
+    fn session_header(&self) -> Option<AgentConnectionSessionHeader>;
+    fn session_subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync>;
+    fn session_wait_for_headless_completion(
+        &self,
+        options: Option<AgentConnectionHeadlessCompletionOptions>,
+    ) -> BoxFuture<Result<AgentAutonomousStatus, String>>;
     fn session_messages(&self) -> Vec<AgentMessage>;
     fn session_state_messages(&self) -> Vec<AgentMessage>;
     fn session_commands(&self) -> Vec<AgentConnectionSlashCommand>;
@@ -37,7 +43,7 @@ pub trait InProcessRuntimeHost: Send + Sync {
     fn session_mutate_queued_message(&self, lane: &str, index: i64, expected_text: &str, mutation: Value) -> String;
     fn session_clear_queue(&self) -> AgentConnectionQueueState;
     fn session_request_abort(&self);
-    fn session_acquire_input_pause(&self) -> Arc<dyn AgentConnectionInputPause>;
+    fn session_acquire_input_pause(&self) -> AgentConnectionSessionInputPause;
     fn session_get_user_messages_for_forking(&self) -> Vec<AgentConnectionUserMessage>;
     fn session_last_assistant_text(&self) -> Option<String>;
     fn session_system_prompt(&self) -> String;
@@ -56,7 +62,7 @@ pub trait InProcessRuntimeHost: Send + Sync {
     fn session_model_registry_available_models(&self) -> BoxFuture<Vec<AgentConnectionModel>>;
     fn session_model_registry_provider_auth_source(&self, provider: &str) -> String;
     fn session_model_registry_find(&self, provider: &str, model_id: &str) -> Option<Model>;
-    fn session_cycle_model(&self, direction: &str) -> Option<AgentConnectionModelCycleResult>;
+    fn session_cycle_model(&self, direction: &str) -> BoxFuture<Result<Option<AgentConnectionModelCycleResult>, String>>;
     fn session_set_scoped_models(&self, scoped_models: Vec<AgentConnectionScopedModel>);
     fn session_set_thinking_level(&self, level: ThinkingLevel);
     fn session_set_service_tier(&self, service_tier: ServiceTier);
@@ -76,12 +82,12 @@ pub trait InProcessRuntimeHost: Send + Sync {
         &self,
         target_id: &str,
         options: Option<AgentConnectionNavigateTreeOptions>,
-    ) -> AgentConnectionNavigateTreeResult;
+    ) -> BoxFuture<Result<AgentConnectionNavigateTreeResult, String>>;
     fn session_export_to_html(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>>;
     fn session_export_to_jsonl(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>>;
     fn session_set_session_name(&self, name: &str);
     fn session_get_rlm_max_depth_status(&self) -> Value;
-    fn session_set_rlm_max_depth(&self, max_depth: f64, options: Option<Value>) -> Value;
+    fn session_set_rlm_max_depth(&self, max_depth: f64, options: Option<Value>) -> BoxFuture<Result<Value, String>>;
     fn session_bind_extensions(&self, options: Value) -> BoxFuture<Result<(), String>>;
     fn session_watch_child(&self, child_id: &str) -> Option<Box<dyn AgentConnectionSessionWatcher>>;
     fn runtime_new_session(&self, options: Option<AgentConnectionNewSessionOptions>) -> BoxFuture<Result<bool, String>>;
@@ -112,8 +118,8 @@ pub type SideQuestionRun = Arc<dyn Fn() + Send + Sync>;
 
 pub struct InProcessAgentConnection {
     runtime_host: Arc<dyn InProcessRuntimeHost>,
-    listeners: Mutex<Vec<AgentConnectionEventListener>>,
-    before_session_invalidate_listeners: Mutex<Vec<AgentConnectionBeforeSessionInvalidateListener>>,
+    listeners: Arc<Mutex<Vec<AgentConnectionEventListener>>>,
+    before_session_invalidate_listeners: Arc<Mutex<Vec<AgentConnectionBeforeSessionInvalidateListener>>>,
     side_question_runs: Mutex<HashMap<String, SideQuestionRun>>,
     session_input_pauses: Mutex<HashMap<String, AgentConnectionSessionInputPause>>,
     headless_extension_options: Mutex<Option<InProcessHeadlessExtensionOptions>>,
@@ -124,8 +130,8 @@ impl InProcessAgentConnection {
     pub fn new(runtime_host: Arc<dyn InProcessRuntimeHost>) -> Self {
         let connection = Self {
             runtime_host,
-            listeners: Mutex::new(Vec::new()),
-            before_session_invalidate_listeners: Mutex::new(Vec::new()),
+            listeners: Arc::new(Mutex::new(Vec::new())),
+            before_session_invalidate_listeners: Arc::new(Mutex::new(Vec::new())),
             side_question_runs: Mutex::new(HashMap::new()),
             session_input_pauses: Mutex::new(HashMap::new()),
             headless_extension_options: Mutex::new(None),
@@ -145,11 +151,18 @@ impl InProcessAgentConnection {
     }
 
     fn bind_current_session_events(&self) {
-        let previous = self.unsubscribe_session_events.lock().unwrap().take();
-        drop(previous);
-        // The session subscribe seam is owned by the runtime host slice; the port
-        // records the handle so `dispose` can drop it, mirroring the TypeScript.
-        let handle: Box<dyn Fn() + Send + Sync> = Box::new(|| {});
+        if let Some(previous) = self.unsubscribe_session_events.lock().unwrap().take() {
+            previous();
+        }
+        let listeners = self.listeners.clone();
+        let handle = self.runtime_host.session_subscribe(Arc::new(move |event| {
+            let listeners = listeners.lock().unwrap().clone();
+            Box::pin(async move {
+                for listener in listeners {
+                    listener(event.clone()).await;
+                }
+            })
+        }));
         *self.unsubscribe_session_events.lock().unwrap() = Some(handle);
     }
 
@@ -187,8 +200,7 @@ impl AgentConnection for InProcessAgentConnection {
     fn subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync> {
         self.listeners.lock().unwrap().push(listener.clone());
         let listeners = self.listeners.clone();
-        let key = Arc::new(listener);
-        let key_for_removal = key.clone();
+        let key_for_removal = listener;
         Box::new(move || {
             let mut guard = listeners.lock().unwrap();
             if let Some(index) = guard.iter().position(|entry| Arc::ptr_eq(entry, &key_for_removal)) {
@@ -232,9 +244,8 @@ impl AgentConnection for InProcessAgentConnection {
     }
 
     fn get_session_header(&self) -> BoxFuture<Result<Option<AgentConnectionSessionHeader>, String>> {
-        // `sessionManager.getHeader()` lives in core/session-manager.ts (another
-        // slice); the adapter reports absence rather than inventing a header.
-        Box::pin(async { Ok(None) })
+        let header = self.runtime_host.session_header();
+        Box::pin(async move { Ok(header) })
     }
 
     fn get_commands(&self) -> BoxFuture<Result<Vec<AgentConnectionSlashCommand>, String>> {
@@ -253,7 +264,8 @@ impl AgentConnection for InProcessAgentConnection {
     }
 
     fn get_available_models(&self) -> BoxFuture<Result<Vec<AgentConnectionModel>, String>> {
-        self.runtime_host.session_model_registry_available_models()
+        let models = self.runtime_host.session_model_registry_available_models();
+        Box::pin(async move { Ok(models.await) })
     }
 
     fn get_session_stats(&self) -> BoxFuture<Result<Value, String>> {
@@ -278,11 +290,19 @@ impl AgentConnection for InProcessAgentConnection {
 
     fn list_saved_sessions(
         &self,
-        _scope: &str,
+        scope: &str,
     ) -> BoxFuture<Result<Vec<AgentConnectionSavedSessionInfo>, String>> {
-        // SessionManager.list/listAll belong to the session slice; the adapter
-        // returns the empty list until that slice lands.
-        Box::pin(async { Ok(Vec::new()) })
+        let source = self.runtime_host.snapshot_source().session;
+        let current = scope == "current";
+        Box::pin(async move {
+            let session_dir = source.session_dir.as_deref().filter(|directory| !directory.is_empty());
+            let sessions = if current {
+                crate::core::session_manager::SessionManager::list(&source.cwd, session_dir, None).await
+            } else {
+                crate::core::session_manager::SessionManager::list_all(None, session_dir).await
+            };
+            sessions.into_iter().map(saved_session_info).collect()
+        })
     }
 
     fn get_queue(&self) -> BoxFuture<Result<AgentConnectionQueueState, String>> {
@@ -527,19 +547,7 @@ impl AgentConnection for InProcessAgentConnection {
         &self,
         options: Option<AgentConnectionHeadlessCompletionOptions>,
     ) -> BoxFuture<Result<AgentAutonomousStatus, String>> {
-        let wait_for_rlm_quiescence = options
-            .as_ref()
-            .and_then(|options| options.wait_for_rlm_quiescence)
-            .unwrap_or(false);
-        let idle = self.runtime_host.session_wait_for_idle();
-        Box::pin(async move {
-            idle.await;
-            // The session's autonomous status lives in core/agent-session.ts; this
-            // adapter reports the same completion signal with an empty status until
-            // that slice lands.
-            let _ = wait_for_rlm_quiescence;
-            Ok(AgentAutonomousStatus::default())
-        })
+        self.runtime_host.session_wait_for_headless_completion(options)
     }
 
     fn execute_bash(
@@ -571,7 +579,7 @@ impl AgentConnection for InProcessAgentConnection {
         let provider = provider.to_string();
         let model_id = model_id.to_string();
         Box::pin(async move {
-            let available_models = registry_models.await?;
+            let available_models = registry_models.await;
             let model = available_models
                 .into_iter()
                 .find(|candidate| candidate.provider == provider && candidate.id == model_id)
@@ -591,8 +599,7 @@ impl AgentConnection for InProcessAgentConnection {
         &self,
         direction: Option<&str>,
     ) -> BoxFuture<Result<Option<AgentConnectionModelCycleResult>, String>> {
-        let result = self.runtime_host.session_cycle_model(direction.unwrap_or("forward"));
-        Box::pin(async move { Ok(result) })
+        self.runtime_host.session_cycle_model(direction.unwrap_or("forward"))
     }
 
     fn set_scoped_models(&self, scoped_models: Vec<AgentConnectionScopedModel>) -> BoxFuture<Result<(), String>> {
@@ -692,8 +699,7 @@ impl AgentConnection for InProcessAgentConnection {
         target_id: &str,
         options: Option<AgentConnectionNavigateTreeOptions>,
     ) -> BoxFuture<Result<AgentConnectionNavigateTreeResult, String>> {
-        let result = self.runtime_host.session_navigate_tree(target_id, options);
-        Box::pin(async move { Ok(result) })
+        self.runtime_host.session_navigate_tree(target_id, options)
     }
 
     fn import_from_jsonl(&self, input_path: &str, cwd_override: Option<&str>) -> BoxFuture<Result<bool, String>> {
@@ -723,8 +729,7 @@ impl AgentConnection for InProcessAgentConnection {
     }
 
     fn set_rlm_max_depth(&self, max_depth: f64, options: Option<Value>) -> BoxFuture<Result<Value, String>> {
-        let result = self.runtime_host.session_set_rlm_max_depth(max_depth, options);
-        Box::pin(async move { Ok(result) })
+        self.runtime_host.session_set_rlm_max_depth(max_depth, options)
     }
 
     fn rename_saved_session(&self, session_path: &str, name: &str) -> BoxFuture<Result<(), String>> {
@@ -739,16 +744,29 @@ impl AgentConnection for InProcessAgentConnection {
                 return Box::pin(async { Ok(()) });
             }
         }
-        // `SessionManager.open(path).appendSessionInfo(name)` belongs to the session
-        // slice; the adapter reports the missing dependency instead of guessing.
-        Box::pin(async {
-            Err("renameSavedSession requires core/session-manager.ts (not ported in this slice)".to_string())
+        let session_path = session_path.to_string();
+        let name = trimmed.to_string();
+        Box::pin(async move {
+            crate::core::session_manager::SessionManager::open(&session_path, None, None)?
+                .append_session_info(&name)?;
+            Ok(())
         })
     }
 
-    fn delete_saved_session(&self, _session_path: &str) -> BoxFuture<Result<Value, String>> {
-        Box::pin(async {
-            Err("deleteSavedSession requires core/session-file-actions.ts (not ported in this slice)".to_string())
+    fn delete_saved_session(&self, session_path: &str) -> BoxFuture<Result<Value, String>> {
+        let session_path = session_path.to_string();
+        Box::pin(async move {
+            use crate::core::session_file_actions::{
+                delete_session_file, DeleteSessionFileMethod, DeleteSessionFileOptions, DeleteSessionFileResult,
+            };
+            let result = delete_session_file(&session_path, &mut DeleteSessionFileOptions::default());
+            Ok(match result {
+                DeleteSessionFileResult::Ok { method } => serde_json::json!({
+                    "ok": true,
+                    "method": match method { DeleteSessionFileMethod::Trash => "trash", DeleteSessionFileMethod::Unlink => "unlink" },
+                }),
+                DeleteSessionFileResult::Error { error } => serde_json::json!({ "ok": false, "error": error }),
+            })
         })
     }
 
@@ -777,11 +795,37 @@ impl AgentConnection for InProcessAgentConnection {
             for pause in pauses {
                 let _ = pause.release().await;
             }
-            drop(unsubscribe);
+            if let Some(unsubscribe) = unsubscribe {
+                unsubscribe();
+            }
             dispose.await;
             Ok(())
         })
     }
+}
+
+fn saved_session_info(session: crate::core::session_manager::SessionInfo) -> Result<AgentConnectionSavedSessionInfo, String> {
+    fn project<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: T) -> Result<U, String> {
+        serde_json::to_value(value)
+            .and_then(serde_json::from_value)
+            .map_err(|error| error.to_string())
+    }
+    Ok(AgentConnectionSavedSessionInfo {
+        path: session.path,
+        id: session.id,
+        cwd: session.cwd,
+        name: session.name,
+        state: session.state.map(project).transpose()?,
+        parent_session_path: session.parent_session_path,
+        rlm_depth: Some(session.rlm_depth as f64),
+        created: session.created,
+        modified: session.modified,
+        message_count: session.message_count as f64,
+        first_message: session.first_message,
+        all_messages_text: session.all_messages_text,
+        agent_status: session.agent_status.map(project).transpose()?,
+        usage: session.usage.map(serde_json::to_value).transpose().map_err(|error| error.to_string())?,
+    })
 }
 
 fn same_path(left: &str, right: &str) -> bool {

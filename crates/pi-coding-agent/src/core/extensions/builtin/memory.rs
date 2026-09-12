@@ -22,7 +22,17 @@ use crate::core::refinement::refinement::{
 };
 use crate::core::session_manager::get_session_artifact_path;
 use crate::core::settings_manager::SettingsManager;
-use crate::modes::daemon::daemon_session_summarizer::provider_retry_policy;
+
+
+fn refinement_retry_policy(settings: &Mutex<SettingsManager>) -> crate::core::refinement::refinement::ProviderRetryPolicy {
+    let retry = settings.lock().unwrap_or_else(|p| p.into_inner()).get_retry_settings();
+    crate::core::refinement::refinement::ProviderRetryPolicy {
+        enabled: retry.enabled,
+        max_retries: retry.max_retries.max(0.0) as u32,
+        base_delay_ms: retry.base_delay_ms,
+        max_retry_delay_ms: retry.max_retry_delay_ms,
+    }
+}
 
 pub const MEMORY_CONTROL_CUSTOM_TYPE: &str = "prime-agent.memory-control";
 pub const MEMORY_RESULT_CUSTOM_TYPE: &str = "prime-agent.memory-result";
@@ -30,7 +40,7 @@ pub const MEMORY_COMMAND_CUSTOM_TYPE: &str = "prime-agent.memory-command";
 pub const MEMORY_DIAGNOSTIC_CUSTOM_TYPE: &str = "prime-agent.memory-diagnostic";
 
 /// `sessionKey(ctx)` - `` `${ctx.cwd}\0${ctx.sessionManager.getSessionId()}` ``.
-fn session_key(ctx: &Arc<dyn ExtensionContext>) -> String {
+fn session_key<T: ExtensionContext + ?Sized>(ctx: &Arc<T>) -> String {
     format!("{}\u{0}{}", ctx.cwd(), ctx.session_manager().get_session_id())
 }
 
@@ -38,7 +48,7 @@ fn session_key(ctx: &Arc<dyn ExtensionContext>) -> String {
 type ServiceMap = Arc<Mutex<HashMap<String, Arc<MemoryService>>>>;
 
 /// `Map<string, { key; recall }>` bound per session.
-type RecalledMap = Arc<Mutex<HashMap<String, (String, crate::core::memory::search::RecallResult)>>>;
+type RecalledMap = Arc<Mutex<HashMap<String, (String, Arc<crate::core::memory::search::RecallResult>)>>>;
 
 /// `createMemoryExtension(agentDir, settingsManager)`.
 pub fn create_memory_extension(
@@ -65,8 +75,8 @@ fn diagnostic(pi: &Arc<dyn ExtensionApi>, data: Value) {
 }
 
 /// `service(ctx)` - resolves (and caches) the session's `MemoryService`.
-fn service(
-    ctx: &Arc<dyn ExtensionContext>,
+fn service<T: ExtensionContext + ?Sized>(
+    ctx: &Arc<T>,
     agent_dir: &str,
     services: &ServiceMap,
 ) -> Result<Arc<MemoryService>, String> {
@@ -108,7 +118,7 @@ fn evidence(ctx: &Arc<dyn ExtensionContext>) -> Vec<Evidence> {
         let Some(message) = entry.extra.get("message").cloned() else {
             continue;
         };
-        let Ok(parsed) = serde_json::from_value::<AgentMessage>(message) else {
+        let Ok(parsed) = serde_json::from_value::<crate::core::memory::evidence::AgentMessage>(message) else {
             continue;
         };
         // `pathToFileURL(file).href`.
@@ -328,11 +338,7 @@ fn extractor(
                 options: RefineOptions {
                     evidence: Some(records.clone()),
                     max_output_tokens: Some(memory.store.settings().max_extraction_tokens as f64),
-                    retry: Some(provider_retry_policy(
-                        &settings_manager
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                    )),
+                    retry: Some(refinement_retry_policy(&settings_manager)),
                     instructions: Some(
                         "Extract only durable project memory. Return create edits of kind memory with sourceIds. Do not update or delete existing entries. Exclude host facts, credentials, unsupported assistant assertions and transient task state. Raw sources remain available, so do not copy entire logs into memory.".to_string(),
                     ),
@@ -545,7 +551,7 @@ fn create_memory_extension_impl(
                         .cloned();
                     let query = user
                         .as_ref()
-                        .and_then(|user| collect_evidence(std::slice::from_ref(user)).into_iter().next())
+                        .and_then(|user| serde_json::to_value(user).ok().and_then(|value| serde_json::from_value::<crate::core::memory::evidence::AgentMessage>(value).ok()).and_then(|message| collect_evidence(&[message]).into_iter().next()))
                         .map(|evidence| evidence.text)
                         .unwrap_or_default();
                     let key = hash(&format!(
@@ -563,12 +569,12 @@ fn create_memory_extension_impl(
                         .cloned();
                     let recalled = match cached {
                         Some((cached_key, recall)) if cached_key == key => recall,
-                        _ if !query.is_empty() => memory.recall(&query),
-                        _ => crate::core::memory::search::RecallResult {
+                        _ if !query.is_empty() => Arc::new(memory.recall(&query)),
+                        _ => Arc::new(crate::core::memory::search::RecallResult {
                             text: String::new(),
                             ids: Vec::new(),
                             chars: 0,
-                        },
+                        }),
                     };
                     recalled_turns
                         .lock()
@@ -623,7 +629,6 @@ fn create_memory_extension_impl(
                         Some(serde_json::json!({ "messages": serialize_messages(&messages) }))
                     }
                 }
-                Some(serde_json::json!({ "messages": serialize_messages(&messages) }))
             })
         });
         pi.on("context", handler);
@@ -662,11 +667,7 @@ fn create_memory_extension_impl(
                         evidence: Some(evidence(&ctx)),
                         instructions: preparation.instructions.clone(),
                         global: Some(preparation.scope == "global"),
-                        retry: Some(provider_retry_policy(
-                            &settings_manager
-                                .lock()
-                                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                        )),
+                        retry: Some(refinement_retry_policy(&settings_manager)),
                         max_output_tokens: Some(memory.store.settings().max_extraction_tokens as f64),
                         ..Default::default()
                     },

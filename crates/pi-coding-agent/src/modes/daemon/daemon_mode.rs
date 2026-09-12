@@ -103,7 +103,7 @@ use super::agent_roster::{
 use super::compact_session_stream::create_compact_assistant_delta;
 // The daemon protocol module is owned by another slice; the wire primitives
 // this module consumes are carried by daemon_client's protocol submodule.
-use super::daemon_protocol::{create_daemon_event_meta, create_daemon_replay_info, is_daemon_command_envelope, is_daemon_dialog_extension_ui_request, is_daemon_mutating_command, is_session_plane_daemon_command, salvage_daemon_command_id, DaemonCommand, DaemonResponse, DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, DAEMON_SUPPORTED_CLIENT_CAPABILITIES};
+use super::daemon_protocol::{create_daemon_event_meta, create_daemon_replay_info, is_daemon_command_envelope, is_daemon_dialog_extension_ui_request, is_daemon_mutating_command, is_session_plane_daemon_command, salvage_daemon_command_id, DaemonResponse, DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, DAEMON_SUPPORTED_CLIENT_CAPABILITIES};
 use super::daemon_client::DaemonClient;
 use super::daemon_client_env::{filter_client_env, with_client_env};
 use super::daemon_errors::{
@@ -150,6 +150,46 @@ use super::snapshot_transcript_cache::{
     SNAPSHOT_TARGET_CHUNK_BYTES,
 };
 use super::worker_recovery_journal::{WorkerRecoveryJournal, WorkerRecoveryRecordInput};
+
+// The server validates raw command fields in handle_line/handle_command. Keep that
+// view separate from the public, typed protocol enum, including private worker commands.
+#[derive(Clone, Serialize, Deserialize)]
+struct ParsedDaemonCommand {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(rename = "type")]
+    type_: String,
+    #[serde(flatten)]
+    body: Value,
+}
+
+impl ParsedDaemonCommand {
+    fn new(command_type: &str) -> Self {
+        Self { id: None, type_: command_type.to_string(), body: Value::Object(Map::new()) }
+    }
+
+    fn from_value(value: &Value) -> Option<Self> {
+        let mut body = value.as_object()?.clone();
+        let type_ = body.remove("type")?.as_str()?.to_string();
+        let id = body.remove("id").and_then(|value| value.as_str().map(str::to_string));
+        Some(Self { id, type_, body: Value::Object(body) })
+    }
+}
+
+trait DaemonResponseConstruction {
+    fn success(id: Option<&str>, command: &str, data: Option<Value>) -> Self;
+    fn failure(id: Option<&str>, command: &str, error: &str, error_info: Option<DaemonErrorInfo>) -> Self;
+}
+
+impl DaemonResponseConstruction for DaemonResponse {
+    fn success(id: Option<&str>, command: &str, data: Option<Value>) -> Self {
+        Self { id: id.map(str::to_string), type_: "response".to_string(), command: command.to_string(), success: true, data, error: None, error_info: None }
+    }
+
+    fn failure(id: Option<&str>, command: &str, error: &str, error_info: Option<DaemonErrorInfo>) -> Self {
+        Self { id: id.map(str::to_string), type_: "response".to_string(), command: command.to_string(), success: false, data: None, error: Some(error.to_string()), error_info }
+    }
+}
 
 // slice plumbing: `getLogger("coding-agent.daemon")`.
 static STRUCTURED_LOG: std::sync::OnceLock<pi_ai::log::Logger> = std::sync::OnceLock::new();
@@ -347,7 +387,7 @@ pub type CreateAgentSessionRuntimeFactory = Arc<
 >;
 
 /// The `createAgentSessionRuntime(factory, input)` argument.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CreateAgentSessionRuntimeInput {
     pub factory: Value,
     pub cwd: String,
@@ -358,7 +398,7 @@ pub struct CreateAgentSessionRuntimeInput {
 }
 
 /// `sessionOptions` handed to the runtime factory.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SessionRuntimeOptions {
     pub model: Option<Value>,
     pub rlm_heartbeat_controller:
@@ -2099,7 +2139,7 @@ impl AgentDaemon {
     fn state_refs(&self) -> Vec<Arc<StdMutex<ActiveSessionState>>> {
         self.session_states()
             .into_iter()
-            .map(|entry| entry.state)
+            .map(|entry| Arc::clone(&entry.state))
             .collect()
     }
 
@@ -2115,7 +2155,7 @@ impl AgentDaemon {
                         .expect("active session poisoned")
                         .active_session_id
                         .clone(),
-                    entry.state,
+                    Arc::clone(&entry.state),
                 )
             })
             .collect()
@@ -2813,7 +2853,7 @@ pub struct HeadlessCompletionInvocation {
 }
 
 /// `startSideQuestion(agent, id, question, onEvent, previousTurns, retryPolicy)`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SideQuestionInvocation {
     pub side_question_id: String,
     pub question: String,
@@ -3102,7 +3142,7 @@ pub struct NavigateTreeOptions {
 }
 
 /// `startSideQuestion(...)`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct SideQuestionOptions {
     pub previous_turns: Option<Value>,
     pub retry_policy: Option<Value>,
@@ -3187,7 +3227,7 @@ impl AgentDaemon {
             let file = entry.session.session_file();
             file.map(|file| resolve_path(&file) == target)
                 .unwrap_or(false)
-                .then(|| entry.state)
+                .then(|| Arc::clone(&entry.state))
         })
     }
 
@@ -3283,7 +3323,7 @@ impl AgentDaemon {
 
     /// `handleLine(client, line)`.
     pub async fn handle_line(self: &Arc<Self>, client: Arc<DaemonClientHandle>, line: String) {
-        let mut command: DaemonCommand;
+        let mut command: ParsedDaemonCommand;
         let mut clear_parsed_admission: Arc<dyn Fn() + Send + Sync> = Arc::new(|| {});
         let prompt_handler_owns_admission = Arc::new(AtomicBool::new(false));
         {
@@ -3720,7 +3760,7 @@ impl AgentDaemon {
             }
             if self.is_worker() && !type_.is_empty() && type_.starts_with("worker_") {
                 let worker_command =
-                    DaemonCommand::from_value(&parsed).unwrap_or_else(|| DaemonCommand::new(type_));
+                    ParsedDaemonCommand::from_value(&parsed).unwrap_or_else(|| ParsedDaemonCommand::new(type_));
                 let update_lifecycle = matches!(
                     worker_command.type_.as_str(),
                     "worker_prepare_update" | "worker_commit_update" | "worker_cancel_update"
@@ -3779,11 +3819,11 @@ impl AgentDaemon {
                 return;
             }
             command =
-                DaemonCommand::from_value(&parsed).unwrap_or_else(|| DaemonCommand::new(type_));
+                ParsedDaemonCommand::from_value(&parsed).unwrap_or_else(|| ParsedDaemonCommand::new(type_));
         }
 
         let mutation =
-            command.type_ != "prepare_update_restart" && is_daemon_mutating_command(&command);
+            command.type_ != "prepare_update_restart" && is_daemon_mutating_command(&command.type_);
         let restart_phase = self
             .update_restart
             .lock()
@@ -3860,7 +3900,7 @@ impl AgentDaemon {
     fn write_worker_success(
         &self,
         client: &Arc<DaemonClientHandle>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
         data: Option<Value>,
     ) {
         let mut object = Map::new();
@@ -3879,35 +3919,17 @@ impl AgentDaemon {
 }
 
 impl AgentDaemon {
-    /// `state.runtime.session`.
-    fn session_of(state: &Arc<StdMutex<ActiveSessionState>>) -> Arc<dyn DaemonSession> {
-        Arc::clone(
-            &state
-                .lock()
-                .expect("active session poisoned")
-                .runtime
-                .session,
-        )
-    }
-
     /// `summaryForActiveSession(state)`.
-    fn summary_for_state(state: &Arc<StdMutex<ActiveSessionState>>) -> SessionSummary {
-        let saved = {
-            let state = state.lock().expect("active session poisoned");
-            state
-                .runtime
-                .session
-                .session_file()
-                .and_then(|path| read_session_info_sync(&path))
-        };
+    fn summary_for_state(&self, state: &Arc<StdMutex<ActiveSessionState>>) -> SessionSummary {
+        let saved = self.session_of(state).session_file().and_then(|path| read_session_info_sync(&path));
         summary_for_active_session(state, saved.as_ref(), false, false, false)
     }
 
     /// `handleCommand(client, command, onPromptHandlerOwnsAdmission)`.
-    pub async fn handle_command(
+    async fn handle_command(
         self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
         on_prompt_handler_owns_admission: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Option<DaemonResponse>, String> {
         let body = &command.body;
@@ -4109,7 +4131,7 @@ impl AgentDaemon {
                     id,
                     "create",
                     Some(
-                        serde_json::to_value(Self::summary_for_state(&state))
+                        serde_json::to_value(self.summary_for_state(&state))
                             .unwrap_or(Value::Null),
                     ),
                 )))
@@ -4358,7 +4380,7 @@ impl AgentDaemon {
                     id,
                     "rename",
                     Some(
-                        serde_json::to_value(Self::summary_for_state(&state))
+                        serde_json::to_value(self.summary_for_state(&state))
                             .unwrap_or(Value::Null),
                     ),
                 )))
@@ -4808,7 +4830,7 @@ impl AgentDaemon {
     async fn handle_command_rest(
         self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
     ) -> Result<Option<DaemonResponse>, String> {
         let body = &command.body;
         let id = command.id.as_deref();
@@ -5153,7 +5175,7 @@ impl AgentDaemon {
                     id,
                     "get_state",
                     Some(
-                        serde_json::to_value(Self::summary_for_state(&state))
+                        serde_json::to_value(self.summary_for_state(&state))
                             .unwrap_or(Value::Null),
                     ),
                 )))
@@ -6044,7 +6066,7 @@ impl AgentDaemon {
     /// `createRuntime(command, runtimeOpenGuard?)`.
     pub(crate) async fn create_runtime(
         self: &Arc<Self>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
         runtime_open_guard: Option<RuntimeOpenGuard>,
     ) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
         let body = &command.body;
@@ -6159,7 +6181,7 @@ impl AgentDaemon {
     #[allow(clippy::too_many_arguments)]
     async fn create_state_for_runtime(
         self: &Arc<Self>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
         session_manager: SessionManager,
         _session_path: Option<String>,
         desired_active_session_id: Option<String>,
@@ -7955,7 +7977,7 @@ impl AgentDaemon {
         self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
         state: &Arc<StdMutex<ActiveSessionState>>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
     ) -> Result<DaemonAttachResult, String> {
         let state_active_session_id = state
             .lock()
@@ -8162,7 +8184,7 @@ impl AgentDaemon {
         );
         snapshot.insert(
             "summary".to_string(),
-            serde_json::to_value(Self::summary_for_state(state)).unwrap_or(Value::Null),
+            serde_json::to_value(self.summary_for_state(state)).unwrap_or(Value::Null),
         );
         snapshot.insert("state".to_string(), connection_state);
         snapshot.insert("messages".to_string(), Value::Array(messages));
@@ -8585,7 +8607,7 @@ impl AgentDaemon {
     async fn handle_worker_command(
         self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
     ) -> Result<(), String> {
         let body = &command.body;
         match command.type_.as_str() {
@@ -9892,7 +9914,7 @@ impl AgentDaemon {
                     .expect("sessions poisoned")
                     .get(&job.active_session_id)
                     .map(|entry| Arc::clone(&entry.state));
-                let summary = state.as_ref().map(|state| Self::summary_for_state(state));
+                let summary = state.as_ref().map(|state| self.summary_for_state(state));
                 let mut object = Map::new();
                 object.insert("job".to_string(), job_to_value(&job));
                 if let Some(summary) = summary {
@@ -10070,7 +10092,7 @@ impl AgentDaemon {
     async fn handle_prompt_command(
         self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
     ) -> Result<Option<DaemonResponse>, String> {
         let body = &command.body;
         let id = command.id.as_deref();
@@ -10295,7 +10317,7 @@ impl AgentDaemon {
     async fn handle_replace_acp_mcp_servers(
         self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
-        command: &DaemonCommand,
+        command: &ParsedDaemonCommand,
     ) -> Result<Option<DaemonResponse>, String> {
         let body = &command.body;
         let id = command.id.as_deref();
@@ -10639,7 +10661,7 @@ impl AgentDaemon {
             let parent_path = resolve_path(&session_file);
             resident_root_paths.insert(parent_path.clone());
             let root = PassiveRlmRoot::Resident(Arc::clone(&parent_state));
-            let parent_session_id = Self::session_of(&parent_state).session_id();
+            let parent_session_id = self.session_of(&parent_state).session_id();
             let mut visited = HashSet::new();
             visited.insert(parent_path);
             self.visit_passive_children(
@@ -11114,7 +11136,7 @@ impl AgentDaemon {
                     PassiveRlmRoot::Saved(_) => None,
                 };
                 let root_parent_session_file = match &passive.root {
-                    PassiveRlmRoot::Resident(state) => Self::session_of(state).session_file(),
+                    PassiveRlmRoot::Resident(state) => self.session_of(state).session_file(),
                     PassiveRlmRoot::Saved(info) => Some(info.path.clone()),
                 };
                 if let Some(object) = value.as_object_mut() {
@@ -11336,7 +11358,7 @@ impl AgentDaemon {
             Some(passive) => passive,
             None => self.list_passive_rlm_subagents(Vec::new(), false).await,
         };
-        let summary = Self::summary_for_state(state);
+        let summary = self.summary_for_state(state);
         let active_session_id = state
             .lock()
             .expect("active session poisoned")
@@ -12173,7 +12195,7 @@ impl AgentDaemon {
                 PassiveRlmRoot::Saved(_) => None,
             };
             let root_parent_session_file = match &passive.root {
-                PassiveRlmRoot::Resident(state) => Self::session_of(state).session_file(),
+                PassiveRlmRoot::Resident(state) => self.session_of(state).session_file(),
                 PassiveRlmRoot::Saved(info) => Some(info.path.clone()),
             };
             let parent_entry = passive
@@ -12252,7 +12274,7 @@ impl AgentDaemon {
                     .lock()
                     .expect("binding sessions poisoned")
                     .contains(&active_session_id))
-                .then_some(entry.state)
+                .then_some(Arc::clone(&entry.state))
             }),
         };
         let remote_peers = match &current {
@@ -12530,7 +12552,7 @@ impl AgentDaemon {
             if !attached {
                 continue;
             }
-            let attach_command = DaemonCommand {
+            let attach_command = ParsedDaemonCommand {
                 id: None,
                 type_: "attach".to_string(),
                 body: serde_json::json!({ "activeSessionId": active_session_id }),
@@ -12774,7 +12796,7 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .active_session_id
             .clone();
-        let command = DaemonCommand {
+        let command = ParsedDaemonCommand {
             id: None,
             type_: "attach".to_string(),
             body: serde_json::json!({ "activeSessionId": active_session_id }),
@@ -12898,7 +12920,7 @@ impl AgentDaemon {
                 ))
             }
         };
-        if let Some(root_parent_file) = Self::session_of(&root_parent).session_file() {
+        if let Some(root_parent_file) = self.session_of(&root_parent).session_file() {
             self.wait_for_passivation(&root_parent_file).await;
         }
         if !self.is_resident(&root_parent) {
@@ -13016,7 +13038,7 @@ impl AgentDaemon {
         stale_parent: Arc<StdMutex<ActiveSessionState>>,
         _selector: Option<String>,
     ) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
-        if let Some(stale_parent_file) = Self::session_of(&stale_parent).session_file() {
+        if let Some(stale_parent_file) = self.session_of(&stale_parent).session_file() {
             self.wait_for_passivation(&stale_parent_file).await;
         }
         let refreshed = self
@@ -13209,8 +13231,8 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .active_session_id
             .clone();
-        let parent_session_id = Self::session_of(&parent_state).session_id();
-        let parent_session_file = Self::session_of(&parent_state).session_file();
+        let parent_session_id = self.session_of(&parent_state).session_id();
+        let parent_session_file = self.session_of(&parent_state).session_file();
         let metadata: Value = {
             let mut object = Map::new();
             object.insert("kind".to_string(), Value::String("subagent".to_string()));
@@ -13274,7 +13296,7 @@ impl AgentDaemon {
         }
         // The session transcript is authoritative for mutable metadata such as a
         // later user-assigned name; the registry value is only the spawn snapshot.
-        if !Self::session_of(&parent_state)
+        if !self.session_of(&parent_state)
             .register_rlm_child_session(&entry.child_id, Arc::clone(&runtime.session))
         {
             self.close_session(Arc::clone(&state), "replaced", true, true, None, None)
@@ -13307,7 +13329,7 @@ impl AgentDaemon {
                         .clone(),
                 )
         {
-            let unsubscribe_child = Self::session_of(&parent_state)
+            let unsubscribe_child = self.session_of(&parent_state)
                 .release_rlm_child_session(&entry.child_id, Arc::clone(&runtime.session));
             let close_result = self
                 .close_session(Arc::clone(&state), "replaced", true, true, None, None)
@@ -13345,7 +13367,7 @@ impl AgentDaemon {
                 let matches = !require_persisted_job
                     || active_id_match
                         .as_ref()
-                        .map(|state| Self::session_of(state).session_id() == due_job.session_id)
+                        .map(|state| self.session_of(state).session_id() == due_job.session_id)
                         .unwrap_or(false);
                 matches.then_some(active_id_match.clone()).flatten()
             });
@@ -13426,7 +13448,7 @@ impl AgentDaemon {
         if !self.is_persisted_cron_job_runnable(&due_job.id).await {
             return None;
         }
-        let command = DaemonCommand {
+        let command = ParsedDaemonCommand {
             id: None,
             type_: "create".to_string(),
             body: serde_json::json!({ "sessionPath": due_job.session_file }),
@@ -13492,7 +13514,7 @@ impl AgentDaemon {
                     != Some("subagent")
             })
             .unwrap_or(false);
-        let command = DaemonCommand {
+        let command = ParsedDaemonCommand {
             id: None,
             type_: "create".to_string(),
             body: serde_json::json!({ "sessionPath": parent_session_path }),
@@ -13634,7 +13656,7 @@ impl AgentDaemon {
         let Some(current) = self.get_runnable_cron_job(&job.id) else {
             return false;
         };
-        let session = Self::session_of(state);
+        let session = self.session_of(state);
         let session_file = session.session_file();
         current.active_session_id == active_session_id
             && current.session_id == session.session_id()
@@ -13665,7 +13687,7 @@ impl AgentDaemon {
         &self,
         state: &Arc<StdMutex<ActiveSessionState>>,
     ) -> AgentFamilyCatalogEntry {
-        let session = Self::session_of(state);
+        let session = self.session_of(state);
         let metadata = state
             .lock()
             .expect("active session poisoned")
@@ -13716,7 +13738,7 @@ impl AgentDaemon {
             .checked_sub(2)
             .and_then(|index| passive.chain.get(index));
         let root_parent_session_file = match &passive.root {
-            PassiveRlmRoot::Resident(state) => Self::session_of(state).session_file(),
+            PassiveRlmRoot::Resident(state) => self.session_of(state).session_file(),
             PassiveRlmRoot::Saved(info) => Some(info.path.clone()),
         };
         AgentFamilyCatalogEntry {
@@ -13947,7 +13969,7 @@ impl AgentDaemon {
                 daemon.log("Agent message admission rejected");
                 return;
             }
-            if Self::session_of(&state_for_commit).session_id() != target_session_id {
+            if self.session_of(&state_for_commit).session_id() != target_session_id {
                 daemon.log("Target session changed before agent message delivery");
             }
         });
@@ -13959,7 +13981,7 @@ impl AgentDaemon {
             admission_committed: Some(admission_committed),
             ..PromptInvocation::default()
         };
-        let status = match Self::session_of(target_state)
+        let status = match self.session_of(target_state)
             .accept_agent_message_prompt(&content, invocation)
             .await
         {
@@ -13999,7 +14021,7 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .active_session_id
             .clone();
-        let session = Self::session_of(state);
+        let session = self.session_of(state);
         Some(serde_json::json!({
             "parentActiveSessionId": active_session_id,
             "parentSessionId": session.session_id(),
@@ -14045,7 +14067,7 @@ impl AgentDaemon {
             }
         }
         let root = Arc::clone(root);
-        Self::session_of(&root)
+        self.session_of(&root)
             .get_rlm_child_snapshots()
             .into_iter()
             .map(|mut snapshot| {
@@ -14089,7 +14111,7 @@ impl AgentDaemon {
         parent_state: &Arc<StdMutex<ActiveSessionState>>,
         input: RlmSubagentStateInput,
     ) -> bool {
-        let parent_session_file = Self::session_of(parent_state).session_file();
+        let parent_session_file = self.session_of(parent_state).session_file();
         let parent_active_session_id = parent_state
             .lock()
             .expect("active session poisoned")
@@ -14177,11 +14199,11 @@ impl AgentDaemon {
         child_id: &str,
         reason: RlmLedgerDeleteReason,
     ) -> Result<(), String> {
-        let parent_session_file = Self::session_of(parent_state).session_file();
+        let parent_session_file = self.session_of(parent_state).session_file();
         let Some(parent_file) = parent_session_file else {
             return Ok(());
         };
-        let parent_session_id = Self::session_of(parent_state).session_id();
+        let parent_session_id = self.session_of(parent_state).session_id();
         let parent_path = canonical_session_path(&parent_file);
         let edges = self
             .rlm_spawn_ledger()
@@ -14344,7 +14366,7 @@ impl AgentDaemon {
         if !restart_session.should_resume {
             return;
         }
-        let session = Self::session_of(state);
+        let session = self.session_of(state);
         // `sessionManager.appendCustomMessageEntry(customType, content, display, details)`.
         let payload = serde_json::json!({
             "customType": "prime-agent.update_restart",
@@ -14436,8 +14458,8 @@ impl AgentDaemon {
         state: &Arc<StdMutex<ActiveSessionState>>,
         current_state: &Arc<StdMutex<ActiveSessionState>>,
     ) -> AgentObserveAgentSummary {
-        let summary = Self::summary_for_state(state);
-        let session = Self::session_of(state);
+        let summary = self.summary_for_state(state);
+        let session = self.session_of(state);
         let session_file = session.session_file();
         let status = if session.is_streaming() {
             "model".to_string()
@@ -14531,7 +14553,7 @@ impl AgentDaemon {
             .clone();
         let mut matches: Vec<Arc<StdMutex<ActiveSessionState>>> = Vec::new();
         for state in self.state_refs() {
-            let session = Self::session_of(&state);
+            let session = self.session_of(&state);
             let is_match =
                 session.session_id() == target || session.session_name().as_deref() == Some(target);
             if !is_match {
@@ -14617,7 +14639,7 @@ impl AgentDaemon {
         self.assert_agent_family_reachable(current_state, &target_state)?;
         let limit = normalize_observe_limit(input.limit, 20)?;
         let max_chars = normalize_observe_max_chars(input.max_chars, 4000)?;
-        let messages = Self::session_of(&target_state).messages();
+        let messages = self.session_of(&target_state).messages();
         let start_index = messages.len().saturating_sub(limit as usize);
         Ok(AgentObserveRecentMessagesResult {
             agent: self.create_agent_observe_summary(&target_state, current_state),

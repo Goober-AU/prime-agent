@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::config::{get_custom_themes_dir, get_themes_dir};
 
@@ -40,14 +40,7 @@ pub enum TerminalBackgroundKind {
     Light,
 }
 
-/// `TerminalColorMode`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalColorMode {
-    Truecolor,
-    Ansi256,
-    Ansi16,
-    Unknown,
-}
+pub use pi_tui::terminal_colors::TerminalColorMode;
 
 /// `AnsiColor = string | number`
 #[derive(Debug, Clone, PartialEq)]
@@ -139,7 +132,7 @@ fn best_ansi_color(rgb: &Rgb, mode: TerminalColorMode) -> AnsiColor {
     if mode == TerminalColorMode::Truecolor {
         return AnsiColor::Hex(rgb_to_hex(rgb));
     }
-    if mode == TerminalColorMode::Ansi256 {
+    if mode == TerminalColorMode::Color256 {
         return AnsiColor::Index(rgb_to_256(rgb));
     }
     AnsiColor::Hex(String::new())
@@ -304,15 +297,15 @@ pub const BG_COLOR_KEYS: &[&str] = &[
 /// `ColorMode`
 pub type ColorMode = TerminalColorMode;
 
-const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = Rgb { r: 0, g: 95, b: 135 };
+const ADAPTIVE_LIGHT_BG_ACCENT: Rgb = Rgb { r: 0.0, g: 95.0, b: 135.0 };
 const SURFACE_MIN_LUMINANCE_DELTA: f64 = 12.0;
 const SURFACE_CONTRAST_ALPHA: f64 = 0.08;
 // Selection rows must stand out clearly, much more than passive surfaces.
 const SELECTION_MIN_LUMINANCE_DELTA: f64 = 28.0;
 const SELECTION_MAX_BLEND_ALPHA: f64 = 0.5;
 const SELECTION_BLEND_STEP: f64 = 0.05;
-const BLACK: Rgb = Rgb { r: 0, g: 0, b: 0 };
-const WHITE: Rgb = Rgb { r: 255, g: 255, b: 255 };
+const BLACK: Rgb = Rgb { r: 0.0, g: 0.0, b: 0.0 };
+const WHITE: Rgb = Rgb { r: 255.0, g: 255.0, b: 255.0 };
 const CUBE_VALUES: [f64; 6] = [0.0, 95.0, 135.0, 175.0, 215.0, 255.0];
 
 // ============================================================================
@@ -332,17 +325,17 @@ pub fn detect_color_mode() -> ColorMode {
     let term = std::env::var("TERM").unwrap_or_default();
     // Fall back to 256color for truly limited terminals
     if term == "dumb" || term.is_empty() || term == "linux" {
-        return TerminalColorMode::Ansi256;
+        return TerminalColorMode::Color256;
     }
     // Terminal.app also doesn't support truecolor
     if std::env::var("TERM_PROGRAM").map(|value| value == "Apple_Terminal").unwrap_or(false) {
-        return TerminalColorMode::Ansi256;
+        return TerminalColorMode::Color256;
     }
     // tmux reports TERM=screen* but forwards 24-bit color, so treat it as
     // truecolor-capable; only genuine GNU screen (no $TMUX) falls back.
     let in_tmux = std::env::var("TMUX").is_ok() || term.starts_with("tmux");
     if !in_tmux && (term == "screen" || term.starts_with("screen-") || term.starts_with("screen.")) {
-        return TerminalColorMode::Ansi256;
+        return TerminalColorMode::Color256;
     }
     // Assume truecolor for everything else - virtually all modern terminals support it
     TerminalColorMode::Truecolor
@@ -518,7 +511,7 @@ pub fn resolve_theme_colors(
 // ============================================================================
 
 /// Port of `Theme`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Theme {
     pub name: Option<String>,
     pub source_path: Option<String>,
@@ -561,7 +554,7 @@ impl Theme {
     }
 
     /// Port of `fg`.
-    pub fn fg(&self, color: ThemeColor, text: &str) -> String {
+    pub fn fg(&self, color: &str, text: &str) -> String {
         let ansi = self
             .fg_colors
             .get(color)
@@ -570,7 +563,7 @@ impl Theme {
     }
 
     /// Port of `bg`.
-    pub fn bg(&self, color: ThemeBg, text: &str) -> String {
+    pub fn bg(&self, color: &str, text: &str) -> String {
         let ansi = self
             .bg_colors
             .get(color)
@@ -754,7 +747,7 @@ impl Theme {
     }
 
     /// Port of `getFgAnsi`.
-    pub fn get_fg_ansi(&self, color: ThemeColor) -> String {
+    pub fn get_fg_ansi(&self, color: &str) -> String {
         self.fg_colors
             .get(color)
             .cloned()
@@ -762,7 +755,7 @@ impl Theme {
     }
 
     /// Port of `getBgAnsi`.
-    pub fn get_bg_ansi(&self, color: ThemeBg) -> String {
+    pub fn get_bg_ansi(&self, color: &str) -> String {
         self.bg_colors
             .get(color)
             .cloned()
@@ -1208,7 +1201,7 @@ pub fn preload_code_highlighter() -> bool {
 pub fn init_theme(theme_name: Option<&str>, enable_watcher: bool) {
     preload_code_highlighter();
     preload_theme_validator();
-    let name = theme_name.unwrap_or_else(get_default_theme).to_string();
+    let name = theme_name.unwrap_or_else(|| get_default_theme()).to_string();
     let mut state = current_theme_state().lock().expect("theme state");
     state.current_theme_name = Some(name.clone());
     state.current_theme_is_automatic = theme_name.is_none();
@@ -1330,10 +1323,11 @@ fn start_theme_watcher() {
         return;
     }
 
+    let reloaded_theme_name = watched_theme_name.clone();
     let schedule_reload = move || {
         // Ignore stale timers after switching themes or stopping the watcher
         let current = current_theme_state().lock().expect("theme state").current_theme_name.clone();
-        if current.as_deref() != Some(watched_theme_name.as_str()) {
+        if current.as_deref() != Some(reloaded_theme_name.as_str()) {
             return;
         }
 
@@ -1350,7 +1344,7 @@ fn start_theme_watcher() {
             registered_themes_store()
                 .lock()
                 .expect("registered themes")
-                .insert(watched_theme_name.clone(), clone_theme(&reloaded_theme));
+                .insert(reloaded_theme_name.clone(), clone_theme(&reloaded_theme));
             set_global_theme(std::sync::Arc::new(reloaded_theme));
             // Notify callback (to invalidate UI)
             notify_theme_change();
@@ -1429,7 +1423,7 @@ fn ansi256_to_hex(index: f64) -> String {
     }
 
     // Grayscale (232-255): 24 shades
-    let gray = 8.0 + (index - 232.0) * 10.0;
+    let gray = (8.0 + (index - 232.0) * 10.0) as i64;
     format!("#{gray:02x}{gray:02x}{gray:02x}")
 }
 
@@ -1513,14 +1507,14 @@ pub fn get_theme_export_colors(theme_name: Option<&str>) -> ThemeExportColors {
 // ============================================================================
 
 /// `CliHighlightTheme = Record<string, (s: string) => string>`
-pub type CliHighlightTheme = HashMap<&'static str, Box<dyn Fn(&str) -> String + Send + Sync>>;
+pub type CliHighlightTheme = HashMap<&'static str, Arc<dyn Fn(&str) -> String + Send + Sync>>;
 
 /// Port of `buildCliHighlightTheme`.
 fn build_cli_highlight_theme(theme: &Theme) -> CliHighlightTheme {
     let mut map: CliHighlightTheme = HashMap::new();
-    let color = |name: ThemeColor| -> Box<dyn Fn(&str) -> String + Send + Sync> {
+    let color = |name: ThemeColor| -> Arc<dyn Fn(&str) -> String + Send + Sync> {
         let ansi = theme.fg_colors.get(name).cloned().unwrap_or_default();
-        Box::new(move |text: &str| format!("{ansi}{text}\u{1b}[39m"))
+        Arc::new(move |text: &str| format!("{ansi}{text}\u{1b}[39m"))
     };
     map.insert("keyword", color("syntaxKeyword"));
     map.insert("built_in", color("syntaxType"));
@@ -1647,24 +1641,25 @@ pub fn get_language_from_path(file_path: &str) -> Option<String> {
 }
 
 /// `MarkdownTheme` (pi-tui, other slice).
+#[derive(Clone)]
 pub struct MarkdownTheme {
-    pub heading: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub link: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub link_url: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub code: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub code_block: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub code_block_border: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub quote: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub quote_border: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub hr: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub list_bullet: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub bold: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub italic: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub underline: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub strikethrough: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub math: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub math_block: Box<dyn Fn(&str) -> String + Send + Sync>,
-    pub highlight_code: Box<dyn Fn(&str, Option<&str>) -> Vec<String> + Send + Sync>,
+    pub heading: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub link: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub link_url: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub code: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub code_block: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub code_block_border: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub quote: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub quote_border: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub hr: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub list_bullet: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub bold: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub italic: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub underline: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub strikethrough: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub math: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub math_block: Arc<dyn Fn(&str) -> String + Send + Sync>,
+    pub highlight_code: Arc<dyn Fn(&str, Option<&str>) -> Vec<String> + Send + Sync>,
     /// `codeBlockIndent` - added by `getMarkdownThemeWithSettings`.
     pub code_block_indent: Option<String>,
 }
@@ -1672,23 +1667,23 @@ pub struct MarkdownTheme {
 /// Port of `getMarkdownTheme`.
 pub fn get_markdown_theme() -> MarkdownTheme {
     MarkdownTheme {
-        heading: Box::new(|text| theme().fg("mdHeading", text)),
-        link: Box::new(|text| theme().fg("mdLink", text)),
-        link_url: Box::new(|text| theme().fg("mdLinkUrl", text)),
-        code: Box::new(|text| theme().fg("mdCode", text)),
-        code_block: Box::new(|text| theme().fg("mdCodeBlock", text)),
-        code_block_border: Box::new(|text| theme().fg("mdCodeBlockBorder", text)),
-        quote: Box::new(|text| theme().fg("mdQuote", text)),
-        quote_border: Box::new(|text| theme().fg("mdQuoteBorder", text)),
-        hr: Box::new(|text| theme().fg("mdHr", text)),
-        list_bullet: Box::new(|text| theme().fg("mdListBullet", text)),
-        bold: Box::new(|text| theme().bold(text)),
-        italic: Box::new(|text| theme().italic(text)),
-        underline: Box::new(|text| theme().underline(text)),
-        strikethrough: Box::new(|text| format!("\u{1b}[9m{text}\u{1b}[29m")),
-        math: Box::new(|text| theme().fg("mdCode", text)),
-        math_block: Box::new(|text| theme().fg("mdCodeBlock", text)),
-        highlight_code: Box::new(|code, lang| {
+        heading: Arc::new(|text| theme().fg("mdHeading", text)),
+        link: Arc::new(|text| theme().fg("mdLink", text)),
+        link_url: Arc::new(|text| theme().fg("mdLinkUrl", text)),
+        code: Arc::new(|text| theme().fg("mdCode", text)),
+        code_block: Arc::new(|text| theme().fg("mdCodeBlock", text)),
+        code_block_border: Arc::new(|text| theme().fg("mdCodeBlockBorder", text)),
+        quote: Arc::new(|text| theme().fg("mdQuote", text)),
+        quote_border: Arc::new(|text| theme().fg("mdQuoteBorder", text)),
+        hr: Arc::new(|text| theme().fg("mdHr", text)),
+        list_bullet: Arc::new(|text| theme().fg("mdListBullet", text)),
+        bold: Arc::new(|text| theme().bold(text)),
+        italic: Arc::new(|text| theme().italic(text)),
+        underline: Arc::new(|text| theme().underline(text)),
+        strikethrough: Arc::new(|text| format!("\u{1b}[9m{text}\u{1b}[29m")),
+        math: Arc::new(|text| theme().fg("mdCode", text)),
+        math_block: Arc::new(|text| theme().fg("mdCodeBlock", text)),
+        highlight_code: Arc::new(|code, lang| {
             // The highlighter loads lazily; until then render the block unhighlighted.
             let highlighter_loaded = super::code_highlighter::is_loaded();
             // Validate language before highlighting to avoid stderr spam from cli-highlight

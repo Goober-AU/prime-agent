@@ -13,15 +13,14 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex};
 
-use super::daemon_protocol::DaemonCommand;
+use super::daemon_protocol::DaemonResponse;
 use super::daemon_client::DaemonHello;
-// UNKNOWN: ['::{is_daemon_response', 'DaemonResponse}']
 use super::daemon_client::{
-    is_daemon_closing, serialize_json_line, DaemonClientError, DaemonClientMessageListener,
-    DaemonClientRequestOptions, DaemonClientResult, DaemonSocketClosedError,
+    is_daemon_closing, is_daemon_response, serialize_json_line, DaemonClientError, DaemonClientMessageListener,
+    DaemonClientRequestOptions, DaemonClientResult, DaemonCommandBody, DaemonSocketClosedError,
 };
 use super::daemon_worker_protocol::{
-    is_daemon_worker_frame_header, DaemonPeerTransportTicket, DaemonWorkerFrameHeader,
+    is_daemon_worker_frame_header, worker_command, DaemonPeerTransportTicket,
 };
 
 const FRAME_PREFIX_BYTES: usize = 8;
@@ -161,7 +160,9 @@ impl PendingWorkerRequest {
         if slot.is_none() {
             *slot = Some(result);
         }
-        self.wake.notify_waiters();
+        // A request has one waiter. Store a permit if its response arrives
+        // before request_wire starts waiting (notify_waiters would lose it).
+        self.wake.notify_one();
     }
 }
 
@@ -256,6 +257,7 @@ impl DaemonWorkerClient {
             }
         };
         let (read_half, write_half) = match stream {
+            #[cfg(unix)]
             WorkerStream::Unix(stream) => {
                 let (read, write) = stream.into_split();
                 (WorkerReadHalf::Unix(read), WorkerWriteHalf::Unix(write))
@@ -387,7 +389,7 @@ impl DaemonWorkerClient {
     /// request fails fast instead of replaying (no double execution).
     pub async fn request(
         &self,
-        command: DaemonCommand,
+        command: DaemonCommandBody,
         timeout_ms: u64,
         _options: DaemonClientRequestOptions,
     ) -> DaemonClientResult<DaemonResponse> {
@@ -396,7 +398,7 @@ impl DaemonWorkerClient {
 
     pub async fn request_worker(
         &self,
-        command: DaemonCommand,
+        command: DaemonCommandBody,
         timeout_ms: u64,
     ) -> DaemonClientResult<DaemonResponse> {
         self.request_wire(command, timeout_ms).await
@@ -408,10 +410,9 @@ impl DaemonWorkerClient {
         owner: &[(&str, Value)],
         timeout_ms: u64,
     ) -> DaemonClientResult<DaemonResponse> {
-        let mut command = DaemonCommand::new("worker_auth");
-        command.body.insert("token".to_string(), Value::String(token.to_string()));
+        let mut command = worker_command("worker_auth", &[("token", Value::String(token.to_string()))]);
         for (key, value) in owner {
-            command.body.insert((*key).to_string(), value.clone());
+            command.insert((*key).to_string(), value.clone());
         }
         let response = self.request_worker(command, timeout_ms).await?;
         if !response.success {
@@ -430,14 +431,12 @@ impl DaemonWorkerClient {
         ticket: &DaemonPeerTransportTicket,
         timeout_ms: u64,
     ) -> DaemonClientResult<()> {
-        let mut command = DaemonCommand::new("peer_auth");
-        command.body.insert("grantId".to_string(), Value::String(ticket.grant_id.clone()));
-        command.body.insert("token".to_string(), Value::String(ticket.token.clone()));
-        command.body.insert(
-            "workerInstanceId".to_string(),
-            Value::String(ticket.worker_instance_id.clone()),
-        );
-        command.body.insert("purpose".to_string(), Value::String(ticket.purpose.clone()));
+        let command = worker_command("peer_auth", &[
+            ("grantId", Value::String(ticket.grant_id.clone())),
+            ("token", Value::String(ticket.token.clone())),
+            ("workerInstanceId", Value::String(ticket.worker_instance_id.clone())),
+            ("purpose", Value::String(ticket.purpose.clone())),
+        ]);
         let response = self.request_wire(command, timeout_ms).await?;
         if !response.success {
             return Err(DaemonClientError::Message(response.error.unwrap_or_default()));
@@ -488,20 +487,21 @@ impl DaemonWorkerClient {
         *self.direct_closing_reason.lock().expect("closing reason poisoned") = None;
     }
 
-    async fn request_wire(&self, command: DaemonCommand, timeout_ms: u64) -> DaemonClientResult<DaemonResponse> {
+    async fn request_wire(&self, command: DaemonCommandBody, timeout_ms: u64) -> DaemonClientResult<DaemonResponse> {
         if !self.is_connected() {
             return Err(DaemonClientError::Message(
                 "Daemon worker client is not connected".to_string(),
             ));
         }
         let id = format!("worker_{}", self.request_id.fetch_add(1, Ordering::SeqCst) + 1);
-        let mut full_command = command.clone();
-        full_command.id = Some(id.clone());
-        let payload = serialize_json_line(&full_command.to_value());
+        let command_type = command.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+        let mut full_command = command;
+        full_command.insert("id".to_string(), Value::String(id.clone()));
+        let payload = serialize_json_line(&Value::Object(full_command));
         let header = serde_json::json!({
             "kind": "command",
             "requestId": id,
-            "commandType": command.type_,
+            "commandType": command_type,
         });
         let result = Arc::new(StdMutex::new(None));
         let wake = Arc::new(tokio::sync::Notify::new());
@@ -535,7 +535,7 @@ impl DaemonWorkerClient {
                         DaemonWorkerProbeTimeoutError {
                             message: format!(
                                 "Timed out waiting for daemon worker response to {}",
-                                command.type_
+                                command_type
                             ),
                         }
                         .message,
@@ -555,6 +555,7 @@ impl DaemonWorkerClient {
         let mut writer = self.writer.lock().await;
         match writer.as_mut() {
             Some(writer) => match writer {
+                #[cfg(unix)]
                 WorkerWriteHalf::Unix(writer) => {
                     writer.write_all(frame).await?;
                     writer.flush().await
@@ -583,15 +584,20 @@ impl DaemonWorkerClient {
                 if let Some(pending) = pending {
                     match serde_json::from_slice::<Value>(&frame.payload) {
                         Ok(response) if is_daemon_response(&response) => {
-                            match DaemonResponse::from_value(&response) {
-                                Some(response) => pending.settle(Ok(response)),
-                                None => pending.settle(Err(DaemonClientError::Message(
+                            match serde_json::from_value::<DaemonResponse>(response) {
+                                Ok(response) => pending.settle(Ok(response)),
+                                Err(_) => pending.settle(Err(DaemonClientError::Message(
                                     "Invalid daemon worker response".to_string(),
                                 ))),
                             }
                             return;
                         }
-                        Ok(_) => {}
+                        Ok(_) => {
+                            pending.settle(Err(DaemonClientError::Message(
+                                "Invalid daemon worker response".to_string(),
+                            )));
+                            return;
+                        }
                         Err(error) => {
                             pending.settle(Err(DaemonClientError::Message(format!(
                                 "Invalid daemon worker response: {error}"
@@ -756,6 +762,7 @@ impl WorkerReadHalf {
     async fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         use tokio::io::AsyncReadExt;
         match self {
+            #[cfg(unix)]
             WorkerReadHalf::Unix(reader) => reader.read(buffer).await,
             #[cfg(windows)]
             WorkerReadHalf::Pipe(reader) => reader.read(buffer).await,
@@ -766,6 +773,19 @@ impl WorkerReadHalf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_response_before_waiting_keeps_its_notification() {
+        let request = PendingWorkerRequest {
+            result: Arc::new(StdMutex::new(None)),
+            wake: Arc::new(tokio::sync::Notify::new()),
+        };
+        request.settle(Err(DaemonClientError::Message("first response".to_string())));
+        tokio::time::timeout(Duration::from_millis(100), request.wake.notified())
+            .await.expect("the response notification is retained");
+        request.settle(Err(DaemonClientError::Message("second response".to_string())));
+        assert_eq!(request.result.lock().unwrap().as_ref().unwrap().as_ref().unwrap_err().to_string(), "first response");
+    }
 
     #[test]
     fn frame_round_trip() {

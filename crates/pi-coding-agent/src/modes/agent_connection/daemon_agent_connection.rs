@@ -446,7 +446,7 @@ pub fn build_session_tree_from_flat_nodes(
     }
     for flat_node in flat_nodes {
         let entry = &flat_node.entry;
-        let mut node = by_id.get(entry.id()).cloned().unwrap_or_default();
+        let mut node = by_id.get(entry.id()).cloned().expect("flat node was indexed");
         node.entry = entry.clone();
         let parent_id = entry.parent_id();
         let parent_key = match parent_id {
@@ -711,40 +711,41 @@ impl Default for SnapshotBegin {
 }
 
 /// `DaemonAgentConnection`.
+#[derive(Clone)]
 pub struct DaemonAgentConnection {
     client: Arc<dyn DaemonTransportClient>,
-    active_session_id: Mutex<String>,
-    options: Mutex<DaemonAgentConnectionOptions>,
-    listeners: Mutex<Vec<AgentConnectionEventListener>>,
-    before_session_invalidate_listeners: Mutex<Vec<AgentConnectionBeforeSessionInvalidateListener>>,
-    unsubscribe_daemon_messages: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
-    unsubscribe_daemon_close: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
+    active_session_id: Arc<Mutex<String>>,
+    options: Arc<Mutex<DaemonAgentConnectionOptions>>,
+    listeners: Arc<Mutex<Vec<AgentConnectionEventListener>>>,
+    before_session_invalidate_listeners: Arc<Mutex<Vec<AgentConnectionBeforeSessionInvalidateListener>>>,
+    unsubscribe_daemon_messages: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    unsubscribe_daemon_close: Arc<Mutex<Option<Box<dyn Fn() + Send + Sync>>>>,
     client_id: String,
-    session_input_pauses: Mutex<HashMap<String, AgentConnectionSessionInputPause>>,
-    session_input_pause_generation: Mutex<u64>,
-    owned_session_promotion_tail: Mutex<()>,
-    last_event_cursor: Mutex<Option<DaemonEventCursor>>,
-    retired_event_generations: Mutex<HashSet<String>>,
-    last_event_sequence: Mutex<Option<i64>>,
-    child_roster_sequence: Mutex<Option<i64>>,
-    latest_snapshot: Mutex<Option<AgentConnectionSnapshot>>,
-    latest_snapshot_is_fresh: Mutex<bool>,
-    attached_session_id: Mutex<Option<String>>,
-    attached_session_file: Mutex<Option<String>>,
-    daemon_log_path: Mutex<Option<String>>,
-    update_restart_pending: Mutex<bool>,
-    update_reconnect_failed: Mutex<bool>,
-    terminal_close_emitted: Mutex<bool>,
-    active_side_question_ids: Mutex<HashSet<String>>,
-    snapshot_assemblies: Mutex<HashMap<String, Arc<Mutex<DaemonSnapshotAssembly>>>>,
-    completed_snapshots: Mutex<VecDeque<(String, DaemonSessionSnapshot)>>,
-    pending_reattach_active_session_ids: Mutex<HashSet<String>>,
-    ignored_snapshot_ids: Mutex<VecDeque<String>>,
-    roster_store: Mutex<Option<Arc<dyn AgentConnectionRosterStore>>>,
-    initial_attach_pending: Mutex<bool>,
-    initial_control_plane_close: Mutex<Option<String>>,
-    disposing: Mutex<bool>,
-    disposed: Mutex<bool>,
+    session_input_pauses: Arc<Mutex<HashMap<String, AgentConnectionSessionInputPause>>>,
+    session_input_pause_generation: Arc<Mutex<u64>>,
+    owned_session_promotion_tail: Arc<tokio::sync::Mutex<()>>,
+    last_event_cursor: Arc<Mutex<Option<DaemonEventCursor>>>,
+    retired_event_generations: Arc<Mutex<HashSet<String>>>,
+    last_event_sequence: Arc<Mutex<Option<i64>>>,
+    child_roster_sequence: Arc<Mutex<Option<i64>>>,
+    latest_snapshot: Arc<Mutex<Option<AgentConnectionSnapshot>>>,
+    latest_snapshot_is_fresh: Arc<Mutex<bool>>,
+    attached_session_id: Arc<Mutex<Option<String>>>,
+    attached_session_file: Arc<Mutex<Option<String>>>,
+    daemon_log_path: Arc<Mutex<Option<String>>>,
+    update_restart_pending: Arc<Mutex<bool>>,
+    update_reconnect_failed: Arc<Mutex<bool>>,
+    terminal_close_emitted: Arc<Mutex<bool>>,
+    active_side_question_ids: Arc<Mutex<HashSet<String>>>,
+    snapshot_assemblies: Arc<Mutex<HashMap<String, Arc<Mutex<DaemonSnapshotAssembly>>>>>,
+    completed_snapshots: Arc<Mutex<VecDeque<(String, DaemonSessionSnapshot)>>>,
+    pending_reattach_active_session_ids: Arc<Mutex<HashSet<String>>>,
+    ignored_snapshot_ids: Arc<Mutex<VecDeque<String>>>,
+    roster_store: Arc<Mutex<Option<Arc<dyn AgentConnectionRosterStore>>>>,
+    initial_attach_pending: Arc<Mutex<bool>>,
+    initial_control_plane_close: Arc<Mutex<Option<String>>>,
+    disposing: Arc<Mutex<bool>>,
+    disposed: Arc<Mutex<bool>>,
 }
 
 /// `AgentsViewRosterStore` seam (modes/agents-view/roster-store.ts, another slice).
@@ -770,38 +771,38 @@ impl DaemonAgentConnection {
         }
         Self {
             client,
-            active_session_id: Mutex::new(active_session_id),
-            options: Mutex::new(options),
-            listeners: Mutex::new(Vec::new()),
-            before_session_invalidate_listeners: Mutex::new(Vec::new()),
-            unsubscribe_daemon_messages: Mutex::new(None),
-            unsubscribe_daemon_close: Mutex::new(None),
+            active_session_id: Arc::new(Mutex::new(active_session_id)),
+            options: Arc::new(Mutex::new(options)),
+            listeners: Arc::new(Mutex::new(Vec::new())),
+            before_session_invalidate_listeners: Arc::new(Mutex::new(Vec::new())),
+            unsubscribe_daemon_messages: Arc::new(Mutex::new(None)),
+            unsubscribe_daemon_close: Arc::new(Mutex::new(None)),
             client_id: format!("daemon-agent-connection:{}", uuid::Uuid::new_v4()),
-            session_input_pauses: Mutex::new(HashMap::new()),
-            session_input_pause_generation: Mutex::new(0),
-            owned_session_promotion_tail: Mutex::new(()),
-            last_event_cursor: Mutex::new(None),
-            retired_event_generations: Mutex::new(HashSet::new()),
-            last_event_sequence: Mutex::new(None),
-            child_roster_sequence: Mutex::new(None),
-            latest_snapshot: Mutex::new(None),
-            latest_snapshot_is_fresh: Mutex::new(false),
-            attached_session_id: Mutex::new(None),
-            attached_session_file: Mutex::new(None),
-            daemon_log_path: Mutex::new(None),
-            update_restart_pending: Mutex::new(false),
-            update_reconnect_failed: Mutex::new(false),
-            terminal_close_emitted: Mutex::new(false),
-            active_side_question_ids: Mutex::new(HashSet::new()),
-            snapshot_assemblies: Mutex::new(HashMap::new()),
-            completed_snapshots: Mutex::new(VecDeque::new()),
-            pending_reattach_active_session_ids: Mutex::new(HashSet::new()),
-            ignored_snapshot_ids: Mutex::new(VecDeque::new()),
-            roster_store: Mutex::new(None),
-            initial_attach_pending: Mutex::new(false),
-            initial_control_plane_close: Mutex::new(None),
-            disposing: Mutex::new(false),
-            disposed: Mutex::new(false),
+            session_input_pauses: Arc::new(Mutex::new(HashMap::new())),
+            session_input_pause_generation: Arc::new(Mutex::new(0)),
+            owned_session_promotion_tail: Arc::new(tokio::sync::Mutex::new(())),
+            last_event_cursor: Arc::new(Mutex::new(None)),
+            retired_event_generations: Arc::new(Mutex::new(HashSet::new())),
+            last_event_sequence: Arc::new(Mutex::new(None)),
+            child_roster_sequence: Arc::new(Mutex::new(None)),
+            latest_snapshot: Arc::new(Mutex::new(None)),
+            latest_snapshot_is_fresh: Arc::new(Mutex::new(false)),
+            attached_session_id: Arc::new(Mutex::new(None)),
+            attached_session_file: Arc::new(Mutex::new(None)),
+            daemon_log_path: Arc::new(Mutex::new(None)),
+            update_restart_pending: Arc::new(Mutex::new(false)),
+            update_reconnect_failed: Arc::new(Mutex::new(false)),
+            terminal_close_emitted: Arc::new(Mutex::new(false)),
+            active_side_question_ids: Arc::new(Mutex::new(HashSet::new())),
+            snapshot_assemblies: Arc::new(Mutex::new(HashMap::new())),
+            completed_snapshots: Arc::new(Mutex::new(VecDeque::new())),
+            pending_reattach_active_session_ids: Arc::new(Mutex::new(HashSet::new())),
+            ignored_snapshot_ids: Arc::new(Mutex::new(VecDeque::new())),
+            roster_store: Arc::new(Mutex::new(None)),
+            initial_attach_pending: Arc::new(Mutex::new(false)),
+            initial_control_plane_close: Arc::new(Mutex::new(None)),
+            disposing: Arc::new(Mutex::new(false)),
+            disposed: Arc::new(Mutex::new(false)),
         }
     }
 
@@ -1356,8 +1357,10 @@ impl DaemonAgentConnection {
         self_arc_registry()
             .lock()
             .unwrap()
-            .get(&(self as *const Self as usize))
+            .values()
+            .find(|connection| connection.client_id == self.client_id)
             .cloned()
+            .or_else(|| Some(Arc::new(self.clone())))
     }
 }
 
@@ -2237,7 +2240,7 @@ impl DaemonAgentConnection {
         self_arc_registry()
             .lock()
             .unwrap()
-            .remove(&(self as *const Self as usize));
+            .retain(|_, connection| connection.client_id != self.client_id);
     }
 
     async fn abort_side_question_inner(&self, id: &str) -> Result<bool, String> {
@@ -2262,7 +2265,7 @@ impl DaemonAgentConnection {
     where
         F: FnOnce(bool) -> BoxFuture<Result<T, String>>,
     {
-        let _guard = self.owned_session_promotion_tail.lock().unwrap();
+        let _guard = self.owned_session_promotion_tail.lock().await;
         let promote_owned_session = self.options.lock().unwrap().owned_session;
         let result = operation(promote_owned_session).await?;
         if promote_owned_session {
@@ -2280,7 +2283,8 @@ impl DaemonAgentConnection {
         message: &str,
         options: Option<AgentConnectionPromptOptions>,
     ) -> BoxFuture<Result<(), String>> {
-        let active_session_id = self.active_session_id();
+        let this = self.clone();
+        let active_session_id = this.active_session_id();
         let message = message.to_string();
         Box::pin(async move {
             let mut fields: Vec<(&str, Value)> = vec![
@@ -2302,7 +2306,7 @@ impl DaemonAgentConnection {
                 }
             }
             let command = command_body(type_, fields);
-            self.request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
+            this.request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
                 .await
                 .map(|_| ())
         })
@@ -2311,8 +2315,9 @@ impl DaemonAgentConnection {
 
 impl AgentConnection for DaemonAgentConnection {
     fn subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync> {
-        self.listeners.lock().unwrap().push(listener.clone());
-        let listeners = self.listeners.clone();
+        let this = self.clone();
+        this.listeners.lock().unwrap().push(listener.clone());
+        let listeners = this.listeners.clone();
         Box::new(move || {
             let mut guard = listeners.lock().unwrap();
             if let Some(index) = guard.iter().position(|entry| Arc::ptr_eq(entry, &listener)) {
@@ -2325,11 +2330,12 @@ impl AgentConnection for DaemonAgentConnection {
         &self,
         listener: AgentConnectionBeforeSessionInvalidateListener,
     ) -> Box<dyn Fn() + Send + Sync> {
-        self.before_session_invalidate_listeners
+        let this = self.clone();
+        this.before_session_invalidate_listeners
             .lock()
             .unwrap()
             .push(listener.clone());
-        let listeners = self.before_session_invalidate_listeners.clone();
+        let listeners = this.before_session_invalidate_listeners.clone();
         Box::new(move || {
             let mut guard = listeners.lock().unwrap();
             if let Some(index) = guard.iter().position(|entry| Arc::ptr_eq(entry, &listener)) {
@@ -2339,37 +2345,40 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_state(&self) -> BoxFuture<Result<AgentConnectionState, String>> {
-        if *self.latest_snapshot_is_fresh.lock().unwrap() {
-            if let Some(snapshot) = self.latest_snapshot.lock().unwrap().clone() {
+        let this = self.clone();
+        if *this.latest_snapshot_is_fresh.lock().unwrap() {
+            if let Some(snapshot) = this.latest_snapshot.lock().unwrap().clone() {
                 return Box::pin(async move { Ok(snapshot.state) });
             }
         }
         let command = command_body(
             "get_connection_state",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             serde_json::from_value(data).map_err(|error| format!("Daemon returned an invalid connection state: {error}"))
         })
     }
 
     fn get_initial_snapshot(&self) -> BoxFuture<Result<AgentConnectionSnapshot, String>> {
-        Box::pin(async move { self.get_initial_snapshot_inner(true).await })
+        let this = self.clone();
+        Box::pin(async move { this.get_initial_snapshot_inner(true).await })
     }
 
     fn get_rlm_child_snapshots(&self) -> BoxFuture<Result<Vec<AgentConnectionRlmChildAgentSnapshot>, String>> {
-        if !self.client.supports_server_capability("authoritative_child_roster") {
+        let this = self.clone();
+        if !this.client.supports_server_capability("authoritative_child_roster") {
             return Box::pin(async {
                 Err(DaemonCapabilityUnavailableError::new("get_rlm_children", "authoritative_child_roster").to_string())
             });
         }
         let command = command_body(
             "get_rlm_children",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             let children: Vec<AgentConnectionRlmChildAgentSnapshot> = data
                 .get("children")
                 .cloned()
@@ -2379,8 +2388,8 @@ impl AgentConnection for DaemonAgentConnection {
                 Some(event_sequence) => event_sequence,
                 None => return Err("Daemon returned an invalid child roster".to_string()),
             };
-            if self.child_roster_sequence.lock().unwrap().unwrap_or(-1) > event_sequence {
-                return Ok(self
+            if this.child_roster_sequence.lock().unwrap().unwrap_or(-1) > event_sequence {
+                return Ok(this
                     .latest_snapshot
                     .lock()
                     .unwrap()
@@ -2388,9 +2397,9 @@ impl AgentConnection for DaemonAgentConnection {
                     .and_then(|snapshot| snapshot.children.clone())
                     .unwrap_or(children));
             }
-            *self.child_roster_sequence.lock().unwrap() = Some(event_sequence);
+            *this.child_roster_sequence.lock().unwrap() = Some(event_sequence);
             {
-                let mut guard = self.latest_snapshot.lock().unwrap();
+                let mut guard = this.latest_snapshot.lock().unwrap();
                 if let Some(snapshot) = guard.as_mut() {
                     snapshot.children = Some(children.clone());
                 }
@@ -2400,8 +2409,9 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_messages(&self) -> BoxFuture<Result<Vec<AgentMessage>, String>> {
-        if *self.latest_snapshot_is_fresh.lock().unwrap() {
-            if let Some(snapshot) = self.latest_snapshot.lock().unwrap().clone() {
+        let this = self.clone();
+        if *this.latest_snapshot_is_fresh.lock().unwrap() {
+            if let Some(snapshot) = this.latest_snapshot.lock().unwrap().clone() {
                 if snapshot.history.is_none() {
                     return Box::pin(async move { Ok(snapshot.messages) });
                 }
@@ -2409,10 +2419,10 @@ impl AgentConnection for DaemonAgentConnection {
         }
         let command = command_body(
             "get_messages",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("messages")
                 .cloned()
@@ -2425,13 +2435,14 @@ impl AgentConnection for DaemonAgentConnection {
         &self,
         request: AgentConnectionHistoryRangeRequest,
     ) -> BoxFuture<Result<AgentConnectionHistoryRange, String>> {
-        if !self.client.supports_server_capability("history_ranges") {
+        let this = self.clone();
+        if !this.client.supports_server_capability("history_ranges") {
             return Box::pin(async {
                 Err(DaemonCapabilityUnavailableError::new("get_history_range", "history_ranges").to_string())
             });
         }
         let mut fields = vec![
-            ("activeSessionId", Value::String(self.active_session_id())),
+            ("activeSessionId", Value::String(this.active_session_id())),
             ("generation", Value::String(request.generation.clone())),
             ("representation", Value::String(request.representation.clone())),
             (
@@ -2450,7 +2461,7 @@ impl AgentConnection for DaemonAgentConnection {
         }
         let command = command_body("get_history_range", fields);
         Box::pin(async move {
-            let data = self.request_data_with_recovery(command, None, false).await?;
+            let data = this.request_data_with_recovery(command, None, false).await?;
             let range: AgentConnectionHistoryRange = serde_json::from_value(data)
                 .map_err(|_| "Daemon returned an invalid session history range".to_string())?;
             let entry_ids_unique = {
@@ -2478,12 +2489,13 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_session_header(&self) -> BoxFuture<Result<Option<AgentConnectionSessionHeader>, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_session_header",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("header")
                 .cloned()
@@ -2492,12 +2504,13 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_commands(&self) -> BoxFuture<Result<Vec<AgentConnectionSlashCommand>, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_commands",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("commands")
                 .cloned()
@@ -2507,18 +2520,20 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_resource_snapshot(&self) -> BoxFuture<Result<AgentConnectionResourceSnapshot, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_resource_snapshot",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             serde_json::from_value(data).map_err(|error| format!("Daemon returned an invalid resource snapshot: {error}"))
         })
     }
 
     fn supports_acp_mcp_servers(&self) -> bool {
-        self.client.supports_server_capability("acp_mcp_servers")
+        let this = self.clone();
+        this.client.supports_server_capability("acp_mcp_servers")
     }
 
     fn replace_acp_mcp_servers(
@@ -2526,7 +2541,8 @@ impl AgentConnection for DaemonAgentConnection {
         servers: Vec<Value>,
         owner_id: &str,
     ) -> BoxFuture<Result<(), String>> {
-        if !self.supports_acp_mcp_servers() {
+        let this = self.clone();
+        if !this.supports_acp_mcp_servers() {
             return Box::pin(async {
                 Err(DaemonCapabilityUnavailableError::new("replace_acp_mcp_servers", "acp_mcp_servers").to_string())
             });
@@ -2534,12 +2550,12 @@ impl AgentConnection for DaemonAgentConnection {
         let command = command_body(
             "replace_acp_mcp_servers",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("ownerId", Value::String(owner_id.to_string())),
                 ("servers", Value::Array(servers)),
             ],
         );
-        Box::pin(async move { self.request_ok(command).await })
+        Box::pin(async move { this.request_ok(command).await })
     }
 
     fn release_acp_mcp_servers(
@@ -2547,17 +2563,19 @@ impl AgentConnection for DaemonAgentConnection {
         owner_id: &str,
         _server_names: Vec<String>,
     ) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let owner_id = owner_id.to_string();
-        Box::pin(async move { self.replace_acp_mcp_servers(Vec::new(), &owner_id).await })
+        Box::pin(async move { this.replace_acp_mcp_servers(Vec::new(), &owner_id).await })
     }
 
     fn get_available_models(&self) -> BoxFuture<Result<Vec<AgentConnectionModel>, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_available_models",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("models")
                 .cloned()
@@ -2567,8 +2585,9 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_model_catalog(&self) -> BoxFuture<Result<AgentConnectionModelCatalog, String>> {
-        if !self.client.supports_server_capability("model_catalog") {
-            let models_future = self.get_available_models();
+        let this = self.clone();
+        if !this.client.supports_server_capability("model_catalog") {
+            let models_future = this.get_available_models();
             return Box::pin(async move {
                 let models = models_future.await?;
                 let mut configured: IndexMap<String, ()> = IndexMap::new();
@@ -2583,33 +2602,36 @@ impl AgentConnection for DaemonAgentConnection {
         }
         let command = command_body(
             "get_model_catalog",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             serde_json::from_value(data).map_err(|error| format!("Daemon returned an invalid model catalog: {error}"))
         })
     }
 
     fn get_session_stats(&self) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_session_stats",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_data(command, None).await })
+        Box::pin(async move { this.request_data(command, None).await })
     }
 
     fn get_context_tree(&self) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_context_tree",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_data(command, None).await })
+        Box::pin(async move { this.request_data(command, None).await })
     }
 
     fn get_session_context(&self) -> BoxFuture<Result<AgentConnectionSessionContext, String>> {
-        if *self.latest_snapshot_is_fresh.lock().unwrap() {
-            if let Some(snapshot) = self.latest_snapshot.lock().unwrap().clone() {
+        let this = self.clone();
+        if *this.latest_snapshot_is_fresh.lock().unwrap() {
+            if let Some(snapshot) = this.latest_snapshot.lock().unwrap().clone() {
                 if let Some(context) = snapshot.session_context {
                     return Box::pin(async move { Ok(context) });
                 }
@@ -2617,10 +2639,10 @@ impl AgentConnection for DaemonAgentConnection {
         }
         let command = command_body(
             "get_session_context",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             data.get("context")
                 .cloned()
                 .and_then(|context| serde_json::from_value(context).ok())
@@ -2629,8 +2651,9 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_session_tree(&self) -> BoxFuture<Result<AgentConnectionWatchSessionTree, String>> {
-        if *self.latest_snapshot_is_fresh.lock().unwrap() {
-            if let Some(snapshot) = self.latest_snapshot.lock().unwrap().clone() {
+        let this = self.clone();
+        if *this.latest_snapshot_is_fresh.lock().unwrap() {
+            if let Some(snapshot) = this.latest_snapshot.lock().unwrap().clone() {
                 if let Some(tree) = snapshot.session_tree {
                     return Box::pin(async move {
                         Ok(AgentConnectionWatchSessionTree {
@@ -2643,10 +2666,10 @@ impl AgentConnection for DaemonAgentConnection {
         }
         let command = command_body(
             "get_session_tree",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             let flat_nodes: Vec<AgentConnectionSessionTreeFlatNode> = data
                 .get("flatNodes")
                 .cloned()
@@ -2663,6 +2686,7 @@ impl AgentConnection for DaemonAgentConnection {
         &self,
         scope: &str,
     ) -> BoxFuture<Result<Vec<AgentConnectionSavedSessionInfo>, String>> {
+        let this = self.clone();
         // `listDaemonSavedSessions(client, target, scope, callbacks)` lives in
         // modes/daemon/saved-session-catalog.ts (another slice).
         let scope = scope.to_string();
@@ -2673,12 +2697,13 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_queue(&self) -> BoxFuture<Result<AgentConnectionQueueState, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_queue",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             serde_json::from_value(data).map_err(|error| format!("Daemon returned an invalid queue state: {error}"))
         })
     }
@@ -2690,13 +2715,14 @@ impl AgentConnection for DaemonAgentConnection {
         expected_text: &str,
         mutation: Value,
     ) -> BoxFuture<Result<String, String>> {
-        if !self.client.supports_server_capability("queue_message_mutation") {
+        let this = self.clone();
+        if !this.client.supports_server_capability("queue_message_mutation") {
             return Box::pin(async { Ok("unsupported".to_string()) });
         }
         let command = command_body(
             "mutate_queued_message",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("lane", Value::String(lane.to_string())),
                 ("index", json!(index)),
                 ("expectedText", Value::String(expected_text.to_string())),
@@ -2704,7 +2730,7 @@ impl AgentConnection for DaemonAgentConnection {
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("status")
                 .and_then(Value::as_str)
@@ -2714,23 +2740,25 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn clear_queue(&self) -> BoxFuture<Result<AgentConnectionQueueState, String>> {
+        let this = self.clone();
         let command = command_body(
             "clear_queue",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             serde_json::from_value(data).map_err(|error| format!("Daemon returned an invalid queue state: {error}"))
         })
     }
 
     fn abort_and_clear_queue(&self) -> BoxFuture<Result<AgentConnectionQueueState, String>> {
+        let this = self.clone();
         let command = command_body(
             "abort_and_clear_queue",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            match self.request_data(command, None).await {
+            match this.request_data(command, None).await {
                 Ok(data) => serde_json::from_value(data)
                     .map_err(|error| format!("Daemon returned an invalid queue state: {error}")),
                 Err(error) => {
@@ -2748,13 +2776,14 @@ impl AgentConnection for DaemonAgentConnection {
         &self,
         lease_key: &str,
     ) -> BoxFuture<Result<AgentConnectionSessionInputPause, String>> {
-        if *self.terminal_close_emitted.lock().unwrap() {
+        let this = self.clone();
+        if *this.terminal_close_emitted.lock().unwrap() {
             return Box::pin(async { Err("Daemon connection is closed; cannot acquire an input pause.".to_string()) });
         }
-        let active_session_id = self.active_session_id();
-        let generation = *self.session_input_pause_generation.lock().unwrap();
+        let active_session_id = this.active_session_id();
+        let generation = *this.session_input_pause_generation.lock().unwrap();
         let acquisition_key = format!("{active_session_id}\u{1}{lease_key}");
-        if let Some(existing) = self.session_input_pauses.lock().unwrap().get(&acquisition_key).cloned() {
+        if let Some(existing) = this.session_input_pauses.lock().unwrap().get(&acquisition_key).cloned() {
             return Box::pin(async move { Ok(existing) });
         }
         let command = command_body(
@@ -2764,7 +2793,7 @@ impl AgentConnection for DaemonAgentConnection {
                 ("leaseKey", Value::String(lease_key.to_string())),
             ],
         );
-        let release_command = |pause_id: String| {
+        let release_command = move |pause_id: String| {
             command_body(
                 "release_session_input_pause",
                 vec![
@@ -2774,19 +2803,19 @@ impl AgentConnection for DaemonAgentConnection {
             )
         };
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             let pause_id = data
                 .get("pauseId")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "Daemon returned an invalid input pause".to_string())?
                 .to_string();
-            if generation != *self.session_input_pause_generation.lock().unwrap()
-                || *self.terminal_close_emitted.lock().unwrap()
+            if generation != *this.session_input_pause_generation.lock().unwrap()
+                || *this.terminal_close_emitted.lock().unwrap()
             {
-                let _ = self.request_data(release_command(pause_id), None).await;
+                let _ = this.request_data(release_command(pause_id), None).await;
                 return Err("Session input pause acquisition was invalidated by a daemon reconnect.".to_string());
             }
-            let connection = self.self_arc();
+            let connection = this.self_arc();
             let key = acquisition_key.clone();
             let generation_check = generation;
             struct DaemonInputPause {
@@ -2794,7 +2823,7 @@ impl AgentConnection for DaemonAgentConnection {
                 pause_id: String,
                 generation: u64,
                 key: String,
-                released: Mutex<bool>,
+                released: Arc<Mutex<bool>>,
             }
             impl AgentConnectionInputPause for DaemonInputPause {
                 fn release(&self) -> BoxFuture<Result<(), String>> {
@@ -2836,9 +2865,9 @@ impl AgentConnection for DaemonAgentConnection {
                 pause_id,
                 generation: generation_check,
                 key: key.clone(),
-                released: Mutex::new(false),
+                released: Arc::new(Mutex::new(false)),
             });
-            self.session_input_pauses
+            this.session_input_pauses
                 .lock()
                 .unwrap()
                 .insert(key, pause.clone());
@@ -2847,13 +2876,14 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn list_cron_jobs(&self, include_inactive: bool) -> BoxFuture<Result<Vec<Value>, String>> {
-        let mut fields = vec![("activeSessionId", Value::String(self.active_session_id()))];
+        let this = self.clone();
+        let mut fields = vec![("activeSessionId", Value::String(this.active_session_id()))];
         if include_inactive {
             fields.push(("includeInactive", Value::Bool(true)));
         }
         let command = command_body("cron_list", fields);
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("jobs")
                 .and_then(Value::as_array)
@@ -2863,6 +2893,7 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn list_heartbeats(&self) -> BoxFuture<Result<Vec<AgentConnectionHeartbeat>, String>> {
+        let this = self.clone();
         // `listDaemonHeartbeats(client, activeSessionId?)` lives in
         // modes/daemon/heartbeat-catalog.ts (another slice).
         Box::pin(async {
@@ -2876,7 +2907,8 @@ impl AgentConnection for DaemonAgentConnection {
         job_id: &str,
         action: Value,
     ) -> BoxFuture<Result<Value, String>> {
-        if !self.client.supports_server_capability("heartbeat_management") {
+        let this = self.clone();
+        if !this.client.supports_server_capability("heartbeat_management") {
             return Box::pin(async {
                 Err("Heartbeat management requires a newer Prime Agent daemon.".to_string())
             });
@@ -2890,7 +2922,7 @@ impl AgentConnection for DaemonAgentConnection {
             ],
         );
         Box::pin(async move {
-            match self.request_data(command, None).await {
+            match this.request_data(command, None).await {
                 Ok(data) => data
                     .get("heartbeat")
                     .cloned()
@@ -2907,16 +2939,18 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn add_cron_job(&self, schedule: &str, prompt: &str) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let command = command_body(
             "cron_add",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("schedule", Value::String(schedule.to_string())),
                 ("prompt", Value::String(prompt.to_string())),
             ],
         );
         Box::pin(async move {
-            self.with_owned_session_promotion(|promote_owned_session| {
+            this.with_owned_session_promotion(|promote_owned_session| {
+                let this = this.clone();
                 let mut command = command.clone();
                 if promote_owned_session {
                     if let Some(object) = command.as_object_mut() {
@@ -2924,7 +2958,7 @@ impl AgentConnection for DaemonAgentConnection {
                     }
                 }
                 Box::pin(async move {
-                    let data = self.request_data(command, None).await?;
+                    let data = this.request_data(command, None).await?;
                     data.get("job")
                         .cloned()
                         .ok_or_else(|| "Daemon returned an invalid cron job".to_string())
@@ -2935,15 +2969,16 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn cancel_cron_job(&self, job_id: &str) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let command = command_body(
             "cron_cancel",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("jobId", Value::String(job_id.to_string())),
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             data.get("job")
                 .cloned()
                 .ok_or_else(|| "Daemon returned an invalid cron job".to_string())
@@ -2951,12 +2986,13 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_heartbeat(&self) -> BoxFuture<Result<Option<Value>, String>> {
+        let this = self.clone();
         let command = command_body(
             "heartbeat_get",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data.get("heartbeat").cloned().filter(|value| !value.is_null()))
         })
     }
@@ -2967,8 +3003,9 @@ impl AgentConnection for DaemonAgentConnection {
         instruction: &str,
         delivery_mode: Option<&str>,
     ) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let mut fields = vec![
-            ("activeSessionId", Value::String(self.active_session_id())),
+            ("activeSessionId", Value::String(this.active_session_id())),
             ("schedule", Value::String(schedule.to_string())),
             ("prompt", Value::String(instruction.to_string())),
         ];
@@ -2977,7 +3014,8 @@ impl AgentConnection for DaemonAgentConnection {
         }
         let command = command_body("heartbeat_set", fields);
         Box::pin(async move {
-            self.with_owned_session_promotion(|promote_owned_session| {
+            this.with_owned_session_promotion(|promote_owned_session| {
+                let this = this.clone();
                 let mut command = command.clone();
                 if promote_owned_session {
                     if let Some(object) = command.as_object_mut() {
@@ -2985,7 +3023,7 @@ impl AgentConnection for DaemonAgentConnection {
                     }
                 }
                 Box::pin(async move {
-                    let data = self.request_data(command, None).await?;
+                    let data = this.request_data(command, None).await?;
                     data.get("heartbeat")
                         .cloned()
                         .ok_or_else(|| "Daemon returned an invalid heartbeat".to_string())
@@ -2996,73 +3034,80 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn update_heartbeat(&self, action: Value) -> BoxFuture<Result<Option<Value>, String>> {
+        let this = self.clone();
         let command = command_body(
             "heartbeat_update",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("action", action),
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data.get("heartbeat").cloned().filter(|value| !value.is_null()))
         })
     }
 
     fn send_agent_message(&self, target_active_session_id: &str, message: &str) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let command = command_body(
             "send_message",
             vec![
                 ("targetActiveSessionId", Value::String(target_active_session_id.to_string())),
                 ("message", Value::String(message.to_string())),
-                ("fromActiveSessionId", Value::String(self.active_session_id())),
+                ("fromActiveSessionId", Value::String(this.active_session_id())),
             ],
         );
-        Box::pin(async move { self.request_data(command, None).await })
+        Box::pin(async move { this.request_data(command, None).await })
     }
 
     fn get_agent_message_status(&self) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let command = command_body(
             "agent_messages_status",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_data(command, None).await })
+        Box::pin(async move { this.request_data(command, None).await })
     }
 
     fn pause_agent_messages(&self) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let command = command_body(
             "agent_messages_pause",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_data(command, None).await })
+        Box::pin(async move { this.request_data(command, None).await })
     }
 
     fn resume_agent_messages(&self) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let command = command_body(
             "agent_messages_resume",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_data(command, None).await })
+        Box::pin(async move { this.request_data(command, None).await })
     }
 
     fn clear_agent_messages(&self) -> BoxFuture<Result<f64, String>> {
+        let this = self.clone();
         let command = command_body(
             "agent_messages_clear",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data.as_f64().unwrap_or(0.0))
         })
     }
 
     fn get_user_messages_for_forking(&self) -> BoxFuture<Result<Vec<AgentConnectionUserMessage>, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_user_messages_for_forking",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("messages")
                 .cloned()
@@ -3072,23 +3117,25 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_last_assistant_text(&self) -> BoxFuture<Result<Option<String>, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_last_assistant_text",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data.get("text").and_then(Value::as_str).map(str::to_string))
         })
     }
 
     fn get_system_prompt(&self) -> BoxFuture<Result<String, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_system_prompt",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("systemPrompt")
                 .and_then(Value::as_str)
@@ -3098,15 +3145,16 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn get_tool_definition(&self, name: &str) -> BoxFuture<Result<Option<AgentConnectionToolDefinition>, String>> {
+        let this = self.clone();
         let command = command_body(
             "get_tool_definition",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("name", Value::String(name.to_string())),
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(command, None).await?;
+            let data = this.request_data(command, None).await?;
             Ok(data
                 .get("toolDefinition")
                 .cloned()
@@ -3115,15 +3163,16 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn set_session_entry_label(&self, entry_id: &str, label: Option<&str>) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let command = command_body(
             "set_session_entry_label",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("entryId", Value::String(entry_id.to_string())),
                 ("label", optional_string(label)),
             ],
         );
-        Box::pin(async move { self.request_ok(command).await })
+        Box::pin(async move { this.request_ok(command).await })
     }
 
     fn respond_to_extension_ui_request(
@@ -3131,10 +3180,11 @@ impl AgentConnection for DaemonAgentConnection {
         request_id: &str,
         response: AgentConnectionExtensionUiResponse,
     ) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let command = command_body(
             "extension_ui_response",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("requestId", Value::String(request_id.to_string())),
                 (
                     "response",
@@ -3142,15 +3192,16 @@ impl AgentConnection for DaemonAgentConnection {
                 ),
             ],
         );
-        Box::pin(async move { self.request_ok(command).await })
+        Box::pin(async move { this.request_ok(command).await })
     }
 
     fn subscribe_agent_roster(
         &self,
         listener: Arc<dyn Fn() + Send + Sync>,
     ) -> BoxFuture<Result<(), String>> {
-        let store = self.roster_store.lock().unwrap().clone();
-        let client = self.client.clone();
+        let this = self.clone();
+        let store = this.roster_store.lock().unwrap().clone();
+        let client = this.client.clone();
         Box::pin(async move {
             let store = match store {
                 Some(store) => store,
@@ -3164,7 +3215,8 @@ impl AgentConnection for DaemonAgentConnection {
         })
     }
     fn prompt(&self, message: &str, options: Option<AgentConnectionPromptOptions>) -> BoxFuture<Result<(), String>> {
-        self.prompt_with_admission_cancellation("prompt", message, options)
+        let this = self.clone();
+        this.prompt_with_admission_cancellation("prompt", message, options)
     }
 
     fn prompt_and_wait(
@@ -3172,7 +3224,8 @@ impl AgentConnection for DaemonAgentConnection {
         message: &str,
         options: Option<AgentConnectionPromptOptions>,
     ) -> BoxFuture<Result<(), String>> {
-        self.prompt_with_admission_cancellation("prompt_and_wait", message, options)
+        let this = self.clone();
+        this.prompt_with_admission_cancellation("prompt_and_wait", message, options)
     }
 
     fn start_side_question(
@@ -3181,8 +3234,9 @@ impl AgentConnection for DaemonAgentConnection {
         question: &str,
         previous_turns: Option<Vec<AgentConnectionSideQuestionTurn>>,
     ) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let has_turns = previous_turns.as_ref().map(|turns| !turns.is_empty()).unwrap_or(false);
-        if has_turns && !self.client.supports_server_capability("side_question_transcript") {
+        if has_turns && !this.client.supports_server_capability("side_question_transcript") {
             // An older daemon would silently ignore previousTurns and answer the
             // follow-up without the side-conversation context; fail loudly instead.
             return Box::pin(async {
@@ -3192,7 +3246,7 @@ impl AgentConnection for DaemonAgentConnection {
         let command = command_body(
             "start_side_question",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("sideQuestionId", Value::String(id.to_string())),
                 ("question", Value::String(question.to_string())),
                 (
@@ -3204,12 +3258,13 @@ impl AgentConnection for DaemonAgentConnection {
                 ),
             ],
         );
+        let id = id.to_string();
         Box::pin(async move {
-            self.active_side_question_ids.lock().unwrap().insert(id.to_string());
-            match self.request_ok(command).await {
+            this.active_side_question_ids.lock().unwrap().insert(id.clone());
+            match this.request_ok(command).await {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    self.active_side_question_ids.lock().unwrap().remove(id);
+                    this.active_side_question_ids.lock().unwrap().remove(&id);
                     if is_unknown_daemon_command_error(&error, "start_side_question") {
                         Err("the daemon is running an older build; restart the daemon and try again".to_string())
                     } else {
@@ -3221,15 +3276,17 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn abort_side_question(&self, id: &str) -> BoxFuture<Result<bool, String>> {
+        let this = self.clone();
         let id = id.to_string();
-        Box::pin(async move { self.abort_side_question_inner(&id).await })
+        Box::pin(async move { this.abort_side_question_inner(&id).await })
     }
 
     fn steer(&self, message: &str, images: Option<Vec<ImageContent>>) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let command = command_body(
             "steer",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("message", Value::String(message.to_string())),
                 (
                     "images",
@@ -3240,14 +3297,15 @@ impl AgentConnection for DaemonAgentConnection {
                 ),
             ],
         );
-        Box::pin(async move { self.request_ok(command).await })
+        Box::pin(async move { this.request_ok(command).await })
     }
 
     fn follow_up(&self, message: &str, images: Option<Vec<ImageContent>>) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let command = command_body(
             "follow_up",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("message", Value::String(message.to_string())),
                 (
                     "images",
@@ -3258,27 +3316,29 @@ impl AgentConnection for DaemonAgentConnection {
                 ),
             ],
         );
-        Box::pin(async move { self.request_ok(command).await })
+        Box::pin(async move { this.request_ok(command).await })
     }
 
     fn abort(&self) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let command = command_body(
             "abort",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_ok(command).await })
+        Box::pin(async move { this.request_ok(command).await })
     }
 
     fn cancel_rlm_child(&self, child_id: &str) -> BoxFuture<Result<bool, String>> {
+        let this = self.clone();
         let command = command_body(
             "cancel_rlm_child",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("childId", Value::String(child_id.to_string())),
             ],
         );
         Box::pin(async move {
-            match self.request_data(command, None).await {
+            match this.request_data(command, None).await {
                 Ok(data) => Ok(data.get("cancelled").and_then(Value::as_bool).unwrap_or(false)),
                 Err(error) => {
                     if is_unknown_daemon_command_error(&error, "cancel_rlm_child") {
@@ -3292,12 +3352,13 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn wait_for_idle(&self) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let command = command_body(
             "wait_for_idle",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            self.request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
+            this.request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
                 .await
                 .map(|_| ())
         })
@@ -3307,22 +3368,23 @@ impl AgentConnection for DaemonAgentConnection {
         &self,
         options: Option<AgentConnectionHeadlessCompletionOptions>,
     ) -> BoxFuture<Result<AgentAutonomousStatus, String>> {
+        let this = self.clone();
         let wait_for_rlm_quiescence = options
             .as_ref()
             .and_then(|options| options.wait_for_rlm_quiescence)
             .unwrap_or(false);
-        if wait_for_rlm_quiescence && !self.client.supports_server_capability("rlm_quiescence_barrier") {
+        if wait_for_rlm_quiescence && !this.client.supports_server_capability("rlm_quiescence_barrier") {
             return Box::pin(async {
                 Err("the daemon is running an older build without RLM quiescence barriers; restart the daemon and try again".to_string())
             });
         }
-        let mut fields = vec![("activeSessionId", Value::String(self.active_session_id()))];
+        let mut fields = vec![("activeSessionId", Value::String(this.active_session_id()))];
         if wait_for_rlm_quiescence {
             fields.push(("waitForRlmQuiescence", Value::Bool(true)));
         }
         let command = command_body("wait_for_headless_completion", fields);
         Box::pin(async move {
-            let data = self
+            let data = this
                 .request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
                 .await?;
             serde_json::from_value(data)
@@ -3335,8 +3397,9 @@ impl AgentConnection for DaemonAgentConnection {
         command: &str,
         options: Option<AgentConnectionExecuteBashOptions>,
     ) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let transient = options.as_ref().and_then(|options| options.transient).unwrap_or(false);
-        if transient && !self.client.supports_server_capability("transient_bash") {
+        if transient && !this.client.supports_server_capability("transient_bash") {
             // An older daemon would record the run into the session, leaking the
             // side conversation into the main transcript; fail loudly instead.
             return Box::pin(async {
@@ -3344,7 +3407,7 @@ impl AgentConnection for DaemonAgentConnection {
             });
         }
         let mut fields = vec![
-            ("activeSessionId", Value::String(self.active_session_id())),
+            ("activeSessionId", Value::String(this.active_session_id())),
             ("command", Value::String(command.to_string())),
         ];
         if let Some(options) = &options {
@@ -3360,7 +3423,7 @@ impl AgentConnection for DaemonAgentConnection {
         }
         let request = command_body("execute_bash", fields);
         Box::pin(async move {
-            match self.request_ok(request).await {
+            match this.request_ok(request).await {
                 Ok(()) => Ok(()),
                 Err(error) => {
                     if is_unknown_daemon_command_error(&error, "execute_bash") {
@@ -3374,26 +3437,28 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn execute_bash_and_wait(&self, command: &str) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let request = command_body(
             "execute_bash_and_wait",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("command", Value::String(command.to_string())),
             ],
         );
         Box::pin(async move {
-            self.request_data(request, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
+            this.request_data(request, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
                 .await
         })
     }
 
     fn abort_bash(&self) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "abort_bash",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            match self.request_ok(request).await {
+            match this.request_ok(request).await {
                 Ok(()) => Ok(()),
                 Err(error) => {
                     if is_unknown_daemon_command_error(&error, "abort_bash") {
@@ -3407,16 +3472,17 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn set_model(&self, provider: &str, model_id: &str) -> BoxFuture<Result<AgentConnectionModel, String>> {
+        let this = self.clone();
         let request = command_body(
             "set_model",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("provider", Value::String(provider.to_string())),
                 ("modelId", Value::String(model_id.to_string())),
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(request, None).await?;
+            let data = this.request_data(request, None).await?;
             serde_json::from_value(data).map_err(|error| format!("Daemon returned an invalid model: {error}"))
         })
     }
@@ -3425,15 +3491,16 @@ impl AgentConnection for DaemonAgentConnection {
         &self,
         direction: Option<&str>,
     ) -> BoxFuture<Result<Option<AgentConnectionModelCycleResult>, String>> {
+        let this = self.clone();
         let request = command_body(
             "cycle_model",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("direction", optional_string(direction)),
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(request, None).await?;
+            let data = this.request_data(request, None).await?;
             if data.is_null() {
                 return Ok(None);
             }
@@ -3444,48 +3511,52 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn set_scoped_models(&self, scoped_models: Vec<AgentConnectionScopedModel>) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_scoped_models",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 (
                     "scopedModels",
                     serde_json::to_value(scoped_models).unwrap_or(Value::Null),
                 ),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn set_thinking_level(&self, level: ThinkingLevel) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_thinking_level",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("level", Value::String(level.as_str().to_string())),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn set_service_tier(&self, service_tier: ServiceTier) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_service_tier",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
-                ("serviceTier", Value::String(service_tier.clone())),
+                ("activeSessionId", Value::String(this.active_session_id())),
+                ("serviceTier", json!(service_tier)),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn cycle_thinking_level(&self) -> BoxFuture<Result<Option<ThinkingLevel>, String>> {
+        let this = self.clone();
         let request = command_body(
             "cycle_thinking_level",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
         Box::pin(async move {
-            let data = self.request_data(request, None).await?;
+            let data = this.request_data(request, None).await?;
             if data.is_null() {
                 return Ok(None);
             }
@@ -3498,73 +3569,80 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn set_transport(&self, transport: Transport) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_transport",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("transport", Value::String(transport)),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn set_steering_mode(&self, mode: &str) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_steering_mode",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("mode", Value::String(mode.to_string())),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn set_follow_up_mode(&self, mode: &str) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_follow_up_mode",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("mode", Value::String(mode.to_string())),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn set_auto_compaction_enabled(&self, enabled: bool) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_auto_compaction",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("enabled", Value::Bool(enabled)),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn set_auto_retry_enabled(&self, enabled: bool) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_auto_retry",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("enabled", Value::Bool(enabled)),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn compact(&self, custom_instructions: Option<&str>) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let request = command_body(
             "compact",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("customInstructions", optional_string(custom_instructions)),
             ],
         );
-        Box::pin(async move { self.request_data(request, None).await })
+        Box::pin(async move { this.request_data(request, None).await })
     }
 
     fn refine(&self, options: Value) -> BoxFuture<Result<Value, String>> {
-        let mut fields = vec![("activeSessionId", Value::String(self.active_session_id()))];
+        let this = self.clone();
+        let mut fields = vec![("activeSessionId", Value::String(this.active_session_id()))];
         if let Some(instructions) = options.get("instructions").and_then(Value::as_str) {
             fields.push(("instructions", Value::String(instructions.to_string())));
         }
@@ -3575,47 +3653,52 @@ impl AgentConnection for DaemonAgentConnection {
             fields.push(("global", Value::Bool(global)));
         }
         let request = command_body("refine", fields);
-        Box::pin(async move { self.request_data(request, Some(DAEMON_REFINE_REQUEST_TIMEOUT_MS)).await })
+        Box::pin(async move { this.request_data(request, Some(DAEMON_REFINE_REQUEST_TIMEOUT_MS)).await })
     }
 
     fn abort_compaction(&self) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "abort_compaction",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn abort_branch_summary(&self) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "abort_branch_summary",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn abort_retry(&self) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "abort_retry",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn reload(&self) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "reload",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn new_session(&self, options: Option<AgentConnectionNewSessionOptions>) -> BoxFuture<Result<bool, String>> {
+        let this = self.clone();
         let parent_session = options.and_then(|options| options.parent_session);
         let request = command_body(
             "new_session",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 (
                     "parentSession",
                     match parent_session {
@@ -3626,7 +3709,7 @@ impl AgentConnection for DaemonAgentConnection {
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(request, None).await?;
+            let data = this.request_data(request, None).await?;
             Ok(data.get("cancelled").and_then(Value::as_bool).unwrap_or(false))
         })
     }
@@ -3636,7 +3719,8 @@ impl AgentConnection for DaemonAgentConnection {
         session_path: &str,
         options: Option<AgentConnectionSwitchSessionOptions>,
     ) -> BoxFuture<Result<bool, String>> {
-        let source_active_session_id = self.active_session_id();
+        let this = self.clone();
+        let source_active_session_id = this.active_session_id();
         let cwd_override = options.and_then(|options| options.cwd_override);
         let request = command_body(
             "switch_session",
@@ -3647,7 +3731,7 @@ impl AgentConnection for DaemonAgentConnection {
             ],
         );
         Box::pin(async move {
-            match self.request_data(request, None).await {
+            match this.request_data(request, None).await {
                 Ok(data) => Ok(data.get("cancelled").and_then(Value::as_bool).unwrap_or(false)),
                 Err(error) => {
                     // `SessionAlreadyActiveError` (core/session-lease.ts) carries the
@@ -3659,16 +3743,17 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn fork(&self, entry_id: &str, options: Option<AgentConnectionForkOptions>) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let position = options.and_then(|options| options.position);
         let request = command_body(
             "fork",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("entryId", Value::String(entry_id.to_string())),
                 ("position", optional_string(position.as_deref())),
             ],
         );
-        Box::pin(async move { self.request_data(request, None).await })
+        Box::pin(async move { this.request_data(request, None).await })
     }
 
     fn navigate_tree(
@@ -3676,8 +3761,9 @@ impl AgentConnection for DaemonAgentConnection {
         target_id: &str,
         options: Option<AgentConnectionNavigateTreeOptions>,
     ) -> BoxFuture<Result<AgentConnectionNavigateTreeResult, String>> {
+        let this = self.clone();
         let mut fields = vec![
-            ("activeSessionId", Value::String(self.active_session_id())),
+            ("activeSessionId", Value::String(this.active_session_id())),
             ("targetId", Value::String(target_id.to_string())),
         ];
         if let Some(options) = &options {
@@ -3696,88 +3782,95 @@ impl AgentConnection for DaemonAgentConnection {
         }
         let request = command_body("navigate_tree", fields);
         Box::pin(async move {
-            let data = self.request_data(request, None).await?;
+            let data = this.request_data(request, None).await?;
             serde_json::from_value(data)
                 .map_err(|error| format!("Daemon returned an invalid navigate-tree result: {error}"))
         })
     }
 
     fn import_from_jsonl(&self, input_path: &str, cwd_override: Option<&str>) -> BoxFuture<Result<bool, String>> {
+        let this = self.clone();
         let request = command_body(
             "import_jsonl",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("inputPath", Value::String(input_path.to_string())),
                 ("cwdOverride", optional_string(cwd_override)),
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(request, None).await?;
+            let data = this.request_data(request, None).await?;
             Ok(data.get("cancelled").and_then(Value::as_bool).unwrap_or(false))
         })
     }
 
     fn export_to_html(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>> {
+        let this = self.clone();
         let request = command_body(
             "export_html",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("outputPath", optional_string(output_path)),
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(request, None).await?;
+            let data = this.request_data(request, None).await?;
             Ok(data.get("path").and_then(Value::as_str).unwrap_or_default().to_string())
         })
     }
 
     fn export_to_jsonl(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>> {
+        let this = self.clone();
         let request = command_body(
             "export_jsonl",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("outputPath", optional_string(output_path)),
             ],
         );
         Box::pin(async move {
-            let data = self.request_data(request, None).await?;
+            let data = this.request_data(request, None).await?;
             Ok(data.get("path").and_then(Value::as_str).unwrap_or_default().to_string())
         })
     }
 
     fn set_session_name(&self, name: &str) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         let request = command_body(
             "set_session_name",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("name", Value::String(name.to_string())),
             ],
         );
-        Box::pin(async move { self.request_ok(request).await })
+        Box::pin(async move { this.request_ok(request).await })
     }
 
     fn get_rlm_max_depth_status(&self) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let request = command_body(
             "get_rlm_max_depth_status",
-            vec![("activeSessionId", Value::String(self.active_session_id()))],
+            vec![("activeSessionId", Value::String(this.active_session_id()))],
         );
-        Box::pin(async move { self.request_data(request, None).await })
+        Box::pin(async move { this.request_data(request, None).await })
     }
 
     fn set_rlm_max_depth(&self, max_depth: f64, options: Option<Value>) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         let global = options.as_ref().and_then(|options| options.get("global")).and_then(Value::as_bool);
         let request = command_body(
             "set_rlm_max_depth",
             vec![
-                ("activeSessionId", Value::String(self.active_session_id())),
+                ("activeSessionId", Value::String(this.active_session_id())),
                 ("maxDepth", json!(max_depth)),
                 ("global", optional_bool(global)),
             ],
         );
-        Box::pin(async move { self.request_data(request, None).await })
+        Box::pin(async move { this.request_data(request, None).await })
     }
 
     fn rename_saved_session(&self, session_path: &str, name: &str) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         // `renameDaemonSavedSession(...)` lives in
         // modes/daemon/saved-session-catalog.ts (another slice).
         let _ = (session_path, name);
@@ -3787,6 +3880,7 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn delete_saved_session(&self, session_path: &str) -> BoxFuture<Result<Value, String>> {
+        let this = self.clone();
         // `deleteDaemonSavedSession(...)` lives in
         // modes/daemon/saved-session-catalog.ts (another slice).
         let _ = session_path;
@@ -3799,10 +3893,11 @@ impl AgentConnection for DaemonAgentConnection {
         &self,
         active_session_id: &str,
     ) -> BoxFuture<Result<Option<Box<dyn AgentConnectionSessionWatcher>>, String>> {
+        let this = self.clone();
         // A second connection on the shared client; each one filters to its own
         // session id. attach() rejects for an unknown/exited session - treat that
         // as unreachable.
-        let client = self.client.control_plane_transport();
+        let client = this.client.clone().control_plane_transport();
         let options = DaemonAgentConnectionOptions {
             close_client_on_dispose: false,
             direct_transport: false,
@@ -3819,8 +3914,9 @@ impl AgentConnection for DaemonAgentConnection {
     }
 
     fn dispose(&self) -> BoxFuture<Result<(), String>> {
+        let this = self.clone();
         Box::pin(async move {
-            self.dispose_inner().await;
+            this.dispose_inner().await;
             Ok(())
         })
     }

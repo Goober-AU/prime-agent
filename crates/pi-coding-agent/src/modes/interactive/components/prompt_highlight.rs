@@ -25,7 +25,7 @@ const MASK_PATTERN: &str = "[\u{E000}-\u{F8FF}]\u{FF9E}*";
 /// Literal mask-range characters would alias generated placeholders; messages containing them skip masking.
 const MASK_LITERAL_PATTERN: &str = "[\u{E000}-\u{F8FF}\u{FF9E}]";
 
-fn compiled<T>(slot: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
+fn compiled(slot: &'static OnceLock<Regex>, pattern: &str) -> &'static Regex {
     slot.get_or_init(|| Regex::new(pattern).expect("valid regex literal"))
 }
 

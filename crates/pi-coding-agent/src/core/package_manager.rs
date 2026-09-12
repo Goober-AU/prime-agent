@@ -88,7 +88,7 @@ pub struct ResolvedResource {
     pub metadata: PathMetadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ResolvedPaths {
     pub extensions: Vec<ResolvedResource>,
     pub skills: Vec<ResolvedResource>,
@@ -127,11 +127,11 @@ pub struct ConfiguredPackage {
     pub installed_path: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PackageManagerOptions {
     pub cwd: String,
     pub agent_dir: String,
-    pub settings_manager: Arc<tokio::sync::Mutex<SettingsManager>>,
+    pub settings_manager: Arc<std::sync::Mutex<SettingsManager>>,
     /// Directory of built-in skills shipped with the package. Defaults to the bundled skills dir; pass `None` to disable.
     pub bundled_skills_dir: Option<Option<String>>,
     /// Extra force-exclude patterns for built-in skills (e.g. unauthenticated MCP integrations).
@@ -1469,13 +1469,15 @@ impl DefaultPackageManager {
                 for chunk in git_tasks.chunks(GIT_UPDATE_CONCURRENCY.max(1)) {
                     let mut chunk_tasks = Vec::new();
                     for (source, parsed, scope) in chunk {
-                        let message = format!("Updating {source}...");
-                        chunk_tasks.push(self.with_progress(
-                            "update",
-                            source,
-                            &message,
-                            Box::pin(async { self.update_git(parsed, scope).await }),
-                        ));
+                        chunk_tasks.push(async move {
+                            let message = format!("Updating {source}...");
+                            self.with_progress(
+                                "update",
+                                source,
+                                &message,
+                                Box::pin(async { self.update_git(parsed, scope).await }),
+                            ).await
+                        });
                     }
                     results.extend(futures::future::join_all(chunk_tasks).await);
                 }

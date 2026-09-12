@@ -53,8 +53,8 @@ fn describe_autonomous_limit(status: &AgentAutonomousStatus, reason: AutonomousL
         return format!("maxTokens reached ({}/{})", status.tokens_used, status.limits.max_tokens);
     }
     let elapsed = match status.started_at {
-        None => 0,
-        Some(started_at) => (now_ms() - started_at).max(0),
+        None => 0.0,
+        Some(started_at) => (now_ms() as f64 - started_at).max(0.0),
     };
     format!("timeoutMs reached ({elapsed}/{})", status.limits.timeout_ms)
 }
@@ -367,20 +367,20 @@ mod tests {
     fn autonomous_limit_text_matches_the_typescript() {
         let status = AgentAutonomousStatus {
             enabled: true,
-            continuations_used: 2,
-            turns_used: 5,
-            tokens_used: 80_000,
-            started_at: Some(0),
+            continuations_used: 2.0,
+            turns_used: 5.0,
+            tokens_used: 80_000.0,
+            started_at: Some(0.0),
             limits: AgentAutonomousLimits {
-                max_continuations: 3,
-                max_turns: 12,
-                max_tokens: 80_000,
-                timeout_ms: 1_800_000,
+                max_continuations: 3.0,
+                max_turns: 12.0,
+                max_tokens: 80_000.0,
+                timeout_ms: 1_800_000.0,
             },
             gates: AgentAutonomousGateStatus {
                 commands: vec!["npm test".to_string()],
-                max_retries: 3,
-                timeout_ms: 300_000,
+                max_retries: 3.0,
+                timeout_ms: 300_000.0,
             },
             gate_attempts: Default::default(),
             last_gate_failure: None,

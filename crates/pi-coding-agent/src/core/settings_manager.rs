@@ -713,7 +713,7 @@ type NestedModifiedFields = BTreeMap<String, BTreeSet<String>>;
 
 struct WriteTask {
     scope: SettingsScope,
-    task: Box<dyn FnOnce() + Send>,
+    task: Box<dyn FnOnce() + Send + Sync>,
 }
 
 pub struct SettingsManager {
@@ -950,7 +950,11 @@ impl SettingsManager {
 
     /// `getSettings()` - the merged global + project view (plus runtime overrides).
     pub async fn reload(&mut self) {
-        self.flush().await;
+        self.reload_sync();
+    }
+
+    pub(crate) fn reload_sync(&mut self) {
+        self.flush_sync();
         let global_load = SettingsManager::try_load_from_storage(self.storage.as_ref(), SETTINGS_SCOPE_GLOBAL);
         match global_load.error {
             None => {
@@ -1029,7 +1033,7 @@ impl SettingsManager {
         self.modified_project_nested_fields.clear();
     }
 
-    fn enqueue_write(&mut self, scope: &str, task: Box<dyn FnOnce() + Send>) {
+    fn enqueue_write(&mut self, scope: &str, task: Box<dyn FnOnce() + Send + Sync>) {
         self.write_queue.push(WriteTask {
             scope: scope.to_string(),
             task,
@@ -1057,7 +1061,11 @@ impl SettingsManager {
             };
             let mut merged_settings: Settings = current_file_settings.clone();
             for field in modified_fields {
-                let value = snapshot_settings.get(field).cloned().unwrap_or(Value::Null);
+                let Some(value) = snapshot_settings.get(field).cloned() else {
+                    // JSON.stringify omits fields assigned undefined.
+                    merged_settings.remove(field);
+                    continue;
+                };
                 let nested_modified = modified_nested_fields.get(field);
                 if let (Some(nested_modified), Value::Object(in_memory_nested)) = (nested_modified, &value) {
                     let mut merged_nested = match current_file_settings.get(field) {
@@ -1154,6 +1162,10 @@ impl SettingsManager {
     /// Runs the queued writes in order. A failing write is recorded as a
     /// settings error instead of propagating, like the promise `.catch`.
     pub async fn flush(&mut self) {
+        self.flush_sync();
+    }
+
+    pub(crate) fn flush_sync(&mut self) {
         let queue = std::mem::take(&mut self.write_queue);
         for WriteTask { scope, task } in queue {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()));
@@ -1669,7 +1681,14 @@ impl SettingsManager {
 
     pub fn get_provider_retry_settings(&self) -> ResolvedProviderRetrySettings {
         ResolvedProviderRetrySettings {
-            timeout_ms: nested_f64(&self.settings, keys::RETRY, keys::TIMEOUT_MS),
+            timeout_ms: self
+                .settings
+                .get(keys::RETRY)
+                .and_then(Value::as_object)
+                .and_then(|retry| retry.get(keys::PROVIDER))
+                .and_then(Value::as_object)
+                .and_then(|provider| provider.get(keys::TIMEOUT_MS))
+                .and_then(value_to_f64),
             max_retry_delay_ms: self
                 .settings
                 .get(keys::RETRY)
@@ -2655,6 +2674,11 @@ mod tests {
         let provider = manager.get_provider_retry_settings();
         assert_eq!(provider.timeout_ms, None);
         assert_eq!(provider.max_retry_delay_ms, 60000.0);
+        let configured = SettingsManager::in_memory(settings_from(
+            r#"{"retry":{"timeoutMs":1,"provider":{"timeoutMs":2400,"maxRetryDelayMs":9000}}}"#,
+        ));
+        assert_eq!(configured.get_provider_retry_settings().timeout_ms, Some(2400.0));
+        assert_eq!(configured.get_provider_retry_settings().max_retry_delay_ms, 9000.0);
     }
 
     #[test]
@@ -2812,8 +2836,8 @@ mod extra_tests {
         assert_eq!(manager.get_enabled_models(), None);
     }
 
-    #[test]
-    fn service_tier_distinguishes_absent_from_null() {
+    #[tokio::test]
+    async fn service_tier_distinguishes_absent_from_null() {
         let mut manager = SettingsManager::in_memory(Settings::new());
         manager.set_default_service_tier(Some(Some("priority".to_string())));
         assert_eq!(
@@ -2822,7 +2846,12 @@ mod extra_tests {
         );
         manager.set_default_service_tier(Some(None));
         assert_eq!(manager.get_global_settings()["defaultServiceTier"], Value::Null);
+        manager.flush().await;
+        manager.reload().await;
+        assert_eq!(manager.get_global_settings()["defaultServiceTier"], Value::Null);
         manager.set_default_service_tier(None);
+        manager.flush().await;
+        manager.reload().await;
         assert!(!manager.get_global_settings().contains_key("defaultServiceTier"));
     }
 

@@ -34,7 +34,7 @@ where
                     Some(factory) => factory(),
                     None => ExtensionContext::default(),
                 };
-                inner.execute(tool_call_id, params, signal, on_update, ctx).await
+                (inner.execute)(tool_call_id, params, signal, on_update, ctx).await
             })
         },
     );
@@ -168,8 +168,7 @@ mod tests {
         assert_eq!(definition.name, "sample");
         assert_eq!(definition.label, "sample");
         assert_eq!(definition.description, "sample tool");
-        let result = definition
-            .execute(
+        let result = (definition.execute)(
                 "call-2".to_string(),
                 serde_json::json!({}),
                 None,

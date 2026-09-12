@@ -1,6 +1,6 @@
 //! Port of packages/coding-agent/src/modes/daemon/daemon-routed-client.ts
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -8,13 +8,12 @@ use serde_json::Value;
 
 use super::daemon_client::{
     get_daemon_socket_close_reason, DaemonClientCloseListener, DaemonClientError, DaemonClientMessageListener,
-    DaemonClientRequestOptions, DaemonClientResult, DaemonHello, DaemonSocketClosedError,
+    DaemonClientRequestOptions, DaemonClientResult, DaemonCommandBody, DaemonHello, DaemonSocketClosedError,
+    command_compatibilities, compatibility_hello,
     DaemonTransportClient,
 };
 use super::daemon_protocol::{
-    get_daemon_command_compatibilities, is_session_plane_daemon_command,
-    meets_daemon_command_compatibility, DaemonCommand, DaemonProtocolInfo, DaemonResponse,
-    DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_REVISION,
+    is_session_plane_daemon_command, meets_daemon_command_compatibility, DaemonResponse,
 };
 use super::daemon_socket::get_daemon_socket_identity;
 use super::daemon_worker_client::DaemonWorkerClient;
@@ -82,29 +81,31 @@ impl std::error::Error for DaemonControlPlaneTransportError {}
 pub struct DaemonRoutedClient {
     supervisor: Arc<dyn DaemonTransportClient>,
     direct: StdMutex<Option<Arc<DaemonWorkerClient>>>,
-    message_listeners: Arc<StdMutex<HashMap<u64, DaemonClientMessageListener>>>,
-    close_listeners: Arc<StdMutex<HashMap<u64, DaemonClientCloseListener>>>,
+    message_listeners: Arc<StdMutex<IndexMap<u64, DaemonClientMessageListener>>>,
+    close_listeners: Arc<StdMutex<IndexMap<u64, DaemonClientCloseListener>>>,
     next_listener_id: AtomicU64,
     unsubscribe_supervisor_message: StdMutex<Option<Box<dyn Fn() + Send + Sync>>>,
     unsubscribe_supervisor_close: StdMutex<Option<Box<dyn Fn() + Send + Sync>>>,
     unsubscribe_direct_message: StdMutex<Option<Box<dyn Fn() + Send + Sync>>>,
     unsubscribe_direct_close: StdMutex<Option<Box<dyn Fn() + Send + Sync>>>,
     closed: AtomicBool,
+    self_ref: std::sync::Weak<Self>,
 }
 
 impl DaemonRoutedClient {
     pub fn new(supervisor: Arc<dyn DaemonTransportClient>, direct: Arc<DaemonWorkerClient>) -> Arc<Self> {
-        let client = Arc::new(Self {
+        let client = Arc::new_cyclic(|self_ref| Self {
             supervisor: Arc::clone(&supervisor),
             direct: StdMutex::new(Some(Arc::clone(&direct))),
-            message_listeners: Arc::new(StdMutex::new(HashMap::new())),
-            close_listeners: Arc::new(StdMutex::new(HashMap::new())),
+            message_listeners: Arc::new(StdMutex::new(IndexMap::new())),
+            close_listeners: Arc::new(StdMutex::new(IndexMap::new())),
             next_listener_id: AtomicU64::new(0),
             unsubscribe_supervisor_message: StdMutex::new(None),
             unsubscribe_supervisor_close: StdMutex::new(None),
             unsubscribe_direct_message: StdMutex::new(None),
             unsubscribe_direct_close: StdMutex::new(None),
             closed: AtomicBool::new(false),
+            self_ref: self_ref.clone(),
         });
         let weak = Arc::downgrade(&client);
         let unsubscribe_message = supervisor.on_message(Arc::new(move |message: &Value| {
@@ -186,7 +187,7 @@ impl DaemonRoutedClient {
 
     pub async fn disconnect_for_reconnect(self: &Arc<Self>, reason: &str) {
         self.fallback_to_supervisor();
-        self.supervisor.disconnect_for_reconnect_boxed(reason).await;
+        self.supervisor.disconnect_for_reconnect_boxed(reason.to_string()).await;
     }
 
     pub async fn reset_transport_for_reconnect(self: &Arc<Self>) {
@@ -201,7 +202,7 @@ impl DaemonRoutedClient {
             .insert(id, listener);
         let registry = Arc::clone(&self.message_listeners);
         Box::new(move || {
-            registry.lock().expect("message listeners poisoned").remove(&id);
+            registry.lock().expect("message listeners poisoned").shift_remove(&id);
         })
     }
 
@@ -213,7 +214,7 @@ impl DaemonRoutedClient {
             .insert(id, listener);
         let registry = Arc::clone(&self.close_listeners);
         Box::new(move || {
-            registry.lock().expect("close listeners poisoned").remove(&id);
+            registry.lock().expect("close listeners poisoned").shift_remove(&id);
         })
     }
 
@@ -223,11 +224,11 @@ impl DaemonRoutedClient {
 
     pub async fn request(
         self: &Arc<Self>,
-        command: DaemonCommand,
+        command: DaemonCommandBody,
         timeout_ms: u64,
         options: DaemonClientRequestOptions,
     ) -> DaemonClientResult<DaemonResponse> {
-        if command.type_ == "reattach" {
+        if command.get("type").and_then(Value::as_str) == Some("reattach") {
             // Reattach may land on a different worker; the direct link to the old
             // one is stale on success.
             let response = self.request_control_plane(command, timeout_ms, options).await?;
@@ -245,21 +246,21 @@ impl DaemonRoutedClient {
         self.request_control_plane(command, timeout_ms, options).await
     }
 
-    fn serves_direct(&self, direct: &DaemonWorkerClient, command: &DaemonCommand) -> bool {
-        if !is_session_plane_daemon_command(&command.type_) {
+    fn serves_direct(&self, direct: &DaemonWorkerClient, command: &DaemonCommandBody) -> bool {
+        if !is_session_plane_daemon_command(command.get("type").and_then(Value::as_str).unwrap_or_default()) {
             return false;
         }
         let Some(hello) = direct.hello() else {
             return false;
         };
-        get_daemon_command_compatibilities(command)
+        command_compatibilities(command)
             .iter()
-            .all(|compatibility| meets_daemon_command_compatibility(&hello, compatibility))
+            .all(|compatibility| meets_daemon_command_compatibility(&compatibility_hello(&hello), compatibility))
     }
 
     async fn request_control_plane(
         self: &Arc<Self>,
-        command: DaemonCommand,
+        command: DaemonCommandBody,
         timeout_ms: u64,
         options: DaemonClientRequestOptions,
     ) -> DaemonClientResult<DaemonResponse> {
@@ -421,6 +422,50 @@ impl DaemonRoutedClient {
     }
 }
 
+impl DaemonTransportClient for DaemonRoutedClient {
+    fn hello(&self) -> Option<DaemonHello> { DaemonRoutedClient::hello(self) }
+    fn is_connected(&self) -> bool { DaemonRoutedClient::is_connected(self) }
+    fn supports_server_capability(&self, capability: &str) -> bool {
+        DaemonRoutedClient::supports_server_capability(self, capability)
+    }
+    fn on_message(&self, listener: DaemonClientMessageListener) -> Box<dyn Fn() + Send + Sync> {
+        DaemonRoutedClient::on_message(self, listener)
+    }
+    fn on_close(&self, listener: DaemonClientCloseListener) -> Box<dyn Fn() + Send + Sync> {
+        DaemonRoutedClient::on_close(self, listener)
+    }
+    fn enable_request_recovery(&self) { DaemonRoutedClient::enable_request_recovery(self); }
+    fn request_boxed(&self, command: DaemonCommandBody, timeout_ms: Option<u64>, options: DaemonClientRequestOptions)
+        -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>> {
+        let client = self.self_ref.upgrade();
+        Box::pin(async move {
+            let client = client.ok_or_else(|| DaemonClientError::Message("Daemon routed client is closed".to_string()))?;
+            client.request(command, timeout_ms.unwrap_or(30_000), options).await
+        })
+    }
+    fn wait_for_hello_boxed(&self, timeout_ms: u64)
+        -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonHello>> {
+        self.supervisor.wait_for_hello_boxed(timeout_ms)
+    }
+    fn connect_boxed(&self, timeout_ms: u64) -> futures::future::BoxFuture<'static, DaemonClientResult<()>> {
+        if self.supervisor.is_connected() { Box::pin(async { Ok(()) }) }
+        else { self.supervisor.connect_boxed(timeout_ms) }
+    }
+    fn reconnect_boxed(&self, timeout_ms: u64) -> futures::future::BoxFuture<'static, DaemonClientResult<()>> {
+        if self.supervisor.is_connected() { Box::pin(async { Ok(()) }) }
+        else { self.supervisor.reconnect_boxed(timeout_ms) }
+    }
+    fn disconnect_for_reconnect_boxed(&self, reason: String) -> futures::future::BoxFuture<'static, ()> {
+        self.fallback_to_supervisor();
+        self.supervisor.disconnect_for_reconnect_boxed(reason)
+    }
+    fn reset_transport_for_reconnect_boxed(&self) -> futures::future::BoxFuture<'static, ()> {
+        self.supervisor.reset_transport_for_reconnect_boxed()
+    }
+    fn is_routed_client(&self) -> bool { true }
+    fn close(&self) { DaemonRoutedClient::close(self); }
+}
+
 /// Upgrade a supervisor connection with a direct worker link; every failure
 /// returns the supervisor unchanged.
 pub async fn create_daemon_session_transport(
@@ -435,14 +480,13 @@ pub async fn create_daemon_session_transport(
         return supervisor;
     }
     let mut direct: Option<Arc<DaemonWorkerClient>> = None;
-    let result = async {
+    let result: DaemonClientResult<Option<Arc<DaemonWorkerClient>>> = async {
         // recoverable:false - this caller owns the fallback; a parked ticket
         // request would pend the attach forever.
-        let mut command = DaemonCommand::new("get_direct_worker_transport");
-        command.body.insert(
-            "activeSessionId".to_string(),
-            Value::String(active_session_id.to_string()),
-        );
+        let command = serde_json::Map::from_iter([
+            ("type".to_string(), Value::String("get_direct_worker_transport".to_string())),
+            ("activeSessionId".to_string(), Value::String(active_session_id.to_string())),
+        ]);
         let response = supervisor
             .request_boxed(
                 command,
@@ -476,10 +520,10 @@ pub async fn create_daemon_session_transport(
             return Ok(None);
         }
         let client = Arc::new(DaemonWorkerClient::new(&ticket.socket_path));
+        direct = Some(Arc::clone(&client));
         client.connect(1000).await?;
         client.wait_for_hello(3000).await?;
-        client.authenticate_peer(&ticket, 30_000).await?;
-        direct = Some(Arc::clone(&client));
+        client.authenticate_peer(&ticket, 3000).await?;
         Ok(Some(client))
     }
     .await;
@@ -525,13 +569,18 @@ pub fn read_session_transport_ticket(value: &Value) -> Option<DaemonPeerTranspor
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::daemon_protocol::{DaemonProtocolInfo, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_REVISION};
     use std::sync::atomic::AtomicUsize;
+
+    fn command(type_: &str) -> DaemonCommandBody {
+        serde_json::Map::from_iter([("type".to_string(), Value::String(type_.to_string()))])
+    }
 
     struct FakeSupervisor {
         connected: AtomicBool,
         hello: StdMutex<Option<DaemonHello>>,
         capability: bool,
-        requests: StdMutex<Vec<DaemonCommand>>,
+        requests: StdMutex<Vec<DaemonCommandBody>>,
         response: StdMutex<Option<DaemonResponse>>,
         closed: AtomicUsize,
     }
@@ -582,7 +631,7 @@ mod tests {
 
         fn request_boxed(
             &self,
-            command: DaemonCommand,
+            command: DaemonCommandBody,
             _timeout_ms: Option<u64>,
             _options: DaemonClientRequestOptions,
         ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>> {
@@ -639,7 +688,7 @@ mod tests {
         let error = DaemonDirectTransportClosedError::new(&cause);
         assert_eq!(error.socket_path, "direct-worker");
         assert_eq!(error.daemon_closing_reason.as_deref(), Some("shutdown"));
-        assert_eq!(error.cause.as_deref(), Some(cause.message()));
+        assert_eq!(error.cause.as_deref(), Some(cause.message().as_str()));
         assert!(error.message().contains("Socket: direct-worker"));
         let control = DaemonControlPlaneTransportError::new("boom");
         assert_eq!(
@@ -651,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn session_plane_commands_go_to_the_supervisor_when_direct_is_down() {
         let supervisor = FakeSupervisor::new(true, true);
-        let response = DaemonResponse::from_value(&serde_json::json!({
+        let response = serde_json::from_value::<DaemonResponse>(serde_json::json!({
             "type": "response",
             "command": "prompt",
             "success": true
@@ -664,7 +713,7 @@ mod tests {
         assert!(!routed.has_direct_transport());
         assert!(routed.is_control_plane_ready());
         let response = routed
-            .request(DaemonCommand::new("prompt"), 1000, DaemonClientRequestOptions::default())
+            .request(command("prompt"), 1000, DaemonClientRequestOptions::default())
             .await
             .expect("ok");
         assert!(response.success);
@@ -679,7 +728,7 @@ mod tests {
     #[tokio::test]
     async fn reattach_falls_back_to_the_supervisor_on_success() {
         let supervisor = FakeSupervisor::new(true, true);
-        let response = DaemonResponse::from_value(&serde_json::json!({
+        let response = serde_json::from_value::<DaemonResponse>(serde_json::json!({
             "type": "response",
             "command": "reattach",
             "success": true
@@ -690,22 +739,22 @@ mod tests {
         let routed = DaemonRoutedClient::new(supervisor.clone(), direct);
         assert!(routed.direct_client().is_some());
         routed
-            .request(DaemonCommand::new("reattach"), 1000, DaemonClientRequestOptions::default())
+            .request(command("reattach"), 1000, DaemonClientRequestOptions::default())
             .await
             .expect("ok");
         assert!(routed.direct_client().is_none());
     }
 
     #[tokio::test]
-    async fn an_unavailable_capability_is_not_wrapped() {
+    async fn control_plane_errors_are_wrapped() {
         let supervisor = FakeSupervisor::new(true, true);
         let direct = Arc::new(DaemonWorkerClient::new("/definitely/missing/worker.sock"));
         let routed = DaemonRoutedClient::new(supervisor.clone(), direct);
         let error = routed
-            .request(DaemonCommand::new("prompt"), 1000, DaemonClientRequestOptions::default())
+            .request(command("prompt"), 1000, DaemonClientRequestOptions::default())
             .await
             .expect_err("fails");
-        assert_eq!(error.message(), "no fake response");
+        assert_eq!(error.message(), "Daemon control-plane transport failed: no fake response");
     }
 
     #[tokio::test]

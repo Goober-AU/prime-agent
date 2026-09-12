@@ -6,11 +6,10 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use super::daemon_client::DaemonHello;
+use super::daemon_client::{DaemonCommandBody, DaemonHello};
 use super::daemon_protocol::DaemonCommand;
 
 use super::agent_roster::WorkerRosterEntry;
-// UNKNOWN: ['::{DaemonCommand', 'DaemonHello}']
 
 pub const SESSION_LEASE_OWNER_ID_ENV: &str = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
 pub const SESSION_LEASES_ENABLED_ENV: &str = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
@@ -194,8 +193,8 @@ pub struct DurableDaemonCreateCommand {
 pub fn durable_daemon_create_command(command: &DaemonCommand) -> DurableDaemonCreateCommand {
     DurableDaemonCreateCommand {
         type_: "create".to_string(),
-        session_path: command.string_field("sessionPath").map(str::to_string),
-        no_session: command.field("noSession").and_then(Value::as_bool),
+        session_path: command.get("sessionPath").and_then(|value| value.as_str().map(str::to_string)),
+        no_session: command.get("noSession").and_then(|value| value.as_bool()),
         extra: Map::new(),
     }
 }
@@ -387,16 +386,20 @@ pub fn require_daemon_worker_authentication_token(environment: &HashMap<String, 
 }
 
 /// The worker command bodies this slice sends; unknown commands keep their JSON body.
-pub fn worker_command(type_: &str, fields: &[(&str, Value)]) -> DaemonCommand {
-    let mut command = DaemonCommand::new(type_);
+pub(crate) fn worker_command(type_: &str, fields: &[(&str, Value)]) -> DaemonCommandBody {
+    let mut command = Map::new();
+    command.insert("type".to_string(), Value::String(type_.to_string()));
     for (key, value) in fields {
-        command.body.insert((*key).to_string(), value.clone());
+        command.insert((*key).to_string(), value.clone());
     }
     command
 }
 
-pub fn worker_command_body(command: &DaemonCommand) -> Map<String, Value> {
-    command.body_without_id()
+pub(crate) fn worker_command_body(command: &DaemonCommand) -> DaemonCommandBody {
+    match command.body_without_id() {
+        Value::Object(body) => body,
+        _ => unreachable!("DaemonCommand serializes to an object"),
+    }
 }
 
 pub fn hello_from_value(value: &Value) -> Option<DaemonHello> {
@@ -447,9 +450,9 @@ mod tests {
 
     #[test]
     fn durable_create_command_keeps_only_the_persisted_fields() {
-        let mut command = DaemonCommand::new("create");
-        command.body.insert("sessionPath".to_string(), Value::String("/tmp/s.jsonl".to_string()));
-        command.body.insert("config".to_string(), serde_json::json!({ "cwd": "/tmp" }));
+        let command = DaemonCommand::from_value(&serde_json::json!({
+            "type": "create", "sessionPath": "/tmp/s.jsonl", "config": { "cwd": "/tmp" }
+        })).expect("create command");
         let durable = durable_daemon_create_command(&command);
         assert_eq!(durable.type_, "create");
         assert_eq!(durable.session_path.as_deref(), Some("/tmp/s.jsonl"));

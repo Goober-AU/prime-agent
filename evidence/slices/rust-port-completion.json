@@ -1,0 +1,19 @@
+{
+  "slice": "rust-port-completion",
+  "role": "lead integration",
+  "baseline": "8556461133acae3bca1dd56f7dec43b113b4571a",
+  "files": [
+    "crates/pi-coding-agent/src/core/agent_session.rs",
+    "crates/pi-coding-agent/src/modes/session_worker/private_framing.rs",
+    "evidence/slices/rust-port-completion.json",
+    "evidence/status/rust-port-completion.json",
+    "docs/RUST_PORT_HANDOFF.md",
+    "evidence/diagnostics/rust-port-handoff-errors.jsonl",
+    "evidence/diagnostics/rust-port-handoff-check.txt",
+    "evidence/diagnostics/rust-port-agent-core-tests.txt",
+    "evidence/diagnostics/rust-port-private-framing-tests.txt",
+    "evidence/diagnostics/rust-port-npm-check.txt",
+    "evidence/reference/start-rlm-child-run-before-extraction.rs.txt"
+  ],
+  "note": "Stopped at user request on 2026-09-12. Partial integration checkpoint; draft PR only, no merge or deployment. Other slice manifests identify transferred ownership."
+}

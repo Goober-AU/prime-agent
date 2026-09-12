@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Map, Value};
+use futures::FutureExt;
 
 use crate::core::diagnostics::ResourceDiagnostic;
 use crate::core::slash_commands::SlashCommandInfo;
@@ -30,7 +31,7 @@ use super::types::{
 
 // Extension shortcuts compete with canonical keybinding ids from keybindings.json.
 // Only editor-global shortcuts are reserved here. Picker-specific bindings are not.
-pub const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS: [&str; 18] = [
+pub const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS: [&str; 17] = [
     "app.interrupt",
     "app.clear",
     "app.exit",
@@ -231,7 +232,7 @@ impl ExtensionUiContext for NoOpUiContext {
     fn set_title(&self, _title: String) {}
 
     fn custom(&self, _factory: Value, _options: Option<Value>) -> super::types::CustomComponentResult {
-        Box::pin(async { Arc::new(NoOpComponent) })
+        Box::pin(async { Arc::new(NoOpComponent) as Arc<dyn Component> })
     }
 
     fn paste_to_editor(&self, _text: String) {}
@@ -380,11 +381,11 @@ impl std::fmt::Debug for RunnerCallbacks {
 pub struct ExtensionRunner {
     extensions: Vec<SharedExtension>,
     runtime: ExtensionRuntime,
-    ui_context: Arc<dyn ExtensionUiContext>,
+    ui_context: Mutex<Option<Arc<dyn ExtensionUiContext>>>,
     cwd: String,
     session_manager: Arc<dyn SessionManager>,
     model_registry: Arc<dyn ModelRegistry>,
-    error_listeners: Mutex<Vec<ExtensionErrorListener>>,
+    error_listeners: Arc<Mutex<Vec<ExtensionErrorListener>>>,
     callbacks: Mutex<RunnerCallbacks>,
     shortcut_diagnostics: Mutex<Vec<ResourceDiagnostic>>,
     command_diagnostics: Mutex<Vec<ResourceDiagnostic>>,
@@ -411,11 +412,11 @@ impl ExtensionRunner {
         Self {
             extensions,
             runtime,
-            ui_context: Arc::new(NoOpUiContext),
+            ui_context: Mutex::new(None),
             cwd,
             session_manager,
             model_registry,
-            error_listeners: Mutex::new(Vec::new()),
+            error_listeners: Arc::new(Mutex::new(Vec::new())),
             callbacks: Mutex::new(RunnerCallbacks::default()),
             shortcut_diagnostics: Mutex::new(Vec::new()),
             command_diagnostics: Mutex::new(Vec::new()),
@@ -516,17 +517,17 @@ impl ExtensionRunner {
         }
     }
 
-    pub fn set_ui_context(&mut self, ui_context: Option<Arc<dyn ExtensionUiContext>>) {
-        self.ui_context = ui_context.unwrap_or_else(|| Arc::new(NoOpUiContext));
+    pub fn set_ui_context(&self, ui_context: Option<Arc<dyn ExtensionUiContext>>) {
+        *self.ui_context.lock().unwrap_or_else(|p| p.into_inner()) = ui_context;
     }
 
     pub fn get_ui_context(&self) -> Arc<dyn ExtensionUiContext> {
-        self.ui_context.clone()
+        self.ui_context.lock().unwrap_or_else(|p| p.into_inner()).clone().unwrap_or_else(|| Arc::new(NoOpUiContext))
     }
 
     /// `hasUI()` - true when a real (non-no-op) UI context is installed.
     pub fn has_ui(&self) -> bool {
-        self.ui_context.as_ref().type_id() != std::any::TypeId::of::<NoOpUiContext>()
+        self.ui_context.lock().unwrap_or_else(|p| p.into_inner()).is_some()
     }
 
     pub fn get_extension_paths(&self) -> Vec<String> {
@@ -859,7 +860,7 @@ impl ExtensionRunner {
             }
 
             for handler in handlers {
-                match handler(event.clone(), ctx.clone()).await {
+                match invoke_handler(&handler, event.clone(), ctx.clone()).await {
                     Ok(handler_result) => {
                         if Self::is_session_before_event(&event) {
                             if let Some(handler_result) = handler_result {
@@ -910,7 +911,7 @@ impl ExtensionRunner {
                 if let Value::Object(map) = &mut current_event {
                     map.insert("message".to_string(), current_message.clone());
                 }
-                match handler(current_event, ctx.clone()).await {
+                match invoke_handler(&handler, ExtensionEvent::MessageEnd(super::types::MessageEndPayload { message: current_message.clone() }), ctx.clone()).await {
                     Ok(Some(handler_result)) => {
                         let Some(message) = handler_result.get("message").cloned() else {
                             continue;
@@ -972,7 +973,7 @@ impl ExtensionRunner {
 
             for handler in handlers {
                 let event_value = serde_json::to_value(&current_event).unwrap_or(Value::Null);
-                match handler(
+                match invoke_handler(&handler, 
                     ExtensionEvent::ToolResult(current_event.clone()),
                     ctx.clone(),
                 )
@@ -1038,7 +1039,7 @@ impl ExtensionRunner {
             }
 
             for handler in handlers {
-                match handler(ExtensionEvent::ToolCall(event.clone()), ctx.clone()).await {
+                match invoke_handler(&handler, ExtensionEvent::ToolCall(event.clone()), ctx.clone()).await {
                     Ok(Some(handler_result)) => {
                         let blocked = handler_result.get("block").and_then(Value::as_bool).unwrap_or(false);
                         let parsed = ToolCallEventResult {
@@ -1058,7 +1059,7 @@ impl ExtensionRunner {
                     Ok(None) => {}
                     Err(error) => {
                         self.emit_error(ExtensionError {
-                            extension_path,
+                            extension_path: extension_path.clone(),
                             event: "tool_call".to_string(),
                             error,
                             stack: None,
@@ -1094,7 +1095,7 @@ impl ExtensionRunner {
                 let Some(extension_event) = parsed else {
                     continue;
                 };
-                match handler(extension_event, ctx.clone()).await {
+                match invoke_handler(&handler, extension_event, ctx.clone()).await {
                     Ok(Some(handler_result)) => {
                         return Some(UserBashEventResult {
                             operations: None,
@@ -1106,7 +1107,7 @@ impl ExtensionRunner {
                     Ok(None) => {}
                     Err(error) => {
                         self.emit_error(ExtensionError {
-                            extension_path,
+                            extension_path: extension_path.clone(),
                             event: "user_bash".to_string(),
                             error,
                             stack: None,
@@ -1143,7 +1144,7 @@ impl ExtensionRunner {
                 let event = ExtensionEvent::Context(super::types::ContextPayload {
                     messages: current_messages.clone(),
                 });
-                match handler(event, ctx.clone()).await {
+                match invoke_handler(&handler, event, ctx.clone()).await {
                     Ok(Some(handler_result)) => {
                         if let Some(next) = handler_result.get("messages").cloned() {
                             if !next.is_null() {
@@ -1158,7 +1159,7 @@ impl ExtensionRunner {
                     Ok(None) => {}
                     Err(error) => {
                         self.emit_error(ExtensionError {
-                            extension_path,
+                            extension_path: extension_path.clone(),
                             event: "context".to_string(),
                             error,
                             stack: None,
@@ -1198,14 +1199,14 @@ impl ExtensionRunner {
                 let event = ExtensionEvent::BeforeProviderRequest(super::types::BeforeProviderRequestPayload {
                     payload: current_payload.clone(),
                 });
-                match handler(event, ctx.clone()).await {
+                match invoke_handler(&handler, event, ctx.clone()).await {
                     Ok(Some(handler_result)) => {
                         current_payload = handler_result;
                     }
                     Ok(None) => {}
                     Err(error) => {
                         self.emit_error(ExtensionError {
-                            extension_path,
+                            extension_path: extension_path.clone(),
                             event: "before_provider_request".to_string(),
                             error,
                             stack: None,
@@ -1220,7 +1221,7 @@ impl ExtensionRunner {
 
     /// `emitBeforeAgentStart(prompt, images, systemPrompt, systemPromptOptions)`.
     pub async fn emit_before_agent_start(
-        &self,
+        self: &Arc<Self>,
         prompt: String,
         images: Option<Vec<pi_ai::types::ImageContent>>,
         system_prompt: String,
@@ -1256,7 +1257,7 @@ impl ExtensionRunner {
                     system_prompt: current_system_prompt.clone(),
                     system_prompt_options: system_prompt_options.clone(),
                 });
-                match handler(event, ctx.clone()).await {
+                match invoke_handler(&handler, event, ctx.clone()).await {
                     Ok(Some(handler_result)) => {
                         if let Ok(result) = serde_json::from_value::<BeforeAgentStartEventResult>(handler_result) {
                             if let Some(message) = result.message {
@@ -1271,7 +1272,7 @@ impl ExtensionRunner {
                     Ok(None) => {}
                     Err(error) => {
                         self.emit_error(ExtensionError {
-                            extension_path,
+                            extension_path: extension_path.clone(),
                             event: "before_agent_start".to_string(),
                             error,
                             stack: None,
@@ -1325,7 +1326,7 @@ impl ExtensionRunner {
                     cwd: cwd.clone(),
                     reason: reason.clone(),
                 });
-                match handler(event, ctx.clone()).await {
+                match invoke_handler(&handler, event, ctx.clone()).await {
                     Ok(Some(handler_result)) => {
                         if let Ok(result) =
                             serde_json::from_value::<super::types::ResourcesDiscoverResult>(handler_result)
@@ -1353,7 +1354,7 @@ impl ExtensionRunner {
                     Ok(None) => {}
                     Err(error) => {
                         self.emit_error(ExtensionError {
-                            extension_path,
+                            extension_path: extension_path.clone(),
                             event: "resources_discover".to_string(),
                             error,
                             stack: None,
@@ -1372,7 +1373,7 @@ impl ExtensionRunner {
 
     /// Emit `input` event. Transforms chain, "handled" short-circuits.
     pub async fn emit_input(
-        &self,
+        self: &Arc<Self>,
         text: String,
         images: Option<Vec<pi_ai::types::ImageContent>>,
         source: String,
@@ -1399,7 +1400,7 @@ impl ExtensionRunner {
                     images: current_images.clone(),
                     source: source.clone(),
                 });
-                match handler(event, ctx.clone()).await {
+                match invoke_handler(&handler, event, ctx.clone()).await {
                     Ok(Some(handler_result)) => {
                         let action = handler_result.get("action").and_then(Value::as_str);
                         match action {
@@ -1422,7 +1423,7 @@ impl ExtensionRunner {
                     Ok(None) => {}
                     Err(error) => {
                         self.emit_error(ExtensionError {
-                            extension_path,
+                            extension_path: extension_path.clone(),
                             event: "input".to_string(),
                             error,
                             stack: None,
@@ -1443,9 +1444,19 @@ impl ExtensionRunner {
     }
 
     /// Borrow this runner as an `Arc` for context construction.
-    fn context_handle(self: &Arc<Self>) -> Option<Arc<ExtensionRunner>> {
-        Some(self.clone())
+    fn context_handle(self: &Arc<Self>) -> Option<Arc<dyn ExtensionContext>> {
+        Some(self.create_context())
     }
+}
+
+// TypeScript catches synchronous throws and asynchronous handler rejections.
+async fn invoke_handler(handler: &ExtensionHandler, event: ExtensionEvent, context: Arc<dyn ExtensionContext>) -> Result<Option<Value>, String> {
+    std::panic::AssertUnwindSafe(async { handler(event, context).await }).catch_unwind().await
+        .map_err(|error| {
+            error.downcast_ref::<String>().cloned()
+                .or_else(|| error.downcast_ref::<&str>().map(|message| (*message).to_string()))
+                .unwrap_or_else(|| "Extension handler panicked".to_string())
+        })
 }
 
 /// The `role` field of a message value.
@@ -2155,7 +2166,7 @@ mod tests {
     #[tokio::test]
     async fn handler_errors_are_reported_and_do_not_stop_later_handlers() {
         let runtime = create_extension_runtime();
-        let failing: ExtensionHandler = Arc::new(|_, _| Box::pin(async { Err("boom".to_string()) }));
+        let failing: ExtensionHandler = Arc::new(|_, _| Box::pin(async { panic!("boom") }));
         let ok: ExtensionHandler = Arc::new(|_, _| Box::pin(async { Some(json!({"cancel": true})) }));
         let first = extension_with_handler("session_before_switch", failing);
         let second = extension_with_handler("session_before_switch", ok);

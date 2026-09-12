@@ -324,7 +324,7 @@ pub use pi_ai::utils::oauth::types::{OAuthCredentials, OAuthLoginCallbacks};
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionUIDialogOptions {
     /// AbortSignal to programmatically dismiss the dialog.
-    #[serde(skip_serializing)]
+    #[serde(skip)]
     pub signal: Option<AbortSignal>,
     /// Timeout in milliseconds. Dialog auto-dismisses with live countdown display.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1085,6 +1085,21 @@ pub struct UserBashPayload {
     pub cwd: String,
 }
 
+/// `InputSource` identifies where user input enters the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InputSource { Interactive, Rpc, Extension }
+
+impl InputSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Interactive => "interactive",
+            Self::Rpc => "rpc",
+            Self::Extension => "extension",
+        }
+    }
+}
+
 /// Payload of `input`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputPayload {
@@ -1222,12 +1237,18 @@ pub struct ToolCallEventResult {
 }
 
 /// `UserBashEventResult`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct UserBashEventResult {
     /// Custom operations to use for execution.
     pub operations: Option<Arc<dyn BashOperations>>,
     /// Full replacement: extension handled execution, use this result.
     pub result: Option<BashResult>,
+}
+
+impl std::fmt::Debug for UserBashEventResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UserBashEventResult").field("result", &self.result).finish_non_exhaustive()
+    }
 }
 
 /// `ToolResultEventResult`.
@@ -2015,7 +2036,7 @@ impl ExtensionRuntime {
     /// `runtime.setModel(model)` - rejects with "Extension runtime not initialized".
     pub fn set_model(&self, model: pi_ai::types::Model) -> Pin<Box<dyn std::future::Future<Output = Result<bool, String>> + Send>> {
         match self.actions() {
-            Some(actions) => (actions.set_model)(model),
+            Some(actions) => Box::pin(async move { Ok((actions.set_model)(model).await) }),
             None => Box::pin(async { Err("Extension runtime not initialized".to_string()) }),
         }
     }

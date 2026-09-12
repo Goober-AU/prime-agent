@@ -617,7 +617,7 @@ impl Component for ArminComponent {
     }
 }
 
-impl Drop for ArminComponent {
+impl std::ops::Drop for ArminComponent {
     fn drop(&mut self) {
         self.stop_animation();
     }

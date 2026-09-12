@@ -11,13 +11,13 @@ use crate::core::messages::{
     HARNESS_DIGEST_CUSTOM_TYPE, REFINEMENT_NOTICE_CUSTOM_TYPE, REFINEMENT_OUTCOME_CUSTOM_TYPE,
 };
 use crate::modes::agent_connection::types::{
-    autonomous_limit_reason_at, AgentAutonomousGateFailure, AgentAutonomousStatus,
+    AgentAutonomousGateFailure, AgentAutonomousStatus,
 };
 
 /// `latestAutonomousGateAttempt(status)`.
-pub fn latest_autonomous_gate_attempt(status: &AgentAutonomousStatus) -> i64 {
-    let mut attempt = status.last_gate_failure.as_ref().map(|failure| failure.attempt).unwrap_or(0);
-    attempt = attempt.max(0);
+pub fn latest_autonomous_gate_attempt(status: &AgentAutonomousStatus) -> f64 {
+    let mut attempt = status.last_gate_failure.as_ref().map(|failure| failure.attempt).unwrap_or(0.0);
+    attempt = attempt.max(0.0);
     for value in status.gate_attempts.values() {
         attempt = attempt.max(*value);
     }
@@ -216,7 +216,7 @@ pub async fn wait_for_headless_completion(
 /// `buildAutonomousGateFailureContinuation(failure, maxRetries, timestamp)`.
 pub fn build_autonomous_gate_failure_continuation(
     failure: &AgentAutonomousGateFailure,
-    max_retries: i64,
+    max_retries: f64,
     timestamp: i64,
 ) -> String {
     let output = if failure.output.is_empty() {
@@ -286,25 +286,25 @@ mod tests {
     fn status_with_gate() -> AgentAutonomousStatus {
         AgentAutonomousStatus {
             enabled: true,
-            continuations_used: 0,
-            turns_used: 0,
-            tokens_used: 0,
+            continuations_used: 0.0,
+            turns_used: 0.0,
+            tokens_used: 0.0,
             started_at: None,
             limits: crate::modes::agent_connection::types::AgentAutonomousLimits {
-                max_continuations: 10,
-                max_turns: 10,
-                max_tokens: 10,
-                timeout_ms: 10,
+                max_continuations: 10.0,
+                max_turns: 10.0,
+                max_tokens: 10.0,
+                timeout_ms: 10.0,
             },
             gates: crate::modes::agent_connection::types::AgentAutonomousGateStatus {
                 commands: vec!["npm test".to_string()],
-                max_retries: 2,
-                timeout_ms: 1000,
+                max_retries: 2.0,
+                timeout_ms: 1000.0,
             },
             gate_attempts: BTreeMap::new(),
             last_gate_failure: Some(AgentAutonomousGateFailure {
                 command: "npm test".to_string(),
-                attempt: 1,
+                attempt: 1.0,
                 exit_text: "exit 1".to_string(),
                 output: "boom".to_string(),
             }),
@@ -314,12 +314,12 @@ mod tests {
     #[test]
     fn latest_attempt_uses_the_gate_attempts_map() {
         let mut status = status_with_gate();
-        status.gate_attempts.insert("npm test".to_string(), 4);
-        assert_eq!(latest_autonomous_gate_attempt(&status), 4);
+        status.gate_attempts.insert("npm test".to_string(), 4.0);
+        assert_eq!(latest_autonomous_gate_attempt(&status), 4.0);
         status.gate_attempts.clear();
-        assert_eq!(latest_autonomous_gate_attempt(&status), 1);
+        assert_eq!(latest_autonomous_gate_attempt(&status), 1.0);
         status.last_gate_failure = None;
-        assert_eq!(latest_autonomous_gate_attempt(&status), 0);
+        assert_eq!(latest_autonomous_gate_attempt(&status), 0.0);
     }
 
     #[test]
@@ -384,11 +384,11 @@ mod tests {
         let text = build_autonomous_gate_failure_continuation(
             &AgentAutonomousGateFailure {
                 command: "npm test".to_string(),
-                attempt: 2,
+                attempt: 2.0,
                 exit_text: "exit 1".to_string(),
                 output: "boom".to_string(),
             },
-            3,
+            3.0,
             0,
         );
         assert!(text.starts_with("Autonomous quality gate failed (attempt 2/3): `npm test` exit 1.\n\nOutput:\nboom\n\n"));
@@ -400,11 +400,11 @@ mod tests {
         let text = build_autonomous_gate_failure_continuation(
             &AgentAutonomousGateFailure {
                 command: "npm test".to_string(),
-                attempt: 1,
+                attempt: 1.0,
                 exit_text: "exit 1".to_string(),
                 output: String::new(),
             },
-            1,
+            1.0,
             0,
         );
         assert!(text.contains("exit 1.\n\nContinue working."));

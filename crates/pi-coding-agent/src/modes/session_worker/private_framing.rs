@@ -1,5 +1,6 @@
 //! Port of packages/coding-agent/src/modes/session-worker/private-framing.ts
 
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 const FRAME_PREFIX_BYTES: usize = 8;
@@ -25,7 +26,7 @@ pub struct PrivateFrame<THeader> {
 }
 
 /// `PrivateFrameHeaderValidator<THeader>`.
-pub type PrivateFrameHeaderValidator<THeader> = Arc<dyn Fn(&serde_json::Value) -> bool + Send + Sync>;
+pub type PrivateFrameHeaderValidator = Arc<dyn Fn(&serde_json::Value) -> bool + Send + Sync>;
 
 /// `assertFrameLength(name, value, maximum)`.
 fn assert_frame_length(name: &str, value: u64, maximum: usize) -> Result<(), String> {
@@ -65,20 +66,22 @@ pub fn encode_private_frame(
 
 /// `class PrivateFrameDecoder<THeader>`.
 pub struct PrivateFrameDecoder<THeader> {
-    validate_header: PrivateFrameHeaderValidator<THeader>,
+    validate_header: PrivateFrameHeaderValidator,
     limits: PrivateFrameLimits,
     buffered: Vec<u8>,
+    header_type: PhantomData<fn() -> THeader>,
 }
 
 impl<THeader: serde::de::DeserializeOwned> PrivateFrameDecoder<THeader> {
     pub fn new(
-        validate_header: PrivateFrameHeaderValidator<THeader>,
+        validate_header: PrivateFrameHeaderValidator,
         limits: PrivateFrameLimits,
     ) -> Self {
         Self {
             validate_header,
             limits,
             buffered: Vec::new(),
+            header_type: PhantomData,
         }
     }
 
@@ -128,7 +131,7 @@ impl<THeader: serde::de::DeserializeOwned> PrivateFrameDecoder<THeader> {
             }
 
             frames.push(PrivateFrame {
-                header: decode_header(&decoded),
+                header: decode_header(&decoded)?,
                 payload: self.buffered[payload_start..payload_start + payload_length as usize].to_vec(),
             });
             offset += frame_length;
@@ -154,11 +157,12 @@ impl<THeader: serde::de::DeserializeOwned> PrivateFrameDecoder<THeader> {
 
 /// The generic decoder hands back the validated JSON header; a caller that
 /// declared a typed header deserializes it from this value.
-fn decode_header<THeader>(value: &serde_json::Value) -> THeader
+fn decode_header<THeader>(value: &serde_json::Value) -> Result<THeader, String>
 where
     THeader: serde::de::DeserializeOwned,
 {
-    serde_json::from_value(value.clone()).expect("validated header must deserialize")
+    serde_json::from_value(value.clone())
+        .map_err(|_| "Invalid private frame routing header".to_string())
 }
 
 /// `PrivateFrameListener<THeader>`.
@@ -191,7 +195,7 @@ pub trait PrivateFrameStream: Send + Sync {
 /// `class PrivateFramedChannel<THeader>`.
 pub struct PrivateFramedChannel<THeader> {
     decoder: Mutex<PrivateFrameDecoder<THeader>>,
-    listeners: Mutex<Vec<PrivateFrameListener<THeader>>>,
+    listeners: Arc<Mutex<Vec<PrivateFrameListener<THeader>>>>,
     closed: Mutex<bool>,
     stream: Arc<dyn PrivateFrameStream>,
     limits: PrivateFrameLimits,
@@ -203,12 +207,12 @@ where
 {
     pub fn new(
         stream: Arc<dyn PrivateFrameStream>,
-        validate_header: PrivateFrameHeaderValidator<THeader>,
+        validate_header: PrivateFrameHeaderValidator,
         limits: PrivateFrameLimits,
     ) -> Arc<Self> {
         let channel = Arc::new(Self {
             decoder: Mutex::new(PrivateFrameDecoder::new(validate_header, limits)),
-            listeners: Mutex::new(Vec::new()),
+            listeners: Arc::new(Mutex::new(Vec::new())),
             closed: Mutex::new(false),
             stream: stream.clone(),
             limits,
@@ -255,10 +259,12 @@ where
 
     /// `onFrame(listener)`.
     pub fn on_frame(&self, listener: PrivateFrameListener<THeader>) -> Arc<dyn Fn() + Send + Sync> {
-        self.listeners
-            .lock()
-            .expect("listeners poisoned")
-            .push(listener.clone());
+        {
+            let mut listeners = self.listeners.lock().expect("listeners poisoned");
+            if !listeners.iter().any(|entry| Arc::ptr_eq(entry, &listener)) {
+                listeners.push(listener.clone());
+            }
+        }
         let listeners = self.listeners.clone();
         Arc::new(move || {
             let mut guard = listeners.lock().expect("listeners poisoned");
@@ -308,7 +314,7 @@ mod tests {
         session_id: String,
     }
 
-    fn validator() -> PrivateFrameHeaderValidator<TestHeader> {
+    fn validator() -> PrivateFrameHeaderValidator {
         Arc::new(|value: &serde_json::Value| {
             value
                 .get("sessionId")
@@ -329,10 +335,10 @@ mod tests {
             DEFAULT_PRIVATE_FRAME_LIMITS,
         )
         .unwrap();
-        assert_eq!(&frame[0..4], &(14u32).to_be_bytes());
+        assert_eq!(&frame[0..4], &(18u32).to_be_bytes());
         assert_eq!(&frame[4..8], &(7u32).to_be_bytes());
 
-        let mut decoder = PrivateFrameDecoder::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
+        let mut decoder = PrivateFrameDecoder::<TestHeader>::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
         let frames = decoder.push(&frame).unwrap();
         assert_eq!(frames.len(), 1);
         assert_eq!(
@@ -349,7 +355,7 @@ mod tests {
     #[test]
     fn a_partial_frame_stays_buffered_until_it_completes() {
         let frame = encode_private_frame(&header("s1"), b"ab", DEFAULT_PRIVATE_FRAME_LIMITS).unwrap();
-        let mut decoder = PrivateFrameDecoder::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
+        let mut decoder = PrivateFrameDecoder::<TestHeader>::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
         assert!(decoder.push(&frame[..5]).unwrap().is_empty());
         assert_eq!(decoder.buffered_bytes(), 5);
         let frames = decoder.push(&frame[5..]).unwrap();
@@ -361,7 +367,7 @@ mod tests {
     fn two_frames_in_one_chunk_decode_in_order() {
         let mut bytes = encode_private_frame(&header("a"), b"", DEFAULT_PRIVATE_FRAME_LIMITS).unwrap();
         bytes.extend(encode_private_frame(&header("b"), b"x", DEFAULT_PRIVATE_FRAME_LIMITS).unwrap());
-        let mut decoder = PrivateFrameDecoder::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
+        let mut decoder = PrivateFrameDecoder::<TestHeader>::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
         let frames = decoder.push(&bytes).unwrap();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].header.session_id, "a");
@@ -381,7 +387,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(error, "Invalid private frame header length: 2");
 
-        let mut decoder = PrivateFrameDecoder::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
+        let mut decoder = PrivateFrameDecoder::<TestHeader>::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
         let mut bytes = 0u32.to_be_bytes().to_vec();
         bytes.extend(4u32.to_be_bytes());
         bytes.extend(b"null");
@@ -393,7 +399,7 @@ mod tests {
 
     #[test]
     fn an_oversized_length_is_rejected() {
-        let mut decoder = PrivateFrameDecoder::new(
+        let mut decoder = PrivateFrameDecoder::<TestHeader>::new(
             validator(),
             PrivateFrameLimits {
                 max_header_bytes: 8,
@@ -410,7 +416,7 @@ mod tests {
 
     #[test]
     fn a_bad_header_payload_is_rejected() {
-        let mut decoder = PrivateFrameDecoder::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
+        let mut decoder = PrivateFrameDecoder::<TestHeader>::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
         let mut bytes = 3u32.to_be_bytes().to_vec();
         bytes.extend(0u32.to_be_bytes());
         bytes.extend(b"not");
@@ -420,7 +426,7 @@ mod tests {
 
     #[test]
     fn an_invalid_routing_header_is_rejected() {
-        let mut decoder = PrivateFrameDecoder::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
+        let mut decoder = PrivateFrameDecoder::<TestHeader>::new(validator(), DEFAULT_PRIVATE_FRAME_LIMITS);
         let payload = b"{}";
         let mut bytes = (payload.len() as u32).to_be_bytes().to_vec();
         bytes.extend(0u32.to_be_bytes());
@@ -429,6 +435,13 @@ mod tests {
             decoder.push(&bytes).unwrap_err(),
             "Invalid private frame routing header"
         );
+    }
+
+    #[test]
+    fn a_validator_that_accepts_an_incompatible_typed_header_returns_an_error() {
+        let frame = encode_private_frame(&serde_json::json!({"sessionId": 7}), b"", DEFAULT_PRIVATE_FRAME_LIMITS).unwrap();
+        let mut decoder = PrivateFrameDecoder::<TestHeader>::new(Arc::new(|_| true), DEFAULT_PRIVATE_FRAME_LIMITS);
+        assert_eq!(decoder.push(&frame).unwrap_err(), "Invalid private frame routing header");
     }
 
     #[test]
@@ -517,6 +530,29 @@ mod tests {
         channel.close();
         assert!(stream.ended.lock().unwrap().to_owned());
         assert!(channel.send(&header("s1"), b"").await.is_err());
+    }
+
+    #[test]
+    fn listener_registration_is_unique_and_unsubscribe_removes_it() {
+        let stream = TestStream::new();
+        let channel: Arc<PrivateFramedChannel<TestHeader>> = PrivateFramedChannel::new(
+            stream.clone(), validator(), DEFAULT_PRIVATE_FRAME_LIMITS,
+        );
+        let received = Arc::new(StdMutex::new(Vec::new()));
+        let sink = received.clone();
+        let listener: PrivateFrameListener<TestHeader> = Arc::new(move |frame| {
+            sink.lock().unwrap().push(frame.header.session_id.clone());
+        });
+        let unsubscribe = channel.on_frame(listener.clone());
+        let _duplicate = channel.on_frame(listener);
+        let frame = encode_private_frame(&header("s1"), b"", DEFAULT_PRIVATE_FRAME_LIMITS).unwrap();
+        let deliver = stream.data.lock().unwrap().as_ref().unwrap().clone();
+        deliver(&frame);
+        assert_eq!(*received.lock().unwrap(), vec!["s1"]);
+        unsubscribe();
+        deliver(&frame);
+        assert_eq!(*received.lock().unwrap(), vec!["s1"]);
+        channel.close();
     }
 
     #[tokio::test]

@@ -24,9 +24,9 @@ use uuid::Uuid;
 use crate::utils::daemon_socket_path::normalize_socket_path;
 
 use super::daemon_protocol::{
-    create_daemon_command_envelope, daemon_command_compatibility, is_daemon_mutating_command,
+    daemon_command_compatibility, is_daemon_mutating_command,
     meets_daemon_command_compatibility, DaemonCommandCompatibility, DaemonCompatibilityHello, DaemonProtocolInfo,
-    DaemonResponse, DaemonServerCapability, DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION, DAEMON_PROTOCOL_VERSION,
+    DaemonResponse, DaemonServerCapability, DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION, DAEMON_PROTOCOL_NAME, DAEMON_PROTOCOL_VERSION,
 };
 
 /// `getDaemonLogPath` from config.ts (logs live under the agent dir).
@@ -128,7 +128,7 @@ impl DaemonHello {
 /// `meetsDaemonCommandCompatibility(hello, compatibility)` reads the greeting; the
 /// protocol module takes its own view of it, so map the frame onto that view.
 /// An unknown capability name can never match `includes`, so dropping it is exact.
-fn compatibility_hello(hello: &DaemonHello) -> DaemonCompatibilityHello {
+pub(crate) fn compatibility_hello(hello: &DaemonHello) -> DaemonCompatibilityHello {
     DaemonCompatibilityHello {
         protocol: hello.protocol.clone(),
         schema_revision: hello.schema_revision,
@@ -406,9 +406,23 @@ fn full_command_value(body: &DaemonCommandBody, id: &str) -> Value {
     Value::Object(object)
 }
 
+// JSON bodies retain missing/null fields and extension keys just like the TypeScript spread.
+fn command_envelope_value(command: &Value, id: &str, client_id: Option<&str>, protocol_version: u32) -> Value {
+    let mut envelope = Map::from_iter([
+        ("type".to_string(), Value::String("command".to_string())),
+        ("id".to_string(), Value::String(id.to_string())),
+        ("protocol".to_string(), serde_json::json!({ "name": DAEMON_PROTOCOL_NAME, "version": protocol_version })),
+    ]);
+    if let Some(client_id) = client_id.filter(|client_id| !client_id.is_empty()) {
+        envelope.insert("clientId".to_string(), Value::String(client_id.to_string()));
+    }
+    envelope.insert("command".to_string(), command.clone());
+    Value::Object(envelope)
+}
+
 /// `getDaemonCommandCompatibilities(command)` for a JSON command body: the extra
 /// requirement the body's fields trigger, then the table entry for its type.
-fn command_compatibilities(body: &DaemonCommandBody) -> Vec<DaemonCommandCompatibility> {
+pub(crate) fn command_compatibilities(body: &DaemonCommandBody) -> Vec<DaemonCommandCompatibility> {
     let command_type = command_body_type(body);
     let mut requirements: Vec<DaemonCommandCompatibility> = Vec::new();
     let has_field = |key: &str| body.get(key).is_some_and(|value| !value.is_null());
@@ -971,7 +985,7 @@ impl DaemonClient {
         };
         let full_command = full_command_value(&command, &id);
         let wire_value = match public_envelope_protocol_version {
-            Some(protocol_version) => create_daemon_command_envelope(
+            Some(protocol_version) => command_envelope_value(
                 &full_command,
                 &id,
                 Some(&self.protocol_client_id),
@@ -1198,7 +1212,7 @@ impl DaemonClient {
         ]);
         let protocol_version = hello.protocol.version.min(DAEMON_PROTOCOL_VERSION);
         let envelope =
-            create_daemon_command_envelope(&Value::Object(command), &id, Some(&self.protocol_client_id), protocol_version);
+            command_envelope_value(&Value::Object(command), &id, Some(&self.protocol_client_id), protocol_version);
         let socket = { self.state.lock().await.socket.clone() };
         if let Some(socket) = socket {
             let _ = socket.write_line(serialize_json_line(&envelope)).await;
@@ -1460,7 +1474,7 @@ impl DaemonTransportClient for DaemonClient {
 
 #[cfg(test)]
 mod tests {
-    use super::daemon_protocol::*;
+    use super::super::daemon_protocol::*;
     use super::*;
 
     #[test]

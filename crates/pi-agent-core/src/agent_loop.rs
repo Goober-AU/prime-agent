@@ -386,11 +386,9 @@ fn end_agent_stream_on_error(
     });
 }
 
-/// `pollMessagesUnlessAborted`. The TypeScript polls return promises; the
-/// `AgentLoopConfig` hooks in this port are synchronous because every caller
-/// drains an in-memory queue, so only the pre-check abort point remains.
+/// `pollMessagesUnlessAborted`.
 async fn poll_messages_unless_aborted(
-    poll: Option<Arc<dyn Fn() -> Vec<AgentMessage> + Send + Sync>>,
+    poll: Option<Arc<dyn Fn() -> BoxFuture<'static, Vec<AgentMessage>> + Send + Sync>>,
     signal: Option<&CancellationToken>,
 ) -> anyhow::Result<Vec<AgentMessage>> {
     let Some(poll) = poll else {
@@ -399,7 +397,7 @@ async fn poll_messages_unless_aborted(
     if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
         return Ok(Vec::new());
     }
-    match maybe_abortable(async move { Ok::<_, anyhow::Error>(poll()) }, signal.cloned()).await {
+    match maybe_abortable(async move { Ok::<_, anyhow::Error>(poll().await) }, signal.cloned()).await {
         Ok(messages) => Ok(messages),
         Err(error) => Err(error),
     }
@@ -705,7 +703,15 @@ async fn run_loop(
                 let hook = config.should_stop_after_turn.clone();
                 let context = last_turn.clone().expect("last turn was just assigned");
                 settle_post_turn(
-                    async move { Ok::<_, anyhow::Error>(hook.map(|hook| hook(context)).unwrap_or(false)) },
+                    maybe_abortable(
+                        async move {
+                            Ok::<_, anyhow::Error>(match hook {
+                                Some(hook) => hook(context).await,
+                                None => false,
+                            })
+                        },
+                        signal.clone(),
+                    ),
                     signal.as_ref(),
                 )
                 .await?
@@ -770,13 +776,16 @@ async fn run_loop(
                 let hook = config.get_continuation_messages.clone();
                 let signal_for_hook = signal.clone();
                 settle_post_turn(
-                    async move {
-                        let messages = match hook {
-                            Some(hook) => hook(last_turn, signal_for_hook),
-                            None => Vec::new(),
-                        };
-                        Ok::<_, anyhow::Error>(messages)
-                    },
+                    maybe_abortable(
+                        async move {
+                            let messages = match hook {
+                                Some(hook) => hook(last_turn, signal_for_hook).await,
+                                None => Vec::new(),
+                            };
+                            Ok::<_, anyhow::Error>(messages)
+                        },
+                        signal.clone(),
+                    ),
                     signal.as_ref(),
                 )
                 .await?
@@ -1449,7 +1458,7 @@ async fn prepare_tool_call(
             {
                 let hook_args = validated_args.clone();
                 async move {
-                    Ok::<_, anyhow::Error>(before_tool_call(
+                    before_tool_call(
                         crate::types::BeforeToolCallContext {
                             assistant_message: assistant_message.clone(),
                             tool_call: tool_call.clone(),
@@ -1457,7 +1466,7 @@ async fn prepare_tool_call(
                             context: current_context.clone(),
                         },
                         signal.cloned(),
-                    ))
+                    ).await
                 }
             },
             signal.cloned(),
@@ -1608,7 +1617,7 @@ async fn finalize_executed_tool_call(
     if let Some(after_tool_call) = config.after_tool_call.clone() {
         let hook_result = maybe_abortable(
             async move {
-                Ok::<_, anyhow::Error>(after_tool_call(
+                after_tool_call(
                     crate::types::AfterToolCallContext {
                         assistant_message: assistant_message.clone(),
                         tool_call: prepared.tool_call.clone(),
@@ -1618,7 +1627,7 @@ async fn finalize_executed_tool_call(
                         context: current_context.clone(),
                     },
                     signal.cloned(),
-                ))
+                ).await
             },
             signal.cloned(),
         )
@@ -1795,7 +1804,7 @@ async fn stream_assistant_response(
     if let Some(transform) = config.transform_context.clone() {
         let signal_for_hook = signal.cloned();
         messages = maybe_abortable(
-            async move { Ok::<_, anyhow::Error>(transform(messages, signal_for_hook)) },
+            async move { Ok::<_, anyhow::Error>(transform(messages, signal_for_hook).await) },
             signal.cloned(),
         )
         .await?;
@@ -1805,7 +1814,7 @@ async fn stream_assistant_response(
     let llm_messages = maybe_abortable(
         async move {
             Ok::<_, anyhow::Error>(match convert {
-                Some(convert) => convert(messages),
+                Some(convert) => convert(messages).await,
                 None => default_convert_to_llm_placeholder(),
             })
         },
@@ -1819,7 +1828,7 @@ async fn stream_assistant_response(
         Some(get_api_key) => {
             let provider = config.model.provider.clone();
             maybe_abortable(
-                async move { Ok::<_, anyhow::Error>(get_api_key(provider)) },
+                async move { Ok::<_, anyhow::Error>(get_api_key(provider).await) },
                 signal.cloned(),
             )
             .await?

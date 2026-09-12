@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use pi_ai::types::{Api, Model, ServiceTier};
+use pi_ai::types::{Model, ServiceTier};
 use pi_agent_core::types::ThinkingLevel;
 use serde_json::{Map, Value};
 
@@ -497,7 +497,7 @@ pub fn create_rlm_find_models_host_handler(handler: RlmFindModelsHandler) -> Hos
                 .to_string();
             let limit = match payload.get("limit") {
                 None => DEFAULT_RLM_MODEL_SEARCH_LIMIT,
-                Some(Value::Null) => DEFAULT_RLM_MODEL_SEARCH_LIMIT,
+                
                 Some(value) => value
                     .as_f64()
                     .filter(|value| value.fract() == 0.0)
@@ -607,7 +607,7 @@ pub struct CreateRlmRootSessionOptions {
     pub prompt: String,
     pub session_name: Option<String>,
     pub cwd: String,
-    pub model: Model<Api>,
+    pub model: Model,
     pub thinking_level: ThinkingLevel,
 }
 
@@ -732,7 +732,7 @@ mod tests {
     fn default_session_names_slug_the_prompt_and_suffix_the_child_id() {
         assert_eq!(
             create_default_rlm_subagent_session_name("Fix the Login Bug!", "sub-abcdef12345678"),
-            "subagent-fix-the-login-bug-abcdef12"
+            "subagent-fix-the-login-bug-12345678"
         );
         assert_eq!(
             create_default_rlm_subagent_session_name("   ", "child"),

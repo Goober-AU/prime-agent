@@ -21,6 +21,11 @@
 
 #![allow(clippy::too_many_arguments)]
 
+#[path = "agent_session/runtime_members.rs"]
+mod runtime_members;
+#[path = "agent_session/agent_handle.rs"]
+mod agent_handle;
+
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -47,7 +52,6 @@ use crate::core::agent_messages::{
     AgentSessionNameAvailabilityInput,
     AgentSessionNameScope,
     DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
-    HostRequestHandlers,
     assert_agent_message_queue_capacity,
     assert_agent_session_name_available,
     assert_direct_agent_message_target,
@@ -70,6 +74,11 @@ use crate::core::auth_guidance::{
     is_likely_authentication_error,
 };
 use crate::core::auth_storage::AuthSourceToken;
+use crate::core::kernel::shared::HostRequestHandlers;
+use crate::core::kernel::state_snapshot::RestoreResult;
+pub use crate::core::resource_loader::{ResourceLoader, ResourceExtensionPaths};
+pub use crate::core::rlm_runtime::{SubagentRuntimeHost, RlmSubagentRuntime, RlmSpawnHandle, CreateRlmSubagentRuntimeOptions, RlmSubagentRegistryEntry, RlmCreateSessionResult, RlmDeleteSubagentResult, RlmFindModelsResult, RlmListSubagentsResult, ScopedModelEntry as ScopedModel};
+pub use crate::core::bash_executor::BashResult;
 use crate::core::compaction::branch_summarization::{
     collect_entries_for_branch_summary, generate_branch_summary, prepare_branch_entries,
     BranchSummaryResult, GenerateBranchSummaryOptions, ReadonlySessionManager,
@@ -199,20 +208,25 @@ use pi_ai::models::get_supported_thinking_levels;
 // TypeScript member names so the mapping stays recognisable.
 // ---------------------------------------------------------------------------
 
-/// `Agent` from `@earendil-works/pi-agent-core`.
-///
-/// The agent module is another slice. The session only uses this surface, so the
-/// seam is kept minimal and mirrors the exact TypeScript members it calls.
+pub use pi_agent_core::types::{
+    AfterToolCallContext, AfterToolCallResult, BeforeToolCallContext, BeforeToolCallResult,
+    GetContinuationMessagesContext, ShouldStopAfterTurnContext,
+};
+pub use pi_agent_core::performance_metrics::{AgentLoopPerformanceMetrics, PerformanceMetricRecorder};
+
+pub type BeforeToolCallHook = Arc<dyn Fn(BeforeToolCallContext, Option<CancellationToken>) -> BoxFuture<Result<Option<BeforeToolCallResult>, String>> + Send + Sync>;
+pub type AfterToolCallHook = Arc<dyn Fn(AfterToolCallContext, Option<CancellationToken>) -> BoxFuture<Result<Option<AfterToolCallResult>, String>> + Send + Sync>;
+pub type GetContinuationMessagesHook = Arc<dyn Fn(GetContinuationMessagesContext, Option<CancellationToken>) -> BoxFuture<Vec<AgentMessage>> + Send + Sync>;
+
 pub trait AgentHandle: Send + Sync {
     fn state(&self) -> AgentState;
     fn set_state(&self, state: AgentState);
-    /// `agent.subscribe(listener)` - returns the unsubscribe function.
-    fn subscribe(&self, listener: Arc<dyn Fn(AgentEvent) + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
+    fn subscribe(&self, listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
     fn set_before_tool_call(&self, hook: BeforeToolCallHook);
     fn set_after_tool_call(&self, hook: AfterToolCallHook);
     fn set_get_continuation_messages(&self, hook: GetContinuationMessagesHook);
     fn set_should_stop_before_turn(&self, hook: Arc<dyn Fn() -> bool + Send + Sync>);
-    fn set_should_stop_after_turn(&self, hook: Arc<dyn Fn(ShouldStopAfterTurnContext) -> bool + Send + Sync>);
+    fn set_should_stop_after_turn(&self, hook: Arc<dyn Fn(ShouldStopAfterTurnContext) -> BoxFuture<bool> + Send + Sync>);
     fn set_stream_fn(&self, stream_fn: pi_agent_core::types::StreamFn);
     fn stream_fn(&self) -> pi_agent_core::types::StreamFn;
     fn abort(&self);
@@ -226,61 +240,18 @@ pub trait AgentHandle: Send + Sync {
     fn follow_up(&self, message: AgentMessage);
     fn set_follow_up_mode(&self, mode: String);
     fn set_steering_mode(&self, mode: String);
-    fn set_convert_to_llm(&self, convert: Arc<dyn Fn(Vec<AgentMessage>) -> Vec<Message> + Send + Sync>);
-    fn set_transform_context(&self, transform: Arc<dyn Fn(Vec<AgentMessage>, Option<CancellationToken>) -> Vec<AgentMessage> + Send + Sync>);
-    fn set_get_api_key(&self, get_api_key: Arc<dyn Fn(String) -> Option<String> + Send + Sync>);
-    fn set_on_payload(&self, hook: Arc<dyn Fn(Value) + Send + Sync>);
-    fn set_on_response(&self, hook: Arc<dyn Fn(Value) + Send + Sync>);
+    fn set_convert_to_llm(&self, convert: Arc<dyn Fn(Vec<AgentMessage>) -> BoxFuture<Vec<Message>> + Send + Sync>);
+    fn set_transform_context(&self, transform: Arc<dyn Fn(Vec<AgentMessage>, Option<CancellationToken>) -> BoxFuture<Vec<AgentMessage>> + Send + Sync>);
+    fn set_get_api_key(&self, get_api_key: Arc<dyn Fn(String) -> BoxFuture<Option<String>> + Send + Sync>);
+    fn set_on_payload(&self, hook: pi_ai::types::OnPayload);
+    fn set_on_response(&self, hook: pi_ai::types::OnResponse);
     fn set_tool_execution(&self, mode: String);
-    fn performance_metrics(&self) -> Option<Arc<dyn PerformanceMetricRecorder>>;
-    fn set_performance_metrics(&self, metrics: Option<Arc<dyn PerformanceMetricRecorder>>);
+    fn performance_metrics(&self) -> Option<AgentLoopPerformanceMetrics>;
+    fn set_performance_metrics(&self, metrics: Option<AgentLoopPerformanceMetrics>);
     fn signal(&self) -> Option<CancellationToken>;
 }
 
-/// `Agent.beforeToolCall` payload.
-#[derive(Debug, Clone)]
-pub struct BeforeToolCallContext {
-    pub tool_call: pi_ai::types::ToolCall,
-    pub args: Value,
-}
-
-/// `Agent.afterToolCall` payload.
-#[derive(Debug, Clone)]
-pub struct AfterToolCallContext {
-    pub tool_call: pi_ai::types::ToolCall,
-    pub args: Value,
-    pub result: pi_agent_core::types::AgentToolResult,
-    pub is_error: bool,
-}
-
-/// `BeforeToolCallResult`: `undefined` means "no override".
-pub type BeforeToolCallResult = Option<Value>;
-pub type AfterToolCallResult = Option<pi_agent_core::types::AgentToolResult>;
-
-pub type BeforeToolCallHook =
-    Arc<dyn Fn(BeforeToolCallContext) -> BoxFuture<Result<BeforeToolCallResult, String>> + Send + Sync>;
-pub type AfterToolCallHook =
-    Arc<dyn Fn(AfterToolCallContext) -> BoxFuture<Result<AfterToolCallResult, String>> + Send + Sync>;
-
-/// `ShouldStopAfterTurnContext` from pi-agent-core.
-#[derive(Debug, Clone, Default)]
-pub struct ShouldStopAfterTurnContext {
-    pub turn_index: i64,
-    pub messages: Vec<AgentMessage>,
-}
-
-pub type GetContinuationMessagesHook = Arc<
-    dyn Fn(AgentContext, Option<CancellationToken>) -> BoxFuture<Result<Vec<AgentMessage>, String>>
-        + Send
-        + Sync,
->;
-
 pub type BoxFuture<T> = pi_ai::types::BoxFuture<T>;
-
-/// `PerformanceMetricRecorder` from pi-agent-core.
-pub trait PerformanceMetricRecorder: Send + Sync {
-    fn monotonic_now(&self) -> Option<f64>;
-}
 
 /// `PerformanceMetricUsageV1` - the subset the session reports for compaction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,48 +267,7 @@ pub struct PerformanceMetricUsageV1 {
     pub reasoning_included_in_output: Option<bool>,
 }
 
-/// `ExtensionRunner` from `core/extensions/runner.ts` (another slice).
-pub trait ExtensionRunner: Send + Sync {
-    fn has_handlers(&self, event_type: &str) -> bool;
-    fn emit_tool_call(&self, tool_name: &str, tool_call_id: &str, input: Value) -> BoxFuture<Result<Option<Value>, String>>;
-    fn emit_tool_result(
-        &self,
-        tool_name: &str,
-        tool_call_id: &str,
-        input: Value,
-        content: Vec<pi_agent_core::types::ContentBlock>,
-        details: Value,
-        is_error: bool,
-    ) -> BoxFuture<Result<Option<ToolResultHookResult>, String>>;
-    fn emit_before_agent_start(
-        &self,
-        prompt: String,
-        images: Option<Vec<ImageContent>>,
-        system_prompt: String,
-        system_prompt_options: BuildSystemPromptOptions,
-    ) -> BoxFuture<Result<BeforeAgentStartResult, String>>;
-    fn emit_session_shutdown(&self, reason: &str) -> bool;
-    fn emit_before_compact(&self, preparation: Value) -> BoxFuture<Result<Option<Value>, String>>;
-    fn emit_before_refine(&self, request: Value) -> BoxFuture<Result<Option<Value>, String>>;
-    fn emit_before_tree(&self, preparation: Value) -> BoxFuture<Result<Option<Value>, String>>;
-    fn emit_resources_discover(&self, cwd: &str, reason: &str);
-    fn emit_input(&self, text: &str, images: Option<Vec<ImageContent>>, source: &str);
-    fn emit_message_end(&self, event: Value);
-    fn emit_user_bash(&self, event: Value);
-    fn emit_context(&self, messages: Vec<Value>);
-    fn emit_before_provider_request(&self, payload: Value);
-    fn get_all_registered_tools(&self) -> Vec<RegisteredExtensionTool>;
-    fn get_tool_definition(&self, name: &str) -> Option<crate::core::extensions::types::ToolDefinition>;
-    fn get_command(&self, name: &str) -> Option<ExtensionCommand>;
-    fn resolve_registered_commands(&self) -> Vec<ExtensionCommand>;
-    fn get_shortcuts(&self, resolved_keybindings: &Map<String, Value>) -> Vec<Value>;
-    fn set_ui_context(&self, ui_context: Option<Value>);
-    fn bind_command_context(&self, actions: Option<Value>);
-    fn assert_active(&self) -> Result<(), String>;
-    fn invalidate(&self, message: Option<String>);
-    fn get_extension_paths(&self) -> Vec<String>;
-    fn shutdown(&self) -> BoxFuture<()>;
-}
+pub type ExtensionRunner = Arc<crate::core::extensions::runner::ExtensionRunner>;
 
 /// `hookResult` from `ExtensionRunner.emitToolResult`.
 #[derive(Debug, Clone)]
@@ -348,7 +278,7 @@ pub struct ToolResultHookResult {
 }
 
 /// `Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct BeforeAgentStartResult {
     pub prompt: Option<String>,
     pub images: Option<Vec<ImageContent>>,
@@ -362,7 +292,7 @@ pub struct RegisteredExtensionTool {
 }
 
 /// `RegisteredCommand` shape used by the session.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ExtensionCommand {
     pub name: String,
     pub description: Option<String>,
@@ -373,50 +303,26 @@ pub struct ExtensionCommand {
 /// `ExtensionRunnerRef` from `AgentSessionConfig`.
 #[derive(Default)]
 pub struct ExtensionRunnerRef {
-    current: Mutex<Option<Arc<dyn ExtensionRunner>>>,
+    current: Mutex<Option<ExtensionRunner>>,
 }
 
 impl ExtensionRunnerRef {
-    pub fn new(runner: Option<Arc<dyn ExtensionRunner>>) -> Self {
+    pub fn new(runner: Option<ExtensionRunner>) -> Self {
         Self {
             current: Mutex::new(runner),
         }
     }
 
-    pub fn current(&self) -> Option<Arc<dyn ExtensionRunner>> {
+    pub fn current(&self) -> Option<ExtensionRunner> {
         self.current.lock().unwrap().clone()
     }
 
-    pub fn set(&self, runner: Option<Arc<dyn ExtensionRunner>>) {
+    pub fn set(&self, runner: Option<ExtensionRunner>) {
         *self.current.lock().unwrap() = runner;
     }
 }
 
-/// `ResourceLoader` from `core/resource-loader.ts` (another slice).
-pub trait ResourceLoader: Send + Sync {
-    fn get_extensions(&self) -> Vec<ResourceExtensionPaths>;
-    fn get_skills(&self) -> Vec<crate::core::skills::Skill>;
-    fn get_prompt_templates(&self) -> Vec<PromptTemplate>;
-    fn get_context_files(&self) -> Vec<crate::core::system_prompt::ContextFile>;
-    fn get_system_prompt_override(&self) -> Option<String>;
-    fn get_append_system_prompt(&self) -> Option<String>;
-    fn reload(&self) -> BoxFuture<()>;
-}
-
-/// `ResourceExtensionPaths` from `core/resource-loader.ts`.
-#[derive(Debug, Clone, Default)]
-pub struct ResourceExtensionPaths {
-    pub path: String,
-    pub extension_path: String,
-}
-
-/// `McpManager` from `core/mcp/mcp-manager.ts` (another slice).
-pub trait McpManager: Send + Sync {
-    fn refresh(&self);
-    fn replace_acp_servers(&self, servers: &[crate::core::mcp::acp_mcp_types::AcpMcpServerConfig], owner_id: &str) -> bool;
-    fn can_release_acp_servers(&self, owner_id: &str) -> bool;
-    fn get_acp_servers(&self) -> Vec<crate::core::mcp::acp_mcp_types::AcpMcpServerConfig>;
-}
+pub use crate::core::mcp::mcp_manager::McpManager;
 
 /// `AgentRlmHeartbeatController` from `core/cron-jobs.ts` (another slice).
 pub trait AgentRlmHeartbeatController: Send + Sync {
@@ -455,82 +361,6 @@ pub struct AgentRlmHeartbeatStatusUpdate {
 pub trait AgentSessionMessageController: Send + Sync {
     fn roster(&self) -> BoxFuture<Result<AgentSessionMessageListResult, String>>;
     fn deliver(&self, payload: Value) -> BoxFuture<Result<Value, String>>;
-}
-
-/// `SubagentRuntimeHost` from `core/rlm-runtime.ts` (another slice).
-pub trait SubagentRuntimeHost: Send + Sync {
-    fn create_subagent_runtime(&self, options: CreateRlmSubagentRuntimeOptions) -> BoxFuture<Result<RlmSubagentRuntime, String>>;
-    fn list_subagents(&self) -> BoxFuture<Result<Value, String>>;
-    fn delete_subagent(&self, selector: &str) -> BoxFuture<Result<Value, String>>;
-    fn find_models(&self, query: &str, limit: i64) -> BoxFuture<Result<Value, String>>;
-    fn run(&self, payload: Value) -> BoxFuture<Result<Value, String>>;
-    fn create_session(&self, payload: Value) -> BoxFuture<Result<Value, String>>;
-}
-
-/// `RlmSubagentRuntime` from `core/rlm-runtime.ts`.
-pub struct RlmSubagentRuntime {
-    pub handle: RlmSpawnHandle,
-    pub runtime: Value,
-}
-
-/// `RlmSpawnHandle` from `core/rlm-runtime.ts`.
-#[derive(Debug, Clone, Default)]
-pub struct RlmSpawnHandle {
-    pub child_id: String,
-    pub session_name: String,
-    pub session_dir: String,
-    pub active_session_id: Option<String>,
-}
-
-/// `CreateRlmSubagentRuntimeOptions` from `core/rlm-runtime.ts`.
-#[derive(Debug, Clone, Default)]
-pub struct CreateRlmSubagentRuntimeOptions {
-    pub prompt: String,
-    pub session_name: String,
-    pub session_dir: String,
-    pub model: Option<Model>,
-    pub thinking_level: Option<ThinkingLevel>,
-    pub parent_session_id: Option<String>,
-    pub parent_session_path: Option<String>,
-    pub inline: bool,
-}
-
-/// `RlmSubagentRegistryEntry` from `core/rlm-runtime.ts`.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RlmSubagentRegistryEntry {
-    pub id: String,
-    pub session_name: String,
-    pub session_dir: String,
-    pub model: Option<String>,
-    pub status: String,
-}
-
-/// `RlmCreateSessionResult`, `RlmDeleteSubagentResult`, `RlmFindModelsResult`,
-/// `RlmListSubagentsResult` from `core/rlm-runtime.ts`.
-#[derive(Debug, Clone, Default)]
-pub struct RlmCreateSessionResult {
-    pub child_id: String,
-    pub session_name: String,
-    pub session_dir: String,
-    pub value: Value,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RlmDeleteSubagentResult {
-    pub deleted: bool,
-    pub value: Value,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RlmFindModelsResult {
-    pub matches: Vec<Value>,
-    pub value: Value,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct RlmListSubagentsResult {
-    pub agents: Vec<RlmChildAgentSnapshot>,
-    pub value: Value,
 }
 
 /// `RlmPendingContinuation` / `RlmPendingResult` / `RlmTerminalStatus` from
@@ -991,7 +821,6 @@ pub struct SubmissionNormalizationPolicy {
 }
 
 /// `NormalizedSubmission`.
-#[derive(Debug, Clone)]
 pub enum NormalizedSubmission {
     Prompt {
         text: String,
@@ -1046,6 +875,41 @@ pub const NEXT_TURN_CONTEXT_TIMING_PREPARATION: &str = "preparation";
 pub const NEXT_TURN_CONTEXT_TIMING_COMMIT: &str = "commit";
 pub const NEXT_TURN_CONTEXT_TIMING_SKIP: &str = "skip";
 
+#[derive(Clone, Default)]
+struct TurnExecutionPolicyOptions {
+    return_after_accepted: Option<bool>,
+    skip_pre_prompt_work: Option<bool>,
+}
+
+#[derive(Clone, Default)]
+struct PreparedTurnActionOptions {
+    agent_message_id: Option<String>,
+    queue_key: Option<String>,
+    content: Option<Vec<pi_ai::types::ImageOrTextContent>>,
+    message: Option<AgentMessage>,
+    custom_message: Option<CustomMessage>,
+    prefix_messages: Option<Vec<CustomMessage>>,
+    preview: Option<String>,
+    preview_label: Option<String>,
+    suppress_autonomous_continuation: Option<bool>,
+    resume_if_idle: Option<bool>,
+    source: Option<String>,
+    execution_policy: Option<TurnExecutionPolicy>,
+    queue_visible: Option<bool>,
+    accepted_agent_message: Option<bool>,
+    accepted_before_completion: Option<bool>,
+}
+
+struct RlmChildTurnOutcome {
+    terminal: bool,
+    continuation: Option<UserMessage>,
+}
+
+const DEFERRED_SESSION_INPUT_ERROR_MESSAGE: &str = "Session input paused before handoff";
+const COMPACTION_CANCELLED_ERROR_MESSAGE: &str = "Compaction cancelled";
+const COMPACTION_SKIPPED_ERROR_MESSAGE: &str = "Session is too short to compact — try again once it grows";
+
+
 /// `turnExecutionPoliciesEqual`.
 pub fn turn_execution_policies_equal(left: &TurnExecutionPolicy, right: &TurnExecutionPolicy) -> bool {
     left.preparation.initial_refine_barrier == right.preparation.initial_refine_barrier
@@ -1086,7 +950,7 @@ pub struct PreparedTurnPayload {
     pub queue_visible: bool,
     pub accepted_agent_message: bool,
     pub accepted_before_completion: bool,
-    pub capture_run_messages: Option<HashSet<usize>>,
+    pub capture_run_messages: Option<HashSet<String>>,
     pub cancelled_dispatch_ended: Option<bool>,
 }
 
@@ -1098,7 +962,7 @@ pub struct PreparedCommandPayload {
 }
 
 /// `QueuedSessionAction = SessionAction<PreparedTurnPayload | PreparedCommandPayload>`.
-pub type QueuedSessionAction = SessionAction;
+pub type QueuedSessionAction = SessionAction<QueuedActionPayload>;
 
 /// `PreparedTurnPayload | PreparedCommandPayload`.
 #[derive(Debug, Clone, PartialEq)]
@@ -1134,6 +998,21 @@ impl QueuedActionPayload {
         match self {
             QueuedActionPayload::Turn(_) => None,
             QueuedActionPayload::SessionCommand(command) => Some(command),
+        }
+    }
+}
+
+impl crate::core::session_action_store::SessionPayload for QueuedActionPayload {
+    fn records(&self) -> &[DeliveryRecord] {
+        match self {
+            Self::Turn(turn) => &turn.base.records,
+            Self::SessionCommand(_) => &[],
+        }
+    }
+    fn preview(&self) -> &str {
+        match self {
+            Self::Turn(turn) => turn.base.preview.as_deref().unwrap_or(&turn.base.text),
+            Self::SessionCommand(command) => &command.base.text,
         }
     }
 }
@@ -1414,16 +1293,6 @@ pub fn autonomous_status(state: &AutonomousRuntimeState) -> AgentAutonomousStatu
 
 pub fn refresh_autonomous_quality_gates(_state: &mut AutonomousRuntimeState) {}
 
-/// `BashResult` from `core/bash-executor.ts` (another slice).
-#[derive(Debug, Clone, Default)]
-pub struct BashResult {
-    pub output: String,
-    pub exit_code: Option<i64>,
-    pub cancelled: bool,
-    pub truncated: bool,
-    pub full_output_path: Option<String>,
-}
-
 /// `AgentSessionConfig`.
 pub struct AgentSessionConfig {
     pub agent: Arc<dyn AgentHandle>,
@@ -1443,7 +1312,7 @@ pub struct AgentSessionConfig {
     pub agent_observe_controller: Option<Arc<dyn AgentObserveController>>,
     pub include_compact_skill: Option<bool>,
     pub rlm_heartbeat_controller: Option<Arc<dyn AgentRlmHeartbeatController>>,
-    pub mcp_manager: Option<Arc<dyn McpManager>>,
+    pub mcp_manager: Option<Arc<Mutex<McpManager>>>,
     pub base_tools_override: Option<Vec<(String, AgentTool)>>,
     pub extension_runner_ref: Option<Arc<ExtensionRunnerRef>>,
     pub session_start_event: Option<Value>,
@@ -1460,13 +1329,6 @@ pub struct AgentSessionConfig {
     pub auto_refine_reviewer: Option<AutoRefineReviewer>,
     pub serialized_refine: Option<bool>,
     pub initial_goal: Option<InitialGoal>,
-}
-
-/// `scopedModels` entry.
-#[derive(Clone)]
-pub struct ScopedModel {
-    pub model: Model,
-    pub thinking_level: Option<ThinkingLevel>,
 }
 
 /// `initialGoal`.
@@ -2068,6 +1930,7 @@ pub fn noop_rlm_child_abort() {}
 pub fn noop_rlm_child_event_unsubscribe() {}
 
 /// `RlmChildRun`.
+#[derive(Clone)]
 pub struct RlmChildRun {
     pub id: String,
     pub prompt: String,
@@ -2112,6 +1975,7 @@ pub struct RlmChildRun {
 }
 
 /// `RetainedRlmChild`.
+#[derive(Clone)]
 pub struct RetainedRlmChild {
     pub session: Arc<AgentSession>,
     pub run: Option<Arc<Mutex<RlmChildRun>>>,
@@ -2263,7 +2127,7 @@ pub struct AgentSession {
     rlm_heartbeat_controller: Mutex<Option<Arc<dyn AgentRlmHeartbeatController>>>,
     agent_message_controller: Option<Arc<dyn AgentSessionMessageController>>,
     agent_observe_controller: Option<Arc<dyn AgentObserveController>>,
-    mcp_manager: Option<Arc<dyn McpManager>>,
+    mcp_manager: Option<Arc<Mutex<McpManager>>>,
     base_tools_override: Option<Vec<(String, AgentTool)>>,
     subagent_runtime_host: Mutex<Option<Arc<dyn SubagentRuntimeHost>>>,
     auto_refine_reviewer: Option<AutoRefineReviewer>,
@@ -2949,7 +2813,7 @@ impl AgentSession {
         self.agent
             .set_should_stop_after_turn(Arc::new(move |context: ShouldStopAfterTurnContext| {
                 let session = session.clone();
-                block_on(async move { session.should_stop_after_turn(context).await })
+                Box::pin(async move { session.should_stop_after_turn(context).await })
             }));
     }
 
@@ -5184,7 +5048,7 @@ impl AgentSession {
                     let matches = primary
                         .as_ref()
                         .map(|record| {
-                            agent_message_key_of_delivery(&record.message) == key || record.started
+                            delivery_message_key_of(&record.message) == key || record.started
                         })
                         .unwrap_or(false);
                     if matches {
@@ -5239,7 +5103,7 @@ impl AgentSession {
                         let mut started_primary = false;
                         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
                             for record in turn.base.records.iter_mut() {
-                                if agent_message_key_of_delivery(&record.message) == key {
+                                if delivery_message_key_of(&record.message) == key {
                                     record.started = true;
                                     if record.role == DeliveryRecordRole::Primary {
                                         started_primary = true;
@@ -5272,7 +5136,7 @@ impl AgentSession {
                         let mut started_primary = false;
                         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
                             for record in turn.base.records.iter_mut() {
-                                if agent_message_key_of_delivery(&record.message) == key {
+                                if delivery_message_key_of(&record.message) == key {
                                     record.durable = true;
                                     if record.role == DeliveryRecordRole::Primary {
                                         started_primary = true;
@@ -6427,7 +6291,7 @@ impl AgentSession {
 
     /// `get promptTemplates()`.
     pub fn prompt_templates(&self) -> Vec<PromptTemplate> {
-        self.resource_loader.get_prompt_templates()
+        self.resource_loader.get_prompts().prompts
     }
 
     /// `_normalizePromptSnippet`.
@@ -6484,12 +6348,12 @@ impl AgentSession {
             }
         }
 
-        let loader_system_prompt = self.resource_loader.get_system_prompt_override();
+        let loader_system_prompt = self.resource_loader.get_system_prompt();
         let loader_append_system_prompt = self.resource_loader.get_append_system_prompt();
-        let append_system_prompt = loader_append_system_prompt
-            .filter(|value| !value.is_empty());
+        let append_system_prompt = (!loader_append_system_prompt.is_empty())
+            .then(|| loader_append_system_prompt.join("\n\n"));
         let loaded_skills = self.model_visible_skills();
-        let loaded_context_files = self.resource_loader.get_context_files();
+        let loaded_context_files = self.resource_loader.get_agents_files().agents_files;
 
         let options = BuildSystemPromptOptions {
             custom_prompt: loader_system_prompt,
@@ -7570,7 +7434,7 @@ impl AgentSession {
         let skill_name = parsed.name["skill:".len()..].to_string();
         let args = parsed.args.clone();
 
-        let skills = self.resource_loader.get_skills();
+        let skills = self.resource_loader.get_skills().skills;
         let skill = match skills.iter().find(|skill| skill.name == skill_name) {
             Some(skill) => skill.clone(),
             None => return text.to_string(), // Unknown skill, pass through
@@ -8023,7 +7887,7 @@ impl AgentSession {
             accepted_agent_message: options.accepted_agent_message.unwrap_or(false),
             accepted_before_completion: options.accepted_before_completion.unwrap_or(false),
             capture_run_messages: None,
-            cancelled_dispatch_end: None,
+            cancelled_dispatch_ended: None,
         };
         QueuedSessionAction {
             id: id.clone(),
@@ -9045,7 +8909,7 @@ impl AgentSession {
                 &text,
                 images,
                 Some(PreparedTurnActionOptions {
-                    message: Some(app_message),
+                    custom_message: Some(app_message),
                     resume_if_idle: Some(true),
                     ..Default::default()
                 }),
@@ -9063,7 +8927,7 @@ impl AgentSession {
                 &text,
                 images,
                 Some(PreparedTurnActionOptions {
-                    message: Some(app_message),
+                    custom_message: Some(app_message),
                     resume_if_idle: Some(true),
                     execution_policy: Some(self.turn_execution_policy("customTrigger", None)),
                     queue_visible: Some(false),
@@ -10734,1536 +10598,7 @@ impl AgentSession {
         self.auto_compaction_enabled.load(Ordering::SeqCst)
     }
 
-    /// `bindExtensions(bindings)`.
-    pub async fn bind_extensions(self: &Arc<Self>, bindings: &ExtensionBindings) -> Result<(), String> {
-        let runner = match &bindings.runner {
-            Some(runner) => runner.clone(),
-            None => return Ok(()),
-        };
-        self.apply_extension_bindings(&runner);
-        self.bind_extension_core(&runner);
-        self.extend_resources_from_extensions("startup").await?;
-        self.refresh_tool_registry(true, None);
-        Ok(())
-    }
 
-    /// `extendResourcesFromExtensions(reason)`.
-    async fn extend_resources_from_extensions(self: &Arc<Self>, reason: &str) -> Result<(), String> {
-        let entries = match &self.resource_extension_paths {
-            Some(paths) => paths.entries.clone(),
-            None => return Ok(()),
-        };
-        let paths = self.build_extension_resource_paths(&entries);
-        if paths.is_empty() {
-            return Ok(());
-        }
-        let _ = reason;
-        Ok(())
-    }
-
-    /// `buildExtensionResourcePaths(entries)`.
-    fn build_extension_resource_paths(
-        &self,
-        entries: &[ResourceExtensionEntry],
-    ) -> Vec<String> {
-        let mut paths: Vec<String> = Vec::new();
-        for entry in entries {
-            if entry.path.is_empty() {
-                continue;
-            }
-            let label = self.get_extension_source_label(&entry.extension_path);
-            let value = format!("{}/{}", entry.path, label);
-            if !paths.contains(&value) {
-                paths.push(value);
-            }
-        }
-        paths
-    }
-
-    /// `getExtensionSourceLabel(extensionPath)`.
-    fn get_extension_source_label(&self, extension_path: &str) -> String {
-        let trimmed = extension_path.trim_end_matches(['/', '\\']);
-        let normalized = trimmed.replace('\\', "/");
-        normalized
-            .rsplit('/')
-            .next()
-            .unwrap_or(normalized.as_str())
-            .to_string()
-    }
-
-    /// `_applyExtensionBindings(runner)`.
-    fn apply_extension_bindings(&self, runner: &ExtensionRunner) {
-        self.extension_runner_ref.set(Some(runner.clone()));
-        if let Some(handler) = &self.extension_shutdown_handler {
-            let _ = handler;
-        }
-    }
-
-    /// `_refreshCurrentModelFromRegistry()`.
-    fn refresh_current_model_from_registry(self: &Arc<Self>) {
-        let models = self.model_registry.lock().unwrap().get_all();
-        let session_model = self.model();
-        // The registry owns the catalog; the session re-derives its handle from it.
-        let _ = (models, session_model);
-    }
-
-    /// `_bindExtensionCore(runner)`.
-    fn bind_extension_core(&self, runner: &ExtensionRunner) {
-        runner.set_extension_command_context_actions(self.extension_command_context_actions.clone());
-        runner.set_extension_error_listener(self.extension_error_listener.clone());
-    }
-
-    /// `_refreshToolRegistry(options)`.
-    fn refresh_tool_registry(
-        self: &Arc<Self>,
-        include_all: bool,
-        active_tool_names: Option<Vec<String>>,
-    ) {
-        let mut tools: Vec<(String, AgentTool)> = self
-            .base_tools_override
-            .clone()
-            .unwrap_or_default();
-        if tools.is_empty() {
-            for (name, tool) in crate::core::extensions::types::builtin_tool_registry() {
-                tools.push((name, tool));
-            }
-        }
-        {
-            let mut registry = self.tool_registry.lock().unwrap();
-            registry.clear();
-            for (name, tool) in tools.iter() {
-                registry.insert(name.clone(), tool.clone());
-            }
-        }
-        let definitions = {
-            let registry = self.tool_registry.lock().unwrap();
-            registry
-                .iter()
-                .map(|(name, tool)| {
-                    (
-                        name.clone(),
-                        ToolDefinitionEntry {
-                            definition: crate::core::extensions::types::ToolDefinition {
-                                name: name.clone(),
-                                description: tool.description.clone().unwrap_or_default(),
-                                parameters: tool.parameters.clone().unwrap_or(Value::Null),
-                                source_info: create_synthetic_source_info(name, "builtin", None),
-                            },
-                            source_info: create_synthetic_source_info(name, "builtin", None),
-                        },
-                    )
-                })
-                .collect::<BTreeMap<String, ToolDefinitionEntry>>()
-        };
-        *self.tool_definitions.lock().unwrap() = definitions;
-        *self.base_tool_definitions.lock().unwrap() = self
-            .tool_definitions
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|(name, entry)| (name.clone(), entry.definition.clone()))
-            .collect();
-        if include_all {
-            let names: Vec<String> = self.get_active_tool_names();
-            self.set_active_tools_by_name(&names);
-        } else if let Some(names) = active_tool_names {
-            self.set_active_tools_by_name(&names);
-        }
-    }
-
-    /// `_buildRuntime(options)`.
-    pub fn build_runtime(self: &Arc<Self>, active_tool_names: Option<Vec<String>>, include_all: bool) {
-        self.refresh_tool_registry(include_all, active_tool_names);
-        let names = self.get_active_tool_names();
-        *self.base_system_prompt.lock().unwrap() = self.rebuild_system_prompt(&names);
-        let mut state = self.agent.state();
-        state.system_prompt = self.base_system_prompt.lock().unwrap().clone();
-        self.agent.set_state(state);
-        let tools = crate::core::tools::create_builtin_tools(crate::core::tools::BuiltinToolOptions {
-            cwd: self.cwd.clone(),
-            agent_dir: self.agent_dir.clone(),
-            include_goals: self.include_goals,
-            include_compact_skill: self.include_compact_skill,
-        });
-        if let Ok(tools) = tools {
-            let mut registry = self.tool_registry.lock().unwrap();
-            for tool in tools {
-                registry.insert(tool.name.clone(), tool);
-            }
-        }
-    }
-
-    /// `_createKernelHostHandlers()`    /// `_createKernelHostHandlers()`.
-    fn create_kernel_host_handlers(self: &Arc<Self>) -> HostRequestHandlers {
-        let mut handlers = HostRequestHandlers::new();
-        let session = self.clone();
-        handlers.insert(
-            "goal".to_string(),
-            Arc::new(move |payload: Value| {
-                let response = session.handle_goal_host_request(payload);
-                Box::pin(async move { Ok(response) })
-            }),
-        );
-        let session = self.clone();
-        handlers.insert(
-            "compact".to_string(),
-            Arc::new(move |payload: Value| {
-                let session = session.clone();
-                Box::pin(async move { session.handle_compact_host_request(payload).await })
-            }),
-        );
-        let session = self.clone();
-        handlers.insert(
-            "refine".to_string(),
-            Arc::new(move |payload: Value| {
-                let session = session.clone();
-                Box::pin(async move { session.handle_refine_host_request(payload).await })
-            }),
-        );
-        let session = self.clone();
-        handlers.insert(
-            "rlm_heartbeat".to_string(),
-            Arc::new(move |payload: Value| {
-                let response = session.handle_rlm_heartbeat_host_request(payload);
-                Box::pin(async move { Ok(response) })
-            }),
-        );
-        let session = self.clone();
-        handlers.insert(
-            "agent_message".to_string(),
-            Arc::new(move |payload: Value| {
-                let session = session.clone();
-                Box::pin(async move { session.handle_agent_message_host_request(payload).await })
-            }),
-        );
-        let session = self.clone();
-        handlers.insert(
-            "agent_observe".to_string(),
-            Arc::new(move |payload: Value| {
-                let session = session.clone();
-                Box::pin(async move { session.handle_agent_observe_host_request(payload).await })
-            }),
-        );
-        handlers
-    }// `reload()`.
-    pub async fn reload_with_options(self: &Arc<Self>, rebind: Option<ExtensionBindings>) -> Result<(), String> {
-        if let Some(bindings) = rebind.as_ref() {
-            if let Some(runner) = &bindings.runner {
-                self.apply_extension_bindings(runner);
-                self.bind_extension_core(runner);
-            }
-        }
-        self.extend_resources_from_extensions("reload").await?;
-        self.refresh_tool_registry(true, None);
-        self.refresh_mcp_providers();
-        Ok(())
-    }
-
-    /// `_rlmKernelEnv()`.
-    fn rlm_kernel_env(&self) -> HashMap<String, String> {
-        let mut env: HashMap<String, String> = HashMap::new();
-        env.insert("PRIME_AGENT_SESSION_ID".to_string(), self.session_id());
-        env.insert("PRIME_AGENT_RLM_DEPTH".to_string(), self.rlm_depth.to_string());
-        if let Some(dir) = self.rlm_session_dir.clone() {
-            env.insert("PRIME_AGENT_RLM_SESSION_DIR".to_string(), dir);
-        }
-        if let Some(node_id) = self.rlm_parent_node_id.clone() {
-            env.insert("PRIME_AGENT_RLM_PARENT_NODE_ID".to_string(), node_id);
-        }
-        if let Some(parent) = self.rlm_parent_agent.clone() {
-            env.insert("PRIME_AGENT_RLM_PARENT_AGENT".to_string(), parent);
-        }
-        if let Some(provider) = self.exec_env_provider.lock().unwrap().clone() {
-            for (key, value) in provider() {
-                env.insert(key, value);
-            }
-        }
-        self.add_websearch_key_env(&mut env);
-        env
-    }
-
-    /// `_addWebsearchKeyEnv(env)`.
-    fn add_websearch_key_env(&self, env: &mut HashMap<String, String>) {
-        // `SERPER_CREDENTIAL_ID`/`WEBSEARCH_SKILL_NAME` drive the credential lookup.
-        let _ = (SERPER_CREDENTIAL_ID, WEBSEARCH_SKILL_NAME);
-        if env.contains_key(SERPER_ENV_VAR) {
-            return;
-        }
-        if let Ok(value) = std::env::var(SERPER_ENV_VAR) {
-            env.insert(SERPER_ENV_VAR.to_string(), value);
-        }
-    }
-
-    /// `_createChildRlmSessionDir()`.
-    fn create_child_rlm_session_dir(&self) -> Result<String, String> {
-        let parent = match self.rlm_session_dir.clone() {
-            Some(parent) => parent,
-            None => return self.create_ephemeral_rlm_session_dir(),
-        };
-        let dir = PathBuf::from(parent).join(format!("child-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-        Ok(dir.to_string_lossy().to_string())
-    }
-
-    /// `_createEphemeralRlmSessionDir()`.
-    fn create_ephemeral_rlm_session_dir(&self) -> Result<String, String> {
-        let dir = PathBuf::from(std::env::temp_dir()).join(format!(
-            "prime-agent-rlm-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
-        Ok(dir.to_string_lossy().to_string())
-    }
-
-    /// `_contextTokensForCurrentMessages()`.
-    pub fn context_tokens_for_current_messages(&self) -> Option<f64> {
-        let messages = self.messages();
-        if messages.is_empty() {
-            return None;
-        }
-        Some(calculate_context_tokens(&messages))
-    }
-
-    /// `setCurrentRecap(recap)`.
-    pub fn set_current_recap(&self, recap: Option<String>) {
-        *self.recap.lock().unwrap() = recap;
-    }
-
-    /// `get repliedToParentSinceTask()`.
-    pub fn replied_to_parent_since_task(&self) -> Option<bool> {
-        *self.replied_to_parent_since_task.lock().unwrap()
-    }
-
-    /// `getCurrentRecap()`.
-    pub fn get_current_recap(&self) -> Option<String> {
-        self.recap.lock().unwrap().clone()
-    }
-
-    /// `_findAssistantEntryForMessage(message)`.
-    fn find_assistant_entry_for_message(&self, message: &AgentMessage) -> Option<SessionEntry> {
-        let key = assistant_message_key(message);
-        self.session_manager
-            .lock()
-            .unwrap()
-            .get_branch(None)
-            .into_iter()
-            .rev()
-            .find(|entry| {
-                entry
-                    .get("message")
-                    .map(|value| assistant_message_key(&agent_message_from_value(value)))
-                    .map(|candidate| candidate == key)
-                    .unwrap_or(false)
-            })
-    }
-
-    /// `_createRlmSubagentRuntimeOptions(options)`.
-    fn create_rlm_subagent_runtime_options(
-        self: &Arc<Self>,
-        options: RlmSubagentRuntimeOptionsInput,
-    ) -> Result<RlmCreateSubagentRuntimeOptions, String> {
-        let session_dir = match options.session_dir {
-            Some(dir) => dir,
-            None => self.create_child_rlm_session_dir()?,
-        };
-        Ok(RlmCreateSubagentRuntimeOptions {
-            parent_session_id: self.session_id(),
-            parent_session_dir: session_dir,
-            parent_node_id: self.rlm_parent_node_id.clone(),
-            parent_agent: self.rlm_parent_agent.clone(),
-            cwd: self.cwd.clone(),
-            agent_dir: self.agent_dir.clone(),
-            rlm_depth: self.rlm_depth + 1,
-            rlm_max_depth: self.rlm_max_depth(),
-            prompt: options.prompt,
-            session_name: options.session_name,
-            model: options.model,
-            thinking_level: options.thinking_level,
-        })
-    }
-
-    /// `_createRlmSubagentRuntime(options)`.
-    async fn create_rlm_subagent_runtime(
-        self: &Arc<Self>,
-        options: RlmSubagentRuntimeOptionsInput,
-    ) -> Result<RlmSubagentRuntime, String> {
-        let host = self.subagent_runtime_host.lock().unwrap().clone();
-        match host {
-            Some(host) => {
-                let runtime_options = self.create_rlm_subagent_runtime_options(options.clone())?;
-                host.create_subagent_runtime(runtime_options).await
-            }
-            None => self.create_inline_rlm_subagent_runtime(options),
-        }
-    }
-
-    /// `_createInlineRlmSubagentRuntime(options)`.
-    fn create_inline_rlm_subagent_runtime(
-        self: &Arc<Self>,
-        options: RlmSubagentRuntimeOptionsInput,
-    ) -> Result<RlmSubagentRuntime, String> {
-        let runtime_options = self.create_rlm_subagent_runtime_options(options)?;
-        // Inline (non-daemon) mode: the runtime handle carries the child session
-        // directory; the host itself is created by the caller's subagent host.
-        Ok(RlmSubagentRuntime {
-            handle: RlmSpawnHandle {
-                child_id: uuid::Uuid::new_v4().to_string(),
-                session_dir: runtime_options.parent_session_dir,
-                session_name: runtime_options.session_name.clone(),
-            },
-            runtime: Value::Null,
-        })
-    }
-
-    /// `_abandonRlmRunForQuiescence(run)`.
-    fn abandon_rlm_run_for_quiescence(&self, run: &RlmChildRun) {
-        self.abandoned_rlm_quiescence_child_ids
-            .lock()
-            .unwrap()
-            .insert(run.child_id.clone());
-    }
-
-    /// `_cancelActiveRlmChildRuns(reason)`.
-    fn cancel_active_rlm_child_runs(&self, reason: &str) {
-        let runs: Vec<Arc<Mutex<RlmChildRun>>> = self
-            .active_rlm_child_runs
-            .lock()
-            .unwrap()
-            .values()
-            .cloned()
-            .collect();
-        for run in runs {
-            let run_snapshot = run.lock().unwrap().clone();
-            let _ = self.cancel_rlm_child_run(&run_snapshot, reason);
-        }
-    }
-
-    /// `_cancelRlmChildRun(run, reason)`.
-    fn cancel_rlm_child_run(&self, run: &RlmChildRun, reason: &str) -> bool {
-        let terminal = matches!(
-            run.status.as_str(),
-            "done" | "error" | "cancelled"
-        );
-        if terminal {
-            return false;
-        }
-        (run.abort)();
-        if let Some(run) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
-            let mut run = run.lock().unwrap();
-            run.status = RLM_CHILD_AGENT_STATUS_CANCELLED.to_string();
-            run.error = Some(reason.to_string());
-        }
-        true
-    }
-
-    /// `getRlmChildRunStatus(childId)`.
-    pub fn get_rlm_child_run_status(&self, child_id: &str) -> Option<RlmChildAgentStatus> {
-        self.active_rlm_child_runs
-            .lock()
-            .unwrap()
-            .get(child_id)
-            .map(|run| run.lock().unwrap().status.clone())
-    }
-
-    /// `_currentActiveSessionId()`.
-    async fn current_active_session_id(&self) -> Option<String> {
-        self.agent_message_controller
-            .as_ref()
-            .map(|controller| self.session_id())
-            .or(Some(self.session_id()))
-    }
-
-    /// `_awaitPendingRlmChildPublication(selector)`.
-    async fn await_pending_rlm_child_publication(&self, selector: &str) -> Result<String, String> {
-        let deferred = {
-            let mut deleting = self.deleting_rlm_children.lock().unwrap();
-            let entry = deleting
-                .entry(selector.to_string())
-                .or_insert_with(|| Arc::new(create_agent_message_deferred()));
-            entry.clone()
-        };
-        deferred.wait().await?;
-        Ok(selector.to_string())
-    }
-
-    /// `listRlmSubagents()`.
-    pub async fn list_rlm_subagents(self: &Arc<Self>) -> Result<RlmListSubagentsResult, String> {
-        let listed = match &self.agent_message_controller {
-            Some(controller) => controller.roster().await.ok(),
-            None => None,
-        };
-        Ok(self.build_rlm_subagent_list(listed))
-    }
-
-    /// `_buildRlmSubagentList(listedAgents?)`.
-    fn build_rlm_subagent_list(
-        &self,
-        listed_agents: Option<AgentSessionMessageListResult>,
-    ) -> RlmListSubagentsResult {
-        let mut entries: Vec<RlmSubagentRegistryEntry> = Vec::new();
-        let runs: Vec<RlmChildRun> = self
-            .active_rlm_child_runs
-            .lock()
-            .unwrap()
-            .values()
-            .map(|run| run.lock().unwrap().clone())
-            .collect();
-        for run in runs.iter() {
-            entries.push(RlmSubagentRegistryEntry {
-                child_id: run.child_id.clone(),
-                session_name: run.session_name.clone(),
-                status: run.status.clone(),
-                label: run.label.clone(),
-                model: run.model.clone(),
-            });
-        }
-        if let Some(listed) = listed_agents {
-            for agent in listed.agents.iter() {
-                if entries.iter().any(|entry| entry.child_id == agent.session_id) {
-                    continue;
-                }
-                entries.push(RlmSubagentRegistryEntry {
-                    child_id: agent.session_id.clone(),
-                    session_name: agent.session_name.clone(),
-                    status: RLM_CHILD_AGENT_STATUS_DONE.to_string(),
-                    label: None,
-                    model: None,
-                });
-            }
-        }
-        let max_depth = self.rlm_max_depth();
-        RlmListSubagentsResult {
-            agents: entries,
-            max_depth,
-            depth: self.rlm_depth,
-        }
-    }
-
-    /// `_rlmSubagentMatchesTarget(entry, target)`.
-    fn rlm_subagent_matches_target(&self, entry: &RlmSubagentRegistryEntry, target: &str) -> bool {
-        entry.child_id == target
-            || entry
-                .session_name
-                .as_deref()
-                .map(|name| name == target)
-                .unwrap_or(false)
-    }
-
-    /// `_resolveDirectRlmSubagent(target)`.
-    async fn resolve_direct_rlm_subagent(
-        self: &Arc<Self>,
-        target: &str,
-    ) -> Result<Option<RlmSubagentRegistryEntry>, String> {
-        let listed = self.list_rlm_subagents().await?;
-        Ok(listed
-            .agents
-            .into_iter()
-            .find(|entry| self.rlm_subagent_matches_target(entry, target)))
-    }
-
-    /// `deleteInactiveRlmSubagent(...)`.
-    pub async fn delete_inactive_rlm_subagent(
-        self: &Arc<Self>,
-        target: &str,
-        status: Option<&str>,
-    ) -> Result<RlmDeleteSubagentResult, String> {
-        let resolved = self.resolve_direct_rlm_subagent(target).await?;
-        let resolved = match resolved {
-            Some(resolved) => resolved,
-            None => {
-                return Ok(RlmDeleteSubagentResult {
-                    deleted: false,
-                    child_id: None,
-                    message: Some(format!("No subagent matched {target}")),
-                })
-            }
-        };
-        if let Some(status) = status {
-            if resolved.status != status {
-                return Ok(RlmDeleteSubagentResult {
-                    deleted: false,
-                    child_id: Some(resolved.child_id.clone()),
-                    message: Some(format!(
-                        "Subagent {} is {}",
-                        resolved.child_id, resolved.status
-                    )),
-                });
-            }
-        }
-        self.delete_resolved_rlm_subagent(&resolved).await
-    }
-
-    /// `deleteRlmSubagent(target)`.
-    pub async fn delete_rlm_subagent(
-        self: &Arc<Self>,
-        target: &str,
-    ) -> Result<RlmDeleteSubagentResult, String> {
-        let resolved = self.resolve_direct_rlm_subagent(target).await?;
-        let resolved = match resolved {
-            Some(resolved) => resolved,
-            None => {
-                return Ok(RlmDeleteSubagentResult {
-                    deleted: false,
-                    child_id: None,
-                    message: Some(format!("No subagent matched {target}")),
-                })
-            }
-        };
-        self.delete_resolved_rlm_subagent(&resolved).await
-    }
-
-    /// `_trackRlmSubagentDeletion(...)`.
-    async fn track_rlm_subagent_deletion(
-        self: &Arc<Self>,
-        child_id: &str,
-    ) -> Result<AgentMessageDeferred, String> {
-        self.deleted_rlm_child_ids
-            .lock()
-            .unwrap()
-            .insert(child_id.to_string());
-        let deferred = Arc::new(create_agent_message_deferred());
-        self.deleting_rlm_children
-            .lock()
-            .unwrap()
-            .insert(child_id.to_string(), deferred.clone());
-        Ok((*deferred).clone())
-    }
-
-    /// `_deleteRlmSubagentSession(childId, session?)`.
-    fn delete_rlm_subagent_session(&self, child_id: &str, session: Option<&Arc<AgentSession>>) -> Result<(), String> {
-        if let Some(session) = session {
-            let _ = session;
-        }
-        let mut children = self.rlm_child_sessions.lock().unwrap();
-        children.remove(child_id);
-        Ok(())
-    }
-
-    /// `_ensureRlmRunDeletionCleanup(run, session)`.
-    fn ensure_rlm_run_deletion_cleanup(&self, run: &RlmChildRun, session: &Arc<AgentSession>) {
-        let _ = (run, session);
-    }
-
-    /// `_recordRlmRunDeletionCleanupFailure(...)`.
-    async fn record_rlm_run_deletion_cleanup_failure(
-        &self,
-        run: &RlmChildRun,
-        error: &str,
-    ) {
-        let entry = RlmSubagentRegistryEntry {
-            child_id: run.child_id.clone(),
-            session_name: run.session_name.clone(),
-            status: RLM_CHILD_AGENT_STATUS_ERROR.to_string(),
-            label: run.label.clone(),
-            model: run.model.clone(),
-        };
-        self.rlm_child_cleanup_failures
-            .lock()
-            .unwrap()
-            .insert(run.child_id.clone(), entry);
-        let _ = error;
-    }
-
-    /// `_finishRlmRunDeletion(run)`.
-    async fn finish_rlm_run_deletion(self: &Arc<Self>, run: &RlmChildRun) {
-        self.remove_rlm_subagent_tracking(&run.child_id, Some(run));
-        if let Some(deferred) = self.deleting_rlm_children.lock().unwrap().remove(&run.child_id) {
-            deferred.resolve();
-        }
-    }
-
-    /// `_observeRlmRunDeletionCleanup(...)`.
-    fn observe_rlm_run_deletion_cleanup(self: &Arc<Self>, run: RlmChildRun, session: Arc<AgentSession>) {
-        let session = self.clone();
-        let _ = session;
-        let _ = (run, self.clone());
-    }
-
-    /// `_continueFinishedRlmRunDeletion(...)`.
-    fn continue_finished_rlm_run_deletion(self: &Arc<Self>, run: RlmChildRun) {
-        let session = self.clone();
-        tokio::spawn(async move {
-            session.finish_rlm_run_deletion(&run).await;
-        });
-    }
-
-    /// `_removeRlmSubagentTracking(childId, run?)`.
-    fn remove_rlm_subagent_tracking(&self, child_id: &str, run: Option<&RlmChildRun>) {
-        let _ = run;
-        self.active_rlm_child_runs.lock().unwrap().remove(child_id);
-        self.unsettled_rlm_child_runs
-            .lock()
-            .unwrap()
-            .retain(|candidate| candidate.lock().unwrap().child_id != child_id);
-        self.rlm_child_unsubscribes.lock().unwrap().remove(child_id);
-    }
-
-    /// `_emitRlmSubagentRemoval(subagent)`.
-    fn emit_rlm_subagent_removal(&self, subagent: &RlmSubagentRegistryEntry) {
-        self.emit(AgentSessionEvent::RlmSubagentRemoved {
-            child_id: subagent.child_id.clone(),
-            session_name: subagent.session_name.clone(),
-        });
-    }
-
-    /// `_deleteResolvedRlmSubagent(subagent)`.
-    async fn delete_resolved_rlm_subagent(
-        self: &Arc<Self>,
-        subagent: &RlmSubagentRegistryEntry,
-    ) -> Result<RlmDeleteSubagentResult, String> {
-        let deferred = self.track_rlm_subagent_deletion(&subagent.child_id).await?;
-        let child_id = subagent.child_id.clone();
-        let run = self
-            .active_rlm_child_runs
-            .lock()
-            .unwrap()
-            .get(&child_id)
-            .map(|run| run.lock().unwrap().clone());
-        if let Some(run) = run.as_ref() {
-            let _ = self.cancel_rlm_child_run(run, "Subagent deleted");
-        }
-        let session = self
-            .rlm_child_sessions
-            .lock()
-            .unwrap()
-            .get(&child_id)
-            .map(|child| child.session.clone());
-        if let Err(error) = self.delete_rlm_subagent_session(&child_id, session.as_ref()) {
-            self.record_rlm_run_deletion_cleanup_failure(
-                run.as_ref().unwrap_or(&empty_rlm_child_run(&child_id)),
-                &error,
-            )
-            .await;
-        }
-        match run.as_ref() {
-            Some(run) => self.finish_rlm_run_deletion(run).await,
-            None => self.remove_rlm_subagent_tracking(&child_id, None),
-        }
-        self.emit_rlm_subagent_removal(subagent);
-        deferred.resolve();
-        Ok(RlmDeleteSubagentResult {
-            deleted: true,
-            child_id: Some(child_id),
-            message: None,
-        })
-    }
-
-    /// `releaseRlmChildSession(childId, session)`.
-    pub fn release_rlm_child_session(
-        self: &Arc<Self>,
-        child_id: &str,
-        session: &Arc<AgentSession>,
-    ) -> Box<dyn Fn() + Send + Sync> {
-        let weak = Arc::downgrade(self);
-        let child_id = child_id.to_string();
-        let session = session.clone();
-        Box::new(move || {
-            let _ = session;
-            if let Some(parent) = weak.upgrade() {
-                parent.rlm_child_sessions.lock().unwrap().remove(&child_id);
-            }
-        })
-    }
-
-    /// `_rlmChildSnapshotForRun(run)`.
-    fn rlm_child_snapshot_for_run(&self, run: &RlmChildRun) -> RlmChildAgentSnapshot {
-        RlmChildAgentSnapshot {
-            child_id: run.child_id.clone(),
-            session_name: run.session_name.clone(),
-            status: run.status.clone(),
-            label: run.label.clone(),
-            model: run.model.clone(),
-            depth: run.depth,
-            activity: run.activity.clone(),
-        }
-    }
-
-    /// `_rlmChildSnapshotForSession(childId, child)`.
-    fn rlm_child_snapshot_for_session(&self, child_id: &str, child: &Arc<AgentSession>) -> RlmChildAgentSnapshot {
-        RlmChildAgentSnapshot {
-            child_id: child_id.to_string(),
-            session_name: child.session_name(),
-            status: RLM_CHILD_AGENT_STATUS_RUNNING.to_string(),
-            label: None,
-            model: Some(child.model().id.clone()),
-            depth: child.rlm_depth(),
-            activity: None,
-        }
-    }
-
-    /// `_isUnboundTerminalRlmChildRun(run)`.
-    fn is_unbound_terminal_rlm_child_run(&self, run: &RlmChildRun) -> bool {
-        matches!(run.status.as_str(), "done" | "error" | "cancelled")
-            && !self.rlm_child_sessions.lock().unwrap().contains_key(&run.child_id)
-    }
-
-    /// `hasRunningRlmChildren()`.
-    pub fn has_running_rlm_children(&self) -> bool {
-        self.active_rlm_child_runs
-            .lock()
-            .unwrap()
-            .values()
-            .any(|run| {
-                matches!(
-                    run.lock().unwrap().status.as_str(),
-                    "queued" | "running"
-                )
-            })
-    }
-
-    /// `_rlmChildSessionSnapshot()`.
-    fn rlm_child_session_snapshot(&self) -> Vec<Arc<AgentSession>> {
-        self.rlm_child_sessions
-            .lock()
-            .unwrap()
-            .values()
-            .map(|child| child.session.clone())
-            .collect()
-    }
-
-    /// `_hasUnsettledRlmQuiescenceWork()`.
-    fn has_unsettled_rlm_quiescence_work(&self) -> bool {
-        !self.unsettled_rlm_child_runs.lock().unwrap().is_empty()
-            || !self.abandoned_rlm_quiescence_child_ids
-                .lock()
-                .unwrap()
-                .is_empty()
-    }
-
-    /// `_assertRlmSubagentSessionNameAvailable(name, ignorePendingName?)`.
-    async fn assert_rlm_subagent_session_name_available(
-        self: &Arc<Self>,
-        name: &str,
-        ignore_pending_name: bool,
-    ) -> Result<(), String> {
-        let pending = if ignore_pending_name {
-            false
-        } else {
-            self.pending_rlm_subagent_session_names
-                .lock()
-                .unwrap()
-                .contains(name)
-        };
-        if pending {
-            return Err(format_agent_session_name_unavailable(name));
-        }
-        Ok(())
-    }
-
-    /// `_authenticatedRlmModels()`.
-    async fn authenticated_rlm_models(&self) -> Vec<Model> {
-        self.model_registry.lock().unwrap().available_models()
-    }
-
-    /// `findRlmModels(query, limit)`.
-    pub async fn find_rlm_models(
-        self: &Arc<Self>,
-        query: &str,
-        limit: i64,
-    ) -> Result<RlmFindModelsResult, String> {
-        let models = self.authenticated_rlm_models().await;
-        let matched: Vec<Value> = models
-            .iter()
-            .filter(|model| {
-                query.is_empty()
-                    || model.id.contains(query)
-                    || model.name.to_lowercase().contains(&query.to_lowercase())
-            })
-            .take(if limit > 0 { limit as usize } else { usize::MAX })
-            .map(|model| {
-                serde_json::json!({
-                    "id": model.id,
-                    "name": model.name,
-                    "provider": model.provider,
-                })
-            })
-            .collect();
-        Ok(RlmFindModelsResult { models: matched })
-    }
-
-    /// `_resolveRlmSubagentModel(...)`.
-    async fn resolve_rlm_subagent_model(
-        self: &Arc<Self>,
-        requested: Option<&str>,
-        thinking_level: Option<ThinkingLevel>,
-    ) -> Result<RlmSubagentModelSelection, String> {
-        let models = self.authenticated_rlm_models().await;
-        let model = match requested {
-            Some(requested) => models
-                .iter()
-                .find(|model| model.id == requested || model.name == requested)
-                .cloned(),
-            None => Some(self.model()),
-        };
-        match model {
-            Some(model) => Ok(RlmSubagentModelSelection {
-                model,
-                thinking_level,
-            }),
-            None => Err(format!("No model matched {requested:?}")),
-        }
-    }
-
-    /// `createRlmSession(prompt, kwargs)`.
-    pub async fn create_rlm_session(
-        self: &Arc<Self>,
-        prompt: &str,
-        kwargs: &Map<String, Value>,
-    ) -> Result<RlmCreateSessionResult, String> {
-        let options = RlmSubagentRuntimeOptionsInput {
-            prompt: prompt.to_string(),
-            session_name: kwargs
-                .get("session_name")
-                .and_then(Value::as_str)
-                .map(|value| value.to_string()),
-            model: kwargs
-                .get("model")
-                .and_then(Value::as_str)
-                .map(|value| value.to_string()),
-            thinking_level: None,
-            session_dir: kwargs
-                .get("session_dir")
-                .and_then(Value::as_str)
-                .map(|value| value.to_string()),
-        };
-        let runtime = self.create_rlm_subagent_runtime(options).await?;
-        Ok(RlmCreateSessionResult {
-            child_id: runtime.runtime_id.clone(),
-            session_dir: runtime.session_dir.clone(),
-            session_name: None,
-        })
-    }
-
-    /// `runRlmChild(...)`.
-    pub async fn run_rlm_child(
-        self: &Arc<Self>,
-        prompt: &str,
-        kwargs: &Map<String, Value>,
-    ) -> Result<RlmSpawnHandle, String> {
-        let created = self.create_rlm_session(prompt, kwargs).await?;
-        Ok(RlmSpawnHandle {
-            child_id: created.child_id,
-            session_dir: created.session_dir,
-            session_name: created.session_name,
-        })
-    }
-
-    /// `_isRetryableError(message)`.
-    fn is_retryable_error(&self, message: &AssistantMessage) -> bool {
-        let kind = self.get_provider_stream_failure_kind(message);
-        if let Some(kind) = kind {
-            if !provider_stream_failure_kind_is_retryable(&kind) {
-                return false;
-            }
-        }
-        if message.stop_reason.as_deref() == Some(STOP_REASON_ERROR) {
-            return !self.is_structured_permanent_provider_retry_exhausted(message);
-        }
-        false
-    }
-
-    /// `_isFauxProviderQueueExhausted(message)`.
-    fn is_faux_provider_queue_exhausted(&self, message: &AssistantMessage) -> bool {
-        message
-            .error_message
-            .as_deref()
-            .map(|value| value.contains("FAUX_QUEUE_EXHAUSTED"))
-            .unwrap_or(false)
-    }
-
-    /// `_isAgentLifecycleFailure(message)`.
-    fn is_agent_lifecycle_failure(&self, message: &AssistantMessage) -> bool {
-        self.get_provider_stream_failure_kind(message).as_deref() == Some("agent_lifecycle")
-    }
-
-    /// `_getProviderStreamFailureKind(message)`.
-    fn get_provider_stream_failure_kind(&self, message: &AssistantMessage) -> Option<String> {
-        message
-            .details
-            .as_ref()
-            .and_then(|details| details.get("providerStreamFailureKind"))
-            .and_then(Value::as_str)
-            .map(|value| value.to_string())
-    }
-
-    /// `_isStructuredPermanentProviderRetryExhausted(message)`.
-    fn is_structured_permanent_provider_retry_exhausted(&self, message: &AssistantMessage) -> bool {
-        message
-            .details
-            .as_ref()
-            .and_then(|details| details.get("permanentProviderRetryExhausted"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    /// `_isConcreteProviderAuthFailure(message)`.
-    fn is_concrete_provider_auth_failure(&self, message: &AssistantMessage) -> bool {
-        let text = message.error_message.clone().unwrap_or_default();
-        is_likely_authentication_error(&text)
-    }
-
-    /// `_captureRetryAuthFailureSource(message)`.
-    fn capture_retry_auth_failure_source(&self, message: &AssistantMessage) -> Option<AuthSourceToken> {
-        if !self.is_concrete_provider_auth_failure(message) {
-            return None;
-        }
-        let source = message
-            .details
-            .as_ref()
-            .and_then(|details| details.get("authSourceToken"))
-            .cloned()
-            .and_then(|value| serde_json::from_value::<AuthSourceToken>(value).ok());
-        if let Some(source) = source.clone() {
-            self.retry_auth_failure_sources.lock().unwrap().push(source.clone());
-        }
-        source
-    }
-
-    /// `_markProviderAuthStale(message, authSourceTokens?)`.
-    fn mark_provider_auth_stale(&self, message: &AssistantMessage, auth_source_tokens: Option<&[AuthSourceToken]>) {
-        let _ = message;
-        let tokens: Vec<AuthSourceToken> = match auth_source_tokens {
-            Some(tokens) => tokens.to_vec(),
-            None => self.retry_auth_failure_sources.lock().unwrap().clone(),
-        };
-        if tokens.is_empty() {
-            return;
-        }
-        let _ = tokens;
-    }
-
-    /// `_markProviderAuthStaleForRetryFailure(message)`.
-    fn mark_provider_auth_stale_for_retry_failure(&self, message: &AssistantMessage) {
-        if !self.is_concrete_provider_auth_failure(message) {
-            return;
-        }
-        let tokens = self.retry_auth_failure_sources.lock().unwrap().clone();
-        if tokens.is_empty() {
-            let source = self.capture_retry_auth_failure_source(message);
-            self.mark_provider_auth_stale(message, source.as_ref().map(std::slice::from_ref));
-            return;
-        }
-        self.mark_provider_auth_stale(message, Some(&tokens));
-    }
-
-    /// `_finishActiveRetryWithFailure(message)`.
-    fn finish_active_retry_with_failure(&self, message: &AssistantMessage) {
-        *self.retry_metric_message.lock().unwrap() = Some(message.clone());
-        self.resolve_retry();
-    }
-
-    /// `_handleRetryableError(settings, message)`.
-    async fn handle_retryable_error(self: &Arc<Self>, message: &AssistantMessage) -> bool {
-        if !self.is_retryable_error(message) {
-            return false;
-        }
-        let settings = self.settings_manager.lock().unwrap().get_retry_settings();
-        let attempt = self.retry_attempt.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempt > settings.max_attempts {
-            self.retry_attempt.store(0, Ordering::SeqCst);
-            self.finish_active_retry_with_failure(message);
-            return false;
-        }
-        let controller = CancellationToken::new();
-        *self.retry_abort_controller.lock().unwrap() = Some(controller.clone());
-        self.emit(AgentSessionEvent::RetryUpdate {
-            active: true,
-            attempt: attempt as i64,
-            max_attempts: settings.max_attempts as i64,
-            message: message.error_message.clone(),
-        });
-        let generation = self.retry_generation.load(Ordering::SeqCst);
-        let aborted = tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_millis(
-                (settings.delay_ms.unwrap_or(1000.0) * attempt as f64) as u64,
-            )) => false,
-            _ = controller.cancelled() => true,
-        };
-        if generation != self.retry_generation.load(Ordering::SeqCst) {
-            return false;
-        }
-        *self.retry_abort_controller.lock().unwrap() = None;
-        if aborted {
-            self.emit(AgentSessionEvent::RetryUpdate {
-                active: false,
-                attempt: attempt as i64,
-                max_attempts: settings.max_attempts as i64,
-                message: None,
-            });
-            return false;
-        }
-        true
-    }
-
-    /// `abortRetry()`.
-    pub fn abort_retry(&self) {
-        self.retry_generation.fetch_add(1, Ordering::SeqCst);
-        self.retry_attempt.store(0, Ordering::SeqCst);
-        if let Some(controller) = self.retry_abort_controller.lock().unwrap().take() {
-            controller.cancel();
-        }
-        self.resolve_retry();
-    }
-
-    /// `waitForRetry()`.
-    async fn wait_for_retry(&self) {
-        let promise = self.retry_promise.lock().unwrap().clone();
-        if let Some(promise) = promise {
-            let _ = promise.await;
-        }
-    }
-
-    /// `get isRetrying()`.
-    pub fn is_retrying(&self) -> bool {
-        self.retry_abort_controller.lock().unwrap().is_some()
-    }
-
-    /// `get hasAcceptedPromptInFlight()`.
-    pub fn has_accepted_prompt_in_flight(&self) -> bool {
-        self.action_store.lock().unwrap().owned_actions().iter().any(|action| {
-            matches!(action.payload, QueuedActionPayload::Turn(_))
-                && (action.lifecycle.state() == "committing"
-                    || action.lifecycle.state() == "running")
-        })
-    }
-
-    /// `get autoRetryEnabled()`.
-    pub fn auto_retry_enabled(&self) -> bool {
-        self.settings_manager.lock().unwrap().get_retry_settings().enabled
-    }
-
-    /// `setAutoRetryEnabled(enabled)`.
-    pub fn set_auto_retry_enabled(&self, enabled: bool) {
-        self.settings_manager
-            .lock()
-            .unwrap()
-            .set_retry_enabled(enabled);
-        if !enabled {
-            self.abort_retry();
-        }
-    }
-
-    /// `runUserBash(command, options)`.
-    pub async fn run_user_bash(
-        self: &Arc<Self>,
-        command: &str,
-        exclude_from_context: Option<bool>,
-    ) -> Result<BashResult, String> {
-        if self.is_bash_running() {
-            return Err("A bash command is already running".to_string());
-        }
-        let controller = CancellationToken::new();
-        self.bash_abort_controllers
-            .lock()
-            .unwrap()
-            .push(controller.clone());
-        self.user_bash_running.store(true, Ordering::SeqCst);
-        self.user_bash_abort_requested.store(false, Ordering::SeqCst);
-        let result = self
-            .run_user_bash_locked(command, exclude_from_context, controller.clone())
-            .await;
-        self.user_bash_running.store(false, Ordering::SeqCst);
-        self.bash_abort_controllers
-            .lock()
-            .unwrap()
-            .retain(|candidate| !candidate.is_cancelled());
-        result
-    }
-
-    /// `_drainQueuedMessagesAfterBash()`.
-    async fn drain_queued_messages_after_bash(self: &Arc<Self>) {
-        self.flush_pending_bash_messages();
-        self.resume_queued_work();
-        self.schedule_session_input_pump();
-    }
-
-    /// `runUserBashLocked(command, options, controller)`.
-    async fn run_user_bash_locked(
-        self: &Arc<Self>,
-        command: &str,
-        exclude_from_context: Option<bool>,
-        controller: CancellationToken,
-    ) -> Result<BashResult, String> {
-        self.emit(AgentSessionEvent::BashStart {
-            command: command.to_string(),
-        });
-        let result = crate::core::bash_executor::execute_bash(crate::core::bash_executor::BashExecutionOptions {
-            command: command.to_string(),
-            cwd: self.cwd.clone(),
-            env: self.rlm_kernel_env(),
-            signal: Some(controller.clone()),
-        })
-        .await?;
-        self.record_bash_result(command, &result, exclude_from_context);
-        self.emit(AgentSessionEvent::BashEnd {
-            command: command.to_string(),
-            exit_code: result.exit_code,
-        });
-        self.drain_queued_messages_after_bash().await;
-        Ok(result)
-    }
-
-    /// `recordBashResult(command, result, options?)`.
-    pub fn record_bash_result(&self, command: &str, result: &BashResult, exclude_from_context: Option<bool>) {
-        if exclude_from_context.unwrap_or(false) {
-            return;
-        }
-        let message = create_custom_message(
-            "bash_execution".to_string(),
-            CustomMessageContent::Text(format!(
-                "{}\n{}",
-                command,
-                result.output.clone().unwrap_or_default()
-            )),
-            true,
-            Some(serde_json::json!({
-                "command": command,
-                "exitCode": result.exit_code,
-                "output": result.output,
-            })),
-            now_ms_i64(),
-        );
-        self.pending_bash_messages.lock().unwrap().push(BashExecutionMessage {
-            command: command.to_string(),
-            output: result.output.clone().unwrap_or_default(),
-            exit_code: result.exit_code,
-            timestamp: message.timestamp,
-        });
-        self.session_manager
-            .lock()
-            .unwrap()
-            .append_custom_message_entry(
-                &message.custom_type,
-                message.content.clone(),
-                message.display,
-                message.details.clone(),
-            );
-    }
-
-    /// `_flushPendingBashMessages()`.
-    fn flush_pending_bash_messages(&self) {
-        let pending: Vec<BashExecutionMessage> =
-            std::mem::take(&mut *self.pending_bash_messages.lock().unwrap());
-        if pending.is_empty() {
-            return;
-        }
-        for bash_message in pending {
-            let mut state = self.agent.state();
-            state.messages.push(AgentMessage::BashExecution(bash_message.clone()));
-            self.agent.set_state(state);
-            self.session_manager
-                .lock()
-                .unwrap()
-                .append_message(AgentMessage::BashExecution(bash_message));
-        }
-    }
-
-    /// `abortBash()`.
-    pub fn abort_bash(&self) {
-        self.user_bash_abort_requested.store(true, Ordering::SeqCst);
-        let controllers: Vec<CancellationToken> = self.bash_abort_controllers.lock().unwrap().clone();
-        for controller in controllers {
-            controller.cancel();
-        }
-    }
-
-    /// `get isBashRunning()`.
-    pub fn is_bash_running(&self) -> bool {
-        self.user_bash_running.load(Ordering::SeqCst)
-            && !self.user_bash_abort_requested.load(Ordering::SeqCst)
-    }
-
-    /// `hasPendingBashMessages()`.
-    pub fn has_pending_bash_messages(&self) -> bool {
-        !self.pending_bash_messages.lock().unwrap().is_empty()
-    }
-
-    /// `getRlmMaxDepthStatus()`.
-    pub fn get_rlm_max_depth_status(&self) -> RlmMaxDepthStatus {
-        RlmMaxDepthStatus {
-            max_depth: self.rlm_max_depth(),
-            source: self.rlm_max_depth_source.lock().unwrap().clone(),
-        }
-    }
-
-    /// `setRlmMaxDepth(maxDepth, options)`.
-    pub async fn set_rlm_max_depth(
-        self: &Arc<Self>,
-        max_depth: i64,
-        global: bool,
-    ) -> Result<SetRlmMaxDepthResult, String> {
-        if !is_non_negative_integer(max_depth as f64) {
-            return Err("rlmMaxDepth must be a non-negative integer".to_string());
-        }
-        *self.rlm_max_depth.lock().unwrap() = max_depth;
-        *self.rlm_max_depth_source.lock().unwrap() = if global {
-            RLM_MAX_DEPTH_SOURCE_GLOBAL.to_string()
-        } else {
-            RLM_MAX_DEPTH_SOURCE_CHAT.to_string()
-        };
-        let _ = self
-            .session_manager
-            .lock()
-            .unwrap()
-            .append_custom_message_entry(
-                RLM_MAX_DEPTH_STATE_CUSTOM_TYPE,
-                CustomMessageContent::Text(max_depth.to_string()),
-                false,
-                Some(serde_json::json!({
-                    "maxDepth": max_depth,
-                    "source": self.rlm_max_depth_source.lock().unwrap().clone(),
-                })),
-            );
-        Ok(SetRlmMaxDepthResult { max_depth, global })
-    }
-
-    /// `setSessionName(name)`.
-    pub fn set_session_name(&self, name: &str) -> Result<(), String> {
-        let manager = self.session_manager.clone();
-        let mut manager = manager.lock().unwrap();
-        manager.append_session_info(name)?;
-        self.emit(AgentSessionEvent::SessionInfoChanged {
-            name: Some(name.to_string()),
-        });
-        Ok(())
-    }
-
-    /// `navigateTree(targetId, options)`.
-    pub async fn navigate_tree(
-        self: &Arc<Self>,
-        target_id: &str,
-        summarize: Option<bool>,
-        editor_text: Option<&str>,
-    ) -> Result<(), String> {
-        self.navigate_tree_under_pause(target_id, summarize, editor_text)
-            .await
-    }
-
-    /// `_navigateTree(targetId, options)`.
-    async fn navigate_tree_inner(
-        self: &Arc<Self>,
-        target_id: &str,
-        summarize: Option<bool>,
-        editor_text: Option<&str>,
-    ) -> Result<(), String> {
-        self.abort_branch_summary();
-        if summarize.unwrap_or(true) {
-            let entries = self.session_manager.lock().unwrap().get_branch(None);
-            let prepared = prepare_branch_entries(&entries);
-            if !prepared.is_empty() {
-                let controller = CancellationToken::new();
-                *self.branch_summary_abort_controller.lock().unwrap() = Some(controller.clone());
-                let result = generate_branch_summary(GenerateBranchSummaryOptions {
-                    messages: prepared,
-                    signal: Some(controller.clone()),
-                })
-                .await;
-                *self.branch_summary_abort_controller.lock().unwrap() = None;
-                if let Ok(result) = result {
-                    let _ = self.session_manager.lock().unwrap().branch_with_summary(
-                        Some(target_id),
-                        &result.summary,
-                        None,
-                        None,
-                        None,
-                    );
-                }
-            }
-        }
-        self.session_manager
-            .lock()
-            .unwrap()
-            .branch(target_id);
-        self.reload_goal_state_from_branch();
-        self.reload_rlm_max_depth_from_branch();
-        let _ = editor_text;
-        self.emit(AgentSessionEvent::TreeNavigated {
-            target_id: target_id.to_string(),
-        });
-        Ok(())
-    }
-
-    /// `_navigateTreeUnderPause(targetId, options)`.
-    async fn navigate_tree_under_pause(
-        self: &Arc<Self>,
-        target_id: &str,
-        summarize: Option<bool>,
-        editor_text: Option<&str>,
-    ) -> Result<(), String> {
-        let pause = self.acquire_queued_work_pause();
-        let previous = self.branch_navigation_queue.lock().unwrap().clone();
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let tail: BoxFuture<Result<(), String>> = Box::pin(async move {
-            let _ = rx.await;
-            Ok(())
-        });
-        *self.branch_navigation_queue.lock().unwrap() = tail;
-        let _ = previous.await;
-        let result = self
-            .navigate_tree_inner(target_id, summarize, editor_text)
-            .await;
-        pause.release();
-        let _ = tx.send(());
-        result
-    }
-
-    /// `getUserMessagesForForking()`.
-    pub fn get_user_messages_for_forking(&self) -> Vec<UserMessageForkEntry> {
-        let entries = self.session_manager.lock().unwrap().get_branch(None);
-        entries
-            .iter()
-            .filter_map(|entry| {
-                if entry.get("type").and_then(Value::as_str) != Some("message") {
-                    return None;
-                }
-                let message = entry.get("message")?;
-                if message.get("role").and_then(Value::as_str) != Some("user") {
-                    return None;
-                }
-                let entry_id = entry.get("id").and_then(Value::as_str)?.to_string();
-                let text = self.extract_user_message_text(message.get("content")?);
-                Some(UserMessageForkEntry { entry_id, text })
-            })
-            .collect()
-    }
-
-    /// `_extractUserMessageText(content)`.
-    fn extract_user_message_text(&self, content: &Value) -> String {
-        match content {
-            Value::String(text) => text.clone(),
-            Value::Array(parts) => parts
-                .iter()
-                .filter_map(|part| {
-                    if part.get("type").and_then(Value::as_str) == Some("text") {
-                        part.get("text").and_then(Value::as_str).map(|text| text.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            _ => String::new(),
-        }
-    }
-
-    /// `getSessionStats()`.
-    pub fn get_session_stats(&self) -> SessionStats {
-        let entries = self.session_manager.lock().unwrap().get_branch(None);
-        let messages = self.messages();
-        let own_usage = compute_own_and_total_usage(&entries).0;
-        let own_usage = self.subtract_unindexed_child_usage(own_usage, &entries);
-        let summary = session_usage_summary_from(Some(&own_usage));
-        SessionStats {
-            message_count: messages.len() as i64,
-            user_message_count: messages
-                .iter()
-                .filter(|message| matches!(message, AgentMessage::Message(pi_ai::types::Message::User(_))))
-                .count() as i64,
-            assistant_message_count: messages
-                .iter()
-                .filter(|message| matches!(message, AgentMessage::Message(pi_ai::types::Message::Assistant(_))))
-                .count() as i64,
-            tool_call_count: messages
-                .iter()
-                .filter(|message| matches!(message, AgentMessage::Message(pi_ai::types::Message::Tool(_))))
-                .count() as i64,
-            usage: summary.total.clone(),
-            tokens_before: None,
-        }
-    }
-
-    /// `getContextUsage()`.
-    pub fn get_context_usage(&self) -> Option<ContextUsage> {
-        let messages = self.messages();
-        if messages.is_empty() {
-            return None;
-        }
-        let tokens = estimate_context_tokens(&messages);
-        let model = self.model();
-        let limit = get_model_input_limit(&model);
-        if !limit.is_finite() || limit <= 0.0 {
-            return Some(ContextUsage {
-                tokens: Some(tokens),
-                context_window: limit,
-                percent: None,
-            });
-        }
-        Some(ContextUsage {
-            tokens: Some(tokens),
-            context_window: limit,
-            percent: Some((tokens / limit) * 100.0),
-        })
-    }
-
-    /// `_rlmSessionDirForReading()`.
-    fn rlm_session_dir_for_reading(&self) -> Option<String> {
-        self.rlm_session_dir
-            .clone()
-            .or_else(|| self.session_manager.lock().unwrap().get_session_artifact_dir())
-    }
-
-    /// `_contextWindowResolver()`.
-    fn context_window_resolver(&self) -> ContextWindowResolver {
-        let registry = self.model_registry.clone();
-        Arc::new(move |provider: &str, model_id: &str| {
-            registry
-                .lock()
-                .unwrap()
-                .find(provider, model_id)
-                .and_then(|model| model.context_window)
-        })
-    }
-
-    /// `_subtractUnindexedChildUsage(ownUsage, entries)`.
-    fn subtract_unindexed_child_usage(&self, own_usage: Usage, entries: &[SessionEntry]) -> Usage {
-        let unindexed = self.rlm_unindexed_child_usage.lock().unwrap();
-        if unindexed.is_empty() {
-            return own_usage;
-        }
-        let indexed: HashSet<i64> = entries
-            .iter()
-            .filter_map(|entry| entry.get("timestamp").and_then(Value::as_i64))
-            .collect();
-        let mut usage = own_usage;
-        for (timestamp, child_usage) in unindexed.iter() {
-            if indexed.contains(timestamp) {
-                continue;
-            }
-            usage = subtract_assistant_usage(&usage, child_usage);
-        }
-        usage
-    }
-
-    /// `_ownUsageMemo` accessor.
-    fn own_usage_memo(&self) -> Option<OwnUsageMemo> {
-        self.own_usage_memo.lock().unwrap().clone()
-    }
-
-    /// `_setOwnUsageMemo(memo)`.
-    fn set_own_usage_memo(&self, memo: Option<OwnUsageMemo>) {
-        *self.own_usage_memo.lock().unwrap() = memo;
-    }
-
-    /// `createReplacedSessionContext()`.
-    pub fn create_replaced_session_context(&self) -> ReplacedSessionContext {
-        let _ = &self.extension_runner_ref;
-        ReplacedSessionContext {
-            send_message: None,
-            send_user_message: None,
-        }
-    }
-
-    /// `hasExtensionHandlers(eventType)`.
-    pub fn has_extension_handlers(&self, event_type: &str) -> bool {
-        self.extension_runner()
-            .map(|runner| runner.has_handlers(event_type))
-            .unwrap_or(false)
-    }
-
-    /// `get extensionRunner()`.
-    pub fn extension_runner(&self) -> Option<ExtensionRunner> {
-        self.extension_runner_ref.get()
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -12275,6 +10610,18 @@ impl AgentSession {
 /// usage: equal messages map to equal keys.
 pub fn agent_message_key_of(message: &AgentMessage) -> String {
     serde_json::to_string(message).unwrap_or_default()
+}
+
+fn agent_message_timestamp(message: &AgentMessage) -> i64 {
+    match message {
+        AgentMessage::Message(Message::User(message)) => message.timestamp,
+        AgentMessage::Message(Message::Assistant(message)) => message.timestamp,
+        AgentMessage::Message(Message::ToolResult(message)) => message.timestamp,
+        AgentMessage::Custom(CustomAgentMessage::Custom { timestamp, .. }
+            | CustomAgentMessage::BashExecution { timestamp, .. }
+            | CustomAgentMessage::BranchSummary { timestamp, .. }
+            | CustomAgentMessage::CompactionSummary { timestamp, .. }) => *timestamp,
+    }
 }
 
 /// `agentMessageKeyOf(record.message)`.
@@ -12684,11 +11031,14 @@ fn session_preparation_policy_from(policy: &TurnExecutionPolicy) -> SessionPrepa
 /// `_createRlmSubagentRuntime` argument object.
 #[derive(Debug, Clone, Default)]
 pub struct RlmSubagentRuntimeOptionsInput {
+    pub id: String,
     pub prompt: String,
-    pub session_name: Option<String>,
-    pub model: Option<String>,
+    pub session_name: String,
+    pub session_dir: String,
+    pub model: Model,
     pub thinking_level: Option<ThinkingLevel>,
-    pub session_dir: Option<String>,
+    pub spawn_code: Option<String>,
+    pub spawned_by_request_id: Option<String>,
 }
 
 /// `ActionExecution` alias used by the appended members.
@@ -12920,102 +11270,7 @@ impl AgentSession {
         Ok(result)
     }
 
-    /// `_startRlmChildRun(options)`.
-    async fn start_rlm_child_run(
-        self: &Arc<Self>,
-        options: RlmChildRunOptions,
-    ) -> Result<RlmChildAgentSnapshot, String> {
-        let child_id = uuid::Uuid::new_v4().to_string();
-        let session_dir = match options.session_dir.clone() {
-            Some(dir) => dir,
-            None => self.create_child_rlm_session_dir()?,
-        };
-        let run = RlmChildRun {
-            id: child_id.clone(),
-            prompt: options.prompt.clone(),
-            session_name: options
-                .session_name
-                .clone()
-                .unwrap_or_else(|| rlm_child_label(&options.prompt)),
-            session_dir: session_dir.clone(),
-            model: options.model.clone(),
-            status: RLM_CHILD_AGENT_STATUS_QUEUED.to_string(),
-            duration_ms: None,
-            answer_preview: None,
-            tool_use_count: 0.0,
-            activity: None,
-            error: None,
-            abort: Arc::new(noop_rlm_child_abort()),
-            publication: create_agent_message_deferred(),
-            settlement: create_agent_message_deferred(),
-            session: None,
-            settled: false,
-            suppress_terminal_notice: None,
-            abandoned_for_quiescence: None,
-            detached_deletion: None,
-            deletion_cleanup: None,
-            deletion_cleanup_observer: None,
-            deletion_reservation: create_agent_message_deferred(),
-            deletion_cleanup_failed: None,
-            deletion_run_finished: None,
-            deletion_notice: None,
-            deletion_failure_notice: None,
-            deletion_needs_completion_notice: None,
-            complete_deletion: None,
-            report_deletion_cleanup_failure: None,
-            emit_update: None,
-            last_emitted_update: None,
-            unsubscribe: None,
-        };
-        let shared = Arc::new(Mutex::new(run.clone()));
-        self.active_rlm_child_runs
-            .lock()
-            .unwrap()
-            .insert(child_id.clone(), Arc::clone(&shared));
-        self.unsettled_rlm_child_runs
-            .lock()
-            .unwrap()
-            .push(Arc::clone(&shared));
-        self.emit(AgentSessionEvent::RlmChildUpdate {
-            child: self.rlm_child_snapshot_for_run(&run),
-        });
 
-        let runtime = self
-            .create_rlm_subagent_runtime(RlmSubagentRuntimeOptionsInput {
-                prompt: options.prompt.clone(),
-                session_name: Some(run.session_name.clone()),
-                model: options
-                    .model
-                    .as_ref()
-                    .map(|model| model.id.clone()),
-                thinking_level: options.thinking_level.clone(),
-                session_dir: Some(session_dir.clone()),
-            })
-            .await;
-        match runtime {
-            Ok(runtime) => {
-                {
-                    let mut run = shared.lock().unwrap();
-                    run.status = RLM_CHILD_AGENT_STATUS_RUNNING.to_string();
-                    run.session_dir = runtime.handle.session_dir.clone();
-                }
-                let snapshot = self.rlm_child_snapshot_for_run(&shared.lock().unwrap().clone());
-                self.emit(AgentSessionEvent::RlmChildUpdate {
-                    child: snapshot.clone(),
-                });
-                Ok(snapshot)
-            }
-            Err(error) => {
-                {
-                    let mut run = shared.lock().unwrap();
-                    run.status = RLM_CHILD_AGENT_STATUS_ERROR.to_string();
-                    run.error = Some(error.clone());
-                }
-                self.remove_rlm_subagent_tracking(&child_id, None);
-                Err(error)
-            }
-        }
-    }
 }
 
 /// `_performCompaction` request auth.
