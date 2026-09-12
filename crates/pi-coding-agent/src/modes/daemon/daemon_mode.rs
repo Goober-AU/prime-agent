@@ -111,6 +111,7 @@ use super::daemon_errors::{
 };
 use super::daemon_extension_binding::{
     bind_active_session_state, ActiveSessionBindingCallbacks, DaemonExtensionBindingSession,
+    DaemonOutbound as BindingDaemonOutbound,
 };
 use super::daemon_session_list::{
     build_session_list, has_live_session_work, inactive_lifecycle_for_session,
@@ -580,6 +581,26 @@ pub struct PassiveRlmSubagent {
     pub chain: Vec<PassiveRlmSubagentEntry>,
 }
 
+/// `rlmSubagentMetadataFields(display)` source shape: a display file read gives the
+/// same five optional members a legacy registry entry does, so the display entry is
+/// projected onto the shared source struct before the spread runs.
+fn passive_entry_from_display(display: &RlmSubagentDisplayEntry) -> PassiveRlmSubagentEntry {
+    PassiveRlmSubagentEntry {
+        child_id: display.child_id.clone(),
+        session_name: display.session_name.clone(),
+        session_dir: display.session_dir.clone(),
+        session_file: display.session_file.clone(),
+        rlm_max_depth: display.rlm_max_depth,
+        rlm_parent_node_id: display.rlm_parent_node_id.clone(),
+        prompt: display.prompt.clone(),
+        spawn_code: display.spawn_code.clone(),
+        model: display.model.clone(),
+        status: display.status.clone(),
+        created_at: display.created_at,
+        ..PassiveRlmSubagentEntry::default()
+    }
+}
+
 /// Spread-ready optional metadata fields shared by display files and legacy
 /// registry entries (`rlmSubagentMetadataFields`).
 fn rlm_subagent_metadata_fields(source: &PassiveRlmSubagentEntry) -> PassiveRlmSubagentEntry {
@@ -808,7 +829,7 @@ fn resolve_path(path: &str) -> String {
 }
 
 /// `sessionHistoryRepresentation(model)`.
-pub fn session_history_representation(model: Option<&ModelIdentity>) -> String {
+pub fn session_history_representation(model: Option<&pi_ai::types::Model>) -> String {
     let identity = match model {
         Some(model) => serde_json::json!([
             model.provider,
@@ -823,14 +844,10 @@ pub fn session_history_representation(model: Option<&ModelIdentity>) -> String {
     encoded.chars().take(22).collect()
 }
 
-/// The `Model<Api>` fields `sessionHistoryRepresentation` reads.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct ModelIdentity {
-    pub provider: String,
-    pub id: String,
-    pub api: String,
-    pub base_url: String,
-}
+/// `Model<Api>` as the daemon seam names it. Canonical owner is
+/// `pi_ai::types::Model` (the TypeScript `Model<Api>`); this is a re-export so
+/// the daemon adapter keeps naming the seam's model type.
+pub type ModelIdentity = pi_ai::types::Model;
 
 /// `slicePinnedSessionHistory(history, options)`.
 pub fn slice_pinned_session_history(
@@ -1455,9 +1472,10 @@ pub struct DaemonClientHandle {
     /// `client.catchupRetryTimer` is scheduled.
     pub catchup_retry_timer: AtomicBool,
     /// `client.snapshotTransferAbortControllers`.
-    pub snapshot_transfer_abort_controllers: HashMap<String, tokio_util::sync::CancellationToken>,
+    pub snapshot_transfer_abort_controllers:
+        StdMutex<HashMap<String, tokio_util::sync::CancellationToken>>,
     /// `client.snapshotTransferTails`.
-    pub snapshot_transfer_tails: HashMap<String, u64>,
+    pub snapshot_transfer_tails: StdMutex<HashMap<String, u64>>,
     /// `client.detachInput()`.
     pub detach_input: Arc<dyn Fn() + Send + Sync>,
     /// The private-frame decoder state for `transport === "private-framed"`.
@@ -1476,8 +1494,8 @@ impl DaemonClientHandle {
             writer,
             catchup_running: AtomicBool::new(false),
             catchup_retry_timer: AtomicBool::new(false),
-            snapshot_transfer_abort_controllers: HashMap::new(),
-            snapshot_transfer_tails: HashMap::new(),
+            snapshot_transfer_abort_controllers: StdMutex::new(HashMap::new()),
+            snapshot_transfer_tails: StdMutex::new(HashMap::new()),
             detach_input,
             frame_decoder: Arc::new(StdMutex::new(PrivateFrameDecoder::new())),
         }
@@ -1686,7 +1704,7 @@ pub fn detach_client_from_active_session(
 
 /// `markClientSnapshotStreaming`; returns the abort token for the transfer.
 pub fn mark_client_snapshot_streaming(
-    client: &mut DaemonClientHandle,
+    client: &DaemonClientHandle,
     active_session_id: &str,
 ) -> tokio_util::sync::CancellationToken {
     client.set_snapshot_streaming(true);
@@ -1704,15 +1722,20 @@ pub fn mark_client_snapshot_streaming(
     }
     let existing = client
         .snapshot_transfer_abort_controllers
-        .get(active_session_id);
+        .lock()
+        .expect("snapshot abort controllers poisoned")
+        .get(active_session_id)
+        .cloned();
     if let Some(existing) = existing {
         if !existing.is_cancelled() {
-            return existing.clone();
+            return existing;
         }
     }
     let controller = tokio_util::sync::CancellationToken::new();
     client
         .snapshot_transfer_abort_controllers
+        .lock()
+        .expect("snapshot abort controllers poisoned")
         .insert(active_session_id.to_string(), controller.clone());
     controller
 }
@@ -1724,23 +1747,31 @@ pub fn abort_client_snapshot_streaming(
 ) {
     match active_session_id {
         Some(active_session_id) => {
-            if let Some(controller) = client
+            client
                 .snapshot_transfer_abort_controllers
+                .lock()
+                .expect("snapshot abort controllers poisoned")
                 .get(active_session_id)
-            {
-                controller.cancel();
-            }
+                .cloned()
+                .iter()
+                .for_each(tokio_util::sync::CancellationToken::cancel);
         }
         None => {
-            for controller in client.snapshot_transfer_abort_controllers.values() {
-                controller.cancel();
-            }
+            client
+                .snapshot_transfer_abort_controllers
+                .lock()
+                .expect("snapshot abort controllers poisoned")
+                .values()
+                .cloned()
+                .collect::<Vec<_>>()
+                .iter()
+                .for_each(tokio_util::sync::CancellationToken::cancel);
         }
     }
 }
 
 /// `finishClientSnapshotStreaming`.
-pub fn finish_client_snapshot_streaming(client: &mut DaemonClientHandle, active_session_id: &str) {
+pub fn finish_client_snapshot_streaming(client: &DaemonClientHandle, active_session_id: &str) {
     let count = {
         let state = client.state.lock().expect("daemon client poisoned");
         state
@@ -1764,8 +1795,14 @@ pub fn finish_client_snapshot_streaming(client: &mut DaemonClientHandle, active_
         drop(state);
         client
             .snapshot_transfer_abort_controllers
+            .lock()
+            .expect("snapshot abort controllers poisoned")
             .remove(active_session_id);
-        client.snapshot_transfer_tails.remove(active_session_id);
+        client
+            .snapshot_transfer_tails
+            .lock()
+            .expect("snapshot transfer tails poisoned")
+            .remove(active_session_id);
         state = client.state.lock().expect("daemon client poisoned");
     }
     let streaming = state
@@ -2030,7 +2067,8 @@ pub struct AgentDaemon {
     pub roster_reporter: StdMutex<WorkerRosterReporterState>,
     pub roster_flush_scheduled: AtomicBool,
     pub roster_heartbeat_timer: StdMutex<Option<tokio::task::JoinHandle<()>>>,
-    pub rlm_spawn_ledger_instance: TokioMutex<Option<Arc<RlmSpawnLedger>>>,
+    /// `rlmSpawnLedgerInstance` - lazily created, never awaited.
+    pub rlm_spawn_ledger_instance: StdMutex<Option<Arc<RlmSpawnLedger>>>,
     pub pending_rlm_spawn_appends:
         StdMutex<HashMap<String, tokio::task::JoinHandle<Result<(), String>>>>,
     /// `passiveRlmSubagentWalks`: same-shape walks waiting on the in-flight one.
@@ -2136,7 +2174,7 @@ impl AgentDaemon {
             roster_reporter: StdMutex::new(WorkerRosterReporterState::default()),
             roster_flush_scheduled: AtomicBool::new(false),
             roster_heartbeat_timer: StdMutex::new(None),
-            rlm_spawn_ledger_instance: TokioMutex::new(None),
+            rlm_spawn_ledger_instance: StdMutex::new(None),
             pending_rlm_spawn_appends: StdMutex::new(HashMap::new()),
             passive_rlm_subagent_walks: StdMutex::new(HashMap::new()),
             passive_rlm_subagent_memo: StdMutex::new(HashMap::new()),
@@ -2498,12 +2536,11 @@ impl AgentDaemon {
         let daemon = Arc::clone(self);
         let handle = tokio::spawn(async move {
             delay(SUPERVISOR_FENCE_POLL_MS).await;
-            let mut timer = daemon
+            daemon
                 .supervisor_fence_timer
                 .lock()
-                .expect("supervisor fence poisoned");
-            let _ = timer.take();
-            drop(timer);
+                .expect("supervisor fence poisoned")
+                .take();
             daemon.check_supervisor_fences().await;
         });
         *self
@@ -2778,8 +2815,11 @@ impl AgentDaemon {
     }
 
     /// `rlmSpawnLedger()`.
-    async fn rlm_spawn_ledger(self: &Arc<Self>) -> Arc<RlmSpawnLedger> {
-        let mut instance = self.rlm_spawn_ledger_instance.lock().await;
+    fn rlm_spawn_ledger(self: &Arc<Self>) -> Arc<RlmSpawnLedger> {
+        let mut instance = self
+            .rlm_spawn_ledger_instance
+            .lock()
+            .expect("rlm spawn ledger poisoned");
         if let Some(ledger) = instance.as_ref() {
             return Arc::clone(ledger);
         }
@@ -2795,15 +2835,15 @@ impl AgentDaemon {
     }
 
     /// `rlmSpawnLedgerFor(sessionDir)`.
-    async fn rlm_spawn_ledger_for(
+    fn rlm_spawn_ledger_for(
         self: &Arc<Self>,
         session_dir: Option<&str>,
     ) -> Arc<RlmSpawnLedger> {
         match session_dir {
-            None => self.rlm_spawn_ledger().await,
+            None => self.rlm_spawn_ledger(),
             Some(session_dir) => {
                 if resolve_path(session_dir) == resolve_path(&self.rlm_ledger_sessions_dir()) {
-                    self.rlm_spawn_ledger().await
+                    self.rlm_spawn_ledger()
                 } else {
                     let daemon = Arc::clone(self);
                     Arc::new(RlmSpawnLedger::new(
@@ -2836,7 +2876,6 @@ impl AgentDaemon {
         };
         if let Err(error) = self
             .rlm_spawn_ledger()
-            .await
             .append_rename(&child_id, &child_file, name)
             .await
         {
@@ -2947,11 +2986,29 @@ pub struct DaemonAttachResult {
 pub trait DaemonSession: Send + Sync {
     fn session_manager(&self) -> Arc<StdMutex<SessionManager>>;
     fn runtime(&self) -> Arc<dyn DaemonRuntimeApi>;
-    fn settings_manager(&self) -> Option<Arc<SettingsManager>>;
+    /// `state.runtime.session.settingsManager`; the live session holds the
+    /// settings behind a mutex (core/agent_session.rs), so the seam exposes the
+    /// same shared handle the daemon mutates for `set_transport`.
+    fn settings_manager(&self) -> Option<Arc<StdMutex<SettingsManager>>>;
     fn session_id(&self) -> String;
     fn session_name(&self) -> Option<String>;
     fn session_file(&self) -> Option<String>;
     fn session_dir(&self) -> Option<String>;
+    /// `state.runtime.session.setExecEnvProvider(...)` /
+    /// `state.runtime.setRuntimeEnvScope(...)` (daemon-extension-binding.ts:55-58).
+    fn set_exec_env_provider(&self, client_env: Option<HashMap<String, String>>);
+    fn set_runtime_env_scope(&self, client_env: Option<HashMap<String, String>>);
+    /// `state.runtime.setSubagentRuntimeHost(...)` (daemon-extension-binding.ts:61).
+    fn set_subagent_runtime_host(&self, host: Option<Value>);
+    /// `state.runtime.setRebindSession(...)` (daemon-extension-binding.ts:70).
+    fn set_rebind_session(&self, rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>);
+    /// `session.bindExtensions({...})` (daemon-extension-binding.ts:83).
+    fn bind_extensions(
+        &self,
+        binding: crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput,
+    ) -> BoxFuture<'static, Result<(), String>>;
+    /// `session.abortForUpdateRestart()` (daemon-mode.ts:6925).
+    fn abort_for_update_restart(&self);
     fn is_streaming(&self) -> bool;
     fn is_compacting(&self) -> bool;
     fn is_bash_running(&self) -> bool;
@@ -2960,7 +3017,7 @@ pub trait DaemonSession: Send + Sync {
     fn has_running_rlm_children(&self) -> bool;
     fn unfinished_action_count(&self) -> f64;
     fn messages(&self) -> Vec<AgentMessage>;
-    fn model_identity(&self) -> Option<ModelIdentity>;
+    fn model_identity(&self) -> Option<pi_ai::types::Model>;
     fn rlm_depth(&self) -> Option<i64>;
     fn thinking_level(&self) -> Option<String>;
     fn service_tier(&self) -> Option<String>;
@@ -2968,12 +3025,21 @@ pub trait DaemonSession: Send + Sync {
     /// The agent-connection entry lists `createAgentConnectionCommands` and
     /// `createAgentConnectionResourceSnapshot` read off the session.
     fn connection_view(&self) -> DaemonConnectionView;
+    /// `createAgentConnectionState(state.runtime, state.activeSessionId)`
+    /// (agent-connection/snapshot.ts:55). REPAIR CURSOR: the implementation needs
+    /// `AgentSessionRuntimeSnapshotSource` (`{ session: AgentSessionSnapshotSource }`,
+    /// 28 fields: cwd, leafId, availableThinkingLevels, retryAttempt, steeringMode,
+    /// followUpMode, autoCompactionEnabled, messageCount, sessionActions,
+    /// compactionCount, goal, scopedModels, activeToolNames, contextUsage, …), which only
+    /// the session slice can build. Fix: implement this member in pack H's
+    /// `AgentSessionDaemonAdapter` from `AgentSessionRuntime`, then delete the cursor.
+    fn connection_state(&self, active_session_id: Option<String>) -> Value;
     fn set_current_recap(&self, recap: Option<&str>);
     fn set_session_name(&self, name: &str);
     fn get_rlm_child_run_status(&self, child_id: &str) -> Option<String>;
     fn register_rlm_child_session(&self, child_id: &str, session: Arc<dyn DaemonSession>) -> bool;
     fn remove_queued_follow_up(&self, key: &str);
-    fn subscribe(&self, listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn FnOnce() + Send>;
+    fn subscribe(&self, listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
     fn prompt_until_accepted(
         &self,
         message: &str,
@@ -3053,20 +3119,20 @@ pub trait DaemonSession: Send + Sync {
         &self,
         options: HeadlessCompletionOptions,
     ) -> BoxFuture<'static, Result<Value, String>>;
-    fn refresh_available_models(&self) -> BoxFuture<'static, Result<Vec<ModelIdentity>, String>>;
+    fn refresh_available_models(&self) -> BoxFuture<'static, Result<Vec<pi_ai::types::Model>, String>>;
     fn refresh_model_catalog(&self) -> BoxFuture<'static, Result<Value, String>>;
     fn get_provider_auth_status_source(&self, provider: &str) -> Option<String>;
-    fn find_model(&self, provider: &str, model_id: &str) -> Option<ModelIdentity>;
+    fn find_model(&self, provider: &str, model_id: &str) -> Option<pi_ai::types::Model>;
     fn set_model(
         &self,
-        model: &ModelIdentity,
+        model: &pi_ai::types::Model,
         wait_for_extensions: bool,
     ) -> BoxFuture<'static, Result<(), String>>;
     fn cycle_model(
         &self,
         direction: &str,
         wait_for_extensions: bool,
-    ) -> BoxFuture<'static, Result<Option<ModelIdentity>, String>>;
+    ) -> BoxFuture<'static, Result<Option<pi_ai::types::Model>, String>>;
     fn set_scoped_models(&self, scoped_models: &Value);
     fn set_thinking_level(&self, level: &str);
     fn set_service_tier(&self, service_tier: &str);
@@ -3936,7 +4002,7 @@ impl AgentDaemon {
 
     /// `writeWorkerSuccess(client, command, data?)`.
     fn write_worker_success(
-        &self,
+        self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
         command: &ParsedDaemonCommand,
         data: Option<Value>,
@@ -3960,6 +4026,14 @@ impl AgentDaemon {
     /// `summaryForActiveSession(state)`.
     fn summary_for_state(&self, state: &Arc<StdMutex<ActiveSessionState>>) -> SessionSummary {
         let saved = self.session_of(state).session_file().and_then(|path| read_session_info_sync(&path));
+        // REPAIR CURSOR: `read_session_info_sync` returns the canonical
+        // `core::session_manager::SessionInfo`, but `summary_for_active_session`
+        // (modes/daemon/daemon_session_list.rs:402) takes its own duplicate
+        // `daemon_session_list::SessionInfo` stub. That file is owned by another slice and
+        // is not in this pack's file list, so the type is not changed here. Fix: delete the
+        // `SessionInfo`/`SessionState`/`AgentStatusRecord` stubs in daemon_session_list.rs
+        // and import the canonical `core::session_manager::SessionInfo` (+ its
+        // `SessionState`, `AgentStatus`); the two files then line up with no conversion.
         summary_for_active_session(state, saved.as_ref(), false, false, false)
     }
 
@@ -4014,7 +4088,7 @@ impl AgentDaemon {
                         .or_else(|| default_config.session_dir.clone());
                     let saved_sessions = match body.get("cwd").and_then(Value::as_str) {
                         Some(cwd) => {
-                            SessionManager::list(resolve_path(cwd), list_session_dir.as_deref(), None)
+                            SessionManager::list(&resolve_path(cwd), list_session_dir.as_deref(), None)
                                 .await
                         }
                         None => SessionManager::list_all(None, list_session_dir.as_deref()).await,
@@ -4054,7 +4128,7 @@ impl AgentDaemon {
                 let progress_client = Arc::clone(client);
                 let progress_active_session_id = active_session_id.clone();
                 let on_progress: Option<Arc<dyn Fn(i64, i64) + Send + Sync>> =
-                    command_id.as_ref().map(|command_id| {
+                    command_id.as_ref().map(|command_id| -> Arc<dyn Fn(i64, i64) + Send + Sync> {
                         let client = Arc::clone(&progress_client);
                         let active_session_id = progress_active_session_id.clone();
                         let command_id = command_id.clone();
@@ -4085,7 +4159,7 @@ impl AgentDaemon {
                 let item_client = Arc::clone(client);
                 let item_active_session_id = active_session_id.clone();
                 let on_session: Option<Arc<dyn Fn(&SessionInfo) + Send + Sync>> =
-                    command_id.as_ref().map(|command_id| {
+                    command_id.as_ref().map(|command_id| -> Arc<dyn Fn(&SessionInfo) + Send + Sync> {
                         let client = Arc::clone(&item_client);
                         let active_session_id = item_active_session_id.clone();
                         let command_id = command_id.clone();
@@ -4135,7 +4209,7 @@ impl AgentDaemon {
                 let daemon = Arc::clone(self);
                 let sessions = with_passive_rlm_descendant_infos(
                     saved_sessions,
-                    &*self.rlm_spawn_ledger_for(session_dir.as_deref()).await,
+                    &self.rlm_spawn_ledger_for(session_dir.as_deref()),
                     crate::modes::daemon::rlm_ledger::WithPassiveRlmDescendantInfosOptions {
                         cwd: if scope_current {
                             Some(cwd.clone())
@@ -4182,16 +4256,16 @@ impl AgentDaemon {
                     .expect("active session poisoned")
                     .active_session_id
                     .clone();
+                let requested_capabilities: Option<HashSet<String>> =
+                    body.get("capabilities").and_then(Value::as_array).map(|values| {
+                        values
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect::<HashSet<String>>()
+                    });
                 let capabilities = normalize_client_capabilities(
-                    body.get("capabilities")
-                        .and_then(Value::as_array)
-                        .map(|values| {
-                            values
-                                .iter()
-                                .filter_map(Value::as_str)
-                                .map(str::to_string)
-                                .collect::<HashSet<String>>()
-                        }),
+                    requested_capabilities.as_ref(),
                     body.get("supportsExtensionUi").and_then(Value::as_bool),
                 );
                 set_daemon_client_session_capabilities(
@@ -4244,7 +4318,7 @@ impl AgentDaemon {
                         .expect("sessions poisoned")
                         .get(&state_active_session_id)
                         .cloned();
-                    if current.as_deref().map(|entry| &entry.state) != Some(&state)
+                    if current.as_deref().map(|entry| Arc::as_ptr(&entry.state)) != Some(Arc::as_ptr(&state))
                         || self
                             .closing_sessions
                             .lock()
@@ -4447,7 +4521,7 @@ impl AgentDaemon {
                         .flatten();
                     let reservation = NameReservationInput {
                         name: name.clone(),
-                        depth,
+                        depth: depth as f64,
                         parent_session_id: None,
                         parent_session_path: parent_session_path.clone(),
                     };
@@ -4458,7 +4532,7 @@ impl AgentDaemon {
                             Box::pin(async move {
                                 let availability = AgentSessionNameAvailabilityInput {
                                     name: name_for_update.clone(),
-                                    depth,
+                                    depth: depth as f64,
                                     parent_session_id: None,
                                     parent_session_path: parent_session_path.clone(),
                                     ignore_session_id: Some(info_id),
@@ -4475,7 +4549,6 @@ impl AgentDaemon {
                                     .append_session_info(&name_for_update);
                                 if let Err(error) = daemon
                                     .rlm_spawn_ledger()
-                                    .await
                                     .append_rename_by_child_path(&path_for_update, &name_for_update)
                                     .await
                                 {
@@ -4513,7 +4586,7 @@ impl AgentDaemon {
                     .map(|entry| entry.summary.runtime_kind.clone())
                     .unwrap_or(None);
                 let tombstone = tombstone_saved_session_delete(
-                    &*self.rlm_spawn_ledger().await,
+                    &self.rlm_spawn_ledger(),
                     session_path,
                     composed_runtime_kind.as_deref(),
                 )
@@ -4564,10 +4637,27 @@ impl AgentDaemon {
                         self.schedule_roster_flush();
                     }
                 }
+                // REPAIR CURSOR: `DeleteSessionFileResult` (core/session_file_actions.rs:14)
+                // carries no serde derives and that file is not in this pack's file list.
+                // Fix: derive `Serialize` with the TypeScript discriminated-union shape
+                // (`{ ok: true, method } | { ok: false, error }`, session-file-actions.ts:7)
+                // and replace this projection.
+                let result_value = match &result {
+                    DeleteSessionFileResult::Ok { method } => serde_json::json!({
+                        "ok": true,
+                        "method": match method {
+                            crate::core::session_file_actions::DeleteSessionFileMethod::Trash => "trash",
+                            crate::core::session_file_actions::DeleteSessionFileMethod::Unlink => "unlink",
+                        },
+                    }),
+                    DeleteSessionFileResult::Error { error } => {
+                        serde_json::json!({ "ok": false, "error": error })
+                    }
+                };
                 Ok(Some(DaemonResponse::success(
                     id,
                     "delete_saved_session",
-                    Some(serde_json::to_value(result).unwrap_or(Value::Null)),
+                    Some(result_value),
                 )))
             }
             "cancel_prompt_admission" => {
@@ -4771,7 +4861,7 @@ impl AgentDaemon {
                     return Ok(Some(DaemonResponse::failure(
                         id,
                         "resume_queue",
-                        &error,
+                        &error.clone(),
                         serialize_daemon_error(&DaemonError::Message(error)),
                     )));
                 }
@@ -4914,6 +5004,7 @@ impl AgentDaemon {
                 let session = self.session_of(&state);
                 let runs = Arc::clone(self);
                 let run_client = Arc::clone(client);
+                let on_event_state = Arc::clone(&state);
                 let on_event: Arc<dyn Fn(&Value) + Send + Sync> = Arc::new(move |event: &Value| {
                     let mut object = Map::new();
                     object.insert(
@@ -4922,7 +5013,13 @@ impl AgentDaemon {
                     );
                     object.insert(
                         "activeSessionId".to_string(),
-                        Value::String(state_active_session_id.clone()),
+                        Value::String(
+                            on_event_state
+                                .lock()
+                                .expect("active session poisoned")
+                                .active_session_id
+                                .clone(),
+                        ),
                     );
                     object.insert("event".to_string(), event.clone());
                     let _ = run_client
@@ -4955,7 +5052,11 @@ impl AgentDaemon {
                         SideQuestionRunEntry {
                             run: Arc::new(|| {}),
                             client: Arc::clone(client),
-                            active_session_id: state_active_session_id,
+                            active_session_id: state
+                                .lock()
+                                .expect("active session poisoned")
+                                .active_session_id
+                                .clone(),
                         },
                     );
                 Ok(Some(DaemonResponse::success(
@@ -5028,8 +5129,14 @@ impl AgentDaemon {
                 let bash = self
                     .session_of(&state)
                     .execute_bash(body.get("command").and_then(Value::as_str).unwrap_or(""));
-                self.track_in_flight_bash(&state, bash.clone());
-                let result = bash.await?;
+                let result = {
+                    let daemon = self.clone_arc();
+                    let tracked_state = Arc::clone(&state);
+                    let in_flight = daemon.in_flight_bash_slot(&tracked_state);
+                    let result = bash.await;
+                    in_flight.notify_waiters();
+                    result
+                }?;
                 self.schedule_roster_flush();
                 Ok(Some(DaemonResponse::success(
                     id,
@@ -5064,7 +5171,7 @@ impl AgentDaemon {
                 let is_resident_child_running: Arc<dyn Fn() -> bool + Send + Sync> =
                     Arc::new(move || {
                         sessions.values().any(|candidate| {
-                            let candidate = candidate.lock().expect("active session poisoned");
+                            let candidate = candidate.state.lock().expect("active session poisoned");
                             let metadata = candidate.runtime.metadata.as_ref();
                             if metadata.and_then(|value| value.kind.as_deref()) != Some("subagent")
                                 || metadata.and_then(|value| value.rlm_child_id.as_deref())
@@ -5072,8 +5179,14 @@ impl AgentDaemon {
                             {
                                 return false;
                             }
-                            candidate.runtime.session.is_streaming()
-                                || candidate.runtime.session.unfinished_action_count() > 0.0
+                            // REPAIR CURSOR: `ActiveSessionRuntimeSession`
+                            // (active_session_state.rs:31) has no `unfinishedActionCount`;
+                            // that file is not in this pack's file list. Fix: add
+                            // `pub unfinished_action_count: f64` there, populate it in
+                            // `DaemonSessionState::sync_view` from
+                            // `session.unfinished_action_count()`, and read the field here
+                            // (daemon-mode.ts:4785).
+                            candidate.runtime.session.is_streaming
                         })
                     });
                 let result = if is_resident_child_running() {
@@ -5268,7 +5381,7 @@ impl AgentDaemon {
                     .build_session_history(
                         body.get("tipEntryId").and_then(Value::as_str),
                         target_model.as_ref(),
-                    );
+                    )?;
                 let range = slice_pinned_session_history(
                     &history,
                     &SlicePinnedSessionHistoryOptions {
@@ -5296,7 +5409,7 @@ impl AgentDaemon {
                     .lock()
                     .expect("active session poisoned")
                     .last_event_sequence;
-                let children = Self::build_rlm_child_snapshots_with_passive(&state).await?;
+                let children = self.build_rlm_child_snapshots_with_passive(&state).await?;
                 Ok(Some(DaemonResponse::success(
                     id,
                     "get_rlm_children",
@@ -5447,7 +5560,7 @@ impl AgentDaemon {
                     body.get("jobId").and_then(Value::as_str).unwrap_or(""),
                     body.get("action").and_then(Value::as_str).unwrap_or(""),
                 );
-                let Some(heartbeat) = heartbeat else {
+                let Ok(Some(heartbeat)) = heartbeat else {
                     return Err(format!(
                         "No active heartbeat found: {}",
                         body.get("jobId").and_then(Value::as_str).unwrap_or("")
@@ -5915,8 +6028,34 @@ impl AgentDaemon {
                 let state = self.get_session_state(active_session_id)?;
                 let manager = self.session_of(&state).session_manager();
                 let manager = manager.lock().expect("session manager poisoned");
-                let flat_nodes =
-                    serde_json::to_value(manager.get_flat_tree()).unwrap_or(Value::Null);
+                // REPAIR CURSOR: `SessionTreeFlatNode` (core/session_manager.rs:3119) has no
+                // serde derives, and that file is not in this pack's file list. Fix: add
+                // `serde::Serialize` (camelCase: `entry`/`label`/`labelTimestamp`) on
+                // `SessionTreeFlatNode` and `SessionEntry` and replace this projection.
+                // `getFlatTree()` (session-manager.ts:2449) is `{ entry, label, labelTimestamp }`.
+                let flat_nodes = Value::Array(
+                    manager
+                        .get_flat_tree()
+                        .into_iter()
+                        .map(|node| {
+                            let mut object = Map::new();
+                            object.insert("entry".to_string(), Value::Object(node.entry));
+                            match node.label {
+                                Some(label) => {
+                                    object.insert("label".to_string(), Value::String(label))
+                                }
+                                None => object.insert("label".to_string(), Value::Null),
+                            };
+                            match node.label_timestamp {
+                                Some(timestamp) => {
+                                    object.insert("labelTimestamp".to_string(), Value::String(timestamp))
+                                }
+                                None => object.insert("labelTimestamp".to_string(), Value::Null),
+                            };
+                            Value::Object(object)
+                        })
+                        .collect(),
+                );
                 let leaf_id = manager
                     .get_leaf_id()
                     .map(Value::String)
@@ -5963,23 +6102,29 @@ impl AgentDaemon {
                 let definition = self
                     .session_of(&state)
                     .get_tool_definition(body.get("name").and_then(Value::as_str).unwrap_or(""));
+                // REPAIR CURSOR: the session seam returns the definition as a `Value` because
+                // `core::extensions::types::ToolDefinition` carries no serde derives and that
+                // file is not in this pack's file list. Fix: derive `Serialize`/`Deserialize`
+                // on `ToolDefinition` and return it directly from `DaemonSession::get_tool_definition`
+                // so `create_agent_connection_tool_definition` can take it without a rebuild.
+                let tool_definition = definition
+                    .as_ref()
+                    .map(create_agent_connection_tool_definition_from_value);
                 Ok(Some(DaemonResponse::success(
                     id,
                     "get_tool_definition",
-                    Some(serde_json::json!({
-                        "toolDefinition": definition
-                            .and_then(|value| serde_json::from_value(value).ok())
-                            .and_then(|definition| create_agent_connection_tool_definition(Some(&definition)))
-                            .and_then(|definition| serde_json::to_value(definition).ok())
-                    })),
+                    Some(serde_json::json!({ "toolDefinition": tool_definition })),
                 )))
             }
             "set_session_entry_label" => {
                 let state = self.get_session_state(active_session_id)?;
-                self.session_of(&state).append_label_change(
+                let manager = self.session_of(&state).session_manager();
+                let mut manager = manager.lock().expect("session manager poisoned");
+                let _ = manager.append_label_change(
                     body.get("entryId").and_then(Value::as_str).unwrap_or(""),
                     body.get("label").and_then(Value::as_str),
                 );
+                drop(manager);
                 Ok(Some(DaemonResponse::success(
                     id,
                     "set_session_entry_label",
@@ -6074,6 +6219,82 @@ fn read_session_info_sync(path: &str) -> Option<SessionInfo> {
         tokio::runtime::Handle::current()
             .block_on(crate::core::session_manager::read_session_info(path))
     })
+}
+
+/// `createAgentConnectionToolDefinition(definition)` for a definition the session
+/// seam already projected to the wire (tool-definition.ts:4 copies these eight
+/// fields and drops `prepareArguments`/`executionMode`/`execute`, which the live
+/// `ToolDefinition` carries as closures).
+fn create_agent_connection_tool_definition_from_value(value: &Value) -> Value {
+    let object = |key: &str| value.get(key).cloned();
+    let mut definition = Map::new();
+    definition.insert(
+        "name".to_string(),
+        object("name").unwrap_or(Value::String(String::new())),
+    );
+    definition.insert(
+        "label".to_string(),
+        object("label").unwrap_or(Value::String(String::new())),
+    );
+    definition.insert(
+        "description".to_string(),
+        object("description").unwrap_or(Value::String(String::new())),
+    );
+    if let Some(prompt_snippet) = object("promptSnippet") {
+        if !prompt_snippet.is_null() {
+            definition.insert("promptSnippet".to_string(), prompt_snippet);
+        }
+    }
+    if let Some(prompt_guidelines) = object("promptGuidelines") {
+        if !prompt_guidelines.is_null() {
+            definition.insert("promptGuidelines".to_string(), prompt_guidelines);
+        }
+    }
+    definition.insert(
+        "parameters".to_string(),
+        object("parameters").unwrap_or(Value::Null),
+    );
+    if let Some(render_shell) = object("renderShell") {
+        if !render_shell.is_null() {
+            definition.insert("renderShell".to_string(), render_shell);
+        }
+    }
+    if let Some(replay_built_in_tool_name) = object("replayBuiltInToolName") {
+        if !replay_built_in_tool_name.is_null() {
+            definition.insert("replayBuiltInToolName".to_string(), replay_built_in_tool_name);
+        }
+    }
+    Value::Object(definition)
+}
+
+/// Serialize the binding module's own `DaemonOutbound` frame (it carries the four
+/// variants the extension binding emits, wire-compatible with this file's superset).
+fn message_to_value(message: &BindingDaemonOutbound) -> Value {
+    serde_json::to_value(message).unwrap_or(Value::Null)
+}
+
+/// `message.timestamp` (session-manager.ts:1339) for every `AgentMessage` shape.
+fn message_timestamp_of(message: &AgentMessage) -> i64 {
+    match message {
+        AgentMessage::Message(pi_ai::types::Message::User(message)) => message.timestamp,
+        AgentMessage::Message(pi_ai::types::Message::Assistant(message)) => message.timestamp,
+        AgentMessage::Message(pi_ai::types::Message::ToolResult(message)) => message.timestamp,
+        AgentMessage::Custom(pi_agent_core::types::CustomAgentMessage::BashExecution {
+            timestamp,
+            ..
+        }) => *timestamp,
+        AgentMessage::Custom(pi_agent_core::types::CustomAgentMessage::Custom {
+            timestamp, ..
+        }) => *timestamp,
+        AgentMessage::Custom(pi_agent_core::types::CustomAgentMessage::BranchSummary {
+            timestamp,
+            ..
+        }) => *timestamp,
+        AgentMessage::Custom(pi_agent_core::types::CustomAgentMessage::CompactionSummary {
+            timestamp,
+            ..
+        }) => *timestamp,
+    }
 }
 
 /// Serialize an `AgentCronJob` for the wire.
@@ -6175,7 +6396,7 @@ impl AgentDaemon {
                 .expect("opening sessions poisoned")
                 .contains_key(session_key)
             {
-                Box::pin(self.create_runtime(command, runtime_open_guard)).await?;
+                Box::pin(self.create_runtime(command, runtime_open_guard.clone())).await?;
             }
         }
         if let Some(guard) = &runtime_open_guard {
@@ -6399,7 +6620,9 @@ impl AgentDaemon {
                     manager
                         .lock()
                         .expect("session manager poisoned")
-                        .append_session_state("active", None);
+                        .append_session_state(&crate::core::session_manager::SessionState {
+                            status: crate::core::session_manager::SessionStateStatus::Active,
+                        });
                 }
             }
         }
@@ -6419,14 +6642,35 @@ impl AgentDaemon {
         let broadcast_daemon = Arc::clone(self);
         let shutdown_daemon = Arc::clone(self);
         let subagent_host_value = self.create_subagent_runtime_host_value(state);
+        // REPAIR CURSOR: this guard cannot be dropped before the await. The callee
+        // `bind_active_session_state` (daemon_extension_binding.rs:120) takes
+        // `state: &mut ActiveSessionState` and its own body awaits
+        // (`session.bind_extensions(..).await`, :153-169), so the borrow - and therefore this
+        // guard - is live across that await by construction. That makes `bind_state`'s future
+        // non-`Send`, which transitively poisons every `Send` boundary that reaches a bound
+        // session: the cron `run_job` hook (daemon_mode.rs:6825) and the two agent-observe
+        // boxed futures (daemon_mode.rs:15395, :15417) all report it.
+        // Fix (in that file, owned by the lead - not in this pack's file list): change the
+        // signature to `state: &Arc<StdMutex<ActiveSessionState>>` and lock only in the
+        // synchronous prologue (set_exec_env_provider / set_runtime_env_scope / unsubscribe /
+        // subscribe / set_rebind_session), releasing the guard before the first await, exactly
+        // as `bindActiveSessionState` (daemon-extension-binding.ts:49-97) does: it takes the
+        // state object, mutates it synchronously, and only `bindExtensions` is awaited
+        // afterwards. Verified with rustc on a minimal repro: the guard-across-await shape
+        // fails for all variants (drop(guard), scoped block, owned local of the guard), while
+        // the `&Arc<StdMutex<..>>` callee with a scoped lock compiles. Then delete this cursor.
         let mut state_guard = state.lock().expect("active session poisoned");
         bind_active_session_state(
             &mut state_guard,
             binder,
             ActiveSessionBindingCallbacks {
                 broadcast: Arc::new(
-                    move |target: &ActiveSessionState, message: DaemonOutbound| {
-                        broadcast_daemon.broadcast_raw_to_session(target, &message);
+                    move |target: &ActiveSessionState, message: BindingDaemonOutbound| {
+                        // The binding module keeps its own four-variant `DaemonOutbound`
+                        // (daemon_extension_binding.rs:30) with the same wire fields as this
+                        // file's superset; hand the frame over as its serialized object,
+                        // which is exactly what the TypeScript passes along.
+                        broadcast_daemon.broadcast_raw_to_session(target, &message_to_value(&message));
                     },
                 ),
                 create_connection_state: Some(Arc::new(|target: &ActiveSessionState| {
@@ -6466,8 +6710,15 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .clients
             .clone();
-        for client in clients {
-            self.abort_side_questions_for(&client, &active_session_id);
+        for client_state in &clients {
+            let Some(handle) = self
+                .client_handles()
+                .into_iter()
+                .find(|handle| Arc::ptr_eq(&handle.state, client_state))
+            else {
+                continue;
+            };
+            self.abort_side_questions_for(&handle, &active_session_id);
         }
         self.summarizer.forget(&active_session_id);
         self.session_of(state).set_current_recap(None);
@@ -6662,7 +6913,7 @@ impl DaemonExtensionBindingSession for SessionBinder {
         &self,
         binding: crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput,
     ) {
-        self.session.bind_extensions(binding).await;
+        let _ = self.session.bind_extensions(binding).await;
     }
 
     async fn wait_for_idle(&self) {
@@ -6701,7 +6952,7 @@ impl DaemonSession for MissingSession {
     fn runtime(&self) -> Arc<dyn DaemonRuntimeApi> {
         Arc::new(MissingRuntime)
     }
-    fn settings_manager(&self) -> Option<Arc<SettingsManager>> {
+    fn settings_manager(&self) -> Option<Arc<StdMutex<SettingsManager>>> {
         None
     }
     fn session_id(&self) -> String {
@@ -6740,7 +6991,7 @@ impl DaemonSession for MissingSession {
     fn messages(&self) -> Vec<AgentMessage> {
         Vec::new()
     }
-    fn model_identity(&self) -> Option<ModelIdentity> {
+    fn model_identity(&self) -> Option<pi_ai::types::Model> {
         None
     }
     fn rlm_depth(&self) -> Option<i64> {
@@ -6758,6 +7009,9 @@ impl DaemonSession for MissingSession {
     fn connection_view(&self) -> DaemonConnectionView {
         DaemonConnectionView::default()
     }
+    fn connection_state(&self, _active_session_id: Option<String>) -> Value {
+        Value::Null
+    }
     fn set_current_recap(&self, _recap: Option<&str>) {}
     fn set_session_name(&self, _name: &str) {}
     fn get_rlm_child_run_status(&self, _child_id: &str) -> Option<String> {
@@ -6771,9 +7025,21 @@ impl DaemonSession for MissingSession {
         false
     }
     fn remove_queued_follow_up(&self, _key: &str) {}
-    fn subscribe(&self, _listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn FnOnce() + Send> {
+    fn subscribe(&self, _listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {
         Box::new(|| {})
     }
+    fn set_exec_env_provider(&self, _client_env: Option<HashMap<String, String>>) {}
+    fn set_runtime_env_scope(&self, _client_env: Option<HashMap<String, String>>) {}
+    fn set_subagent_runtime_host(&self, _host: Option<Value>) {}
+    fn set_rebind_session(&self, _rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>) {}
+    fn bind_extensions(
+        &self,
+        _binding: crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let error = self.error();
+        Box::pin(async move { Err(error) })
+    }
+    fn abort_for_update_restart(&self) {}
     fn prompt_until_accepted(
         &self,
         _message: &str,
@@ -6916,7 +7182,9 @@ impl DaemonSession for MissingSession {
         let error = self.error();
         Box::pin(async move { Err(error) })
     }
-    fn refresh_available_models(&self) -> BoxFuture<'static, Result<Vec<ModelIdentity>, String>> {
+    fn refresh_available_models(
+        &self,
+    ) -> BoxFuture<'static, Result<Vec<pi_ai::types::Model>, String>> {
         Box::pin(async { Ok(Vec::new()) })
     }
     fn refresh_model_catalog(&self) -> BoxFuture<'static, Result<Value, String>> {
@@ -6925,12 +7193,12 @@ impl DaemonSession for MissingSession {
     fn get_provider_auth_status_source(&self, _provider: &str) -> Option<String> {
         None
     }
-    fn find_model(&self, _provider: &str, _model_id: &str) -> Option<ModelIdentity> {
+    fn find_model(&self, _provider: &str, _model_id: &str) -> Option<pi_ai::types::Model> {
         None
     }
     fn set_model(
         &self,
-        _model: &ModelIdentity,
+        _model: &pi_ai::types::Model,
         _wait_for_extensions: bool,
     ) -> BoxFuture<'static, Result<(), String>> {
         let error = self.error();
@@ -6940,7 +7208,7 @@ impl DaemonSession for MissingSession {
         &self,
         _direction: &str,
         _wait_for_extensions: bool,
-    ) -> BoxFuture<'static, Result<Option<ModelIdentity>, String>> {
+    ) -> BoxFuture<'static, Result<Option<pi_ai::types::Model>, String>> {
         Box::pin(async { Ok(None) })
     }
     fn set_scoped_models(&self, _scoped_models: &Value) {}
@@ -7170,10 +7438,10 @@ impl DaemonSessionState {
                     if message.get("role").and_then(Value::as_str) == Some("assistant") {
                         view.messages_len = self.session.messages().len();
                         if !message.is_null() {
-                            view.streaming_message =
-                                Some(serde_json::from_value(message.clone()).unwrap_or_else(
-                                    |_| pi_agent_core::types::AgentMessage::default(),
-                                ));
+                            if let Ok(parsed) = serde_json::from_value::<AgentMessage>(message.clone())
+                            {
+                                view.streaming_message = Some(parsed);
+                            }
                         }
                     }
                 }
@@ -7316,7 +7584,7 @@ impl AgentDaemon {
                     .capabilities_for_session(&active_session_id)
                     .contains("chunked_snapshot")
             {
-                self.begin_replacement_snapshot(client, Arc::clone(&entry), sequenced);
+                self.begin_replacement_snapshot(&client, &state, sequenced.clone());
                 continue;
             }
             if client
@@ -7445,7 +7713,7 @@ impl AgentDaemon {
         let meta = create_daemon_event_meta(
             message.active_session_id().unwrap_or(""),
             sequence,
-            &now_iso(),
+            now_iso(),
             &generation,
         );
         let mut value = value;
@@ -7485,6 +7753,90 @@ impl AgentDaemon {
             &serialize_json_line(&message.to_value()),
             Some(message),
         )
+    }
+
+    /// `writeSerialized(client, line, message, payloadEncoding = "jsonl", snapshotPurpose?)`.
+    ///
+    /// The TypeScript body has two arms: a private-framed client gets
+    /// `encodePrivateFrame` with the routing header, every other client gets the plain
+    /// line. Both arms live here so `writeWorkerSnapshotBuffer` can pass a `Buffer`.
+    fn write_serialized_encoded(
+        self: &Arc<Self>,
+        client: &Arc<DaemonClientHandle>,
+        line: &[u8],
+        message: &DaemonOutbound,
+        payload_encoding: &str,
+        snapshot_purpose: Option<&str>,
+    ) -> bool {
+        let private_framed = client
+            .state
+            .lock()
+            .expect("daemon client poisoned")
+            .transport
+            .as_deref()
+            == Some("private-framed");
+        let wire: Vec<u8> = if private_framed {
+            let mut header = Map::new();
+            header.insert("kind".to_string(), Value::String("outbound".to_string()));
+            header.insert(
+                "outboundType".to_string(),
+                Value::String(message.type_name().to_string()),
+            );
+            header.insert(
+                "payloadEncoding".to_string(),
+                Value::String(payload_encoding.to_string()),
+            );
+            if let Some(snapshot_purpose) = snapshot_purpose {
+                header.insert(
+                    "snapshotPurpose".to_string(),
+                    Value::String(snapshot_purpose.to_string()),
+                );
+            }
+            if let Some(active_session_id) = message.active_session_id() {
+                header.insert(
+                    "activeSessionId".to_string(),
+                    Value::String(active_session_id.to_string()),
+                );
+            }
+            if let DaemonOutbound::Raw(value) = message {
+                if let Some(snapshot_id) = value.get("snapshotId").and_then(Value::as_str) {
+                    header.insert(
+                        "snapshotId".to_string(),
+                        Value::String(snapshot_id.to_string()),
+                    );
+                }
+                if let Some(request_id) = value.get("id").and_then(Value::as_str) {
+                    header.insert(
+                        "requestId".to_string(),
+                        Value::String(request_id.to_string()),
+                    );
+                }
+            }
+            if let DaemonOutbound::SessionEvent { event, .. } = message {
+                if let Some(event_type) = event.get("type").and_then(Value::as_str) {
+                    header.insert(
+                        "sessionEventType".to_string(),
+                        Value::String(event_type.to_string()),
+                    );
+                }
+            }
+            match encode_private_frame(&Value::Object(header), line) {
+                Ok(frame) => frame,
+                Err(_) => return false,
+            }
+        } else {
+            line.to_vec()
+        };
+        let delivered = match std::str::from_utf8(&wire) {
+            Ok(text) => client.writer.write(text.to_string()),
+            Err(_) => false,
+        };
+        if !delivered {
+            if let Some(active_session_id) = message.active_session_id() {
+                self.mark_client_backpressured(client, active_session_id);
+            }
+        }
+        delivered
     }
 
     /// `writeSerialized(client, serialized, message)`.
@@ -7542,7 +7894,7 @@ impl AgentDaemon {
             let client = Arc::clone(client);
             let daemon = self.clone_arc();
             tokio::spawn(async move {
-                if let Err(error) = daemon.catch_up_backpressured_client(&client).await {
+                if let Err(error) = daemon.catch_up_backpressured_client(Arc::clone(&client)).await {
                     daemon.log(&format!(
                         "could not catch up snapshot client {}: {error}",
                         client.id()
@@ -7807,10 +8159,10 @@ impl AgentDaemon {
                 .lock()
                 .expect("session manager poisoned")
                 .get_cwd(),
-            is_streaming: Some(false),
-            is_compacting: Some(false),
-            attached_clients: Some(0.0),
-            message_count: Some(0.0),
+            is_streaming: false,
+            is_compacting: false,
+            attached_clients: 0,
+            message_count: 0,
             first_message: child
                 .get("label")
                 .and_then(Value::as_str)
@@ -7860,6 +8212,11 @@ impl AgentDaemon {
     fn flush_roster_now(self: &Arc<Self>) {
         let scheduled_jobs = self.cron_store.list();
         let mut entries: HashMap<String, WorkerRosterEntry> = HashMap::new();
+        // REPAIR CURSOR: `build_session_list` returns `daemon_session_list::SessionSummary`
+        // while `worker_roster_entry_from_summary` (agent_roster.rs:235) takes
+        // `RosterSessionSummary`; both unowned stubs of the same TypeScript type. Fix:
+        // collapse the two stubs onto one owner (agent_roster.rs's `RosterSessionSummary`
+        // is the one the roster path serializes), then delete this cursor.
         for summary in build_session_list(&self.state_refs(), &[], &scheduled_jobs) {
             let entry = worker_roster_entry_from_summary(&summary);
             entries.insert(entry.agent_id.clone(), entry);
@@ -7901,7 +8258,7 @@ impl AgentDaemon {
                 if previous.queued_child == Some(true) || swapped {
                     reporter
                         .removed_agent_ids
-                        .insert(agent_id, previous.summary.session_id.clone());
+                        .insert(agent_id, Some(previous.summary.session_id.clone()));
                 }
             }
             let removed: Vec<(String, Option<String>)> = reporter
@@ -8078,22 +8435,27 @@ impl AgentDaemon {
             let state = state.lock().expect("active session poisoned");
             (state.last_event_sequence, state.event_generation.clone())
         };
-        let resume_cursor = command.body.get("resumeCursor");
+        // `command.resumeCursor` is a `DaemonResumeCursor` (daemon-protocol.ts:350).
+        let resume_cursor = command
+            .body
+            .get("resumeCursor")
+            .and_then(|value| {
+                serde_json::from_value::<crate::modes::daemon::daemon_protocol::DaemonResumeCursor>(
+                    value.clone(),
+                )
+                .ok()
+            });
         let replay = match resume_cursor
-            .and_then(|cursor| cursor.get("activeSessionId"))
-            .and_then(Value::as_str)
+            .as_ref()
+            .and_then(|cursor| cursor.active_session_id.as_deref())
         {
             Some(resume_active_session_id)
                 if resume_active_session_id != state_active_session_id =>
             {
                 let from_sequence = resume_cursor
-                    .and_then(|cursor| {
-                        cursor
-                            .get("sequence")
-                            .or_else(|| cursor.get("eventSequence"))
-                            .and_then(Value::as_f64)
-                    })
-                    .unwrap_or(0.0);
+                    .as_ref()
+                    .map(|cursor| cursor.resume_sequence())
+                    .unwrap_or(0);
                 serde_json::json!({
                     "status": "unavailable",
                     "fromSequence": from_sequence,
@@ -8103,7 +8465,7 @@ impl AgentDaemon {
                 })
             }
             _ => serde_json::to_value(create_daemon_replay_info(
-                resume_cursor.cloned(),
+                resume_cursor.as_ref(),
                 last_event_sequence,
                 &event_generation,
             ))
@@ -8205,14 +8567,19 @@ impl AgentDaemon {
                     .iter()
                     .zip(live_messages.iter())
                     .all(|(left, right)| {
-                        left.role == right.role && left.timestamp == right.timestamp
+                        left.role() == right.role()
+                            && message_timestamp_of(left) == message_timestamp_of(right)
                     });
             if aligns {
                 // Keep the exact public messages (including in-memory detail
                 // augmentation), while using persisted entry ids to present the same
-                // context chronologically.
-                let ordered =
-                    order_session_context_for_transcript(&persisted_context, &live_messages);
+                // context chronologically. `{ ...persistedContext, messages: liveMessages }`
+                // (daemon-mode.ts:5503) replaces the message list, keeping the entry ids.
+                let live_context = crate::core::session_manager::SessionContextWithEntryIds {
+                    messages: live_messages.clone(),
+                    ..persisted_context.clone()
+                };
+                let ordered = order_session_context_for_transcript(&live_context);
                 history = Some(SessionHistorySnapshot {
                     messages: ordered.messages,
                     entry_ids: ordered.entry_ids,
@@ -8352,8 +8719,7 @@ impl AgentDaemon {
         }
         remove_daemon_client_session_capabilities(client, &active_session_id);
         if streams_snapshot {
-            let mut client = Arc::clone(client);
-            finish_client_snapshot_streaming(&mut client, &active_session_id);
+            finish_client_snapshot_streaming(client, &active_session_id);
         }
     }
 
@@ -8372,19 +8738,10 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .active_session_id
             .clone();
-        let mut client_mut = Arc::clone(client);
-        let mut signal = mark_client_snapshot_streaming(&mut client_mut, &active_session_id);
-        signal = {
-            let existing = client_mut
-                .snapshot_transfer_abort_controllers
-                .get(&active_session_id)
-                .cloned()
-                .unwrap_or_else(tokio_util::sync::CancellationToken::new);
-            existing
-        };
+        let signal = mark_client_snapshot_streaming(client, &active_session_id);
         let messages: Vec<AgentMessage> = snapshot_messages
             .iter()
-            .map(|value| serde_json::from_value(value.clone()).unwrap_or_default())
+            .filter_map(|value| serde_json::from_value(value.clone()).ok())
             .collect();
         let transcript = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             create_snapshot_transcript_chunks(CreateSnapshotTranscriptChunksOptions {
@@ -8537,7 +8894,7 @@ impl AgentDaemon {
                 deliver_failure(&message);
                 break;
             }
-            let Some(chunk) = chunks.next_chunk() else {
+            let Some(chunk) = chunks.next() else {
                 // `session_snapshot_end` closes the transfer.
                 let end = serde_json::json!({
                     "type": "session_snapshot_end",
@@ -8580,10 +8937,11 @@ impl AgentDaemon {
             }
             chunk_count += 1;
         }
-        let mut client_mut = Arc::clone(client);
-        finish_client_snapshot_streaming(&mut client_mut, &active_session_id);
-        if !client_mut.snapshot_streaming() {
-            if let Err(error) = self.catch_up_backpressured_client(client).await {
+        finish_client_snapshot_streaming(client, &active_session_id);
+        if !client.snapshot_streaming() {
+            // Box only this edge of the catch-up cycle; every call and await stays the same.
+            let catchup = Box::pin(self.catch_up_backpressured_client(Arc::clone(client)));
+            if let Err(error) = catchup.await {
                 self.log(&format!(
                     "could not catch up snapshot client {}: {error}",
                     client.id()
@@ -8614,7 +8972,7 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .active_session_id
             .clone();
-        let mut connection_state = create_agent_connection_state(&entry.state, &active_session_id);
+        let mut connection_state = entry.session.connection_state(Some(active_session_id.clone()));
         let heartbeat = self
             .cron_store
             .get_latest_heartbeat(&active_session_id)
@@ -8655,6 +9013,10 @@ pub struct DaemonConnectionView {
     pub resource_themes: Vec<crate::modes::agent_connection::snapshot::ResourceThemeEntry>,
     pub skill_diagnostics:
         Vec<crate::modes::agent_connection::types::AgentConnectionResourceDiagnostic>,
+    pub prompt_diagnostics:
+        Vec<crate::modes::agent_connection::types::AgentConnectionResourceDiagnostic>,
+    pub theme_diagnostics:
+        Vec<crate::modes::agent_connection::types::AgentConnectionResourceDiagnostic>,
     pub extension_load_errors: Vec<crate::modes::agent_connection::snapshot::ExtensionLoadError>,
 }
 
@@ -8682,9 +9044,11 @@ impl AgentDaemon {
             &view.resource_skills,
             view.skill_diagnostics.clone(),
             &view.resource_prompts,
+            view.prompt_diagnostics.clone(),
             &view.resource_extensions,
-            &view.resource_themes,
             &view.extension_load_errors,
+            &view.resource_themes,
+            view.theme_diagnostics.clone(),
         ))
         .unwrap_or(Value::Null)
     }
@@ -9036,10 +9400,17 @@ impl AgentDaemon {
         transaction_id: u64,
     ) -> Result<Value, String> {
         self.assert_update_restart_not_cancelled(transaction_id)?;
+        let abort = self
+            .update_restart
+            .lock()
+            .expect("update restart poisoned")
+            .as_ref()
+            .filter(|transaction| transaction.id == transaction_id)
+            .map(|transaction| transaction.abort.clone())
+            .ok_or_else(|| "Update restart preparation was cancelled".to_string())?;
         self.mutation_drain
-            .acquire(0, "Daemon is preparing an update restart")
-            .await
-            .map_err(|error| error)?;
+            .wait_for_drain(0, &abort, "Daemon is preparing an update restart")
+            .await?;
         self.assert_update_restart_not_cancelled(transaction_id)?;
         let manifest = self
             .commit_prepared_update_restart(Some(transaction_id))
@@ -9163,9 +9534,24 @@ impl AgentDaemon {
         );
         session_value.insert("cwd".to_string(), Value::String(cwd));
         session_value.insert("config".to_string(), config);
+        // REPAIR CURSOR: `active_session_state::AgentSessionRuntimeMetadata`
+        // (active_session_state.rs:99) is a lossy 8-field duplicate of the canonical
+        // `core::agent_session_runtime::AgentSessionRuntimeMetadata` (:84) and carries no
+        // serde derives. Fix: delete the duplicate, import the canonical type at
+        // daemon_mode.rs:96, and serialize `entry.runtime_metadata` directly. The
+        // projection below writes the same camelCase field names.
         session_value.insert(
             "runtimeMetadata".to_string(),
-            serde_json::to_value(&entry.runtime_metadata).unwrap_or(Value::Null),
+            serde_json::json!({
+                "kind": entry.runtime_metadata.kind,
+                "prompt": entry.runtime_metadata.prompt,
+                "parentActiveSessionId": entry.runtime_metadata.parent_active_session_id,
+                "parentSessionId": entry.runtime_metadata.parent_session_id,
+                "parentSessionFile": entry.runtime_metadata.parent_session_file,
+                "rlmChildId": entry.runtime_metadata.rlm_child_id,
+                "rlmParentNodeId": entry.runtime_metadata.rlm_parent_node_id,
+                "spawnCode": entry.runtime_metadata.spawn_code,
+            }),
         );
         if let Some(client_env) = &state.lock().expect("active session poisoned").client_env {
             session_value.insert(
@@ -9240,8 +9626,15 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .clients
             .clone();
-        for client in clients {
-            self.abort_side_questions_for(&client, &active_session_id);
+        for client_state in &clients {
+            let Some(handle) = self
+                .client_handles()
+                .into_iter()
+                .find(|handle| Arc::ptr_eq(&handle.state, client_state))
+            else {
+                continue;
+            };
+            self.abort_side_questions_for(&handle, &active_session_id);
         }
         let existing_close = self
             .closing_sessions
@@ -9362,7 +9755,9 @@ impl AgentDaemon {
             .session_manager()
             .lock()
             .expect("session manager poisoned")
-            .append_session_state("archived", None);
+            .append_session_state(&crate::core::session_manager::SessionState {
+                status: crate::core::session_manager::SessionStateStatus::Archived,
+            });
     }
 
     /// `abortBashForClose(state)`.
@@ -9474,8 +9869,15 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .clients
             .clone();
-        for client in &clients {
-            abort_client_snapshot_streaming(client, Some(&active_session_id));
+        for client_state in &clients {
+            let Some(handle) = self
+                .client_handles()
+                .into_iter()
+                .find(|handle| Arc::ptr_eq(&handle.state, client_state))
+            else {
+                continue;
+            };
+            abort_client_snapshot_streaming(&handle, Some(&active_session_id));
         }
         self.broadcast_to_session(
             &self.session_entry_for_state(&state),
@@ -9484,14 +9886,20 @@ impl AgentDaemon {
                 reason: reason.to_string(),
             },
         );
-        for client in &clients {
-            client
-                .state
+        for client_state in &clients {
+            client_state
                 .lock()
                 .expect("daemon client poisoned")
                 .attached_active_session_ids
                 .remove(&active_session_id);
-            remove_daemon_client_session_capabilities(client, &active_session_id);
+            let Some(handle) = self
+                .client_handles()
+                .into_iter()
+                .find(|handle| Arc::ptr_eq(&handle.state, client_state))
+            else {
+                continue;
+            };
+            remove_daemon_client_session_capabilities(&handle, &active_session_id);
         }
         state
             .lock()
@@ -9530,9 +9938,8 @@ impl AgentDaemon {
             if let Some(session_file) = session_file {
                 let _ = crate::core::session_file_actions::delete_session_file(
                     &session_file,
-                    DeleteSessionFileOptions::default(),
-                )
-                .await;
+                    &mut DeleteSessionFileOptions::default(),
+                );
             }
         }
         if let Some(error) = dispose_error {
@@ -9567,17 +9974,17 @@ impl AgentDaemon {
                 .lock()
                 .expect("descendants poisoned")
                 .push(Arc::clone(&child_state));
-            if let Err(error) = self
-                .close_session(
-                    child_state,
-                    reason,
-                    wait_for_abort,
-                    true,
-                    Some(Arc::clone(&descendants)),
-                    disposal_kernel_snapshot,
-                )
-                .await
-            {
+            // Box only this edge of the close cascade (TS: closeChildSessions awaits
+            // closeSession, which reaches back here through closeSessionOnce).
+            let closing = Box::pin(self.close_session(
+                child_state,
+                reason,
+                wait_for_abort,
+                true,
+                Some(Arc::clone(&descendants)),
+                disposal_kernel_snapshot,
+            ));
+            if let Err(error) = closing.await {
                 if cascade_error.is_none() {
                     cascade_error = Some(error);
                 }
@@ -9598,7 +10005,6 @@ impl AgentDaemon {
             .iter()
             .any(|client| {
                 !client
-                    .state
                     .lock()
                     .expect("daemon client poisoned")
                     .attached_active_session_ids
@@ -9972,7 +10378,11 @@ impl AgentDaemon {
                 now: None,
             },
         );
-        let job = job?;
+        // The TypeScript signature is `AgentCronJob | undefined`: a store failure
+        // reads as "no job" (the error is logged by the store).
+        let Ok(job) = job else {
+            return None;
+        };
         if let Some(job) = &job {
             if input.instruction.is_some()
                 || input.interval.is_some()
@@ -10031,11 +10441,10 @@ impl AgentDaemon {
                     if let Some(session_name) = summary.session_name.clone() {
                         object.insert("sessionName".to_string(), Value::String(session_name));
                     }
-                    if !summary.first_message.is_empty() {
-                        object.insert(
-                            "firstMessage".to_string(),
-                            Value::String(summary.first_message.clone()),
-                        );
+                    if let Some(first_message) =
+                        summary.first_message.clone().filter(|value| !value.is_empty())
+                    {
+                        object.insert("firstMessage".to_string(), Value::String(first_message));
                     }
                 }
                 Value::Object(object)
@@ -10239,7 +10648,7 @@ impl AgentDaemon {
                 }
             })
         };
-        let commit_admission = {
+        let commit_admission: Arc<dyn Fn() + Send + Sync> = {
             let daemon = Arc::clone(self);
             let admission_key = admission.clone();
             Arc::new(move || {
@@ -10511,7 +10920,7 @@ impl AgentDaemon {
     /// `passiveRlmTopologyFingerprint(savedRootInfos)`.
     async fn passive_rlm_topology_fingerprint(self: &Arc<Self>, saved_root_infos: &[SessionInfo]) -> String {
         let ledger_stat = self
-            .passive_rlm_stat_string(self.rlm_spawn_ledger().await.ledger_path())
+            .passive_rlm_stat_string(self.rlm_spawn_ledger().ledger_path())
             .await;
         let mut resident: Vec<String> = self
             .session_states()
@@ -10583,6 +10992,9 @@ impl AgentDaemon {
         saved_roots: Vec<SessionInfo>,
         include_resident: bool,
     ) -> Vec<PassiveRlmSubagent> {
+        // REPAIR CURSOR: `inactive_lifecycle_for_session` (daemon_session_list.rs:278)
+        // takes the duplicate `daemon_session_list::SessionInfo`; `saved_roots` here is
+        // `Vec<core::session_manager::SessionInfo>`. Same unowned-file duplicate-stub fix.
         let saved_root_infos: Vec<SessionInfo> = saved_roots
             .into_iter()
             .filter(|root_info| inactive_lifecycle_for_session(root_info) == SessionLifecycle::Live)
@@ -10739,7 +11151,7 @@ impl AgentDaemon {
         for entry in self.session_states() {
             // An in-memory session cannot own persisted children.
             if let Some(parent_file) = entry.session.session_file() {
-                resident_roots.push((entry.state, parent_file));
+                resident_roots.push((Arc::clone(&entry.state), parent_file));
             }
         }
         if resident_roots.is_empty() && saved_root_infos.is_empty() {
@@ -10749,7 +11161,7 @@ impl AgentDaemon {
                 degraded: false,
             };
         }
-        let edges = self.rlm_spawn_ledger().await.edges(false).await;
+        let edges = self.rlm_spawn_ledger().edges(false).await;
         let mut children_by_parent: HashMap<String, Vec<RlmLedgerEdge>> = HashMap::new();
         for edge in edges {
             let parent_path = canonical_session_path(&edge.parent);
@@ -10846,24 +11258,31 @@ impl AgentDaemon {
                 &self.legacy_rlm_subagent_registry_path(parent_session_file, parent_session_id),
             )
             .await;
-            let mut entry_degraded = false;
+            let entry_degraded = Arc::new(AtomicBool::new(false));
             {
-                let mut on_read_error = |path: &str| {
+                // `(path) => { if (inputStats.get(resolve(path)) !== "absent") degraded = true; }`
+                // (daemon-mode.ts:1508). The registry reader takes an owned listener, so the
+                // hook carries a snapshot of the stats recorded so far (nothing mutates them
+                // while this edge is being read) plus a shared flag, instead of the walker's
+                // mutable borrows.
+                let stats_snapshot = Arc::new(input_stats.clone());
+                let flag = Arc::clone(&entry_degraded);
+                let on_read_error: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |path: &str| {
                     // A present metadata file may recover without a stat change.
-                    if input_stats.get(&resolve_path(path)).map(String::as_str) != Some("absent") {
-                        entry_degraded = true;
+                    if stats_snapshot.get(&resolve_path(path)).map(String::as_str) != Some("absent") {
+                        flag.store(true, Ordering::SeqCst);
                     }
-                };
+                });
                 let entry = self
                     .passive_rlm_subagent_entry_for_edge(
                         &edge,
                         parent_session_id,
                         parent_session_file,
                         legacy_registry_cache,
-                        &mut on_read_error,
+                        on_read_error,
                     )
                     .await;
-                if entry_degraded {
+                if entry_degraded.load(Ordering::SeqCst) {
                     *degraded = true;
                 }
                 let session_key = resolve_path(&entry.session_file);
@@ -10938,7 +11357,7 @@ impl AgentDaemon {
         parent_session_id: &str,
         parent_session_file: &str,
         legacy_registry_cache: &mut HashMap<String, Vec<LegacyRlmSubagentRegistryEntry>>,
-        on_read_error: &mut dyn FnMut(&str),
+        on_read_error: Arc<dyn Fn(&str) + Send + Sync>,
     ) -> PassiveRlmSubagentEntry {
         let edge_child = canonical_session_path(&edge.child);
         let base = PassiveRlmSubagentEntry {
@@ -10971,14 +11390,16 @@ impl AgentDaemon {
         let display_root = dirname(&edge.child);
         let display_path = rlm_subagent_display_path(&display_root);
         let display = {
-            let mut on_read_error = || on_read_error(&display_path);
-            let listener: Option<&(dyn Fn() + Send + Sync)> = Some(&on_read_error);
+            let on_read_error = Arc::clone(&on_read_error);
+            let path = display_path.clone();
+            let report_display_error = move || on_read_error(&path);
+            let listener: Option<&(dyn Fn() + Send + Sync)> = Some(&report_display_error);
             read_rlm_subagent_display_entry(&display_root, listener).await
         };
         if let Some(display) = display {
             if display.child_id == edge.child_id {
                 // A display-file child was ledger-spawned: the edge depth is real.
-                let mut fields = metadata_fields(&display);
+                let mut fields = metadata_fields(&passive_entry_from_display(&display));
                 fields.rlm_depth = Some(edge.depth);
                 return fields;
             }
@@ -10987,8 +11408,9 @@ impl AgentDaemon {
             self.legacy_rlm_subagent_registry_path(parent_session_file, parent_session_id);
         if !legacy_registry_cache.contains_key(&registry_path) {
             let registry_path_for_error = registry_path.clone();
-            let mut on_read = || on_read_error(&registry_path_for_error);
-            let listener: Option<Arc<dyn Fn() + Send + Sync>> = Some(Arc::new(move || on_read()));
+            let on_read_error = Arc::clone(&on_read_error);
+            let listener: Option<Arc<dyn Fn() + Send + Sync>> =
+                Some(Arc::new(move || on_read_error(&registry_path_for_error)));
             let entries = self
                 .read_legacy_rlm_subagent_registry(&registry_path, listener)
                 .await
@@ -11212,6 +11634,10 @@ impl AgentDaemon {
             saved_by_path.insert(path.clone(), passive.info.clone());
         }
         let saved = saved_by_path.into_values().collect::<Vec<_>>();
+        // REPAIR CURSOR: `build_session_list` (daemon_session_list.rs:317) takes its own
+        // duplicate `SessionInfo` and `AgentCronJob` stubs, not the canonical
+        // `core::session_manager::SessionInfo` / `core::cron_jobs::AgentCronJob` this file
+        // holds. Same unowned-file fix as the `summary_for_active_session` cursor above.
         build_session_list(active_sessions, &saved, scheduled_jobs)
             .into_iter()
             .map(|summary| {
@@ -11342,7 +11768,7 @@ impl AgentDaemon {
         });
         if let Some(hydrating_child) = hydrating_child {
             return self
-                .wait_for_hydrating_child(hydrating_child.state, id)
+                .wait_for_hydrating_child(Arc::clone(&hydrating_child.state), id)
                 .await;
         }
         match self.get_bound_session_state(id) {
@@ -11769,8 +12195,9 @@ impl AgentDaemon {
             .collect();
         candidates.sort_by(|left, right| {
             left.1
+                .eviction
                 .last_activity_at
-                .partial_cmp(&right.1.last_activity_at)
+                .partial_cmp(&right.1.eviction.last_activity_at)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         candidates.truncate(limit);
@@ -12297,9 +12724,11 @@ impl AgentDaemon {
             rlm_child_id: metadata
                 .as_ref()
                 .and_then(|metadata| metadata.rlm_child_id.clone()),
-            session_dir: metadata
-                .as_ref()
-                .and_then(|metadata| metadata.session_dir.clone()),
+            // REPAIR CURSOR: `active_session_state::AgentSessionRuntimeMetadata` has no
+            // `session_dir` (see the metadata cursor in `session_snapshot_entry`). The
+            // canonical type (core/agent_session_runtime.rs:104) carries it. Fix: swap the
+            // import and read `metadata.session_dir` here.
+            session_dir: None,
             session_path: session.session_file(),
             parent_session_id: metadata
                 .as_ref()
@@ -12469,9 +12898,9 @@ impl AgentDaemon {
             .map(|path| canonical_session_path(&path))
             .collect();
         let session_dir = self.options.default_session_config.session_dir.clone();
-        let saved_roots: Vec<AgentFamilyCatalogEntry> = SessionManager::list_all(None, session_dir)
-            .await
-            .unwrap_or_default()
+        let saved_roots: Vec<AgentFamilyCatalogEntry> =
+            SessionManager::list_all(None, session_dir.as_deref())
+                .await
             .into_iter()
             .filter(|info| {
                 let depth = if info.rlm_depth != 0 {
@@ -12586,16 +13015,16 @@ impl AgentDaemon {
         self: &Arc<Self>,
         client: Arc<DaemonClientHandle>,
     ) -> Result<(), String> {
-        if client.in_flight_catchup() {
+        if client.catchup_running.load(Ordering::SeqCst) {
             return Ok(());
         }
         if client.snapshot_streaming() || client.is_backpressured() {
             return Ok(());
         }
         self.clear_client_catchup_retry(&client);
-        client.set_in_flight_catchup(true);
+        client.catchup_running.store(true, Ordering::SeqCst);
         let result = self.drain_backpressured_client_catchup_queue(&client).await;
-        client.set_in_flight_catchup(false);
+        client.catchup_running.store(false, Ordering::SeqCst);
         result
     }
 
@@ -12775,8 +13204,8 @@ impl AgentDaemon {
                             "meta": serde_json::to_value(create_daemon_event_meta(
                                 active_session_id,
                                 last_event_sequence,
-                                None,
-                                Some(&event_generation),
+                                now_iso(),
+                                &event_generation,
                             ))
                             .unwrap_or(Value::Null),
                         })),
@@ -12793,7 +13222,7 @@ impl AgentDaemon {
                     .unwrap_or_default();
                 let messages: Vec<AgentMessage> = snapshot_messages
                     .iter()
-                    .map(|value| serde_json::from_value(value.clone()).unwrap_or_default())
+                    .filter_map(|value| serde_json::from_value(value.clone()).ok())
                     .collect();
                 let transcript =
                     create_snapshot_transcript_chunks(CreateSnapshotTranscriptChunksOptions {
@@ -12832,8 +13261,8 @@ impl AgentDaemon {
             let meta = serde_json::to_value(create_daemon_event_meta(
                 active_session_id,
                 last_event_sequence,
-                None,
-                Some(&event_generation),
+                now_iso(),
+                &event_generation,
             ))
             .unwrap_or(Value::Null);
             let catchup = if purpose == "replacement" {
@@ -12994,7 +13423,7 @@ impl AgentDaemon {
             .unwrap_or_default();
         let messages: Vec<AgentMessage> = snapshot_messages
             .iter()
-            .map(|value| serde_json::from_value(value.clone()).unwrap_or_default())
+            .filter_map(|value| serde_json::from_value(value.clone()).ok())
             .collect();
         let transcript = create_snapshot_transcript_chunks(CreateSnapshotTranscriptChunksOptions {
             active_session_id: active_session_id.clone(),
@@ -13378,7 +13807,7 @@ impl AgentDaemon {
             .or(client_env);
         let session_manager = SessionManager::open_async(
             &entry.session_file,
-            Some(entry.session_dir.clone()).filter(|dir| !dir.is_empty()),
+            Some(entry.session_dir.as_str()).filter(|dir| !dir.is_empty()),
             None,
         )
         .await
@@ -13435,15 +13864,15 @@ impl AgentDaemon {
             );
             Value::Object(object)
         };
-        let runtime_metadata: AgentSessionRuntimeMetadata =
-            serde_json::from_value(metadata).map_err(|error| error.to_string())?;
         let input = CreateAgentSessionRuntimeInput {
             factory: Value::Null,
             cwd,
             agent_dir: self.options.default_session_config.agent_dir.clone(),
             session_manager: Arc::new(StdMutex::new(session_manager)),
             session_options: SessionRuntimeOptions::default(),
-            runtime_metadata: Some(serde_json::to_value(&runtime_metadata).unwrap_or(Value::Null)),
+            // `runtimeMetadata` is handed to the factory as the same object the
+            // TypeScript builds, so it stays a value here.
+            runtime_metadata: Some(metadata.clone()),
         };
         let runtime = (self.options.create_runtime)(input).await?;
         let state = self
@@ -13651,8 +14080,7 @@ impl AgentDaemon {
             && parent_info
                 .as_ref()
                 .and_then(|info| info.state.as_ref())
-                .and_then(|state| state.status.as_deref())
-                == Some("active");
+                .is_some_and(|state| state.status == crate::core::session_manager::SessionStateStatus::Active);
         if !valid {
             self.cancel_rlm_heartbeat(&job.id);
             return None;
@@ -13692,7 +14120,7 @@ impl AgentDaemon {
             .await;
         let resident = self.find_session_by_session_file(Some(&job.session_file));
         let child_state = match passive_subagent {
-            Some(passive) => match self
+            Some(ref passive) => match self
                 .hydrate_passive_rlm_subagent(passive.clone(), None)
                 .await
             {
@@ -13768,8 +14196,8 @@ impl AgentDaemon {
                 && session_info
                     .as_ref()
                     .and_then(|info| info.state.as_ref())
-                    .and_then(|state| state.status.as_deref())
-                    == Some("active");
+                    .is_some_and(|state| state.status
+                        == crate::core::session_manager::SessionStateStatus::Active);
             if !valid {
                 self.cancel_scheduled_jobs_for_session_file(&current.session_file);
                 return false;
@@ -13981,7 +14409,7 @@ impl AgentDaemon {
                                 == Some(target_selector.as_str())
                     })
                 {
-                    self.wait_for_hydrating_child(hydrating_child.state, &target_selector)
+                    self.wait_for_hydrating_child(Arc::clone(&hydrating_child.state), &target_selector)
                         .await?
                 } else if self.is_worker() && options.from_state.is_some() {
                     // The supervisor can resolve and wake a saved worker even when it
@@ -14127,7 +14555,7 @@ impl AgentDaemon {
                 daemon.log("Agent message admission rejected");
                 return;
             }
-            if self.session_of(&state_for_commit).session_id() != target_session_id {
+            if daemon.session_of(&state_for_commit).session_id() != target_session_id {
                 daemon.log("Target session changed before agent message delivery");
             }
         });
@@ -14282,7 +14710,7 @@ impl AgentDaemon {
                 let depth_for_task = input.rlm_depth;
                 let name_for_task = input.session_name.clone();
                 let parent_file = parent_file.clone();
-                let ledger = Arc::clone(&self.rlm_spawn_ledger());
+                let ledger = self.rlm_spawn_ledger();
                 let key = format!("{parent_active_session_id}#{}", input.child_id);
                 // Mark handled so an early rejection cannot surface as an
                 // unhandled-rejection crash before the admission path awaits it.
@@ -14363,7 +14791,7 @@ impl AgentDaemon {
         };
         let parent_session_id = self.session_of(parent_state).session_id();
         let parent_path = canonical_session_path(&parent_file);
-        let ledger = self.rlm_spawn_ledger().await;
+        let ledger = self.rlm_spawn_ledger();
         let edges = ledger
             .edges(true)
             .await
@@ -14373,18 +14801,21 @@ impl AgentDaemon {
                     && canonical_session_path(&candidate.child) == parent_path
             })
             .collect::<Vec<_>>();
-        let live_edge = edges.iter().find(|candidate| !candidate.deleted).cloned();
+        let live_edge = edges
+            .iter()
+            .find(|candidate| candidate.deleted.is_none())
+            .cloned();
         let entry = if let Some(edge) = live_edge {
             {
                 let mut cache: HashMap<String, Vec<LegacyRlmSubagentRegistryEntry>> =
                     HashMap::new();
-                let mut noop = |_path: &str| {};
+                let noop: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(|_path: &str| {});
                 self.passive_rlm_subagent_entry_for_edge(
                     &edge,
                     &parent_session_id,
                     &parent_file,
                     &mut cache,
-                    &mut noop,
+                    noop,
                 )
                 .await
             }
@@ -14394,9 +14825,7 @@ impl AgentDaemon {
             // so restore the display tombstone before sweeping artifacts.
             for tombstoned in &edges {
                 let display_dir = dirname(&tombstoned.child);
-                let current_display = read_rlm_subagent_display_entry(&display_dir, None)
-                    .await
-                    .unwrap_or(None);
+                let current_display = read_rlm_subagent_display_entry(&display_dir, None).await;
                 if current_display
                     .as_ref()
                     .map(|display| display.status != "deleted")
@@ -14457,7 +14886,8 @@ impl AgentDaemon {
                     &self.legacy_rlm_subagent_registry_path(&parent_file, &parent_session_id),
                     None,
                 )
-                .await?
+                .await
+                .map_err(|error| error.to_string())?
                 .into_iter()
                 .find(|candidate| candidate.child_id == child_id);
             let Some(legacy) = legacy else {
@@ -14526,7 +14956,7 @@ impl AgentDaemon {
                 .lock()
                 .expect("roster reporter poisoned")
                 .removed_agent_ids
-                .insert(agent_id, basename(&entry.session_file, ".jsonl"));
+                .insert(agent_id, Some(basename(&entry.session_file, Some(".jsonl"))));
             self.schedule_roster_flush();
         }
         // Deletion boundary: transcript + display tombstone are the durable record
@@ -14621,10 +15051,10 @@ impl AgentDaemon {
         aborted: bool,
         drain_timeout_ms: Option<u64>,
     ) -> bool {
-        if aborted || client.is_destroyed() {
+        if aborted || client.writer.destroyed() {
             return false;
         }
-        if self.write_serialized(client, buffer, message, "jsonl", purpose) {
+        if self.write_serialized_encoded(client, &buffer, message, "jsonl", Some(purpose)) {
             return true;
         }
         let _ = drain_timeout_ms;
