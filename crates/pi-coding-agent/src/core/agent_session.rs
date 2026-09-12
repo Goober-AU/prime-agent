@@ -44,10 +44,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
+use crate::core::extensions::runner::{ExtensionErrorListener, ShutdownHandler};
 use crate::core::extensions::types::{
-    AgentEndPayload, ExtensionError, ExtensionEvent, MessageStartPayload, MessageUpdatePayload,
-    ModelSelectPayload, ToolCallEvent, ToolExecutionEndPayload, ToolExecutionStartPayload,
-    ToolExecutionUpdatePayload, ToolResultEvent, TurnEndPayload, TurnStartPayload,
+    AgentEndPayload, ExtensionCommandContextActions, ExtensionError, ExtensionEvent,
+    ExtensionUiContext, MessageStartPayload, MessageUpdatePayload, ModelSelectPayload,
+    ToolCallEvent, ToolExecutionEndPayload, ToolExecutionStartPayload, ToolExecutionUpdatePayload,
+    ToolResultEvent, TurnEndPayload, TurnStartPayload,
 };
 use crate::core::agent_messages::{
     AGENT_MESSAGE_CUSTOM_TYPE,
@@ -695,12 +697,18 @@ impl std::fmt::Display for RefineSkippedError {
 impl std::error::Error for RefineSkippedError {}
 
 /// `ExtensionBindings`.
+///
+/// The TypeScript interface (agent-session.ts:565-570) holds live objects, never
+/// serialized values: `bindExtensions` stores each one and `_applyExtensionBindings`
+/// (agent-session.ts:9822-9830) hands it straight to the runner. The port keeps the
+/// canonical owners (`ExtensionUiContext`, `ExtensionCommandContextActions`,
+/// `ShutdownHandler`, `ExtensionErrorListener`) for the same reason.
 #[derive(Default)]
 pub struct ExtensionBindings {
-    pub ui_context: Option<Value>,
-    pub command_context_actions: Option<Value>,
-    pub shutdown_handler: Option<Arc<dyn Fn(Value) -> BoxFuture<()> + Send + Sync>>,
-    pub on_error: Option<Arc<dyn Fn(Value) + Send + Sync>>,
+    pub ui_context: Option<Arc<dyn ExtensionUiContext>>,
+    pub command_context_actions: Option<ExtensionCommandContextActions>,
+    pub shutdown_handler: Option<ShutdownHandler>,
+    pub on_error: Option<ExtensionErrorListener>,
 }
 
 /// `AutoRefineReviewRequest`.
@@ -2230,9 +2238,12 @@ pub struct AgentSession {
     session_action_activity_notify: Arc<tokio::sync::Notify>,
     observed_action_deferrals: Mutex<HashMap<String, String>>,
     resource_extension_paths: Option<ResourceExtensionPaths>,
-    extension_command_context_actions: Option<Value>,
-    extension_error_listener: Option<Arc<dyn Fn(Value) + Send + Sync>>,
-    extension_shutdown_handler: Option<Arc<dyn Fn(Value) -> BoxFuture<()> + Send + Sync>>,
+    extension_command_context_actions: Option<ExtensionCommandContextActions>,
+    extension_error_listener: Option<ExtensionErrorListener>,
+    /// `_extensionShutdownHandler` is reassigned by `bindExtensions` on a shared
+    /// instance (agent-session.ts:9752), so the port keeps the interior mutability
+    /// the sibling fields use.
+    extension_shutdown_handler: Mutex<Option<ShutdownHandler>>,
     own_usage_memo: Mutex<Option<OwnUsageMemo>>,
 }
 
@@ -2521,7 +2532,7 @@ impl AgentSession {
             resource_extension_paths: None,
             extension_command_context_actions: None,
             extension_error_listener: None,
-            extension_shutdown_handler: None,
+            extension_shutdown_handler: Mutex::new(None),
             own_usage_memo: Mutex::new(None),
         });
 
@@ -11018,6 +11029,28 @@ impl AgentSession {
     pub fn set_follow_up_mode(&self, mode: &str) {
         *self.follow_up_mode.lock().unwrap() = mode.to_string();
         self.agent.set_follow_up_mode(mode.to_string());
+    }
+
+    /// `this._extensionShutdownHandler` (agent-session.ts:1288).
+    ///
+    /// `_bindExtensionCore` reads it when the extension context shuts down
+    /// (agent-session.ts:9928). `bindExtensions(self: &Arc<Self>)` runs on a shared
+    /// reference, so the two seams below are the only way a sibling module can read
+    /// or replace the field.
+    pub fn extension_shutdown_handler(&self) -> Option<ShutdownHandler> {
+        self.extension_shutdown_handler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// `this._extensionShutdownHandler = bindings.shutdownHandler`
+    /// (agent-session.ts:9752-9754).
+    pub fn set_extension_shutdown_handler(&self, handler: Option<ShutdownHandler>) {
+        *self
+            .extension_shutdown_handler
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = handler;
     }
 
     /// `compact(customInstructions, options)`.

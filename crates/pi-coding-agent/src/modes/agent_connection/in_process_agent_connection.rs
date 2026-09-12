@@ -5,12 +5,20 @@
 //! mirrors the exact methods this file calls on the TypeScript host.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 use pi_ai::types::{BoxFuture, ImageContent, Model, ServiceTier, Transport};
 use serde_json::Value;
 
+use crate::core::agent_session::ExtensionBindings;
+use crate::core::extensions::runner::{ExtensionErrorListener, ShutdownHandler};
+use crate::core::extensions::types::{
+    CancelledResult, ExtensionCommandContextActions, ExtensionError, ExtensionUiContext, ForkOptions,
+    NavigateTreeOptions, NewSessionOptions, SwitchSessionOptions,
+};
 use crate::modes::agent_connection::snapshot::{
     create_agent_connection_snapshot, create_agent_connection_state, AgentSessionRuntimeSnapshotSource,
 };
@@ -88,7 +96,14 @@ pub trait InProcessRuntimeHost: Send + Sync {
     fn session_set_session_name(&self, name: &str);
     fn session_get_rlm_max_depth_status(&self) -> Value;
     fn session_set_rlm_max_depth(&self, max_depth: f64, options: Option<Value>) -> BoxFuture<Result<Value, String>>;
-    fn session_bind_extensions(&self, options: Value) -> BoxFuture<Result<(), String>>;
+    /// `session.bindExtensions({ uiContext, commandContextActions, shutdownHandler, onError })`.
+    ///
+    /// The TypeScript passes live extension objects (in-process-agent-connection.ts:657-682),
+    /// so the seam carries the canonical Rust owners, never a JSON value.
+    fn session_bind_extensions(
+        &self,
+        bindings: ExtensionBindings,
+    ) -> BoxFuture<Result<(), String>>;
     fn session_watch_child(&self, child_id: &str) -> Option<Box<dyn AgentConnectionSessionWatcher>>;
     fn runtime_new_session(&self, options: Option<AgentConnectionNewSessionOptions>) -> BoxFuture<Result<bool, String>>;
     fn runtime_switch_session(
@@ -107,10 +122,11 @@ pub trait InProcessRuntimeHost: Send + Sync {
     fn runtime_dispose(&self) -> BoxFuture<()>;
 }
 
+/// `InProcessHeadlessExtensionOptions` (in-process-agent-connection.ts:74-77).
 #[derive(Default, Clone)]
 pub struct InProcessHeadlessExtensionOptions {
-    pub ui_context: Option<Value>,
-    pub shutdown_handler: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub ui_context: Option<Arc<dyn ExtensionUiContext>>,
+    pub shutdown_handler: Option<ShutdownHandler>,
 }
 
 /// `SideQuestionRun` surface used by `startSideQuestion`.
@@ -166,12 +182,148 @@ impl InProcessAgentConnection {
         *self.unsubscribe_session_events.lock().unwrap() = Some(handle);
     }
 
+    /// `bindCurrentSessionExtensions()` (in-process-agent-connection.ts:655-683).
+    ///
+    /// The TypeScript builds one typed object: `uiContext` and `shutdownHandler`
+    /// come from the headless options, `commandContextActions` is built inline,
+    /// and `onError` re-emits the extension error on this connection. Every action
+    /// forwards to the same target the TypeScript forwards to.
     fn bind_current_session_extensions(&self) -> BoxFuture<Result<(), String>> {
         let options = self.headless_extension_options.lock().unwrap().clone();
-        let bind_options = serde_json::json!({
-            "uiContext": options.as_ref().and_then(|options| options.ui_context.clone()),
+        let host = self.runtime_host.clone();
+        let listeners = self.listeners.clone();
+
+        let wait_for_idle_host = host.clone();
+        let wait_for_idle: Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync> =
+            Arc::new(move || wait_for_idle_host.session_wait_for_idle());
+
+        let new_session_host = host.clone();
+        let new_session: Arc<
+            dyn Fn(Option<NewSessionOptions>) -> Pin<Box<dyn Future<Output = CancelledResult> + Send>>
+                + Send
+                + Sync,
+        > = Arc::new(move |options: Option<NewSessionOptions>| {
+            let host = new_session_host.clone();
+            let parent_session = options.and_then(|options| options.parent_session);
+            Box::pin(async move {
+                match host
+                    .runtime_new_session(Some(AgentConnectionNewSessionOptions { parent_session }))
+                    .await
+                {
+                    Ok(cancelled) => CancelledResult { cancelled },
+                    Err(error) => {
+                        eprintln!("Warning: Could not start a new session from an extension command: {error}");
+                        CancelledResult { cancelled: false }
+                    }
+                }
+            })
         });
-        self.runtime_host.session_bind_extensions(bind_options)
+
+        let fork_host = host.clone();
+        let fork: Arc<
+            dyn Fn(String, Option<ForkOptions>) -> Pin<Box<dyn Future<Output = CancelledResult> + Send>>
+                + Send
+                + Sync,
+        > = Arc::new(move |entry_id: String, options: Option<ForkOptions>| {
+            let host = fork_host.clone();
+            let position = options.and_then(|options| options.position);
+            Box::pin(async move {
+                match host
+                    .runtime_fork(&entry_id, Some(AgentConnectionForkOptions { position }))
+                    .await
+                {
+                    Ok(result) => CancelledResult {
+                        cancelled: result.get("cancelled").and_then(Value::as_bool).unwrap_or(false),
+                    },
+                    Err(error) => {
+                        eprintln!("Warning: Could not fork from an extension command: {error}");
+                        CancelledResult { cancelled: false }
+                    }
+                }
+            })
+        });
+
+        let navigate_tree_host = host.clone();
+        let navigate_tree: Arc<
+            dyn Fn(String, Option<NavigateTreeOptions>) -> Pin<Box<dyn Future<Output = CancelledResult> + Send>>
+                + Send
+                + Sync,
+        > = Arc::new(move |target_id: String, options: Option<NavigateTreeOptions>| {
+            let host = navigate_tree_host.clone();
+            let options = options.map(|options| AgentConnectionNavigateTreeOptions {
+                summarize: options.summarize,
+                custom_instructions: options.custom_instructions,
+                replace_instructions: options.replace_instructions,
+                label: options.label,
+            });
+            Box::pin(async move {
+                match host.session_navigate_tree(&target_id, options).await {
+                    Ok(result) => CancelledResult { cancelled: result.cancelled },
+                    Err(error) => {
+                        eprintln!("Warning: Could not navigate the session tree from an extension command: {error}");
+                        CancelledResult { cancelled: false }
+                    }
+                }
+            })
+        });
+
+        let switch_session_host = host.clone();
+        let switch_session: Arc<
+            dyn Fn(String, Option<SwitchSessionOptions>) -> Pin<Box<dyn Future<Output = CancelledResult> + Send>>
+                + Send
+                + Sync,
+        > = Arc::new(move |session_path: String, _options: Option<SwitchSessionOptions>| {
+            let host = switch_session_host.clone();
+            Box::pin(async move {
+                // The connection-layer options carry `cwdOverride`; the extension
+                // options carry `withSession`, so nothing maps onto it here.
+                match host.runtime_switch_session(&session_path, None).await {
+                    Ok(cancelled) => CancelledResult { cancelled },
+                    Err(error) => {
+                        eprintln!("Warning: Could not switch sessions from an extension command: {error}");
+                        CancelledResult { cancelled: false }
+                    }
+                }
+            })
+        });
+
+        let reload_host = host.clone();
+        let reload: Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync> =
+            Arc::new(move || {
+                let host = reload_host.clone();
+                Box::pin(async move {
+                    if let Err(error) = host.session_reload().await {
+                        eprintln!("Warning: Could not reload the session from an extension command: {error}");
+                    }
+                })
+            });
+
+        let bindings = ExtensionBindings {
+            ui_context: options.as_ref().and_then(|options| options.ui_context.clone()),
+            command_context_actions: Some(ExtensionCommandContextActions {
+                wait_for_idle,
+                new_session,
+                fork,
+                navigate_tree,
+                switch_session,
+                reload,
+            }),
+            shutdown_handler: options.as_ref().and_then(|options| options.shutdown_handler.clone()),
+            on_error: Some(Arc::new(move |error: ExtensionError| {
+                let delivery = emit_to_listeners(
+                    &listeners,
+                    AgentConnectionEvent::ExtensionError {
+                        extension_path: error.extension_path.clone(),
+                        event: error.event.clone(),
+                        error: error.error.clone(),
+                    },
+                );
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(delivery);
+                }
+            })),
+        };
+        host.session_bind_extensions(bindings)
     }
 
     fn abort_all_side_questions(&self) {
@@ -183,16 +335,7 @@ impl InProcessAgentConnection {
     }
 
     fn emit(&self, event: AgentConnectionEvent) -> BoxFuture<()> {
-        let listeners: Vec<AgentConnectionEventListener> = self.listeners.lock().unwrap().clone();
-        Box::pin(async move {
-            let mut deliveries = Vec::with_capacity(listeners.len());
-            for listener in listeners {
-                deliveries.push(listener(event.clone()));
-            }
-            for delivery in deliveries {
-                let _ = delivery.await;
-            }
-        })
+        emit_to_listeners(&self.listeners, event)
     }
 }
 
@@ -802,6 +945,26 @@ impl AgentConnection for InProcessAgentConnection {
             Ok(())
         })
     }
+}
+
+/// Deliver one event to the current listener roster.
+///
+/// `emit(event)` (in-process-agent-connection.ts:651) is `void`-returning in the
+/// TypeScript, so the extension-error listener hands the future to the runtime.
+fn emit_to_listeners(
+    listeners: &Arc<Mutex<Vec<AgentConnectionEventListener>>>,
+    event: AgentConnectionEvent,
+) -> BoxFuture<()> {
+    let listeners: Vec<AgentConnectionEventListener> = listeners.lock().unwrap().clone();
+    Box::pin(async move {
+        let mut deliveries = Vec::with_capacity(listeners.len());
+        for listener in listeners {
+            deliveries.push(listener(event.clone()));
+        }
+        for delivery in deliveries {
+            let _ = delivery.await;
+        }
+    })
 }
 
 fn saved_session_info(session: crate::core::session_manager::SessionInfo) -> Result<AgentConnectionSavedSessionInfo, String> {
