@@ -8,11 +8,6 @@
    "loc": 157
   },
   {
-   "src": "packages/coding-agent/src/core/agent-session-runtime.ts",
-   "rust": "crates/pi-coding-agent/src/core/agent_session_runtime.rs",
-   "loc": 774
-  },
-  {
    "src": "packages/coding-agent/src/core/agent-session-services.ts",
    "rust": "crates/pi-coding-agent/src/core/agent_session_services.rs",
    "loc": 287
@@ -66,17 +61,7 @@
    "src": "packages/coding-agent/src/core/rlm-runtime.ts",
    "rust": "crates/pi-coding-agent/src/core/rlm_runtime.rs",
    "loc": 320
-  },
-  {
-   "src": "packages/coding-agent/src/core/sdk.ts",
-   "rust": "crates/pi-coding-agent/src/core/sdk.rs",
-   "loc": 465
-  },
-  {
-   "src": "packages/coding-agent/src/core/side-question.ts",
-   "rust": "crates/pi-coding-agent/src/core/side_question.rs",
-   "loc": 187
   }
  ],
- "loc": 5333
+ "loc": 3907
 }
