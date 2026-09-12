@@ -1,0 +1,26 @@
+{
+ "incident": "lead ran `git stash` while 14 sub-agents were writing to the working tree",
+ "when": "2026-09-12, during a diagnostic comparison of the extensions/mod.rs fix",
+ "why_it_was_wrong": "stash is a whole-tree operation; it reverted uncommitted work of every concurrently writing worker, not just the file under test. This violates the lead's own rule of never disturbing worker state.",
+ "damage": {
+  "files_reverted_to_HEAD": 4,
+  "files": {
+   "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs": "740 bytes of newer work",
+   "crates/pi-coding-agent/src/modes/interactive/components/scoped_models_selector.rs": "3 bytes",
+   "crates/pi-coding-agent/src/modes/telegram/bridge.rs": "1 byte",
+   "evidence/status/ca-interactive-components-1.json": "881 bytes of status detail"
+  },
+  "also_reverted_then_restored": {
+   "Cargo.toml": "lost the `v7` uuid feature (needed by workers)"
+  },
+  "git_stash_pop_conflict": "Cargo.lock, core/agent_session.rs, core/sdk.rs - pop aborted, stash kept"
+ },
+ "recovery": "extracted all 10 stashed files with `git show stash@{0}:<path>` into .port-env/stash-restore/ while workers kept writing, then copied back ONLY the files where the live copy had not already advanced past the stash; live-newer files were left alone. Cargo.toml uuid v7 feature restored. Stash dropped only after every file was verified on disk.",
+ "verification": "mapped-file emptiness re-checked after recovery: 4 empty files (was 5 before the incident; sdk.rs got written by its worker during recovery). cargo check -p pi-coding-agent runs and reports type errors, so the crate parses.",
+ "secondary_error_i_made": "I also ran os.environ['GIT_DIR']='' which broke the recovery redirects (produced 0-byte extracts) and made later git commands report 'not a git repository'; fixed by popping GIT_DIR and re-extracting.",
+ "rules_added": [
+  "NEVER run git stash/reset/checkout while sub-agents are live.",
+  "To compare a proposed change against its base, copy the file to a temp path; never mutate the shared tree.",
+  "If the tree must be manipulated, first confirm zero live writers."
+ ]
+}

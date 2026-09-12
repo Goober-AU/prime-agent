@@ -55,3 +55,26 @@ sha2 and base64 were unavailable, and proposed local stand-ins.
 Correction: verified directly - `cargo add reqwest && cargo fetch && cargo build`
 succeeded in a scratch crate. The registry is online; every crate now declares the
 full workspace dependency set, and stand-ins were rejected.
+
+## 2026-09-12 - lead ran `git stash` with 14 live writers (SELF-INFLICTED)
+
+While comparing whether my own `core/extensions/mod.rs` fix had caused 5 errors, I ran
+`cargo check` from a stashed tree (`git stash` / `git stash pop`). `git stash` is a
+WHOLE-TREE operation: it reverted uncommitted work belonging to every concurrently
+writing sub-agent, not only the file under test. `git stash pop` then aborted with a
+merge conflict on Cargo.lock, core/agent_session.rs and core/sdk.rs.
+
+Reverted: daemon_mode.rs (740 B of newer work), scoped_models_selector.rs (3 B),
+telegram/bridge.rs (1 B), evidence/status/ca-interactive-components-1.json (881 B),
+and Cargo.toml (lost the `v7` uuid feature workers need).
+
+Recovered by extracting all 10 files with `git show stash@{0}:<path>` into
+`.port-env/stash-restore/` while workers kept writing, then restoring only the copies
+whose live version had NOT already advanced past the stash. Live-newer files were left
+untouched. Stash dropped only after every file was verified present on disk.
+A secondary error: I set `GIT_DIR=''` in the shell env, which broke the extraction
+redirects (0-byte files) and made git report "not a git repository"; fixed and re-run.
+
+Rules added: never run git stash/reset/checkout while sub-agents are live; to compare a
+change against its base, copy the file to a temp path; confirm zero live writers before
+any tree-level git operation.
