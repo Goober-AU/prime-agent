@@ -50,6 +50,14 @@ pub enum AgentsViewSection {
     Inactive,
 }
 
+impl Default for AgentsViewSection {
+    /// `classifyUnifiedSession` returns `"inactive"` when the record has no daemon
+    /// session, so that is the section a defaulted record gets.
+    fn default() -> Self {
+        AgentsViewSection::Inactive
+    }
+}
+
 /// Durable lifecycle; decides agents-view visibility. Only `Live` is shown.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,6 +84,13 @@ pub enum AgentRosterStatus {
     Running,
     Idle,
     Inactive,
+}
+impl Default for AgentRosterStatus {
+    /// `classifyAgentStatus` returns `"inactive"` for a non-resident agent, so a
+    /// defaulted roster entry is inactive.
+    fn default() -> Self {
+        AgentRosterStatus::Inactive
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

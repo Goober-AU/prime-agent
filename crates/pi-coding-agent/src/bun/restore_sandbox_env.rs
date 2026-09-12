@@ -35,7 +35,10 @@ pub fn restore_sandbox_env() {
                     // Rust cannot mutate the process environment after start on
                     // every platform; the recovered values are exposed to the
                     // port's shell env builder instead.
-                    sandbox_env().insert(entry[..index].to_string(), entry[index + 1..].to_string());
+                    sandbox_env()
+                        .lock()
+                        .unwrap()
+                        .insert(entry[..index].to_string(), entry[index + 1..].to_string());
                 }
             }
         }

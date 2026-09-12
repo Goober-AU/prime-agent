@@ -255,7 +255,9 @@ fn fuzzy_match(query: &str, text: &str) -> Option<f64> {
                 } else {
                     consecutive_matches = 0;
                     if last_match_index >= 0 {
-                        score += (i as f64 - last_match_index - 1.0) * 2.0;
+                        // TS: `score += (i - lastMatchIndex - 1) * 2` - an integer
+                        // difference, so compute it as one and widen afterwards.
+                        score += (i as i64 - last_match_index - 1) as f64 * 2.0;
                     }
                 }
                 if is_word_boundary {

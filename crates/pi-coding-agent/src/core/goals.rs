@@ -120,6 +120,14 @@ pub struct CustomMessage {
     pub timestamp: f64,
 }
 
+impl Default for GoalState {
+    /// `emptyGoalState()` - the TypeScript's empty goal, which is also what a
+    /// defaulted connection state carries.
+    fn default() -> Self {
+        empty_goal_state()
+    }
+}
+
 pub fn empty_goal_state() -> GoalState {
     GoalState {
         active: false,

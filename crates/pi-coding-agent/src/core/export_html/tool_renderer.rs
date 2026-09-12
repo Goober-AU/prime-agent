@@ -178,7 +178,7 @@ impl ToolHtmlRenderer for DefaultToolHtmlRenderer {
                 .iter()
                 .map(|part| match part.content_type.as_str() {
                     "image" => pi_agent_core::types::ContentBlock::Image(pi_ai::types::ImageContent {
-                        r#type: "image".to_string(),
+                        type_: "image".to_string(),
                         data: part.data.clone().unwrap_or_default(),
                         mime_type: part.mime_type.clone().unwrap_or_default(),
                     }),

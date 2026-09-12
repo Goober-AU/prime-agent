@@ -325,6 +325,7 @@ impl CommandRecoveryJournal {
                 mode: Some(0o600),
                 fsync: true,
                 fsync_dir: true,
+                before_rename: None,
             },
         );
         self.record_count = records.len();

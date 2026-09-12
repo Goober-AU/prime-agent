@@ -885,8 +885,8 @@ pub use super::theme::theme::Theme;
 /// registry access, and theme registration. They are not execution ownership and
 /// should not be used to reach back into AgentSessionRuntime or AgentSession.
 pub struct InteractiveModeUiServices {
-    pub settings_manager: Arc<SettingsManager>,
-    pub model_registry: Arc<ModelRegistry>,
+    pub settings_manager: Arc<Mutex<SettingsManager>>,
+    pub model_registry: Arc<Mutex<ModelRegistry>>,
     pub get_initial_cwd: Box<dyn Fn() -> String + Send + Sync>,
     pub get_initial_session_name: Box<dyn Fn() -> Option<String> + Send + Sync>,
     pub get_themes: Box<dyn Fn() -> Vec<Theme> + Send + Sync>,
@@ -986,24 +986,28 @@ pub struct ForkOutcome {
 
 /// Port of `createInteractiveModeUiServices`.
 pub fn create_interactive_mode_ui_services(session: &AgentSession) -> InteractiveModeUiServices {
-    let system_prompt = session.system_prompt.clone();
+    // TS `createInteractiveModeUiServices` reuses the session's own objects:
+    // `settingsManager: session.settingsManager`, `modelRegistry: session.modelRegistry`,
+    // `() => session.sessionManager.getCwd()/getSessionName()`.
+    let settings_manager = Arc::clone(&session.settings_manager);
+    let model_registry = Arc::clone(&session.model_registry);
+    let session_manager = Arc::clone(&session.session_manager);
+    let session_manager_for_name = Arc::clone(&session.session_manager);
     InteractiveModeUiServices {
-        settings_manager: Arc::new(SettingsManager),
-        model_registry: Arc::new(ModelRegistry::in_memory()),
-        get_initial_cwd: Box::new(|| SessionManager.get_cwd()),
-        get_initial_session_name: Box::new(|| SessionManager.get_session_name()),
+        settings_manager,
+        model_registry,
+        get_initial_cwd: Box::new(move || session_manager.lock().unwrap().get_cwd()),
+        get_initial_session_name: Box::new(move || session_manager_for_name.lock().unwrap().get_session_name()),
         get_themes: Box::new(Vec::new),
-        refresh_mcp_providers: Some(Box::new(move || {
-            let _ = &system_prompt;
-        })),
+        refresh_mcp_providers: None,
     }
 }
 
 /// Port of `createInteractiveModeUiServicesFromServices`.
 pub fn create_interactive_mode_ui_services_from_services(
-    settings_manager: Arc<SettingsManager>,
-    model_registry: Arc<ModelRegistry>,
-    session_manager: Arc<SessionManager>,
+    settings_manager: Arc<Mutex<SettingsManager>>,
+    model_registry: Arc<Mutex<ModelRegistry>>,
+    session_manager: Arc<Mutex<SessionManager>>,
 ) -> InteractiveModeUiServices {
     let session_manager_for_cwd = Arc::clone(&session_manager);
     let session_manager_for_name = Arc::clone(&session_manager);
@@ -1125,9 +1129,11 @@ mod tests {
     #[test]
     fn ui_services_expose_initial_cwd_and_name() {
         let services = create_interactive_mode_ui_services_from_services(
-            Arc::new(SettingsManager),
-            Arc::new(ModelRegistry::in_memory()),
-            Arc::new(SessionManager),
+            Arc::new(Mutex::new(SettingsManager::in_memory(serde_json::Map::new()))),
+            Arc::new(Mutex::new(ModelRegistry::in_memory())),
+            Arc::new(Mutex::new(
+                SessionManager::in_memory(Some("."), None).expect("in-memory session manager"),
+            )),
         );
         assert_eq!(services.get_initial_cwd(), "");
         assert_eq!(services.get_initial_session_name(), None);

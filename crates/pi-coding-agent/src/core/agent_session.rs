@@ -214,7 +214,9 @@ use crate::core::usage::{
 use crate::core::websearch_credential::{SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME};
 use crate::core::cron_jobs::normalize_heartbeat_delivery_mode;
 use crate::modes::agent_connection::daemon_agent_connection::now_iso;
-use pi_ai::models::get_supported_thinking_levels;
+use pi_ai::models::{
+    get_model_input_limit, get_supported_thinking_levels, models_are_equal, supports_fast_mode,
+};
 
 // ---------------------------------------------------------------------------
 // Private plumbing for cross-slice seams
@@ -1198,12 +1200,13 @@ pub struct SetRlmMaxDepthResult {
 }
 
 /// `AutonomousRuntimeSnapshot = Pick<AutonomousRuntimeState, ...>`.
-#[derive(Debug, Clone, Default, PartialEq)]
+///
+/// The picked members (`continuationsUsed`, `gateAttempts`, `lastGateFailure`,
+/// `lastGateFailureSnapshot`) are read back out of a retained clone because the
+/// worktree-snapshot member's type is private to `core::autonomous`.
+#[derive(Debug, Clone)]
 pub struct AutonomousRuntimeSnapshot {
-    pub continuations_used: f64,
-    pub gate_attempts: f64,
-    pub last_gate_failure: Option<String>,
-    pub last_gate_failure_snapshot: Option<String>,
+    state: crate::core::autonomous::AutonomousRuntimeState,
 }
 
 /// `AgentAutonomousConfig` / `AgentAutonomousStatus` / `AutonomousRuntimeState`
@@ -3851,22 +3854,18 @@ impl AgentSession {
     }
     /// `_snapshotAutonomousRuntimeState`.
     fn snapshot_autonomous_runtime_state(&self) -> AutonomousRuntimeSnapshot {
-        let state = self.autonomous_state.lock().unwrap();
         AutonomousRuntimeSnapshot {
-            continuations_used: state.continuations_used,
-            gate_attempts: state.gate_attempts,
-            last_gate_failure: state.last_gate_failure.clone(),
-            last_gate_failure_snapshot: state.last_gate_failure_snapshot.clone(),
+            state: self.autonomous_state.lock().unwrap().clone(),
         }
     }
 
     /// `_restoreAutonomousRuntimeSnapshot`.
     fn restore_autonomous_runtime_snapshot(&self, snapshot: AutonomousRuntimeSnapshot) {
         let mut state = self.autonomous_state.lock().unwrap();
-        state.continuations_used = snapshot.continuations_used;
-        state.gate_attempts = snapshot.gate_attempts;
-        state.last_gate_failure = snapshot.last_gate_failure;
-        state.last_gate_failure_snapshot = snapshot.last_gate_failure_snapshot;
+        state.continuations_used = snapshot.state.continuations_used;
+        state.gate_attempts = snapshot.state.gate_attempts;
+        state.last_gate_failure = snapshot.state.last_gate_failure;
+        state.last_gate_failure_snapshot = snapshot.state.last_gate_failure_snapshot;
     }
 
     /// `_queueAutonomousContinuationForThresholdCompaction`.
@@ -4307,9 +4306,14 @@ impl AgentSession {
                 let target = assert_direct_agent_message_target(&target)?;
                 let message = normalize_agent_session_message(&message, usize::MAX)?;
                 Ok(Box::pin(async move {
-                    controller
-                        .deliver(serde_json::json!({ "target": target, "message": message }))
-                        .await
+                    let receipt = controller
+                        .send_agent_message(crate::core::agent_messages::AgentSessionMessageSendInput {
+                            target,
+                            message,
+                            receiver_role: None,
+                        })
+                        .await?;
+                    serde_json::to_value(receipt).map_err(|error| error.to_string())
                 }))
             }
             _ => Err(format!("unknown agent message request type \"{request_type}\"")),
@@ -4798,13 +4802,11 @@ impl AgentSession {
             Ok(roster) => roster,
             Err(_) => return,
         };
-        let parent = match roster.agents.iter().find(|entry| {
-            entry
-                .relationship
-                .as_deref()
-                .map(|relationship| relationship == "parent")
-                .unwrap_or(false)
-        }) {
+        let parent = match roster
+            .entries
+            .iter()
+            .find(|entry| entry.relationship == crate::core::agent_messages::FAMILY_RELATIONSHIP_PARENT)
+        {
             Some(parent) => parent.clone(),
             None => return,
         };
@@ -4833,10 +4835,11 @@ impl AgentSession {
                     .unwrap_or_else(|| "(no visible assistant text was produced)".to_string()),
             );
             let _ = controller
-                .deliver(serde_json::json!({
-                    "target": parent.session_id,
-                    "message": text.join("\n"),
-                }))
+                .send_agent_message(crate::core::agent_messages::AgentSessionMessageSendInput {
+                    target: parent.id.clone(),
+                    message: text.join("\n"),
+                    receiver_role: None,
+                })
                 .await;
             {
                 let mut state = self.rlm_continuation.lock().unwrap();
@@ -9902,7 +9905,7 @@ impl AgentSession {
     /// `_emitModelSelect(nextModel, previousModel, source)`.
     async fn emit_model_select(self: &Arc<Self>, next: Model, previous: Option<Model>, source: &str) {
         if let Some(previous) = &previous {
-            if models_are_equal(previous, &next) {
+            if models_are_equal(Some(previous), Some(&next)) {
                 return;
             }
         }
@@ -10036,7 +10039,7 @@ impl AgentSession {
         let current = self.model();
         let index = scoped
             .iter()
-            .position(|entry| models_are_equal(&entry.model, &current))
+            .position(|entry| models_are_equal(Some(&entry.model), current.as_ref()))
             .unwrap_or(0);
         let next_index = ((index as i64 + direction).rem_euclid(scoped.len() as i64)) as usize;
         let next = scoped[next_index].clone();
@@ -10065,7 +10068,7 @@ impl AgentSession {
         let current = self.model();
         let index = models
             .iter()
-            .position(|model| models_are_equal(model, &current))
+            .position(|model| models_are_equal(Some(model), current.as_ref()))
             .unwrap_or(0);
         let next_index = ((index as i64 + direction).rem_euclid(models.len() as i64)) as usize;
         let next = models[next_index].clone();
@@ -10124,11 +10127,13 @@ impl AgentSession {
     /// `_clampServiceTierForModel(serviceTier)`.
     fn clamp_service_tier_for_model(&self, service_tier: Option<ServiceTier>) -> ServiceTier {
         let service_tier = service_tier.unwrap_or_else(|| self.get_service_tier_for_model_switch());
-        if supports_fast_mode(&self.model()) {
-            service_tier
-        } else {
-            ServiceTier::Standard
+        let current_model = self.model();
+        if let Some(current_model) = current_model.as_ref() {
+            if supports_fast_mode(current_model) {
+                return service_tier;
+            }
         }
+        ServiceTier::Standard
     }
 
     /// `cycleThinkingLevel()`.
@@ -11527,24 +11532,8 @@ fn refine_options_from_command(options: &RefineCommandOptions) -> RefineOptions 
     }
 }
 
-/// `getModelInputLimit(model)`.
-fn get_model_input_limit(model: &Model) -> f64 {
-    model.context_window.unwrap_or(0.0)
-}
-
-/// `supportsFastMode(model)`.
-fn supports_fast_mode(model: &Model) -> bool {
-    model
-        .service_tiers
-        .as_ref()
-        .map(|tiers| tiers.iter().any(|tier| tier == "priority"))
-        .unwrap_or(false)
-}
-
-/// `modelsAreEqual(left, right)`.
-fn models_are_equal(left: &Model, right: &Model) -> bool {
-    left.provider == right.provider && left.id == right.id
-}
+// `getModelInputLimit`, `supportsFastMode` and `modelsAreEqual` are owned by
+// `pi_ai::models`; use those implementations instead of local copies.
 
 /// `providerStreamFailureKind` retryability.
 fn provider_stream_failure_kind_is_retryable(kind: &str) -> bool {

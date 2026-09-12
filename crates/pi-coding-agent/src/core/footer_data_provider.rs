@@ -91,7 +91,7 @@ pub struct FooterDataProvider {
     reftable_watcher: Mutex<Option<FsWatcher>>,
     reftable_tables_list_watcher: Mutex<Option<FsWatcher>>,
     reftable_tables_list_path: Mutex<Option<String>>,
-    branch_change_callbacks: Mutex<BTreeMap<usize, Arc<dyn Fn() + Send + Sync>>>,
+    branch_change_callbacks: Arc<Mutex<BTreeMap<usize, Arc<dyn Fn() + Send + Sync>>>>,
     next_branch_change_callback_id: AtomicUsize,
     available_provider_count: AtomicUsize,
     refresh_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -118,7 +118,7 @@ impl FooterDataProvider {
             reftable_watcher: Mutex::new(None),
             reftable_tables_list_watcher: Mutex::new(None),
             reftable_tables_list_path: Mutex::new(None),
-            branch_change_callbacks: Mutex::new(BTreeMap::new()),
+            branch_change_callbacks: Arc::new(Mutex::new(BTreeMap::new())),
             next_branch_change_callback_id: AtomicUsize::new(1),
             available_provider_count: AtomicUsize::new(0),
             refresh_timer: Mutex::new(None),
@@ -160,7 +160,7 @@ impl FooterDataProvider {
             .lock()
             .unwrap()
             .insert(id, callback);
-        let callbacks = self.branch_change_callbacks.clone();
+        let callbacks = Arc::clone(&self.branch_change_callbacks);
         Unsubscribe(Arc::new(move || {
             callbacks.lock().unwrap().remove(&id);
         }))

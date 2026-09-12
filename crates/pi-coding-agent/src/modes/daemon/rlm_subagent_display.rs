@@ -149,6 +149,7 @@ pub fn write_rlm_subagent_display_entry(entry: &RlmSubagentDisplayEntry) -> Resu
             mode: Some(0o600),
             fsync: true,
             fsync_dir: false,
+            before_rename: None,
         },
     )?;
     Ok(true)

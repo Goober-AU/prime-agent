@@ -273,7 +273,7 @@ fn inline_raw(tokens: &[Token]) -> String {
             Token::Link { href, text, .. } => out.push_str(&format!("[{text}]({href})")),
             Token::Br => out.push('\n'),
             Token::Html { raw } => out.push_str(raw),
-            Token::InlineMath(math) => out.push_str(math.raw.as_deref().unwrap_or(&math.text)),
+            Token::InlineMath(math) => out.push_str(&math.text),
             Token::Code { text, lang } => match lang {
                 Some(lang) => out.push_str(&format!("```{lang}\n{text}\n```\n")),
                 None => out.push_str(&format!("```\n{text}\n```\n")),

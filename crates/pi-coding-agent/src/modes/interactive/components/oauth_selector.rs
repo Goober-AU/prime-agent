@@ -631,7 +631,7 @@ mod tests {
         let storage = storage();
         let single = OAuthSelectorComponent::new(
             "login",
-            Box::new(storage),
+            Box::new(storage.clone()),
             vec![provider("a", "A", "oauth")],
             None,
             OAuthSelectorOptions::default(),
@@ -644,7 +644,7 @@ mod tests {
         };
         let two = OAuthSelectorComponent::new(
             "login",
-            Box::new(storage.clone()),
+            Box::new(storage),
             vec![provider("a", "A", "oauth"), service],
             None,
             OAuthSelectorOptions::default(),
