@@ -513,7 +513,10 @@ pub struct DaemonCommandEnvelope {
 }
 
 /// `DaemonCommandWire = DaemonCommand | DaemonCommandEnvelope`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Like `DaemonCommand`, this union embeds `SessionActionRecoverySnapshot` (via
+/// `DaemonCommand`) which carries no `PartialEq`; nothing compares these wire values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum DaemonCommandWire {
     Envelope(DaemonCommandEnvelope),
@@ -770,7 +773,10 @@ pub const DAEMON_PROMPT_STREAMING_BEHAVIOR: [&str; 2] = ["steer", "followUp"];
 ///
 /// The TypeScript union is spread across many modules; the field sets here are
 /// the union's, unchanged, with camelCase wire names and absent-vs-null kept.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// `SessionActionRecoverySnapshot` carries no `PartialEq`, so neither does this
+// command union; nothing compares these wire values in the port (same decision as
+// `DaemonUpdateRestartQueue` above).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DaemonCommand {
     #[serde(rename = "ack_result")]

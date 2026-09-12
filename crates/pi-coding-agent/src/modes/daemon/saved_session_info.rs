@@ -108,7 +108,7 @@ mod tests {
         assert_eq!(restored.modified, 1000.0);
         assert_eq!(restored.message_count, 2.0);
         assert_eq!(
-            restored.state.and_then(|state| state.status).as_deref(),
+            restored.state.map(|state| state.status).as_deref(),
             Some("archived")
         );
         assert_eq!(

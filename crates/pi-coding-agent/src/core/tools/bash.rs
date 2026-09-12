@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
 use pi_agent_core::types::ContentBlock as AgentContentBlock;
+use crate::utils::shell::kill_process_tree;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -191,7 +192,8 @@ impl BashOperations for LocalBashOperations {
             let child_pid = child.id();
             if result.is_none() {
                 if let Some(pid) = child_pid {
-                    kill_process_tree(pid);
+                    // `utils/shell.ts killProcessTree(pid: number)`.
+                    kill_process_tree(pid as i32);
                 }
             }
 
@@ -253,30 +255,6 @@ pub fn get_shell_env() -> Vec<(String, String)> {
     std::env::vars().collect()
 }
 
-/// Port of `utils/shell.ts killProcessTree`.
-pub fn kill_process_tree(pid: Option<u32>) {
-    let Some(pid) = pid else {
-        return;
-    };
-    kill_process_tree_raw(pid);
-}
-
-#[cfg(windows)]
-fn kill_process_tree_raw(pid: u32) {
-    let _ = std::process::Command::new("taskkill")
-        .args(["/T", "/F", "/PID", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
-}
-
-#[cfg(unix)]
-fn kill_process_tree_raw(pid: u32) {
-    unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
-        libc::kill(pid as i32, libc::SIGKILL);
-    }
-}
 
 /// TypeScript `interface BashSpawnContext`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -735,183 +713,6 @@ pub fn create_bash_tool(cwd: &str, options: Option<&BashToolOptions>) -> AgentTo
     wrap_tool_definition(&create_bash_tool_definition(cwd, options), None)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct RecordingOperations {
-        calls: Arc<AtomicUsize>,
-    }
-
-    impl BashOperations for RecordingOperations {
-        fn exec(
-            &self,
-            command: &str,
-            _cwd: &str,
-            options: BashExecOptions,
-        ) -> futures::future::BoxFuture<'static, Result<BashExecResult, String>> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            let command = command.to_string();
-            let on_data = options.on_data.clone();
-            let signal = options.signal.clone();
-            Box::pin(async move {
-                if command.contains("fail") {
-                    on_data(b"boom");
-                    return Ok(BashExecResult { exit_code: Some(1) });
-                }
-                if command.contains("abort") {
-                    return Err("aborted".to_string());
-                }
-                if command.contains("timeout") {
-                    return Err("timeout:2".to_string());
-                }
-                on_data(b"hello\n");
-                if let Some(token) = signal {
-                    token.cancelled().await;
-                }
-                Ok(BashExecResult { exit_code: Some(0) })
-            })
-        }
-    }
-
-    fn recording(calls: Arc<AtomicUsize>) -> Arc<dyn BashOperations> {
-        Arc::new(RecordingOperations { calls })
-    }
-
-    #[test]
-    fn description_uses_default_limits() {
-        let description = bash_tool_description();
-        assert!(description.contains("last 2000 lines"));
-        assert!(description.contains("50KB"));
-    }
-
-    #[test]
-    fn format_bash_call_previews_runner_commands() {
-        let args = BashToolInput {
-            command: "npx tsx ../../node_modules/vitest/dist/cli.js --run test/a.test.ts".to_string(),
-            timeout: Some(30.0),
-        };
-        let text = format_bash_call(Some(&args), &super::super::render_utils::PlainTheme);
-        assert!(text.contains("$ vitest --run test/a.test.ts"));
-        assert!(text.contains("(timeout 30s)"));
-    }
-
-    #[test]
-    fn format_bash_call_marks_invalid_and_empty_arguments() {
-        let empty = BashToolInput {
-            command: String::new(),
-            timeout: None,
-        };
-        let text = format_bash_call(Some(&empty), &super::super::render_utils::PlainTheme);
-        assert!(text.contains("$ ..."));
-    }
-
-    #[test]
-    fn format_duration_uses_one_decimal() {
-        assert_eq!(format_duration(1500.0), "1.5s");
-    }
-
-    #[tokio::test]
-    async fn execute_bash_streams_output_and_returns_details() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let input = BashToolInput {
-            command: "echo hello".to_string(),
-            timeout: None,
-        };
-        let (text, details) = execute_bash("/", recording(calls.clone()), None, None, &input, None, None)
-            .await
-            .expect("executed");
-        assert_eq!(text, "hello\n");
-        assert!(details.is_none());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn execute_bash_reports_non_zero_exit_code() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let input = BashToolInput {
-            command: "fail".to_string(),
-            timeout: None,
-        };
-        let error = execute_bash("/", recording(calls), None, None, &input, None, None)
-            .await
-            .expect_err("must fail");
-        assert_eq!(error, "boom\n\nCommand exited with code 1");
-    }
-
-    #[tokio::test]
-    async fn execute_bash_reports_abort_and_timeout_statuses() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let abort_input = BashToolInput {
-            command: "abort".to_string(),
-            timeout: None,
-        };
-        let abort_error = execute_bash("/", recording(calls.clone()), None, None, &abort_input, None, None)
-            .await
-            .expect_err("aborted");
-        assert_eq!(abort_error, "Command aborted");
-
-        let timeout_input = BashToolInput {
-            command: "timeout".to_string(),
-            timeout: Some(2.0),
-        };
-        let timeout_error = execute_bash("/", recording(calls), None, None, &timeout_input, None, None)
-            .await
-            .expect_err("timed out");
-        assert_eq!(timeout_error, "Command timed out after 2 seconds");
-    }
-
-    #[tokio::test]
-    async fn execute_bash_applies_command_prefix() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let input = BashToolInput {
-            command: "echo hello".to_string(),
-            timeout: None,
-        };
-        let (text, _) = execute_bash(
-            "/",
-            recording(calls),
-            Some("set -e"),
-            None,
-            &input,
-            None,
-            None,
-        )
-        .await
-        .expect("executed");
-        assert_eq!(text, "hello\n");
-    }
-
-    #[tokio::test]
-    async fn execute_bash_rejects_missing_working_directory() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let input = BashToolInput {
-            command: "echo hello".to_string(),
-            timeout: None,
-        };
-        let error = execute_bash(
-            "/definitely/missing/dir",
-            create_local_bash_operations(None),
-            None,
-            None,
-            &input,
-            None,
-            None,
-        )
-        .await
-        .expect_err("must reject");
-        assert!(error.starts_with("Working directory does not exist: /definitely/missing/dir\nCannot execute bash commands."));
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[test]
-    fn get_shell_config_uses_explicit_shell_path() {
-        let (shell, args) = get_shell_config(Some("/bin/zsh"));
-        assert_eq!(shell, "/bin/zsh");
-        assert_eq!(args, vec!["-c".to_string()]);
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -1056,6 +857,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_bash_rejects_missing_working_directory() {
+        let calls = Arc::new(AtomicUsize::new(0));
         let input = BashToolInput {
             command: "echo hello".to_string(),
             timeout: None,
@@ -1074,6 +876,7 @@ mod tests {
         assert!(error.starts_with(
             "Working directory does not exist: /definitely/missing/dir\nCannot execute bash commands."
         ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

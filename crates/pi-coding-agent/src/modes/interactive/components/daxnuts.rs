@@ -108,9 +108,12 @@ impl DaxnutsComponent {
     fn start_animation(&mut self) {
         let tick = Arc::clone(&self.tick);
         let running = Arc::clone(&self.running);
-        let ui = Rc::clone(&self.ui);
         let max_ticks = self.max_ticks;
         running.store(true, Ordering::SeqCst);
+        // Port of `setInterval(() => { this.tick++; ... this.ui.requestRender(); }, 80)`.
+        // The `TUI` is not `Send`, so the interval task only advances the shared
+        // tick counter; the render loop reads it, exactly like the `ArminComponent`
+        // and pi-tui `Loader` ports do for their animations.
         let task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_millis(80));
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -124,9 +127,6 @@ impl DaxnutsComponent {
                 tick.store(next, Ordering::SeqCst);
                 if next >= max_ticks {
                     running.store(false, Ordering::SeqCst);
-                }
-                if let Ok(mut ui) = ui.try_borrow_mut() {
-                    ui.request_render();
                 }
             }
         });

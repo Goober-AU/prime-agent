@@ -17,7 +17,7 @@ const DAEMON_SOCKET_LOCK_STALE_MS: u64 = 5000;
 const DAEMON_SOCKET_LOCK_UPDATE_MS: u64 = 1000;
 const DAEMON_SOCKET_LOCK_RETRIES: u32 = 600;
 
-pub type DaemonSocketCompromiseListener = Box<dyn Fn(&DaemonSocketError) + Send + Sync>;
+pub type DaemonSocketCompromiseListener = std::sync::Arc<dyn Fn(&DaemonSocketError) + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonSocketError {
@@ -36,7 +36,7 @@ pub struct DaemonSocketPathLease {
     pub socket_path: String,
     released: std::sync::atomic::AtomicBool,
     compromised_error: std::sync::Mutex<Option<DaemonSocketError>>,
-    compromise_listeners: std::sync::Mutex<Vec<std::sync::Arc<DaemonSocketCompromiseListener>>>,
+    compromise_listeners: std::sync::Mutex<Vec<DaemonSocketCompromiseListener>>,
     lock_path: Option<String>,
 }
 
@@ -61,7 +61,7 @@ impl DaemonSocketPathLease {
     /// Returns the unsubscribe handle (a no-op when the lease is already compromised).
     pub fn on_compromised(
         self: &std::sync::Arc<Self>,
-        listener: std::sync::Arc<DaemonSocketCompromiseListener>,
+        listener: DaemonSocketCompromiseListener,
     ) -> Box<dyn FnOnce() + Send> {
         if let Some(error) = self.compromise() {
             notify_compromise_listener(&listener, &error);
@@ -90,7 +90,7 @@ impl DaemonSocketPathLease {
             }
             *compromised = Some(error.clone());
         }
-        let listeners: Vec<std::sync::Arc<DaemonSocketCompromiseListener>> = self
+        let listeners: Vec<DaemonSocketCompromiseListener> = self
             .compromise_listeners
             .lock()
             .expect("listeners poisoned")
@@ -531,7 +531,7 @@ mod tests {
         let lease = std::sync::Arc::new(DaemonSocketPathLease::new("/tmp/s.sock", None));
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let captured = std::sync::Arc::clone(&seen);
-        let listener: std::sync::Arc<DaemonSocketCompromiseListener> =
+        let listener: DaemonSocketCompromiseListener =
             std::sync::Arc::new(move |error: &DaemonSocketError| {
                 captured.lock().expect("seen").push(error.message.clone());
             });

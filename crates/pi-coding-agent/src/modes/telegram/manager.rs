@@ -32,6 +32,7 @@ pub const TELEGRAM_MANAGEMENT_RETRY_MS: u64 = 100;
 ///
 /// blocked_on: `proper-lockfile` is a Node dependency; the port implements the
 /// same protocol locally (lock directory, stale takeover, mtime heartbeat).
+#[derive(Debug)]
 pub struct TelegramFileLock {
     lock_path: String,
     heartbeat: Option<Arc<std::sync::atomic::AtomicBool>>,

@@ -144,6 +144,25 @@ fn connection_source_info(
     }
 }
 
+/// `toConnectionSourceInfo(theme.sourceInfo)`.
+///
+/// `resource_loader::update_themes_from_paths` assigns the theme module's own
+/// three-field `SourceInfo` (the TypeScript assigns the full `core/source-info.ts`
+/// shape, but the Rust theme owner narrows it). `origin`/`baseDir` are therefore
+/// not available on a loaded theme; the connection layer's stand-in expects them,
+/// so they are reported as absent rather than invented.
+fn connection_source_info_from_theme(
+    source_info: &crate::modes::interactive::theme::theme::SourceInfo,
+) -> crate::modes::agent_connection::types::AgentConnectionSourceInfo {
+    crate::modes::agent_connection::types::AgentConnectionSourceInfo {
+        path: source_info.path.clone(),
+        source: source_info.source.clone(),
+        scope: source_info.scope.clone(),
+        origin: String::new(),
+        base_dir: None,
+    }
+}
+
 fn skill_base(skill: &Skill) -> &crate::core::skills::BaseSkill {
     match skill {
         Skill::Markdown(skill) => &skill.base,
@@ -410,7 +429,7 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
             .map(|theme| ResourceThemeEntry {
                 name: theme.name.clone(),
                 source_path: theme.source_path.clone(),
-                source_info: theme.source_info.as_ref().map(connection_source_info),
+                source_info: theme.source_info.as_ref().map(connection_source_info_from_theme),
             })
             .collect::<Vec<_>>();
         let cwd = session.session_manager.lock().unwrap().get_cwd();

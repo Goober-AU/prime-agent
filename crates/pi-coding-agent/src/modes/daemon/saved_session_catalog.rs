@@ -178,7 +178,7 @@ mod tests {
     }
 
     /// A command body field, as the JSON object the client writes.
-    fn field(command: &DaemonCommandBody, key: &str) -> Option<&str> {
+    fn field<'a>(command: &'a DaemonCommandBody, key: &str) -> Option<&'a str> {
         command.get(key).and_then(Value::as_str)
     }
 

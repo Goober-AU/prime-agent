@@ -12,7 +12,7 @@ pub trait OnboardingSettingsReader {
 
 impl OnboardingSettingsReader for SettingsManager {
     fn get_onboarding_shown(&self) -> bool {
-        false
+        SettingsManager::get_onboarding_shown(self)
     }
 }
 
@@ -23,17 +23,22 @@ pub trait OnboardingModelRegistryReader {
     fn get_provider_auth_status(&self, provider: &str) -> AuthStatus;
 }
 
-impl OnboardingModelRegistryReader for ModelRegistry {
+/// The TypeScript hands the live `ModelRegistry` object to the reader and calls
+/// `refresh(): void` on it, so the reader borrows the registry shared. The port's
+/// registry mutates on `refresh` (`&mut self`), so the reader owns it behind a
+/// `RefCell` and borrows mutably only for the reload - the same adapter shape
+/// `InteractiveMode` and `main_entry` use for their shared registries.
+impl OnboardingModelRegistryReader for std::cell::RefCell<ModelRegistry> {
     fn refresh(&self) {
-        ModelRegistry::refresh(self);
+        self.borrow_mut().refresh();
     }
 
     fn has_configured_auth(&self, model: &AgentConnectionModel) -> bool {
-        ModelRegistry::has_configured_auth(self, model)
+        self.borrow().has_configured_auth(model)
     }
 
     fn get_provider_auth_status(&self, provider: &str) -> AuthStatus {
-        ModelRegistry::get_provider_auth_status(self, provider)
+        self.borrow().get_provider_auth_status(provider)
     }
 }
 

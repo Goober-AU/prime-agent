@@ -505,7 +505,6 @@ pub fn create_rlm_find_models_host_handler(handler: RlmFindModelsHandler) -> Hos
                 .to_string();
             let limit = match payload.get("limit") {
                 None => DEFAULT_RLM_MODEL_SEARCH_LIMIT,
-                
                 Some(value) => value
                     .as_f64()
                     .filter(|value| value.fract() == 0.0)

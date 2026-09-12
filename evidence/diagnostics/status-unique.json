@@ -1,0 +1,12 @@
+[
+ [
+  "core/agent_session_runtime.rs",
+  33,
+  "file not found for module `daemon_adapter`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4157,
+  "unexpected closing delimiter: `}`"
+ ]
+]

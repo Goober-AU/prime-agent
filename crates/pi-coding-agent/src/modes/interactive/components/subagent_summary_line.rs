@@ -4,7 +4,6 @@ use pi_tui::tui::{Component, Focusable};
 use pi_tui::utils::{truncate_to_width, visible_width};
 
 use crate::modes::agent_connection::types::AgentConnectionRlmChildAgentSnapshot;
-use crate::modes::agents_view::agents_view_state::is_direct_agent_child;
 use crate::modes::daemon::agent_roster::{
     classify_agent_status, classify_session_roster_status, AgentRosterStatus, AgentStatusInput,
     RosterSummaryView,
@@ -65,6 +64,26 @@ pub struct RosterParent {
     pub session_file: Option<String>,
 }
 
+/// `isDirectAgentChild` (agents-view-state.ts) is declared over the agents-view
+/// row type there, which is a second declaration of the daemon `SessionSummary`
+/// this module ports (`daemon-session-list.ts`). Project the parent-linkage
+/// fields `getParentKeys` reads onto an agents-view row so the shared direct-child
+/// check can run on the daemon wire row, the same bridge `InteractiveMode` uses
+/// for its roster bar.
+fn linkage_row_for_roster_summary(
+    child: &SessionSummary,
+) -> crate::modes::agents_view::agents_view_state::SessionSummary {
+    let mut view = crate::modes::agents_view::agents_view_state::SessionSummary::new(
+        child.id.clone(),
+        child.session_id.clone(),
+        child.cwd.clone(),
+    );
+    view.parent_active_session_id = child.parent_active_session_id.clone();
+    view.parent_session_id = child.parent_session_id.clone();
+    view.parent_session_path = child.parent_session_path.clone();
+    view
+}
+
 /// Port of `countRosterSubagentStatuses`.
 pub fn count_roster_subagent_statuses<'a>(
     summaries: impl IntoIterator<Item = &'a SessionSummary>,
@@ -75,8 +94,8 @@ pub fn count_roster_subagent_statuses<'a>(
         if child.runtime_kind.as_deref() != Some("subagent") || child.lifecycle != "live" {
             continue;
         }
-        if !is_direct_agent_child(
-            child,
+        if !crate::modes::agents_view::agents_view_state::is_direct_agent_child(
+            &linkage_row_for_roster_summary(child),
             parent.active_session_id.as_deref(),
             parent.session_id.as_deref(),
             parent.session_file.as_deref(),

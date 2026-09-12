@@ -2498,7 +2498,11 @@ impl AgentSession {
                         crate::core::goals::GoalContextKind::Continuation,
                         None,
                     )?;
-                    session.pending_next_turn_messages.lock().unwrap().push(message);
+                    session
+                        .pending_next_turn_messages
+                        .lock()
+                        .unwrap()
+                        .push(goal_context_custom_message(&message));
                 }
             }
         }
@@ -2870,7 +2874,13 @@ impl AgentSession {
         self.agent.set_get_continuation_messages(Arc::new(
             move |context: GetContinuationMessagesContext, signal: Option<CancellationToken>| {
                 let session = session.clone();
-                Box::pin(async move { session.get_continuation_messages(context, signal).await })
+                Box::pin(async move {
+                    // The agent hook cannot fail; a rejected continuation list is empty.
+                    session
+                        .get_continuation_messages(context, signal)
+                        .await
+                        .unwrap_or_default()
+                })
             },
         ));
     }
@@ -4675,14 +4685,11 @@ impl AgentSession {
             None,
         ) {
             Ok(goal_message) => {
+                // `createGoalContextMessage` yields the canonical
+                // `messages::CustomMessage`; the goal slice's local shape is
+                // converted through the documented adapter.
                 let message = goal_context_custom_message(&goal_message);
-                vec![AgentMessage::Custom(CustomAgentMessage::Custom {
-                    custom_type: message.custom_type.clone(),
-                    content: message.content.clone(),
-                    display: message.display,
-                    details: message.details.clone(),
-                    timestamp: message.timestamp,
-                })]
+                vec![custom_message_agent_message(&message)]
             }
             Err(error) => {
                 // The continuation hook must not reject; listener failures should not crash the agent loop.
@@ -4890,6 +4897,7 @@ impl AgentSession {
         queue: bool,
         compaction_reason: Option<&str>,
     ) -> Option<RlmChildTurnOutcome> {
+        let session = self.session_arc();
         if self.rlm_depth == 0 || self.rlm_continuation.lock().unwrap().pending_results.is_empty() {
             return None;
         }
@@ -4913,7 +4921,9 @@ impl AgentSession {
             .unwrap_or(false)
         {
             if queue {
-                self.queue_pending_rlm_continuation();
+                if let Some(session) = &session {
+                    session.queue_pending_rlm_continuation();
+                }
             }
             return Some(RlmChildTurnOutcome {
                 terminal: false,
@@ -4934,7 +4944,9 @@ impl AgentSession {
         }
         self.persist_rlm_continuation_state();
         if queue {
-            self.queue_pending_rlm_continuation();
+            if let Some(session) = &session {
+                session.queue_pending_rlm_continuation();
+            }
         }
         Some(RlmChildTurnOutcome {
             terminal: false,
@@ -5834,7 +5846,9 @@ impl AgentSession {
             resolve();
             *self.retry_promise.lock().unwrap() = None;
             self.notify_session_input_checkpoint_change();
-            self.schedule_session_input_pump();
+            if let Some(session) = self.session_arc() {
+                session.schedule_session_input_pump();
+            }
         }
     }
 
@@ -7809,17 +7823,25 @@ impl AgentSession {
 
         let runner = self.extension_runner()?;
         let command = runner.get_command(&command_name)?;
-        let session = self.clone();
+        let context = runner.create_command_context();
+        let runner_for_error = runner.clone();
         Some(Box::pin(async move {
-            let handler = match &command.handler {
-                Some(handler) => handler.clone(),
-                None => return Ok(()),
-            };
-            match handler(args).await {
+            let handler = command.command.handler.clone();
+            match handler(args, context).await {
                 Ok(()) => Ok(()),
                 Err(error) => {
-                    let _ = session;
-                    Err(error)
+                    let command_error = if error.is_empty() {
+                        "Extension command failed".to_string()
+                    } else {
+                        error
+                    };
+                    runner_for_error.emit_error(ExtensionError {
+                        extension_path: format!("command:{command_name}"),
+                        event: "command".to_string(),
+                        error: command_error.clone(),
+                        stack: None,
+                    });
+                    Err(command_error)
                 }
             }
         }))
@@ -8419,12 +8441,25 @@ impl AgentSession {
 
     /// `_scheduleSessionInputPump`.
     fn schedule_session_input_pump(self: &Arc<Self>) {
-        if self.session_input_pump_requested.swap(true, Ordering::SeqCst) {
+        if self.session_input_pump_suspended.load(Ordering::SeqCst)
+            || !self.queued_work_pauses.lock().unwrap().is_empty()
+        {
             return;
         }
+        if self.disposed.load(Ordering::SeqCst)
+            || self.disposing.load(Ordering::SeqCst)
+            || self.session_input_pump_requested.swap(true, Ordering::SeqCst)
+            || !self.has_selectable_session_input()
+        {
+            return;
+        }
+        let epoch = self.session_input_pump_epoch.load(Ordering::SeqCst);
         let session = self.clone();
         tokio::spawn(async move {
-            session.pump_session_inputs().await;
+            session
+                .session_input_pump_requested
+                .store(false, Ordering::SeqCst);
+            session.pump_session_inputs(epoch).await;
         });
     }
 
@@ -9489,16 +9524,16 @@ impl AgentSession {
             }
         }
         let images = if images.is_empty() { None } else { Some(images) };
-        self.prompt_with_options(
+        self.prompt(
             &text_parts.join("\n"),
-            PromptOptions {
+            Some(PromptOptions {
                 expand_prompt_templates: Some(false),
                 streaming_behavior: deliver_as,
                 images,
-                source: Some("extension".to_string()),
+                source: Some(crate::core::session_action_store::InputSource::Extension),
                 resume_if_idle: Some(true),
                 ..Default::default()
-            },
+            }),
         )
         .await
     }
@@ -10115,7 +10150,7 @@ impl AgentSession {
             let _ = rx.await;
             Ok(())
         });
-        *self.session_action_commit_tail.lock().unwrap() = tail;
+        *self.session_action_commit_tail.lock().unwrap() = Some(tail);
         let owner = uuid::Uuid::new_v4().to_string();
         *self.session_action_commit_owner.lock().unwrap() = Some(owner.clone());
         let result = previous.await;
@@ -10148,13 +10183,17 @@ impl AgentSession {
         self.session_input_pump_suspended.store(false, Ordering::SeqCst);
         self.session_input_suspended_for_update_restart
             .store(false, Ordering::SeqCst);
-        self.schedule_session_input_pump();
+        if let Some(session) = self.session_arc() {
+            session.schedule_session_input_pump();
+        }
     }
 
     /// `resumeQueuedWork()`.
     pub fn resume_queued_work(&self) {
         self.session_action_activity_notify.notify_waiters();
-        self.schedule_session_input_pump();
+        if let Some(session) = self.session_arc() {
+            session.schedule_session_input_pump();
+        }
     }
 
     /// `waitForSessionInputIdle()`.
@@ -10291,11 +10330,22 @@ impl AgentSession {
         }
     }
 
-    /// `_queueModelSelectEmit(emit)`.
+    /// `_queueModelSelectEmit(nextModel, previousModel, source)`.
     fn queue_model_select_emit(
         self: &Arc<Self>,
-        emit: Arc<dyn Fn() -> BoxFuture<Result<(), String>> + Send + Sync>,
+        next: Model,
+        previous: Option<Model>,
+        source: &str,
     ) {
+        let source = source.to_string();
+        let session = self.clone();
+        let emit: Arc<dyn Fn() -> BoxFuture<Result<(), String>> + Send + Sync> = Arc::new(move || {
+            let session = session.clone();
+            let next = next.clone();
+            let previous = previous.clone();
+            let source = source.clone();
+            Box::pin(async move { session.emit_model_select(next, previous, &source).await })
+        });
         let previous = self.model_select_emit_queue.lock().unwrap().take();
         let previous: BoxFuture<Result<(), String>> = match previous {
             Some(previous) => previous,
@@ -10309,7 +10359,7 @@ impl AgentSession {
             session.model_select_emit_queue_idle.store(true, Ordering::SeqCst);
             result
         });
-        *self.model_select_emit_queue.lock().unwrap() = tail;
+        *self.model_select_emit_queue.lock().unwrap() = Some(tail);
     }
 
     /// `setModel(model, options)`.
@@ -10319,23 +10369,28 @@ impl AgentSession {
         options: ModelSelectOptions,
     ) -> Result<(), String> {
         let previous = self.agent.state().model;
+        let thinking_level = self.get_thinking_level_for_model_switch(None);
+        let service_tier = self.get_service_tier_for_model_switch();
         let mut state = self.agent.state();
         state.model = model.clone();
-        state.thinking_level = clamp_thinking_level_for_model(&model, self.thinking_level());
-        state.service_tier = self.clamp_service_tier_for_model(None);
         self.agent.set_state(state);
+        // `appendModelChange` then settings, matching the TypeScript order.
+        let _ = self
+            .session_manager
+            .lock()
+            .unwrap()
+            .append_model_change(&model.provider, &model.id);
         self.restore_provider_context_for_model();
-        if let Some(entry) = self.find_assistant_entry_for_message(&AgentMessage::Message(
-            pi_ai::types::Message::Assistant(AssistantMessage::default()),
-        )) {
-            let _ = entry;
-        }
-        self.emit_extension_event("model_select");
-        let emit_promise = self.emit_model_select(model.clone(), previous.clone(), "set");
-        let _ = emit_promise;
-        self.track_model_select_emit_error();
+        self.settings_manager
+            .lock()
+            .unwrap()
+            .set_default_model_and_provider(&model.provider, &model.id);
+        self.set_thinking_level(thinking_level);
+        let service_tier = self.clamp_service_tier_for_model(Some(service_tier));
+        self.set_service_tier(service_tier);
         if self.should_wait_for_model_select_emit(&options) {
-            self.pending_model_select_emit().await;
+            self.emit_model_select(model.clone(), Some(previous.clone()), "set")
+                .await;
         }
         self.emit(AgentSessionEvent::ModelSelect {
             model: model.id.clone(),
@@ -10346,7 +10401,7 @@ impl AgentSession {
     }
 
     /// `_trackModelSelectEmitError()`.
-    fn track_model_select_emit_error(&self) {
+    fn track_model_select_emit_error(self: &Arc<Self>) {
         let queue = self.model_select_emit_queue.lock().unwrap().take();
         let Some(queue) = queue else {
             return;
@@ -10369,7 +10424,8 @@ impl AgentSession {
 
     /// `_shouldWaitForModelSelectEmit(options)`.
     fn should_wait_for_model_select_emit(&self, options: &ModelSelectOptions) -> bool {
-        !options.defer_emit.unwrap_or(false) && self.model_select_emit_queue_idle.load(Ordering::SeqCst)
+        options.wait_for_extensions != Some(false)
+            && !self.model_select_emit_queue_idle.load(Ordering::SeqCst)
     }
 
     /// `_pendingModelSelectEmit()`.
