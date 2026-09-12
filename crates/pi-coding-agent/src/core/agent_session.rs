@@ -304,6 +304,21 @@ pub struct BeforeAgentStartResult {
     pub system_prompt: Option<String>,
 }
 
+/// `CustomMessagePayload` content (`string | (TextContent | ImageContent)[]`)
+/// as the session's `CustomMessageContent`.
+pub fn custom_message_content_from_value(content: &Value) -> CustomMessageContent {
+    match content {
+        Value::String(text) => CustomMessageContent::Text(text.clone()),
+        Value::Array(blocks) => CustomMessageContent::Blocks(
+            serde_json::from_value::<Vec<pi_agent_core::types::ContentBlock>>(Value::Array(
+                blocks.clone(),
+            ))
+            .unwrap_or_default(),
+        ),
+        _ => CustomMessageContent::Text(String::new()),
+    }
+}
+
 /// `getAllRegisteredTools()` entry.
 #[derive(Debug, Clone)]
 pub struct RegisteredExtensionTool {
@@ -2801,6 +2816,17 @@ impl AgentSession {
             }));
     }
 
+    /// `_installAgentContinuationHook`.
+    fn install_agent_continuation_hook(self: &Arc<Self>) {
+        let session = self.clone();
+        self.agent.set_get_continuation_messages(Arc::new(
+            move |context: GetContinuationMessagesContext, signal: Option<CancellationToken>| {
+                let session = session.clone();
+                Box::pin(async move { session.get_continuation_messages(context, signal).await })
+            },
+        ));
+    }
+
     /// `_installAgentTurnHook`.
     fn install_agent_turn_hook(self: &Arc<Self>) {
         let session = self.clone();
@@ -3614,16 +3640,17 @@ impl AgentSession {
     fn append_before_agent_start_messages(
         &self,
         messages: &[AgentMessage],
-        result: Option<&BeforeAgentStartResult>,
+        result: Option<&crate::core::extensions::runner::BeforeAgentStartCombinedResult>,
     ) {
         let _ = messages;
         let Some(result) = result else {
             return;
         };
-        if result.messages.is_empty() {
-            return;
-        }
-        for message in &result.messages {
+        let messages = match &result.messages {
+            Some(messages) if !messages.is_empty() => messages,
+            _ => return,
+        };
+        for message in messages {
             let _ = self.session_manager.lock().unwrap().append_message(AgentMessage::Custom(
                 CustomAgentMessage::Custom {
                     custom_type: message.custom_type.clone(),
@@ -3635,7 +3662,7 @@ impl AgentSession {
             ));
         }
         let mut state = self.agent.state();
-        for message in &result.messages {
+        for message in messages {
             state.messages.push(AgentMessage::Custom(CustomAgentMessage::Custom {
                 custom_type: message.custom_type.clone(),
                 content: custom_message_content_from_value(&message.content),
@@ -4984,7 +5011,7 @@ impl AgentSession {
     /// `_getContinuationMessages`.
     async fn get_continuation_messages(
         self: &Arc<Self>,
-        context: AgentContext,
+        context: GetContinuationMessagesContext,
         signal: Option<CancellationToken>,
     ) -> Result<Vec<AgentMessage>, String> {
         let aborted = signal.as_ref().map(|signal| signal.is_cancelled()).unwrap_or(false);
@@ -4997,16 +5024,8 @@ impl AgentSession {
         if self.rlm_depth > 0 {
             self.await_agent_event_queue().await;
         }
-        let message = context
-            .messages
-            .last()
-            .cloned()
-            .unwrap_or(AgentMessage::Message(Message::User(UserMessage::new(
-                UserContent::Text(String::new()),
-                0,
-            ))));
-        if let AgentMessage::Message(Message::Assistant(assistant)) = &message {
-            let outcome = self.handle_rlm_child_turn_outcome(assistant, false, None);
+        {
+            let outcome = self.handle_rlm_child_turn_outcome(&context.message, false, None);
             if let Some(outcome) = outcome {
                 if outcome.terminal {
                     return Ok(Vec::new());
@@ -5027,7 +5046,10 @@ impl AgentSession {
         let goal_snapshot = self.goal_state.lock().unwrap().clone();
         let goal_accounting_started_at = *self.goal_accounting_started_at.lock().unwrap();
         let goal_messages = self
-            .get_goal_continuation_messages(message.clone(), signal.as_ref())
+            .get_goal_continuation_messages(
+                AgentMessage::from(context.message.clone()),
+                signal.as_ref(),
+            )
             .await;
         if !goal_messages.is_empty() || aborted {
             if !goal_messages.is_empty()

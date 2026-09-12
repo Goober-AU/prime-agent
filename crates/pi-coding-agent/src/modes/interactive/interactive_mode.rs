@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 use pi_ai::types::{ImageContent, Model, ServiceTier};
@@ -29,6 +29,7 @@ use super::interactive_mode_services::{
     InteractiveModeLocalSessionHost, InteractiveModeUiServices, OverlayHandle, Text, Theme,
 };
 use super::onboarding::should_run_onboarding;
+use crate::core::goals::{empty_goal_state, GoalStatus};
 use super::prompt_stash_state::{ClientPromptStashStore, PromptStash, PromptStashState};
 use super::queue_selection::{QueueSelection, QueueSelectionItem};
 use super::resume_hint::format_resume_hint;
@@ -483,7 +484,9 @@ impl StartupPromptBarrierOutcome {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GoalAnnouncementSnapshot {
     pub goal_id: Option<String>,
-    pub status: String,
+    /// `GoalState["status"]` - the TypeScript snapshot copies the union verbatim,
+    /// so the port keeps the typed enum rather than a string.
+    pub status: GoalStatus,
     pub objective: Option<String>,
     pub last_reason: Option<String>,
     pub last_error: Option<String>,
@@ -1448,7 +1451,7 @@ impl InteractiveMode {
             escape_repeat_window_ms: Self::ESCAPE_REPEAT_WINDOW_MS,
         };
         mode.hydrate_prompt_stash();
-        mode.hide_thinking_block = mode.settings_manager().get_hide_thinking_block();
+        mode.hide_thinking_block = mode.with_settings(|settings| settings.get_hide_thinking_block());
         Ok(mode)
     }
 
@@ -1459,19 +1462,29 @@ impl InteractiveMode {
 
     /// `private get settingsManager()`
     ///
-    /// REPAIR CURSOR: `interactive_mode_services::SettingsManager` (line 841 there)
-    /// is still an empty stand-in owned by pack p-g-tail, so the five settings
-    /// reads below cannot resolve. Owner fix: make that module's `SettingsManager`
-    /// the canonical `crate::core::settings_manager::SettingsManager` (held as
-    /// `Arc<Mutex<SettingsManager>>`, like `core/agent_session_services.rs:106`) and
-    /// re-point `InteractiveModeUiServices.settings_manager` (line 901 there) at it.
-    /// No change is then needed here.
-    pub fn settings_manager(&self) -> &Arc<super::interactive_mode_services::SettingsManager> {
+    /// The TypeScript getter hands out the live `SettingsManager`; the port shares it
+    /// as `Arc<Mutex<..>>`, so every read takes the lock for the call it wraps.
+    fn with_settings<R>(&self, read: impl FnOnce(&super::interactive_mode_services::SettingsManager) -> R) -> R {
+        let settings = self.ui_services.settings_manager.lock().expect("settings manager poisoned");
+        read(&settings)
+    }
+
+    /// Same as `with_settings`, for the one mutating call (`setOnboardingShown`).
+    fn with_settings_mut<R>(
+        &self,
+        write: impl FnOnce(&mut super::interactive_mode_services::SettingsManager) -> R,
+    ) -> R {
+        let mut settings = self.ui_services.settings_manager.lock().expect("settings manager poisoned");
+        write(&mut settings)
+    }
+
+    /// `private get settingsManager()` - the raw shared handle.
+    pub fn settings_manager(&self) -> &Arc<Mutex<super::interactive_mode_services::SettingsManager>> {
         &self.ui_services.settings_manager
     }
 
     /// `private get modelRegistry()`
-    pub fn model_registry(&self) -> &Arc<super::interactive_mode_services::ModelRegistry> {
+    pub fn model_registry(&self) -> &Arc<Mutex<super::interactive_mode_services::ModelRegistry>> {
         &self.ui_services.model_registry
     }
 
@@ -1679,6 +1692,8 @@ impl InteractiveMode {
 
     /// Port of `getOnboardingState`.
     pub fn get_onboarding_state(&self) -> super::onboarding::OnboardingStartupState<'_> {
+        // The TypeScript hands the live objects straight through; the port shares them
+        // as `Arc<Mutex<..>>`, and the adapters below expose the same read surface.
         super::onboarding::OnboardingStartupState {
             settings_manager: self.settings_manager().as_ref(),
             model_registry: self.model_registry().as_ref(),
@@ -1698,8 +1713,8 @@ impl InteractiveMode {
 
     /// Port of `markOnboardingShown`.
     fn mark_onboarding_shown(&self) {
-        if !self.settings_manager().get_onboarding_shown() {
-            self.settings_manager().set_onboarding_shown(true);
+        if !self.with_settings(|settings| settings.get_onboarding_shown()) {
+            self.with_settings_mut(|settings| settings.set_onboarding_shown(true));
         }
     }
 
@@ -2058,7 +2073,7 @@ impl InteractiveMode {
         self.connection_state
             .as_ref()
             .map(|state| state.goal.clone())
-            .unwrap_or_else(GoalState::empty)
+            .unwrap_or_else(empty_goal_state)
     }
 
     /// Port of `getConnectionContextUsage`.
@@ -2385,7 +2400,11 @@ impl InteractiveMode {
     /// Port of `isModelProviderConfigured`.
     pub fn is_model_provider_configured(&self, model: &AgentConnectionModel) -> bool {
         self.connection_configured_providers.contains(&model.provider)
-            || self.model_registry().has_configured_auth(model)
+            || self
+                .model_registry()
+                .lock()
+                .expect("model registry poisoned")
+                .has_configured_auth(model)
     }
 
     /// Port of `currentModelSupportsFastMode`.
@@ -2471,27 +2490,19 @@ impl InteractiveMode {
 
     /// Port of `formatGoalStatus`.
     ///
-    /// REPAIR CURSOR: `GoalState` here is the stand-in in
-    /// `interactive_mode_services.rs:448` (p-g-tail), which has no `tokensUsed` /
-    /// `tokenBudget`, so the real `core::goals::format_goal_usage` cannot run.
-    /// Owner fix: delete that stand-in and re-export
-    /// `crate::core::goals::GoalState` (plus `empty_goal_state`), and re-point
-    /// `AgentConnectionState.goal` (line 469 there) at it. This function then needs
-    /// only `GoalState::empty()` -> `crate::core::goals::empty_goal_state()` and the
-    /// string status comparisons -> `GoalStatus` comparisons.
     pub fn format_goal_status(&self, goal: &GoalState, terminal_columns: f64) -> String {
         let usage = crate::core::goals::format_goal_usage(goal);
         let usage_text = usage.map(|usage| format!(" ({usage})")).unwrap_or_default();
-        match goal.status.as_str() {
-            "idle" => "No active goal".to_string(),
-            "active" => match &goal.objective {
+        match goal.status {
+            GoalStatus::Idle => "No active goal".to_string(),
+            GoalStatus::Active => match &goal.objective {
                 Some(objective) => format!(
                     "Goal{}",
                     self.format_goal_detail_suffix(Some(objective), visible_width("Goal"), terminal_columns)
                 ),
                 None => "Pursuing goal".to_string(),
             },
-            "paused" => match &goal.last_reason {
+            GoalStatus::Paused => match &goal.last_reason {
                 Some(last_reason) => format!(
                     "Goal paused{}",
                     self.format_goal_detail_suffix(
@@ -2502,7 +2513,7 @@ impl InteractiveMode {
                 ),
                 None => "Goal paused (/goal resume)".to_string(),
             },
-            "budget_limited" => match &goal.last_reason {
+            GoalStatus::BudgetLimited => match &goal.last_reason {
                 Some(last_reason) => {
                     let prefix = format!("Goal budget limited{usage_text}");
                     let suffix = self.format_goal_detail_suffix(
@@ -2514,7 +2525,7 @@ impl InteractiveMode {
                 }
                 None => format!("Goal budget limited{usage_text}"),
             },
-            "complete" => match &goal.last_reason {
+            GoalStatus::Complete => match &goal.last_reason {
                 Some(last_reason) => format!(
                     "Goal complete{}",
                     self.format_goal_detail_suffix(
@@ -2525,7 +2536,7 @@ impl InteractiveMode {
                 ),
                 None => "Goal complete".to_string(),
             },
-            "error" => match &goal.last_error {
+            GoalStatus::Error => match &goal.last_error {
                 Some(last_error) => format!(
                     "Goal error{}",
                     self.format_goal_detail_suffix(
@@ -2536,7 +2547,6 @@ impl InteractiveMode {
                 ),
                 None => "Goal error".to_string(),
             },
-            _ => String::new(),
         }
     }
 
@@ -2660,7 +2670,7 @@ impl InteractiveMode {
     /// Port of `getMarkdownThemeWithSettings`.
     pub fn get_markdown_theme_with_settings(&self) -> super::theme::theme::MarkdownTheme {
         let mut markdown_theme = super::theme::theme::get_markdown_theme();
-        markdown_theme.code_block_indent = Some(self.settings_manager().get_code_block_indent());
+        markdown_theme.code_block_indent = Some(self.with_settings(|settings| settings.get_code_block_indent()));
         markdown_theme
     }
 
@@ -2732,19 +2742,21 @@ impl InteractiveMode {
         let next = self.goal_announcement_snapshot(goal);
         self.last_goal_announcement = Some(next.clone());
         let Some(previous) = previous else {
-            return goal.status != "idle";
+            return goal.status != GoalStatus::Idle;
         };
         if previous.status != next.status {
             return true;
         }
         if previous.goal_id != next.goal_id {
-            return goal.status != "idle";
+            return goal.status != GoalStatus::Idle;
         }
-        match goal.status.as_str() {
-            "active" => false,
-            "paused" | "budget_limited" | "complete" => previous.last_reason != next.last_reason,
-            "error" => previous.last_error != next.last_error,
-            "idle" => false,
+        match goal.status {
+            GoalStatus::Active => false,
+            GoalStatus::Paused | GoalStatus::BudgetLimited | GoalStatus::Complete => {
+                previous.last_reason != next.last_reason
+            }
+            GoalStatus::Error => previous.last_error != next.last_error,
+            GoalStatus::Idle => false,
             _ => false,
         }
     }
@@ -3121,7 +3133,8 @@ impl InteractiveMode {
         self.main_container.add_child(Box::new(super::interactive_mode_services::Container::new()));
         self.ui.add_child(Box::new(Text::new("", 0, 0)));
         self.ui.start();
-        self.fullscreen_enabled = self.options.force_fullscreen || self.settings_manager().get_fullscreen();
+        self.fullscreen_enabled =
+            self.options.force_fullscreen || self.with_settings(|settings| settings.get_fullscreen());
         self.is_initialized = true;
         Ok(())
     }
@@ -3334,6 +3347,34 @@ fn clone_ui_services(services: &InteractiveModeUiServices) -> InteractiveModeUiS
     }
 }
 
+/// `OnboardingSettingsReader` reads `session.settingsManager`, which the client owns as
+/// `Arc<Mutex<..>>`; this adapter keeps the onboarding call shape identical while the
+/// lock is held only for the read.
+impl super::onboarding::OnboardingSettingsReader for Mutex<super::interactive_mode_services::SettingsManager> {
+    fn get_onboarding_shown(&self) -> bool {
+        self.lock()
+            .expect("settings manager poisoned")
+            .get_onboarding_shown()
+    }
+}
+
+/// `OnboardingModelRegistryReader` - same adapter shape for the shared model registry.
+impl super::onboarding::OnboardingModelRegistryReader for Mutex<super::interactive_mode_services::ModelRegistry> {
+    fn refresh(&self) {
+        self.lock().expect("model registry poisoned").refresh();
+    }
+
+    fn has_configured_auth(&self, model: &AgentConnectionModel) -> bool {
+        self.lock().expect("model registry poisoned").has_configured_auth(model)
+    }
+
+    fn get_provider_auth_status(&self, provider: &str) -> super::interactive_mode_services::AuthStatus {
+        self.lock()
+            .expect("model registry poisoned")
+            .get_provider_auth_status(provider)
+    }
+}
+
 impl InteractiveMode {
     /// Port of `armEscapeRepeat`.
     pub fn arm_escape_repeat(&mut self, action: &'static str) {
@@ -3477,7 +3518,10 @@ impl InteractiveMode {
 
     /// Port of `applyAuthStaleEvent`.
     pub fn apply_auth_stale_event(&self, _provider: &str, _source_tokens: &[String]) {
-        self.model_registry().mark_provider_auth_stale(_provider);
+        self.model_registry()
+            .lock()
+            .expect("model registry poisoned")
+            .mark_provider_auth_stale(_provider);
     }
 
     /// Port of `updateConnectionStateFromEvent`.
@@ -4081,14 +4125,14 @@ mod tests {
     #[test]
     fn goal_tray_labels_follow_the_status() {
         let mut mode = test_mode();
-        let mut goal = GoalState::empty();
-        goal.status = "active".to_string();
+        let mut goal = empty_goal_state();
+        goal.status = GoalStatus::Active;
         goal.time_used_seconds = 61.0;
         // `getTrayGoalLabel()` reads `this.getGoalState()`, so the label is driven
         // through the connection state exactly like the reference.
         mode.connection_state = Some(AgentConnectionState { goal: goal.clone(), ..Default::default() });
         assert_eq!(mode.get_tray_goal_label().as_deref(), Some("Pursuing goal (1m 01s)"));
-        goal.status = "idle".to_string();
+        goal.status = GoalStatus::Idle;
         mode.connection_state = Some(AgentConnectionState { goal, ..Default::default() });
         assert_eq!(mode.get_tray_goal_label(), None);
     }
@@ -4096,15 +4140,15 @@ mod tests {
     #[test]
     fn goal_announcements_track_status_and_reason_changes() {
         let mut mode = test_mode();
-        let mut goal = GoalState::empty();
+        let mut goal = empty_goal_state();
         mode.set_goal_announcement_baseline(&goal);
         assert!(!mode.should_announce_goal_update(&goal));
 
-        goal.status = "active".to_string();
+        goal.status = GoalStatus::Active;
         assert!(mode.should_announce_goal_update(&goal));
         assert!(!mode.should_announce_goal_update(&goal));
 
-        goal.status = "paused".to_string();
+        goal.status = GoalStatus::Paused;
         goal.last_reason = Some("budget".to_string());
         assert!(mode.should_announce_goal_update(&goal));
         goal.last_reason = Some("other".to_string());
@@ -4356,17 +4400,17 @@ mod tests {
     #[test]
     fn goal_status_formatting_matches_the_typescript_branches() {
         let mode = test_mode();
-        let mut goal = GoalState::empty();
+        let mut goal = empty_goal_state();
         assert_eq!(mode.format_goal_status(&goal, 120.0), "No active goal");
-        goal.status = "active".to_string();
+        goal.status = GoalStatus::Active;
         assert_eq!(mode.format_goal_status(&goal, 120.0), "Pursuing goal");
         goal.objective = Some("ship it".to_string());
         assert_eq!(mode.format_goal_status(&goal, 120.0), "Goal: ship it");
-        goal.status = "complete".to_string();
+        goal.status = GoalStatus::Complete;
         assert_eq!(mode.format_goal_status(&goal, 120.0), "Goal complete");
         goal.last_reason = Some("done".to_string());
         assert_eq!(mode.format_goal_status(&goal, 120.0), "Goal complete: done");
-        goal.status = "error".to_string();
+        goal.status = GoalStatus::Error;
         goal.last_error = Some("boom".to_string());
         assert_eq!(mode.format_goal_status(&goal, 120.0), "Goal error: boom");
     }
@@ -4417,8 +4461,12 @@ mod tests {
     /// A minimal mode with no connection: enough for the pure helpers above.
     fn test_mode() -> InteractiveMode {
         let services = InteractiveModeUiServices {
-            settings_manager: Arc::new(super::super::interactive_mode_services::SettingsManager),
-            model_registry: Arc::new(super::super::interactive_mode_services::ModelRegistry::in_memory()),
+            settings_manager: Arc::new(Mutex::new(
+                super::super::interactive_mode_services::SettingsManager::in_memory(serde_json::Map::new()),
+            )),
+            model_registry: Arc::new(Mutex::new(
+                super::super::interactive_mode_services::ModelRegistry::in_memory(),
+            )),
             get_initial_cwd: Box::new(|| "/initial".to_string()),
             get_initial_session_name: Box::new(|| Some("initial".to_string())),
             get_themes: Box::new(Vec::new),
