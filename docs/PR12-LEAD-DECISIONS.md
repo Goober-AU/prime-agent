@@ -13,12 +13,27 @@ Baseline TypeScript: `packages/coding-agent/src` at commit 9f547cea. TS is the b
 
 ## ROOT CAUSES the lead confirmed (fix these, do not patch symptoms one by one)
 
-1. **Invented `mod` declarations.** `core/agent_session_runtime.rs:33-34` declares
-   `mod daemon_adapter; mod in_process_adapter;` and neither file exists, and NOTHING in the
-   crate references either module. The TypeScript `core/agent-session-runtime.ts` contains NO
-   such modules (it exports only CreateAgentSessionRuntimeResult/Factory, AgentSessionRuntimeKind/
-   Metadata/DisposeOptions, AgentSessionRuntime). These declarations were invented.
-   -> Remove the two `mod` lines. Do NOT create empty modules and do NOT feature-gate.
+1. **CORRECTION (the lead was wrong here - do not act on the earlier claim).**
+   `core/agent_session_runtime.rs:33-34` declares `mod daemon_adapter; mod in_process_adapter;` and
+   neither file exists. The handoff is CORRECT that they must be implemented. The lead first claimed
+   these were "invented" and deleted the two `mod` lines. That was WRONG and has been reverted.
+
+   Evidence: the TypeScript seam IS real, it is just implicit. `InProcessAgentConnection`'s
+   constructor takes the concrete class `AgentSessionRuntime` and calls 8 of its members directly
+   (`session`, `switchSession`, `newSession`, `fork`, `importFromJsonl`, `setRebindSession`,
+   `setBeforeSessionInvalidate`, `dispose`). TypeScript resolves this structurally; Rust cannot,
+   because the consumer trait `InProcessRuntimeHost` lives in `modes/agent_connection/` and the
+   concrete `AgentSessionRuntime` lives in `core/`. So Rust needs an explicit trait plus a real
+   adapter IMPL that forwards to `AgentSessionRuntime`.
+
+   Current state: `InProcessRuntimeHost` (69 methods) has ZERO implementors. `DaemonSession`
+   (97 methods) is implemented ONLY by `MissingSession`. The compiler states this directly:
+   `no method named runtime_switch_session found for &Arc<AgentDaemon>` /
+   "`InProcessRuntimeHost` defines an item `runtime_switch_session`, perhaps you need to implement it".
+
+   -> IMPLEMENT the adapters. Do NOT create empty modules. Do NOT delete the `mod` lines.
+   The adapter struct wraps `Arc<AgentSessionRuntime>` and forwards each method to the real member.
+   For `daemon_adapter`, implement the runtime-facing part over the daemon's session state.
 
 2. **`Box` vs `Arc` callback drift (64 errors).** e.g.
    `assistant_message.rs:58` declares `fn rc(value: Box<dyn Fn(&str)->String + Send + Sync>)`

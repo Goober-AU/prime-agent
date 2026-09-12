@@ -30,6 +30,9 @@ use crate::core::session_manager::{NewSessionOptions, SessionManager};
 
 pub type BoxFuture<T> = pi_ai::types::BoxFuture<T>;
 
+mod daemon_adapter;
+mod in_process_adapter;
+
 
 // ---------------------------------------------------------------------------
 // Re-exports (`export { ... } from "./agent-session-services.js"`)
