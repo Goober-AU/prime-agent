@@ -105,10 +105,10 @@ fn identity_from_metadata(metadata: &std::fs::Metadata) -> StatIdentity {
 pub fn try_acquire_dir_lock<F, Fut>(
     lock_path: &str,
     owner_alive: F,
-) -> impl Future<Output = std::io::Result<DirLockAttempt>>
+) -> impl Future<Output = std::io::Result<DirLockAttempt>> + Send
 where
-    F: Fn(Option<i32>) -> Fut + Copy,
-    Fut: Future<Output = bool>,
+    F: Fn(Option<i32>) -> Fut + Copy + Send + Sync + 'static,
+    Fut: Future<Output = bool> + Send,
 {
     let lock_path = lock_path.to_string();
     async move {
@@ -123,10 +123,10 @@ fn acquire_attempt<'a, F, Fut>(
     lock_path: &'a str,
     owner_alive: F,
     retry_on_swept_candidate: bool,
-) -> Pin<Box<dyn Future<Output = std::io::Result<DirLockAttempt>> + 'a>>
+) -> Pin<Box<dyn Future<Output = std::io::Result<DirLockAttempt>> + Send + 'a>>
 where
-    F: Fn(Option<i32>) -> Fut + Copy + 'a,
-    Fut: Future<Output = bool> + 'a,
+    F: Fn(Option<i32>) -> Fut + Copy + Send + Sync + 'a,
+    Fut: Future<Output = bool> + Send + 'a,
 {
     Box::pin(async move {
     let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4());
@@ -224,8 +224,8 @@ async fn judge_and_reclaim<F, Fut>(
     token: &str,
 ) -> std::io::Result<DirLockAttempt>
 where
-    F: Fn(Option<i32>) -> Fut + Copy,
-    Fut: Future<Output = bool>,
+    F: Fn(Option<i32>) -> Fut + Copy + Send + Sync,
+    Fut: Future<Output = bool> + Send,
 {
     let judged = read_owner_raw(lock_path, captured.is_dir);
     if judged == OwnerRead::Unreadable {

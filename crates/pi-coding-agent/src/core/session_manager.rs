@@ -1765,13 +1765,16 @@ async fn load_entries_from_file_async_observed(
             None
         },
     };
-    let observed_bytes = std::cell::Cell::new(0u64);
-    let mut on_bytes_read = |bytes: usize| {
-        observed_bytes.set(observed_bytes.get() + bytes as u64);
+    // `onBytesRead` counts the chunks actually returned. The counter is an atomic rather than a
+    // `Cell` because the closure's borrow must not be held across the parse loop's awaits below.
+    let observed_bytes = std::sync::atomic::AtomicU64::new(0);
+    let lines = {
+        let mut on_bytes_read = |bytes: usize| {
+            observed_bytes.fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+        };
+        read_lines_as_buffers(file_path, Some(&range), Some(&mut on_bytes_read)).unwrap_or_default()
     };
-    let lines = read_lines_as_buffers(file_path, Some(&range), Some(&mut on_bytes_read))
-        .unwrap_or_default();
-    read_bytes += observed_bytes.get();
+    read_bytes += observed_bytes.load(std::sync::atomic::Ordering::Relaxed);
     for line in lines {
         append_entry_from_buffer(&mut entries, &line, 0, line.len());
         bytes_since_yield += line.len() + 1;
