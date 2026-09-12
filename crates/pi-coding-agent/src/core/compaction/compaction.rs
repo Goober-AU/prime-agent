@@ -373,9 +373,12 @@ fn error_is_transient(error: &ProviderRequestError) -> bool {
 
 /// `requestWithProviderRetry` for the unary provider compaction request.
 async fn request_with_provider_retry(
-    attempt_request: &dyn Fn() -> pi_ai::types::BoxFuture<
+    // `Send + Sync` so awaiting the attempt inside the caller's `Send` future keeps
+    // that future `Send` (same reasoning as `complete_with_provider_retry` above).
+    attempt_request: &(dyn Fn() -> pi_ai::types::BoxFuture<
         Result<Option<pi_ai::compaction::ProviderCompactionResult>, ProviderRequestError>,
-    >,
+    > + Send
+              + Sync),
     policy: Option<&ProviderRetryPolicy>,
     signal: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<Option<pi_ai::compaction::ProviderCompactionResult>, ProviderRequestError> {
@@ -1216,7 +1219,8 @@ async fn generate_bounded_summary(
     thinking_level: Option<&ThinkingLevel>,
     retry: Option<&ProviderRetryPolicy>,
     summary_call: SummaryCallRunner,
-    instructions: &dyn Fn(Option<&str>) -> String,
+    // `Send + Sync` for the same reason: the caller awaits inside a `Send` future.
+    instructions: &(dyn Fn(Option<&str>) -> String + Send + Sync),
     previous_summary: Option<&str>,
 ) -> Result<SummarySlice, String> {
     let input_limit = get_model_input_limit(model);
