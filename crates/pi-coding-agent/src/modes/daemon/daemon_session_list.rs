@@ -1,8 +1,8 @@
 //! Port of packages/coding-agent/src/modes/daemon/daemon-session-list.ts
 //!
-//! `SessionInfo`, `AgentCronJob` and `SessionSummary`'s live fields come from
-//! core modules owned by other slices; the daemon keeps the structural views it
-//! reads here with the same field names, so the real types can drop in later.
+//! `SessionInfo` and `AgentCronJob` are the canonical `core` types, re-exported
+//! here rather than restated: the daemon reads the same objects the session and
+//! cron owners produce, so a second definition could only drift.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::active_session_state::ActiveSessionState;
+use crate::core::cron_jobs::is_heartbeat_cron_job;
+
 use super::agent_roster::{is_session_summary_busy, AgentRosterStatus};
 use super::agent_roster::RosterSessionSummary;
 
@@ -56,45 +58,14 @@ impl SessionActivity {
 pub const SPAWN_CODE_MAX_CHARS: usize = 4000;
 const MAX_DATE_TIMESTAMP_MS: f64 = 8.64e15;
 
-/// A saved session row (core/session-manager.ts owns the real type).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SessionInfo {
-    pub path: String,
-    pub id: String,
-    pub cwd: String,
-    pub name: Option<String>,
-    pub state: Option<SessionState>,
-    pub parent_session_path: Option<String>,
-    pub rlm_depth: Option<i64>,
-    pub created_ms: f64,
-    pub modified_ms: f64,
-    pub message_count: usize,
-    pub first_message: String,
-    pub all_messages_text: String,
-    pub agent_status: Option<AgentStatusRecord>,
-    pub usage: Option<Value>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct SessionState {
-    pub status: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct AgentStatusRecord {
-    pub summary: String,
-    pub task_state: Option<String>,
-    pub based_on_message_count: usize,
-}
-
-/// A scheduled cron job (core/cron-jobs.ts owns the real type).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct AgentCronJob {
-    pub active_session_id: String,
-    pub session_file: String,
-    pub status: String,
-    pub heartbeat: bool,
-}
+// `SessionState` / `AgentStatus` / `SessionInfo` are the canonical session-manager
+// types; `AgentCronJob` is the canonical cron-jobs type. The daemon previously kept
+// lossy copies (`status: Option<String>` where TS requires `SessionStateStatus`,
+// `AgentStatus` for `AgentStatus`, `Date` fields as `*_ms`, and an invented
+// `heartbeat: bool` standing in for `isHeartbeatCronJob`). A duplicate only drifts.
+pub use crate::core::cron_jobs::AgentCronJob;
+pub use crate::core::session_manager::{AgentStatus, SessionInfo, SessionState};
+use crate::core::session_manager::{AgentTaskState, SessionStateStatus};
 
 /// The `SessionSummary` projection used by the daemon wire.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -278,7 +249,9 @@ pub struct ScheduledJobRegistrations {
 pub fn scheduled_job_registrations(scheduled_jobs: &[AgentCronJob]) -> ScheduledJobRegistrations {
     let mut registrations = ScheduledJobRegistrations::default();
     for job in scheduled_jobs {
-        let heartbeat = job.heartbeat;
+        // TS daemon-session-list.ts:127 calls `isHeartbeatCronJob(job)`, which reads
+        // the job's `source` ("heartbeat"/"rlm_heartbeat"); there is no `heartbeat` flag.
+        let heartbeat = is_heartbeat_cron_job(job);
         if heartbeat && job.status == "active" {
             registrations
                 .active_heartbeat_session_ids
@@ -408,7 +381,7 @@ pub fn summary_for_active_session(
 ) -> SessionSummary {
     let state = active_session.lock().expect("active session poisoned");
     let session = &state.runtime.session;
-    let mut modified = saved_session.map(|saved| iso_from_ms(saved.modified_ms));
+    let mut modified = saved_session.map(|saved| iso_from_ms(saved.modified));
     if modified.is_none() {
         if let Some(session_file) = &session.session_file {
             if let Ok(metadata) = std::fs::metadata(session_file) {
@@ -464,7 +437,7 @@ pub fn summary_for_active_session(
         unfinished_action_count: None,
         session_actions: None,
         streaming_message: None,
-        created: saved_session.map(|saved| iso_from_ms(saved.created_ms)),
+        created: saved_session.map(|saved| iso_from_ms(saved.created)),
         modified,
         // Subagent sessions live in artifact dirs the saved-session scan never
         // sees; their spawn prompt is the most identifying title we have.
@@ -543,7 +516,7 @@ pub fn summary_for_inactive_session(
         has_active_heartbeat: None,
         has_registered_heartbeat: has_registered_heartbeat.then_some(true),
         has_registered_cron_job: has_registered_cron_job.then_some(true),
-        last_activity_at: Some(iso_from_ms(session.modified_ms)),
+        last_activity_at: Some(iso_from_ms(session.modified)),
         runtime_kind: None,
         rlm_depth: None,
         active_session_id: None,
@@ -557,11 +530,11 @@ pub fn summary_for_inactive_session(
         is_compacting: false,
         is_bash_running: None,
         has_running_rlm_children: None,
-        usage: session.usage.clone(),
+        usage: session.usage.as_ref().and_then(|usage| serde_json::to_value(usage).ok()),
         is_running_tools: None,
         attached_clients: 0,
         direct_attached_clients: None,
-        message_count: session.message_count as i64,
+        message_count: session.message_count,
         unfinished_action_count: Some(0),
         session_actions: Some(serde_json::json!({
             "queuedCount": 0,
@@ -569,8 +542,8 @@ pub fn summary_for_inactive_session(
             "followUps": [],
         })),
         streaming_message: None,
-        created: Some(iso_from_ms(session.created_ms)),
-        modified: Some(iso_from_ms(session.modified_ms)),
+        created: Some(iso_from_ms(session.created)),
+        modified: Some(iso_from_ms(session.modified)),
         first_message: Some(session.first_message.clone()),
         parent_active_session_id: None,
         parent_session_id: None,
@@ -588,13 +561,18 @@ pub fn summary_for_inactive_session(
                 .map(|status| status.summary.clone())
                 .unwrap_or_default()
         }),
-        task_state: currency.then(|| {
-            session
-                .agent_status
-                .as_ref()
-                .and_then(|status| status.task_state.clone())
-                .unwrap_or_default()
-        }),
+        // TS daemon-session-list.ts:358-360 copies `agentStatus.taskState`, a string union;
+        // the port's verdict is the `AgentTaskState` enum, mapped to its TS string here.
+        task_state: currency
+            .then(|| {
+                session.agent_status.as_ref().and_then(|status| {
+                    status.task_state.map(|task_state| match task_state {
+                        AgentTaskState::NeedsInput => "needs_input".to_string(),
+                        AgentTaskState::Completed => "completed".to_string(),
+                    })
+                })
+            })
+            .flatten(),
         roster_status: None,
         status_label: None,
         last_heard_from_at: None,
@@ -634,8 +612,10 @@ pub fn active_activity_for_session(state: &ActiveSessionState) -> SessionActivit
 
 /// Lifecycle for an on-disk session not resident in the daemon.
 pub fn inactive_lifecycle_for_session(session: &SessionInfo) -> SessionLifecycle {
-    let status = session.state.as_ref().and_then(|state| state.status.as_deref());
-    if status == Some("archived") || status == Some("crash") {
+    // TS daemon-session-list.ts:448 reads `session.state?.status`; the port's status is
+    // the `SessionStateStatus` enum, so compare the enum rather than a string.
+    let status = session.state.as_ref().map(|state| state.status);
+    if matches!(status, Some(SessionStateStatus::Archived) | Some(SessionStateStatus::Crash)) {
         return SessionLifecycle::Archived;
     }
     if session.message_count > 0 {
@@ -698,6 +678,7 @@ fn iso_from_system_time(time: SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::cron_jobs::{SOURCE_CRON, SOURCE_HEARTBEAT};
 
     fn summary(message_count: i64, name: Option<&str>) -> SessionSummary {
         SessionSummary {
@@ -709,6 +690,26 @@ mod tests {
             session_name: name.map(str::to_string),
             message_count,
             ..Default::default()
+        }
+    }
+
+    /// `core::session_manager::SessionInfo` has no `Default`; build the whole value.
+    fn saved_session() -> SessionInfo {
+        SessionInfo {
+            path: "/tmp/s.jsonl".to_string(),
+            id: "s".to_string(),
+            cwd: "/tmp".to_string(),
+            name: None,
+            state: None,
+            parent_session_path: None,
+            rlm_depth: 0,
+            created: 0.0,
+            modified: 0.0,
+            message_count: 0,
+            first_message: String::new(),
+            all_messages_text: String::new(),
+            agent_status: None,
+            usage: None,
         }
     }
 
@@ -741,19 +742,22 @@ mod tests {
                 active_session_id: "a".to_string(),
                 session_file: "/tmp/a.jsonl".to_string(),
                 status: "active".to_string(),
-                heartbeat: true,
+                source: Some(SOURCE_HEARTBEAT.to_string()),
+                ..AgentCronJob::default()
             },
             AgentCronJob {
                 active_session_id: "b".to_string(),
                 session_file: "/tmp/b.jsonl".to_string(),
                 status: "paused".to_string(),
-                heartbeat: true,
+                source: Some(SOURCE_HEARTBEAT.to_string()),
+                ..AgentCronJob::default()
             },
             AgentCronJob {
                 active_session_id: "c".to_string(),
                 session_file: "/tmp/c.jsonl".to_string(),
                 status: "paused".to_string(),
-                heartbeat: false,
+                source: Some(SOURCE_CRON.to_string()),
+                ..AgentCronJob::default()
             },
         ];
         let registrations = scheduled_job_registrations(&jobs);
@@ -780,15 +784,12 @@ mod tests {
 
     #[test]
     fn inactive_lifecycle_follows_message_count_and_state() {
-        let mut session = SessionInfo {
-            message_count: 0,
-            ..Default::default()
-        };
+        let mut session = saved_session();
         assert_eq!(inactive_lifecycle_for_session(&session), SessionLifecycle::Draft);
         session.message_count = 3;
         assert_eq!(inactive_lifecycle_for_session(&session), SessionLifecycle::Live);
         session.state = Some(SessionState {
-            status: Some("archived".to_string()),
+            status: SessionStateStatus::Archived,
         });
         assert_eq!(inactive_lifecycle_for_session(&session), SessionLifecycle::Archived);
     }
@@ -796,16 +797,13 @@ mod tests {
     #[test]
     fn inactive_summary_carries_a_current_verdict_only() {
         let session = SessionInfo {
-            id: "s".to_string(),
-            path: "/tmp/s.jsonl".to_string(),
-            cwd: "/tmp".to_string(),
             message_count: 2,
-            agent_status: Some(AgentStatusRecord {
+            agent_status: Some(AgentStatus {
                 summary: "Doing work".to_string(),
-                task_state: Some("completed".to_string()),
+                task_state: Some(AgentTaskState::Completed),
                 based_on_message_count: 2,
             }),
-            ..Default::default()
+            ..saved_session()
         };
         let current = summary_for_inactive_session(&session, false, false);
         assert_eq!(current.summary.as_deref(), Some("Doing work"));
@@ -813,9 +811,9 @@ mod tests {
         assert_eq!(current.activity, "idle");
 
         let stale = SessionInfo {
-            agent_status: Some(AgentStatusRecord {
+            agent_status: Some(AgentStatus {
                 summary: "Old".to_string(),
-                task_state: Some("completed".to_string()),
+                task_state: Some(AgentTaskState::Completed),
                 based_on_message_count: 1,
             }),
             ..session.clone()

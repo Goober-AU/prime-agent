@@ -19,7 +19,8 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Mutex};
 
-use super::daemon_session_list::{AgentStatusRecord, SessionInfo, SessionState};
+use super::daemon_session_list::{AgentStatus, SessionInfo, SessionState};
+use crate::core::session_manager::{AgentTaskState, SessionStateStatus, SessionUsageSummary};
 use crate::utils::atomic_file::realpath_if_present_sync;
 
 pub const DAEMON_CATALOG_ROLE_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_CATALOG";
@@ -94,10 +95,10 @@ pub fn serialize_session_info(session: &SessionInfo) -> SessionInfoWire {
             .as_ref()
             .map(|state| serde_json::json!({ "status": state.status })),
         parent_session_path: session.parent_session_path.clone(),
-        rlm_depth: session.rlm_depth,
-        created: iso_from_ms(session.created_ms),
-        modified: iso_from_ms(session.modified_ms),
-        message_count: session.message_count,
+        rlm_depth: Some(session.rlm_depth),
+        created: iso_from_ms(session.created),
+        modified: iso_from_ms(session.modified),
+        message_count: session.message_count as usize,
         first_message: session.first_message.clone(),
         all_messages_text: session.all_messages_text.clone(),
         agent_status: session.agent_status.as_ref().map(|status| {
@@ -107,7 +108,26 @@ pub fn serialize_session_info(session: &SessionInfo) -> SessionInfoWire {
                 "basedOnMessageCount": status.based_on_message_count,
             })
         }),
-        usage: session.usage.clone(),
+        usage: session.usage.as_ref().and_then(|usage| serde_json::to_value(usage).ok()),
+    }
+}
+
+/// The wire carries the TS string for a session state; an unrecognized one is no state.
+fn session_state_status(value: &str) -> Option<SessionStateStatus> {
+    match value {
+        "active" => Some(SessionStateStatus::Active),
+        "archived" => Some(SessionStateStatus::Archived),
+        "crash" => Some(SessionStateStatus::Crash),
+        _ => None,
+    }
+}
+
+/// The wire carries the TS string for a task verdict; an unrecognized one is no verdict.
+fn agent_task_state(value: &str) -> Option<AgentTaskState> {
+    match value {
+        "needs_input" => Some(AgentTaskState::NeedsInput),
+        "completed" => Some(AgentTaskState::Completed),
+        _ => None,
     }
 }
 
@@ -117,29 +137,38 @@ pub fn deserialize_session_info(session: &SessionInfoWire) -> SessionInfo {
         id: session.id.clone(),
         cwd: session.cwd.clone(),
         name: session.name.clone(),
-        state: session.state.as_ref().map(|state| SessionState {
-            status: state.get("status").and_then(Value::as_str).map(str::to_string),
-        }),
+        state: session
+            .state
+            .as_ref()
+            .and_then(|state| state.get("status").and_then(Value::as_str))
+            .and_then(session_state_status)
+            .map(|status| SessionState { status }),
         parent_session_path: session.parent_session_path.clone(),
-        rlm_depth: session.rlm_depth,
-        created_ms: parse_iso_ms(&session.created),
-        modified_ms: parse_iso_ms(&session.modified),
-        message_count: session.message_count,
+        rlm_depth: session.rlm_depth.unwrap_or(0),
+        created: parse_iso_ms(&session.created),
+        modified: parse_iso_ms(&session.modified),
+        message_count: session.message_count as i64,
         first_message: session.first_message.clone(),
         all_messages_text: session.all_messages_text.clone(),
-        agent_status: session.agent_status.as_ref().map(|status| AgentStatusRecord {
+        agent_status: session.agent_status.as_ref().map(|status| AgentStatus {
             summary: status
                 .get("summary")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            task_state: status.get("taskState").and_then(Value::as_str).map(str::to_string),
+            task_state: status
+                .get("taskState")
+                .and_then(Value::as_str)
+                .and_then(agent_task_state),
             based_on_message_count: status
                 .get("basedOnMessageCount")
                 .and_then(Value::as_f64)
-                .unwrap_or(0.0) as usize,
+                .unwrap_or(0.0) as i64,
         }),
-        usage: session.usage.clone(),
+        usage: session
+            .usage
+            .as_ref()
+            .and_then(|usage| serde_json::from_value::<SessionUsageSummary>(usage.clone()).ok()),
     }
 }
 
@@ -610,8 +639,8 @@ async fn handle_catalog_request(
                     let already_archived = session
                         .state
                         .as_ref()
-                        .and_then(|state| state.status.as_deref())
-                        == Some("archived");
+                        .map(|state| state.status)
+                        == Some(SessionStateStatus::Archived);
                     if !already_archived {
                         if let Err(error) = backend.append_session_state(session_path, "archived") {
                             return CatalogOutbound::Response {
@@ -1122,8 +1151,16 @@ mod tests {
             id: id.to_string(),
             cwd: "/tmp".to_string(),
             name: name.map(str::to_string),
+            state: None,
+            parent_session_path: None,
+            rlm_depth: 0,
+            created: 0.0,
+            modified: 0.0,
             message_count: 1,
-            ..Default::default()
+            first_message: String::new(),
+            all_messages_text: String::new(),
+            agent_status: None,
+            usage: None,
         }
     }
 
@@ -1149,14 +1186,14 @@ mod tests {
     #[test]
     fn session_info_round_trips_over_the_wire() {
         let original = SessionInfo {
-            created_ms: 0.0,
-            modified_ms: 5_000.0,
+            created: 0.0,
+            modified: 5_000.0,
             state: Some(SessionState {
-                status: Some("archived".to_string()),
+                status: SessionStateStatus::Archived,
             }),
-            agent_status: Some(AgentStatusRecord {
+            agent_status: Some(AgentStatus {
                 summary: "done".to_string(),
-                task_state: Some("completed".to_string()),
+                task_state: Some(AgentTaskState::Completed),
                 based_on_message_count: 1,
             }),
             ..session("abc", Some("named"))
@@ -1166,10 +1203,14 @@ mod tests {
         assert_eq!(wire.modified, "1970-01-01T00:00:05.000Z");
         let restored = deserialize_session_info(&wire);
         assert_eq!(restored.path, original.path);
-        assert_eq!(restored.modified_ms, 5000.0);
+        assert_eq!(restored.modified, 5000.0);
         assert_eq!(
-            restored.state.and_then(|state| state.status).as_deref(),
-            Some("archived")
+            restored.state.map(|state| state.status),
+            Some(SessionStateStatus::Archived)
+        );
+        assert_eq!(
+            restored.agent_status.and_then(|status| status.task_state),
+            Some(AgentTaskState::Completed)
         );
     }
 
