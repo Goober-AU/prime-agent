@@ -2,22 +2,24 @@
  "slice": "ca-kernel-b",
  "files": [
   {
-   "src": "packages/coding-agent/src/core/kernel/bootstrap-cli.ts",
-   "rust": "crates/pi-coding-agent/src/core/kernel/bootstrap_cli.rs",
-   "status": "ported",
-   "functions_mapped": 2,
-   "notes": "Written by the lead (13 LOC). Wrapper over bootstrap::ensure_kernel_python; same output text 'kernel python: {python}' and exit code 1 on failure; error_message helper reused."
-  },
-  {
    "src": "packages/coding-agent/src/core/kernel/repl-manager.ts",
    "rust": "crates/pi-coding-agent/src/core/kernel/repl_manager.rs",
-   "status": "blocked",
-   "functions_mapped": 0,
-   "notes": "Still 0 bytes. Two workers died at their output limit. Re-sliced into four sequential 500-line passes."
+   "status": "ported",
+   "functions_mapped": 63,
+   "notes": "All four passes done in one file, written in chunks (module header, helpers, constants, ReplKernelManager/KernelState, lifecycle, protocol repair, child wiring, execution queue, teardown, snapshot/restore, KernelClient impl, tests). Every significant TS function has a Rust counterpart (constructor/options, ownerSessionId, hasBackgroundWork, appendKernelDiagnostic, appendKernelStderrText, openStderrLog, start/doStart/startStale, wireChild, failProtocolFrame, repairProtocolChild, bootstrapRepairedKernel, ensureKernelRebootstrapped, reprovisionFreshKernel, killChildToIdle, finishFailedProtocolRepair, supersedeProtocolRepair, waitForProtocolRepair, waitForReady, writeLine, handleEvent, execute, enqueueExecute, enqueueRequest, executeInner, appendBackgroundOutput, finishActiveExecution, resolveExecution, dispatch/registerLateSentAgentMessageHandler, rejectActiveExecution, notifyActiveExecutionIdle, waitForActiveExecutionToClear, reconcileSettledActiveExecution, waitForActiveExecutionToClearForReuse, startHostRequest, handleHostRequest, interrupt, cleanupResources, waitForKernelExit, waitForHostRequestsToSettle, shutdown, performShutdown, restart, kill, snapshotState, pruneOversizedVariables, casRootPath, requiresCasCapability, recordSnapshotMetric, captureSnapshot, restoreState, performRestore, exportStateForLegacyRuntime, listNamespaceNames, scheduleSnapshot, clearSnapshotTimer, flushSnapshotForDispose, runSnapshotFlushForDispose, disposeSync, isRunning, isDefunct). Node event emitters became owned tokio pump tasks: stdout parses JSON lines with a stateful UTF-8 decoder, stderr feeds the bounded diagnostic tail plus the rotating log, and a wait task produces the exit event. `AbortSignal` uses the shared listener API; `executionQueue`/`startPromise`/repair promises reuse shared::SharedPromise; insertion ordered Maps/Sets became Vec + ordered_set/ordered_delete. `client_weak`/new_cyclic replaces the implicit `this` captured by liveKernels and signal handlers."
   }
  ],
- "build": "not run",
- "tests": "not run",
- "blocked_on": "repl-manager.ts is 1913 LOC and needs budgeted multi-pass work",
- "honest_summary": "bootstrap_cli.rs is done by the lead. repl_manager.rs remains unwritten; the slice now instructs the worker to work in four sequential 500-line passes instead of one pass."
+ "build": "cargo check -p pi-coding-agent: NOT RUN to completion (blocked in pi-agent-core, outside this slice)",
+ "tests": "cargo test -p pi-coding-agent: 0 passed / 0 failed - the test binary cannot link because pi-agent-core fails to compile (7 errors, all in pi-agent-core/src/agent_loop.rs and agent.rs)",
+ "blocked_on": "pi-agent-core does not compile (repair in progress; last run: 7 errors in crates/pi-agent-core/src/agent_loop.rs and agent.rs). pi-coding-agent is blocked behind it, so cargo never type-checked repl_manager.rs. Within this slice nothing else is missing: every symbol repl_manager.rs imports exists in kernel/shared.rs, kernel/state_snapshot.rs, kernel/bootstrap.rs, core/orphan_process_journal.rs and utils/child_process.rs.",
+ "evidence": {
+  "rust_bytes": 156096,
+  "rust_lines": 3936,
+  "rustfmt": "rustfmt --edition 2021 completed with exit 0 (file is formatted, so it parses)",
+  "ts_loc": 1913,
+  "unverified": "The file has NOT been compiled: cargo never got past pi-agent-core. Expect residual type errors on first successful check (notably borrow/lifetime details around the Arc<Mutex<ActiveExecution>> slot and the boxed send future in execute_inner).",
+  "test_run": "cargo test -p pi-coding-agent exit code 101; every error path is crates\\pi-agent-core\\src\\... (agent_loop.rs:831,975,1470,1612,1836-1838; agent.rs:14,21,25)"
+ },
+ "honest_summary": "repl-manager.ts (1913 LOC) is fully ported to crates/pi-coding-agent/src/core/kernel/repl_manager.rs in four chunked passes; all 63 TS methods have named Rust counterparts and the file is rustfmt-clean, so it parses. The build rule was followed: everything was written first, then ONE cargo check and ONE cargo test. Both stopped in pi-agent-core, which is outside this slice and does not compile, so repl_manager.rs was never type-checked and no test ran. The port is complete in scope but unverified by the compiler.",
+ "lead_verification": "Lead verified on disk: 156096 bytes / 3936 lines / 144 fns / 125 named fns / 0 todo!()/unimplemented!(). Protocol version 3 matches the TS PROTOCOL_VERSION = 3. All named TS helpers exist (asMetricNumber, asReasonArray, asStringArray, installSignalHandlersOnce, safeMetricNow, safeRecordPerformanceMetric -> their snake_case forms). Type-checking is still owed once pi-agent-core compiles."
 }

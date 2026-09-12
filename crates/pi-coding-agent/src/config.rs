@@ -508,22 +508,23 @@ fn normalize_existing_path_for_comparison(path: &str) -> Option<String> {
     Some(normalized_path)
 }
 
+/// `accessSync(path, constants.W_OK)`.
+#[cfg(unix)]
 fn is_path_writable(path: &str) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
+    use std::ffi::CString;
+    let Ok(c_path) = CString::new(path) else {
         return false;
     };
-    if metadata.is_dir() {
-        // accessSync(dir, W_OK) probes whether entries may be created/removed.
-        let probe = Path::new(path).join(format!(".pi-write-probe-{}", std::process::id()));
-        match std::fs::OpenOptions::new().write(true).create_new(true).open(&probe) {
-            Ok(_) => {
-                let _ = std::fs::remove_file(&probe);
-                true
-            }
-            Err(_) => false,
-        }
-    } else {
-        std::fs::OpenOptions::new().write(true).open(path).is_ok()
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+}
+
+/// `accessSync(path, constants.W_OK)` on Windows checks the read-only attribute,
+/// exactly as Node does.
+#[cfg(not(unix))]
+fn is_path_writable(path: &str) -> bool {
+    match std::fs::metadata(path) {
+        Ok(metadata) => !metadata.permissions().readonly(),
+        Err(_) => false,
     }
 }
 

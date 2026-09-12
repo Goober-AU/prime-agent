@@ -56,3 +56,57 @@ pub mod tree_selector;
 pub mod user_message;
 pub mod user_message_selector;
 pub mod visual_truncate;
+
+// ---------------------------------------------------------------------------
+// Port of index.ts - UI Components for extensions
+//
+// The TypeScript module is a pure re-export surface. The port re-exports the
+// same names from the mapped modules so every `components/<file>.js` import
+// target resolves to the same path segment.
+// ---------------------------------------------------------------------------
+
+pub use armin::ArminComponent;
+pub use daxnuts::DaxnutsComponent;
+pub use expandable_custom_message::{custom_message_label, ExpandableCustomMessageBox};
+pub use extension_editor::ExtensionEditorComponent;
+pub use heartbeat_manager::{
+    get_menu_list_layout, HeartbeatManagerComponent, HeartbeatManagerOptions,
+};
+pub use mermaid::{create_mermaid_markdown_transform, MermaidMarkdownTransform};
+pub use modal_back::{should_treat_as_back, BackGuardInput};
+pub use prime_team_selector::PrimeTeamSelectorComponent;
+pub use prompt_highlight::{style_argument_tokens, PromptTokenMask};
+pub use refinement_outcome_message::{
+    MalformedRefinementOutcomeMessageComponent, RefinementOutcomeMessageComponent,
+};
+pub use slash_command_message::{
+    is_leading_slash_command, style_slash_command_text, SlashCommandMessageComponent,
+};
+pub use thinking_selector::ThinkingSelectorComponent;
+pub use tree_selector::{FilterMode, TreeList, TreeSelectorComponent, FILTER_MODES};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_re_exports_resolve() {
+        // The TypeScript index.ts re-exports these names; assert the port keeps
+        // the same names at the same module path.
+        let _ = std::any::type_name::<ArminComponent>();
+        let _ = std::any::type_name::<DaxnutsComponent>();
+        let _ = std::any::type_name::<ExtensionEditorComponent>();
+        let _ = std::any::type_name::<HeartbeatManagerComponent>();
+        let _ = std::any::type_name::<PrimeTeamSelectorComponent>();
+        let _ = std::any::type_name::<RefinementOutcomeMessageComponent>();
+        let _ = std::any::type_name::<MalformedRefinementOutcomeMessageComponent>();
+        let _ = std::any::type_name::<SlashCommandMessageComponent>();
+        let _ = std::any::type_name::<ThinkingSelectorComponent>();
+        let _ = std::any::type_name::<TreeSelectorComponent>();
+        let _ = std::any::type_name::<TreeList>();
+        assert_eq!(
+            FILTER_MODES,
+            ["default", "no-tools", "user-only", "labeled-only", "all"]
+        );
+    }
+}

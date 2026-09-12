@@ -1508,7 +1508,7 @@ async fn resolve_live_session_selector(client: &Arc<DaemonClient>, selector: &st
             .to_string());
     }
     if matches.len() > 1 {
-        return Err(format!("Ambiguous active session \\"{}\\"", selector));
+        return Err(format!("Ambiguous active session \"{}\"", selector));
     }
     Err(format!("Unknown active session: {}", selector))
 }

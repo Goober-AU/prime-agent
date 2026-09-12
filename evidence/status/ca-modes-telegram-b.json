@@ -1,0 +1,23 @@
+{
+ "slice": "ca-modes-telegram-b",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/telegram/bridge.ts",
+   "rust": "crates/pi-coding-agent/src/modes/telegram/bridge.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "Not written: ran out of budget while mapping dependencies. Needed seams identified: TelegramApi::call/send/updates/redact, TelegramStore read/write/state/settings, TelegramCommands::new/execute, AgentConnection trait (prompt/subscribe/get_state/respond_to_extension_ui_request), TelegramApiError.retry_after, split_telegram_text, private_message, pairing_hash, telegram_command_menu."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/telegram/worker.ts",
+   "rust": "crates/pi-coding-agent/src/modes/telegram/worker.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "Not written. connectTelegramSession needs DaemonClient (connect/wait_for_hello/request/close) + DaemonAgentConnection::attach(client, id, options); runTelegramWorker needs TelegramFileLock (manager.rs) and runTelegramWorker's process.argv entrypoint guard."
+  }
+ ],
+ "build": "cargo check -p pi-coding-agent: not run",
+ "tests": "cargo test -p pi-coding-agent: not run",
+ "blocked_on": "child output budget exhausted during dependency mapping; slice files are still 0 bytes. Also: daemon_agent_connection.rs defines its OWN local DaemonTransportClient trait (Arc dyn, request(Value, Option<u64>)), separate from daemon_client.rs DaemonTransportClient; worker.ts must pick the daemon_agent_connection seam for DaemonAgentConnection::attach.",
+ "honest_summary": "No Rust was written for this slice; both mapped files remained empty. I spent the whole budget reading the two TypeScript files and mapping their Rust seams (api.rs, store.rs, commands.rs, manager.rs, agent_connection types, DaemonAgentConnection::attach, DaemonClient). The slice needs a re-spawn with the mapped seams handed over; nothing outside the slice was modified."
+}

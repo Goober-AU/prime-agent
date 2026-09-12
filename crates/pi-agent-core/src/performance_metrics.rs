@@ -5,10 +5,10 @@
 //! TypeScript defensive containment so a third-party recorder failure can never
 //! change agent behaviour.
 
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
+use indexmap::IndexMap;
 use pi_ai::types::AssistantMessage;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -146,8 +146,9 @@ impl PerformanceMetricComponent {
 /// `Partial<Record<PerformanceMetricMeasurement, number | null>>`.
 ///
 /// The TypeScript value type is `number | null`, so an explicit JSON null is
-/// observable and must stay distinguishable from an absent key.
-pub type PerformanceMetricMeasurements = BTreeMap<PerformanceMetricMeasurement, Option<f64>>;
+/// observable and must stay distinguishable from an absent key. `IndexMap`
+/// keeps the insertion order an object literal has in TypeScript.
+pub type PerformanceMetricMeasurements = IndexMap<PerformanceMetricMeasurement, Option<f64>>;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PerformanceMetricCorrelation {
@@ -433,9 +434,18 @@ pub fn performance_metric_usage_from_assistant(message: &AssistantMessage) -> Pe
 /// Converts a raw provider usage observation. Kept here (rather than in
 /// agent-loop.ts) as the shared `PerformanceMetricUsageV1` constructor.
 pub fn provider_metric_usage(observation: &pi_ai::types::ProviderUsageObservation) -> PerformanceMetricUsageV1 {
-    fn token(value: Option<f64>) -> Option<f64> {
+    /// `typeof value === "number" && Number.isFinite(value) && value >= 0`.
+    /// `None` and `Some(None)` both mean the raw field was not a number.
+    fn token(value: Option<Option<f64>>) -> Option<f64> {
         match value {
-            Some(value) if value.is_finite() && value >= 0.0 => Some(value),
+            Some(Some(value)) if value.is_finite() && value >= 0.0 => Some(value),
+            _ => None,
+        }
+    }
+    /// `typeof value === "boolean"`.
+    fn flag(value: Option<Option<bool>>) -> Option<bool> {
+        match value {
+            Some(Some(value)) => Some(value),
             _ => None,
         }
     }
@@ -446,8 +456,8 @@ pub fn provider_metric_usage(observation: &pi_ai::types::ProviderUsageObservatio
         output_tokens: token(observation.output_tokens),
         reasoning_tokens: token(observation.reasoning_tokens),
         total_tokens: token(observation.total_tokens),
-        cached_input_included_in_input: observation.cached_input_included_in_input,
-        reasoning_included_in_output: observation.reasoning_included_in_output,
+        cached_input_included_in_input: flag(observation.cached_input_included_in_input),
+        reasoning_included_in_output: flag(observation.reasoning_included_in_output),
         estimator: None,
     }
 }
@@ -464,7 +474,7 @@ mod tests {
     use pi_ai::types::{AssistantMessage, Usage};
 
     fn assistant_usage(input: f64, cache_read: f64, output: f64) -> AssistantMessage {
-        let mut message = AssistantMessage::empty("openai-responses", "openai", "gpt-test");
+        let mut message = AssistantMessage::new("openai-responses", "openai", "gpt-test", 1);
         message.usage = Usage {
             input,
             output,
@@ -525,6 +535,7 @@ mod tests {
         measurements.insert(PerformanceMetricMeasurement::TotalMs, Some(5.0));
         measurements.insert(PerformanceMetricMeasurement::AttemptCount, None);
         let json = serde_json::to_string(&measurements).unwrap();
-        assert_eq!(json, r#"{"attempt_count":null,"total_ms":5.0}"#);
+        // TypeScript builds the object literal in this insertion order.
+        assert_eq!(json, r#"{"total_ms":5.0,"attempt_count":null}"#);
     }
 }
