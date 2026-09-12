@@ -668,7 +668,17 @@ impl AgentSessionRuntime {
     }
 
     /// `disposeSubagentRuntimes()`.
-    async fn dispose_subagent_runtimes(&self) -> Result<(), String> {
+    ///
+    /// Returns a boxed future: this function awaits `dispose`, which awaits
+    /// `dispose_once`, which awaits `dispose_hosted_subagent_runtimes`, which awaits
+    /// this function again. Boxing the recursive link breaks that layout/Send cycle
+    /// so the spawned `BoxFuture` cast in `dispose` stays `Send`.
+    fn dispose_subagent_runtimes(self: &Arc<Self>) -> BoxFuture<Result<(), String>> {
+        let this = Arc::clone(self);
+        Box::pin(async move { this.dispose_subagent_runtimes_inner().await })
+    }
+
+    async fn dispose_subagent_runtimes_inner(self: &Arc<Self>) -> Result<(), String> {
         let runtimes: Vec<Arc<AgentSessionRuntime>> = {
             let mut map = self
                 .subagent_runtimes
@@ -693,7 +703,7 @@ impl AgentSessionRuntime {
     }
 
     /// `disposeHostedSubagentRuntimes()`.
-    async fn dispose_hosted_subagent_runtimes(&self) -> Result<(), String> {
+    async fn dispose_hosted_subagent_runtimes(self: &Arc<Self>) -> Result<(), String> {
         let mut dispose_error: Option<String> = None;
         let host = self
             .subagent_runtime_host
