@@ -43,9 +43,8 @@ the machine. A shared target directory is intentional; "Blocking waiting for
 file lock on build directory" is normal and resolves by itself.
 
 **CONCURRENCY CEILING (provider limit).** The model provider returns
-`429 too many concurrent requests` above 20 in-flight requests. The cap counts
-EVERY agent at every depth: the lead + all depth-1 children + all depth-2
-grandchildren. Keep at most 18 depth-1 children running at once so the lead plus
+`429 too many concurrent requests` above 20 in-flight requests, and exceeding 20 total agents crashed the
+session. The cap counts EVERY agent at every depth: the lead + all depth-1 children + all depth-2 grandchildren. Keep at most 18 depth-1 children running at once so the lead plus
 one grandchild still fit. Never spawn a sub-agent from a sub-agent.
 
 **BUILD IT ALL AT ONCE. TEST AT THE END.** Hish's explicit rule for this port:

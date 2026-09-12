@@ -1,6 +1,5 @@
-Hish's rule (2026-09-11, revised): the provider returns 429 'too many concurrent requests' above 20
-in-flight requests. Cap = 20 TOTAL agents, counting every depth: lead + depth-1 children + depth-2
-grandchildren. Therefore at most 18 depth-1 children run at once, and sub-agents must NEVER spawn
-their own sub-agents.
-Model for every sub-agent: ollama-cloud/deepseek-v4.1-flash only.
-If that model is blocked or out of tokens there is NO fallback: stop and wait for reset.
+Hish's rule (2026-09-11, REVISED after a crash): TOTAL sub-agents must never exceed 15, counting EVERY depth
+(depth 1, depth 2, ...). One crashed the session at 20+. Therefore keep at most 13-14 depth-1 children live,
+and sub-agents must NEVER spawn their own children (that is what pushes the total over the cap).
+Model for every sub-agent: ollama-cloud/deepseek-v4.1-flash only. No fallback model: if it is blocked or out
+of tokens, stop and wait for the reset.
