@@ -6,13 +6,8 @@
    "src": "packages/coding-agent/src/core/kernel/repl-manager.ts",
    "rust": "crates/pi-coding-agent/src/core/kernel/repl_manager.rs",
    "loc": 1913
-  },
-  {
-   "src": "packages/coding-agent/src/core/kernel/bootstrap-cli.ts",
-   "rust": "crates/pi-coding-agent/src/core/kernel/bootstrap_cli.rs",
-   "loc": 13
   }
  ],
- "note": "bootstrap.rs/boot_gate.rs/shared.rs/state_snapshot.rs were written by the previous worker (uncompiled). Finish repl_manager.rs and bootstrap_cli.rs, then run ONE cargo check + ONE cargo test for pi-coding-agent.",
- "loc": 1926
+ "note": "repl-manager.ts (1913 LOC) is the ONLY remaining file. Previous workers died at their output limit before writing anything, twice. YOU MUST NOT try to write it in one pass and you MUST NOT read the whole file first. Work in FOUR sequential passes, appending to crates/pi-coding-agent/src/core/kernel/repl_manager.rs each time:\n  PASS 1: read repl-manager.ts lines 1-500, then append the Rust for those lines (module header, imports, constants, helper functions: write_fully_sync, invalid_protocol_frame_reason, error helpers, small structs).\n  PASS 2: read lines 500-1000, append their Rust.\n  PASS 3: read lines 1000-1500, append their Rust.\n  PASS 4: read lines 1500-1913, append their Rust.\nUse a python slice or a line-ranged read for each pass; never dump a whole file into your context. Then ONE cargo check -p pi-coding-agent and report. If you run low on budget, stop after a pass and say exactly which passes are done in evidence/status/ca-kernel-b.json so the next worker continues from there.",
+ "loc": 1913
 }

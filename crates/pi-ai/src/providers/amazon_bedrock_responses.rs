@@ -410,16 +410,16 @@ mod tests {
 	use crate::types::{Message, ModelCost, Tool, UserContent, UserMessage};
 
 	fn model(id: &str) -> Model {
-		let mut model = Model::new(
+		let mut built = Model::new(
 			id,
 			"Astra",
 			"bedrock-responses",
 			"amazon-bedrock",
 			"https://bedrock-mantle.us-west-2.api.aws/openai/v1",
 		);
-		model.reasoning = true;
-		model.cost = ModelCost::default();
-		model
+		built.reasoning = true;
+		built.cost = ModelCost::default();
+		built
 	}
 
 	fn context(text: &str) -> Context {
@@ -486,8 +486,8 @@ mod tests {
 
 	#[test]
 	fn build_params_carries_max_tokens_tools_and_reasoning_options() {
-		let mut context = context("hello");
-		context.tools = Some(vec![Tool {
+		let mut ctx = context("hello");
+		ctx.tools = Some(vec![Tool {
 			name: "read".to_string(),
 			description: "Read a file".to_string(),
 			parameters: json!({ "type": "object" }),
@@ -501,7 +501,7 @@ mod tests {
 			reasoning_summary: Some("concise".to_string()),
 			..Default::default()
 		};
-		let params = build_params(&model("openai.gpt-6-astra"), &context, Some(&options)).unwrap();
+		let params = build_params(&model("openai.gpt-6-astra"), &ctx, Some(&options)).unwrap();
 		assert_eq!(params["max_output_tokens"], json!(4096.0));
 		assert_eq!(params["tools"][0]["type"], json!("function"));
 		assert_eq!(params["tools"][0]["name"], json!("read"));
@@ -509,9 +509,9 @@ mod tests {
 		assert_eq!(params["reasoning"], json!({ "effort": "high", "summary": "concise" }));
 
 		// Empty tool lists do not add the key.
-		let mut context = context("hello");
-		context.tools = Some(Vec::new());
-		let params = build_params(&model("openai.gpt-6-astra"), &context, None).unwrap();
+		let mut ctx = context("hello");
+		ctx.tools = Some(Vec::new());
+		let params = build_params(&model("openai.gpt-6-astra"), &ctx, None).unwrap();
 		assert!(params.get("tools").is_none());
 	}
 
@@ -561,9 +561,9 @@ mod tests {
 
 	#[test]
 	fn build_params_skips_reasoning_for_non_reasoning_models() {
-		let mut model = model("openai.gpt-6-astra");
-		model.reasoning = false;
-		let params = build_params(&model, &context("hi"), None).unwrap();
+		let mut non_reasoning_model = model("openai.gpt-6-astra");
+		non_reasoning_model.reasoning = false;
+		let params = build_params(&non_reasoning_model, &context("hi"), None).unwrap();
 		assert!(params.get("reasoning").is_none());
 		assert!(params.get("include").is_none());
 	}
@@ -611,7 +611,9 @@ mod tests {
 		assert_eq!(error.to_string(), "Request was aborted");
 		match error.as_thrown() {
 			ThrownStreamError::Message(message) => assert_eq!(message, "Request was aborted"),
-			other => panic!("unexpected {:?}", other),
+			ThrownStreamError::Failure(failure) => panic!("unexpected stream failure: {}", failure.message),
+			ThrownStreamError::Error(error) => panic!("unexpected thrown error: {error}"),
+			ThrownStreamError::Value(value) => panic!("unexpected thrown value: {value}"),
 		}
 
 		let failure = stream_failure_from_stop_reason(Some("malformed_model_output"), Some("req-1"));
@@ -621,7 +623,9 @@ mod tests {
 				assert_eq!(failure.info.kind, "malformed_response");
 				assert_eq!(failure.info.request_id.as_deref(), Some("req-1"));
 			}
-			other => panic!("unexpected {:?}", other),
+			ThrownStreamError::Error(error) => panic!("unexpected thrown error: {error}"),
+			ThrownStreamError::Value(value) => panic!("unexpected thrown value: {value}"),
+			ThrownStreamError::Message(message) => panic!("unexpected thrown message: {message}"),
 		}
 	}
 
@@ -640,20 +644,19 @@ mod tests {
 			reasoning: Some("high".to_string()),
 			thinking_budgets: None,
 		};
-		let mut model = model("openai.gpt-6-astra");
-		model.max_tokens = 1000.0;
-		let base = build_base_options(&model, Some(&simple), None);
+		let mut reasoning_model = model("openai.gpt-6-astra");
+		reasoning_model.max_tokens = 1000.0;
+		let base = build_base_options(&reasoning_model, Some(&simple), None);
 		assert!(base.on_usage_observation.is_some());
 
 		// `clampThinkingLevel(model, options?.reasoning ?? "medium")` on a model without a
 		// thinking-level map keeps the requested level.
-		let mut clamped_model = model("openai.gpt-6-astra");
-		clamped_model.reasoning = true;
-		assert_eq!(clamp_thinking_level(&clamped_model, "high"), "high");
-		assert_eq!(clamp_thinking_level(&clamped_model, "medium"), "medium");
+		reasoning_model.reasoning = true;
+		assert_eq!(clamp_thinking_level(&reasoning_model, "high"), "high");
+		assert_eq!(clamp_thinking_level(&reasoning_model, "medium"), "medium");
 
 		// A `null` level in the map is unsupported, so the clamp walks to another level.
-		let mut mapped = clamped_model.clone();
+		let mut mapped = reasoning_model.clone();
 		let mut map = crate::types::ThinkingLevelMap::new();
 		map.insert("high".to_string(), None);
 		map.insert("xhigh".to_string(), None);

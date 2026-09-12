@@ -128,7 +128,9 @@ pub fn serialize_conversation(messages: &[Message]) -> String {
 
                 for block in &assistant.content {
                     match block {
-                        pi_ai::types::ContentBlock::Text(text) => text_parts.push(text.text.clone()),
+                        pi_ai::types::ContentBlock::Text(text) => {
+                            text_parts.push(text.text.clone())
+                        }
                         pi_ai::types::ContentBlock::Thinking(thinking) => {
                             thinking_parts.push(thinking.thinking.clone())
                         }
@@ -137,7 +139,10 @@ pub fn serialize_conversation(messages: &[Message]) -> String {
                                 .arguments
                                 .iter()
                                 .map(|(key, value)| {
-                                    format!("{key}={}", serde_json::to_string(value).unwrap_or_default())
+                                    format!(
+                                        "{key}={}",
+                                        serde_json::to_string(value).unwrap_or_default()
+                                    )
                                 })
                                 .collect::<Vec<_>>()
                                 .join(", ");
@@ -147,7 +152,10 @@ pub fn serialize_conversation(messages: &[Message]) -> String {
                 }
 
                 if !thinking_parts.is_empty() {
-                    parts.push(format!("[Assistant thinking]: {}", thinking_parts.join("\n")));
+                    parts.push(format!(
+                        "[Assistant thinking]: {}",
+                        thinking_parts.join("\n")
+                    ));
                 }
                 if !text_parts.is_empty() {
                     parts.push(format!("[Assistant]: {}", text_parts.join("\n")));
@@ -207,7 +215,9 @@ mod tests {
             arguments.insert("path".to_string(), json!(path));
         }
         AgentMessage::Message(Message::Assistant(AssistantMessage {
-            content: vec![ContentBlock::ToolCall(ToolCall::new("call-1", name, arguments))],
+            content: vec![ContentBlock::ToolCall(ToolCall::new(
+                "call-1", name, arguments,
+            ))],
             ..Default::default()
         }))
     }
@@ -215,10 +225,19 @@ mod tests {
     #[test]
     fn edit_tool_calls_record_edited_paths_only() {
         let mut ops = create_file_ops();
-        extract_file_ops_from_message(&assistant_with_tool_call("edit", Some("src/a.ts")), &mut ops);
-        extract_file_ops_from_message(&assistant_with_tool_call("read", Some("src/b.ts")), &mut ops);
+        extract_file_ops_from_message(
+            &assistant_with_tool_call("edit", Some("src/a.ts")),
+            &mut ops,
+        );
+        extract_file_ops_from_message(
+            &assistant_with_tool_call("read", Some("src/b.ts")),
+            &mut ops,
+        );
         extract_file_ops_from_message(&assistant_with_tool_call("edit", None), &mut ops);
-        assert_eq!(ops.edited.iter().cloned().collect::<Vec<_>>(), vec!["src/a.ts"]);
+        assert_eq!(
+            ops.edited.iter().cloned().collect::<Vec<_>>(),
+            vec!["src/a.ts"]
+        );
         assert!(ops.read.is_empty());
         assert!(ops.written.is_empty());
     }

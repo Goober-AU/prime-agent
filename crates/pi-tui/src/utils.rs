@@ -15,15 +15,18 @@ pub fn graphemes(s: &str) -> Vec<String> {
         .collect()
 }
 
+#[allow(dead_code)] // Ported for fidelity; only the grapheme path above uses it today.
 fn is_regional_indicator(c: char) -> bool {
     (0x1f1e6..=0x1f1ff).contains(&(c as u32))
 }
 
+#[allow(dead_code)] // Ported for fidelity; only the grapheme path above uses it today.
 fn is_variation_selector(c: char) -> bool {
     let cp = c as u32;
     (0xfe00..=0xfe0f).contains(&cp) || (0xe0100..=0xe01ef).contains(&cp)
 }
 
+#[allow(dead_code)] // Ported for fidelity; only the grapheme path above uses it today.
 fn is_emoji_modifier(c: char) -> bool {
     let cp = c as u32;
     (0x1f3fb..=0x1f3ff).contains(&cp) || cp == 0x20e3
@@ -47,6 +50,7 @@ impl Segmenter {
 // East Asian width (port of the get-east-asian-width package data)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)] // The generated tables keep every class from get-east-asian-width.
 mod east_asian_width {
     include!("east_asian_width_tables.rs");
 
@@ -1072,7 +1076,6 @@ fn wrap_single_line(line: &str, width: usize) -> Vec<String> {
                     current_line.push_str(&line_end_reset);
                 }
                 wrapped.push(std::mem::take(&mut current_line));
-                current_visible_length = 0;
             }
 
             let broken = break_long_word(&token, width, &mut tracker);

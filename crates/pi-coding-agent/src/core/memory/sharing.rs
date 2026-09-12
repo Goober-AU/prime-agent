@@ -32,6 +32,7 @@ pub struct SharedCache {
     pub error: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct MemorySharing {
     pub path: String,
     pub store: MemoryStore,
@@ -140,7 +141,8 @@ impl MemorySharing {
     pub async fn sync(&self) -> Result<SharedCache, String> {
         let store = self.store.clone();
         let path = self.path.clone();
-        store
+        let lock_store = store.clone();
+        lock_store
             .exclusive_async(move || {
                 let store = store.clone();
                 let path = path.clone();

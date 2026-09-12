@@ -96,6 +96,7 @@ pub type MemoryExtractor = Arc<
         + Sync,
 >;
 
+#[derive(Clone)]
 pub struct MemoryJobs {
     pub dir: String,
     pub store: MemoryStore,
@@ -188,6 +189,7 @@ impl MemoryJobs {
                         mode: Some(0o600),
                         fsync: true,
                         fsync_dir: false,
+                        ..Default::default()
                     },
                 )
                 .map_err(|error| error.to_string())?;

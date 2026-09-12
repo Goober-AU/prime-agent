@@ -163,7 +163,7 @@ impl Loader {
         let message = (self.message_color_fn)(&self.message);
         self.text.set_text(format!("{indicator}{message}"));
         if let Some(ui) = &self.ui {
-            ui.borrow().request_render();
+            ui.borrow_mut().request_render();
         }
     }
 }

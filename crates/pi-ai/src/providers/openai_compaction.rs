@@ -436,6 +436,7 @@ pub use crate::utils::hash::short_hash as openai_compaction_short_hash;
 mod tests {
 	use super::*;
 	use crate::types::{InputModality, ModelCost, NativeCompactionCapability};
+	use crate::utils::hash::short_hash;
 
 	fn model() -> Model {
 		Model {
@@ -589,10 +590,13 @@ mod tests {
 
 	#[test]
 	fn short_hash_matches_typescript_for_known_inputs() {
-		// `shortHash` is the port of utils/hash.ts; the compaction module re-exports it.
-		assert_eq!(short_hash(""), "0");
-		assert!(!short_hash("fc_abc").is_empty());
-		assert_eq!(short_hash("fc_abc"), openai_compaction_short_hash("fc_abc"));
+		// `shortHash` is the port of utils/hash.ts.
+		assert_eq!(crate::utils::hash::short_hash(""), "0");
+		assert!(!crate::utils::hash::short_hash("fc_abc").is_empty());
+		assert_eq!(
+			crate::utils::hash::short_hash("fc_abc"),
+			crate::utils::hash::short_hash("fc_abc")
+		);
 	}
 
 	#[tokio::test]

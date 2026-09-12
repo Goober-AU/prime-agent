@@ -356,8 +356,9 @@ impl MemoryService {
             }
             "backup" => {
                 let store = self.store.clone();
+                let backup_store = store.clone();
                 store
-                    .exclusive(move || Ok(serde_json::json!({"id": store.backup(None)?})))
+                    .exclusive(move || Ok(serde_json::json!({"id": backup_store.backup(None)?})))
                     .await
             }
             "restore" => {
@@ -552,7 +553,7 @@ pub fn create_memory_host_handlers(
                 agent_dir.as_deref().unwrap_or(&get_agent_dir()),
                 session_artifact_dir,
             )
-            .map_err(KernelError::message)?;
+            .map_err(KernelError::new)?;
             let mut extract = None;
             if action == "import_run" {
                 let factory = extractor_factory
@@ -561,7 +562,7 @@ pub fn create_memory_host_handlers(
                 extract = Some(
                     factory(service.clone())
                         .await
-                        .map_err(KernelError::message)?,
+                        .map_err(KernelError::new)?,
                 );
             }
             let payload = match payload {
@@ -571,7 +572,7 @@ pub fn create_memory_host_handlers(
             let result = service
                 .request(&action, &payload, extract)
                 .await
-                .map_err(KernelError::message)?;
+                .map_err(KernelError::new)?;
             Ok(serde_json::json!({
                 "origin": "[memory data; not new evidence]",
                 "result": result,

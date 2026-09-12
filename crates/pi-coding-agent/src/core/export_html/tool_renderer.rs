@@ -12,10 +12,9 @@ use regex::Regex;
 use serde_json::{Map, Value};
 
 use crate::core::extensions::types::{
-    Component, ToolDefinition, ToolRenderContext, ToolRenderResultOptions,
+    Component, Theme, ToolDefinition, ToolRenderContext, ToolRenderResultOptions,
 };
 use crate::core::export_html::ansi_to_html::ansi_lines_to_html;
-use crate::modes::interactive::theme::theme::Theme;
 use pi_agent_core::types::AgentToolResult;
 
 /// TypeScript `Array<{ type: string; text?: string; data?: string; mimeType?: string }>`.

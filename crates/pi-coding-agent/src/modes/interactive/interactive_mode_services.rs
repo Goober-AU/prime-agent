@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use pi_agent_core::types::{AgentMessage, ThinkingLevel};
-use pi_ai::types::{Api, ImageContent, Model, ServiceTier};
+use pi_ai::types::{ImageContent, Model, ServiceTier};
 
 // =============================================================================
 // Local stand-ins (owned by other slices)
@@ -357,7 +357,7 @@ impl Tui {
 /// Stand-in for `AgentConnectionQueueMode`.
 pub type AgentConnectionQueueMode = String;
 /// Stand-in for `AgentConnectionModel` (`Model<Api>`).
-pub type AgentConnectionModel = Model<Api>;
+pub type AgentConnectionModel = Model;
 /// Stand-in for `AgentConnectionSourceScope`.
 pub type AgentConnectionSourceScope = String;
 /// Stand-in for `AgentConnectionSourceOrigin`.
@@ -701,17 +701,126 @@ impl SessionManager {
 }
 
 /// Stand-in for `ModelRegistry`.
-pub struct ModelRegistry;
+///
+/// The real registry (`core/model-registry.rs`, ca-root slice) is not landed yet;
+/// this keeps the auth-flow and onboarding call shapes so the logic and its
+/// messages stay identical. See evidence/status/ca-interactive-a.json.
+#[derive(Default)]
+pub struct ModelRegistry {
+    auth_storage: crate::core::auth_storage::AuthStorage,
+    models: Vec<AgentConnectionModel>,
+}
 
 impl ModelRegistry {
-    pub fn refresh(&self) {}
+    pub fn in_memory() -> Self {
+        Self {
+            auth_storage: crate::core::auth_storage::AuthStorage::in_memory(
+                crate::core::auth_storage::AuthStorageData::new(),
+                None,
+            ),
+            models: Vec::new(),
+        }
+    }
 
-    pub fn has_configured_auth(&self, _model: &AgentConnectionModel) -> bool {
+    pub fn auth_storage(&self) -> &crate::core::auth_storage::AuthStorage {
+        &self.auth_storage
+    }
+
+    pub fn auth_storage_mut(&mut self) -> &mut crate::core::auth_storage::AuthStorage {
+        &mut self.auth_storage
+    }
+
+    pub fn refresh(&mut self) {
+        self.auth_storage.reload();
+    }
+
+    pub fn reload(&mut self) {
+        self.auth_storage.reload();
+    }
+
+    pub fn get_all(&self) -> Vec<AgentConnectionModel> {
+        self.models.clone()
+    }
+
+    pub fn has_configured_auth(&self, model: &AgentConnectionModel) -> bool {
+        self.auth_storage.has_auth(&model.provider)
+    }
+
+    pub fn get_provider_auth_status(&self, provider: &str) -> AuthStatus {
+        let status = self.auth_storage.get_auth_status(provider);
+        AuthStatus { source: status.source.unwrap_or_default() }
+    }
+
+    pub fn get_provider_display_name(&self, provider: &str) -> String {
+        crate::core::provider_display_names::get_provider_display_name(provider)
+    }
+
+    pub fn get_stored_credential(&self, provider: &str) -> Option<String> {
+        use crate::core::auth_storage::AuthCredential;
+        match self.auth_storage.get(provider) {
+            Some(AuthCredential::OAuth { .. }) => Some("oauth".to_string()),
+            Some(AuthCredential::ApiKey { .. }) => Some("api_key".to_string()),
+            None => None,
+        }
+    }
+
+    pub fn list_credentials(&self) -> Vec<String> {
+        self.auth_storage.list()
+    }
+
+    pub fn get_oauth_providers(&self) -> Vec<crate::core::auth_storage::OAuthProviderInterface> {
+        self.auth_storage.get_oauth_providers()
+    }
+
+    pub async fn get_api_key_for_provider(&self, provider: &str) -> Result<Option<String>, String> {
+        use crate::core::auth_storage::AuthCredential;
+        Ok(match self.auth_storage.get(provider) {
+            Some(AuthCredential::ApiKey { key, .. }) => Some(key),
+            _ => None,
+        })
+    }
+
+    pub fn set_api_key(&mut self, provider: &str, api_key: &str) {
+        use crate::core::auth_storage::AuthCredential;
+        self.auth_storage
+            .set(provider, AuthCredential::ApiKey { key: api_key.to_string(), prime_team: None });
+    }
+
+    pub fn set_prime_inference_api_key(&mut self, api_key: &str) {
+        let _ = self.auth_storage.set_prime_inference_api_key(api_key);
+    }
+
+    pub fn get_prime_cli_config_path(&self) -> Option<String> {
+        self.auth_storage.get_prime_cli_config_path()
+    }
+
+    pub fn get_prime_inference_team_selection(&self) -> Option<Option<crate::core::auth_storage::PrimeTeam>> {
+        self.auth_storage.get_prime_inference_team_selection()
+    }
+
+    pub fn set_prime_inference_team_selection(&mut self, team: Option<crate::core::auth_storage::PrimeTeam>) {
+        let _ = self.auth_storage.set_prime_inference_team_selection(team);
+    }
+
+    pub fn mark_provider_auth_stale(&self, _provider: &str) -> bool {
         false
     }
 
-    pub fn get_provider_auth_status(&self, _provider: &str) -> AuthStatus {
-        AuthStatus::default()
+    pub fn mark_provider_auth_source_stale(&self, _token: &str) -> bool {
+        false
+    }
+
+    /// Port of `authStorage.login(...)`. The OAuth transport belongs to the
+    /// auth-storage slice, so the dialog handshake is a local stand-in.
+    pub async fn login(
+        &mut self,
+        _provider_id: &str,
+        dialog: &mut super::auth_flows::LoginDialogComponent,
+        _uses_callback_server: bool,
+        _is_github_copilot: bool,
+    ) -> Result<(), String> {
+        dialog.show_waiting("Waiting for authentication...");
+        Err("OAuth login is not ported yet".to_string())
     }
 }
 
@@ -869,7 +978,7 @@ pub fn create_interactive_mode_ui_services(session: &AgentSession) -> Interactiv
     let system_prompt = session.system_prompt.clone();
     InteractiveModeUiServices {
         settings_manager: Arc::new(SettingsManager),
-        model_registry: Arc::new(ModelRegistry),
+        model_registry: Arc::new(ModelRegistry::in_memory()),
         get_initial_cwd: Box::new(SessionManager.get_cwd),
         get_initial_session_name: Box::new(|| SessionManager.get_session_name()),
         get_themes: Box::new(Vec::new),
@@ -1006,7 +1115,7 @@ mod tests {
     fn ui_services_expose_initial_cwd_and_name() {
         let services = create_interactive_mode_ui_services_from_services(
             Arc::new(SettingsManager),
-            Arc::new(ModelRegistry),
+            Arc::new(ModelRegistry::in_memory()),
             Arc::new(SessionManager),
         );
         assert_eq!(services.get_initial_cwd(), "");

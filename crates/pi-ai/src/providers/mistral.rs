@@ -33,8 +33,7 @@ use crate::utils::stream_failure::{
 const MISTRAL_TOOL_CALL_ID_LENGTH: usize = 9;
 const MAX_MISTRAL_ERROR_BODY_CHARS: usize = 4000;
 
-/// The pinned `@mistralai/mistralai` version, used for the SDK user agent.
-const MISTRAL_SDK_VERSION: &str = "2.2.1";
+/// `SDK_METADATA.userAgent` of the pinned `@mistralai/mistralai` 2.2.1 client.
 const MISTRAL_USER_AGENT: &str = "speakeasy-sdk/typescript 2.2.1 2.881.4 1.0.0 @mistralai/mistralai";
 /// `ServerList[ServerEu]` - the SDK default when `serverURL` is not set.
 const MISTRAL_DEFAULT_SERVER_URL: &str = "https://api.mistral.ai";

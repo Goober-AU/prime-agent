@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use pi_agent_core::types::{AgentMessage, CustomAgentMessage, CustomMessageContent, ThinkingLevel};
 use pi_ai::compaction::{
-    compaction_matches_model, is_compaction_checkpoint, CompactionOptions, ProviderCompactionCheckpoint,
+    compaction_matches_model, is_compaction_checkpoint, CompactionOptions,
+    ProviderCompactionCheckpoint,
 };
 use pi_ai::models::get_model_input_limit;
 use pi_ai::stream::{compact_simple, complete_simple, supports_compaction};
@@ -251,10 +252,13 @@ fn is_agent_lifecycle_failure(message: &AssistantMessage) -> bool {
 }
 
 fn is_faux_provider_queue_exhausted(message: &AssistantMessage) -> bool {
-    message.provider == "faux" && message.error_message.as_deref() == Some("No more faux responses queued")
+    message.provider == "faux"
+        && message.error_message.as_deref() == Some("No more faux responses queued")
 }
 
-fn provider_stream_failure_details(message: &AssistantMessage) -> Option<serde_json::Map<String, Value>> {
+fn provider_stream_failure_details(
+    message: &AssistantMessage,
+) -> Option<serde_json::Map<String, Value>> {
     let failure = message
         .diagnostics
         .as_ref()?
@@ -298,7 +302,11 @@ async fn complete_with_provider_retry(
 ) -> Result<AssistantMessage, String> {
     let default_policy = DEFAULT_PROVIDER_RETRY_POLICY;
     let policy = policy.unwrap_or(&default_policy);
-    let max_retries = if policy.enabled { policy.max_retries } else { 0 };
+    let max_retries = if policy.enabled {
+        policy.max_retries
+    } else {
+        0
+    };
     let mut retries_performed = 0u32;
     loop {
         let message = attempt_completion().await?;
@@ -369,7 +377,11 @@ async fn request_with_provider_retry(
 ) -> Result<Option<pi_ai::compaction::ProviderCompactionResult>, ProviderRequestError> {
     let default_policy = DEFAULT_PROVIDER_RETRY_POLICY;
     let policy = policy.unwrap_or(&default_policy);
-    let max_retries = if policy.enabled { policy.max_retries } else { 0 };
+    let max_retries = if policy.enabled {
+        policy.max_retries
+    } else {
+        0
+    };
     let mut attempt = 0u32;
     loop {
         if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
@@ -418,7 +430,6 @@ const TURN_PREFIX_SUMMARIZATION_PROMPT: &str = "This is the PREFIX of a turn tha
 
 const KERNEL_PERSIST_SUMMARY_NOTE: &str = "Note: the Python kernel keeps running after this summary — every Python variable, import, and helper you defined stays available. The cells that defined them won't appear above, so record in the summary any names worth remembering so you reuse them instead of redefining them.";
 
-
 /** Details stored in CompactionEntry.details for file tracking */
 pub fn build_summarization_prompt(
     custom_instructions: Option<&str>,
@@ -465,7 +476,9 @@ fn extract_file_operations(
                             }
                         }
                     }
-                    if let Some(modified_files) = details.get("modifiedFiles").and_then(Value::as_array) {
+                    if let Some(modified_files) =
+                        details.get("modifiedFiles").and_then(Value::as_array)
+                    {
                         for entry in modified_files {
                             if let Some(path) = entry.as_str() {
                                 file_ops.edited.insert(path.to_string());
@@ -506,11 +519,9 @@ fn get_message_from_entry(entry: &CompactionSessionEntry) -> Option<AgentMessage
             from_id,
             timestamp,
             ..
-        } => Some(branch_summary_to_agent_message(create_branch_summary_message(
-            summary.clone(),
-            from_id.clone(),
-            timestamp,
-        ))),
+        } => Some(branch_summary_to_agent_message(
+            create_branch_summary_message(summary.clone(), from_id.clone(), timestamp),
+        )),
         CompactionSessionEntry::Compaction {
             summary,
             tokens_before,
@@ -568,8 +579,13 @@ pub const SUMMARY_UPDATE_POLICY_OFF: &str = "off";
 
 pub type SummaryUpdatePolicy = String;
 
-pub fn resolve_summary_update_policy(configured: Option<&str>, environment: Option<&str>) -> SummaryUpdatePolicy {
-    if configured == Some(CONSOLIDATE_REPEATED_SUMMARY_POLICY) || configured == Some(SUMMARY_UPDATE_POLICY_OFF) {
+pub fn resolve_summary_update_policy(
+    configured: Option<&str>,
+    environment: Option<&str>,
+) -> SummaryUpdatePolicy {
+    if configured == Some(CONSOLIDATE_REPEATED_SUMMARY_POLICY)
+        || configured == Some(SUMMARY_UPDATE_POLICY_OFF)
+    {
         return configured.unwrap_or(SUMMARY_UPDATE_POLICY_OFF).to_string();
     }
     let environment = environment
@@ -600,7 +616,10 @@ fn is_staged_azure_native_compaction_model(model: &Model) -> bool {
         && capability.enabled
         && capability.validation == pi_ai::types::NativeCompactionValidation::LiveVerified
         && trim_trailing_slashes(&capability.endpoint)
-            == format!("{}/responses/compact", trim_trailing_slashes(&model.base_url))
+            == format!(
+                "{}/responses/compact",
+                trim_trailing_slashes(&model.base_url)
+            )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -707,7 +726,11 @@ pub fn estimate_context_tokens(messages: &[AgentMessage]) -> ContextUsageEstimat
 }
 
 /// Check if compaction should trigger based on context usage.
-pub fn should_compact(context_tokens: f64, context_window: f64, settings: &CompactionSettings) -> bool {
+pub fn should_compact(
+    context_tokens: f64,
+    context_window: f64,
+    settings: &CompactionSettings,
+) -> bool {
     if !settings.enabled {
         return false;
     }
@@ -761,7 +784,9 @@ pub fn estimate_tokens(message: &AgentMessage) -> f64 {
                 pi_ai::types::UserContent::Blocks(blocks) => blocks
                     .iter()
                     .filter_map(|block| match block {
-                        pi_ai::types::ImageOrTextContent::Text(text) => Some(text.text.chars().count()),
+                        pi_ai::types::ImageOrTextContent::Text(text) => {
+                            Some(text.text.chars().count())
+                        }
                         pi_ai::types::ImageOrTextContent::Image(_) => None,
                     })
                     .sum(),
@@ -790,16 +815,20 @@ pub fn estimate_tokens(message: &AgentMessage) -> f64 {
             let mut chars = 0usize;
             for block in &tool_result.content {
                 match block {
-                    pi_ai::types::ImageOrTextContent::Text(text) => chars += text.text.chars().count(),
+                    pi_ai::types::ImageOrTextContent::Text(text) => {
+                        chars += text.text.chars().count()
+                    }
                     pi_ai::types::ImageOrTextContent::Image(_) => chars += 4800,
                 }
             }
             ceil_div4(chars)
         }
-        AgentMessage::Custom(CustomAgentMessage::BashExecution { command, output, .. }) => {
-            ceil_div4(command.chars().count() + output.chars().count())
+        AgentMessage::Custom(CustomAgentMessage::BashExecution {
+            command, output, ..
+        }) => ceil_div4(command.chars().count() + output.chars().count()),
+        AgentMessage::Custom(CustomAgentMessage::Custom { content, .. }) => {
+            ceil_div4(content_chars(content))
         }
-        AgentMessage::Custom(CustomAgentMessage::Custom { content, .. }) => ceil_div4(content_chars(content)),
         AgentMessage::Custom(CustomAgentMessage::BranchSummary { summary, .. }) => {
             ceil_div4(summary.chars().count())
         }
@@ -830,25 +859,28 @@ pub fn estimate_tokens(message: &AgentMessage) -> f64 {
 /// When we cut at an assistant message with tool calls, its tool results follow it
 /// and will be kept.
 /// BashExecutionMessage is treated like a user message (user-initiated context).
-fn find_valid_cut_points(entries: &[CompactionSessionEntry], start_index: usize, end_index: usize) -> Vec<usize> {
+fn find_valid_cut_points(
+    entries: &[CompactionSessionEntry],
+    start_index: usize,
+    end_index: usize,
+) -> Vec<usize> {
     let mut cut_points: Vec<usize> = Vec::new();
     for index in start_index..end_index {
         let entry = &entries[index];
         match entry {
-            CompactionSessionEntry::Message { message, .. } => {
-                match message.role() {
-                    "bashExecution" | "custom" | "branchSummary" | "compactionSummary" | "user"
-                    | "assistant" => cut_points.push(index),
-                    "toolResult" => {}
-                    _ => {}
-                }
-            }
+            CompactionSessionEntry::Message { message, .. } => match message.role() {
+                "bashExecution" | "custom" | "branchSummary" | "compactionSummary" | "user"
+                | "assistant" => cut_points.push(index),
+                "toolResult" => {}
+                _ => {}
+            },
             _ => {}
         }
         // Branch summaries and custom messages are user-role turn boundaries.
         if matches!(
             entry,
-            CompactionSessionEntry::BranchSummary { .. } | CompactionSessionEntry::CustomMessage { .. }
+            CompactionSessionEntry::BranchSummary { .. }
+                | CompactionSessionEntry::CustomMessage { .. }
         ) {
             cut_points.push(index);
         }
@@ -871,7 +903,8 @@ pub fn find_turn_start_index(
         let entry = &entries[index];
         if matches!(
             entry,
-            CompactionSessionEntry::BranchSummary { .. } | CompactionSessionEntry::CustomMessage { .. }
+            CompactionSessionEntry::BranchSummary { .. }
+                | CompactionSessionEntry::CustomMessage { .. }
         ) {
             return Some(index);
         }
@@ -1034,7 +1067,12 @@ pub fn prepare_compaction(
 
     let tokens_before = estimate_context_tokens(&build_session_context(path_entries)).tokens;
 
-    let cut_point = find_cut_point(path_entries, boundary_start, boundary_end, settings.keep_recent_tokens);
+    let cut_point = find_cut_point(
+        path_entries,
+        boundary_start,
+        boundary_end,
+        settings.keep_recent_tokens,
+    );
     let first_kept_entry = path_entries.get(cut_point.first_kept_entry_index)?;
     if first_kept_entry.id().is_empty() {
         return None; // Session needs migration
@@ -1042,7 +1080,9 @@ pub fn prepare_compaction(
     let first_kept_entry_id = first_kept_entry.id().to_string();
 
     let history_end = if cut_point.is_split_turn {
-        cut_point.turn_start_index.unwrap_or(cut_point.first_kept_entry_index)
+        cut_point
+            .turn_start_index
+            .unwrap_or(cut_point.first_kept_entry_index)
     } else {
         cut_point.first_kept_entry_index
     };
@@ -1063,10 +1103,14 @@ pub fn prepare_compaction(
     }
 
     // Avoid a compaction that would summarize no history.
-    if messages_to_summarize.is_empty() && turn_prefix_messages.is_empty() && previous_summary.is_none() {
+    if messages_to_summarize.is_empty()
+        && turn_prefix_messages.is_empty()
+        && previous_summary.is_none()
+    {
         return None;
     }
-    let mut file_ops = extract_file_operations(&messages_to_summarize, path_entries, prev_compaction_index);
+    let mut file_ops =
+        extract_file_operations(&messages_to_summarize, path_entries, prev_compaction_index);
     // Split turns retain their suffix, but their prefix file operations still belong in the summary.
     if cut_point.is_split_turn {
         for message in &turn_prefix_messages {
@@ -1093,14 +1137,18 @@ pub fn prepare_compaction(
 /// One wire summary call. The argument is the per-call header map that
 /// `SummaryCallRunner` supplies.
 pub type SummaryCallFn = Arc<
-    dyn Fn(Option<serde_json::Map<String, Value>>) -> pi_ai::types::BoxFuture<Result<AssistantMessage, String>>
+    dyn Fn(
+            Option<serde_json::Map<String, Value>>,
+        ) -> pi_ai::types::BoxFuture<Result<AssistantMessage, String>>
         + Send
         + Sync,
 >;
 
 /// Runs one summary wire call; hosts decorate each call with its own request identity.
 pub type SummaryCallRunner = Arc<
-    dyn Fn(SummaryCallFn) -> pi_ai::types::BoxFuture<Result<AssistantMessage, String>> + Send + Sync,
+    dyn Fn(SummaryCallFn) -> pi_ai::types::BoxFuture<Result<AssistantMessage, String>>
+        + Send
+        + Sync,
 >;
 
 /// `(call) => call(headers)`: the default runner forwards the caller's headers.
@@ -1173,7 +1221,10 @@ async fn generate_bounded_summary(
     let input_limit = get_model_input_limit(model);
     let max_tokens = f64::max(
         1.0,
-        f64::min(requested_max_tokens, f64::min(model.max_tokens, (input_limit / 4.0).floor())),
+        f64::min(
+            requested_max_tokens,
+            f64::min(model.max_tokens, (input_limit / 4.0).floor()),
+        ),
     );
     let conversation = serialize_conversation(&convert_to_llm(messages, &Default::default()));
     let mut offset = 0usize;
@@ -1192,13 +1243,15 @@ async fn generate_bounded_summary(
             instructions(summary.as_deref())
         );
         // Leave output headroom and use a conservative chars/3 estimate for fallback calls.
-        let budget = (((f64::min(input_limit, model.context_window - max_tokens) - 1024.0) * 3.0).floor())
+        let budget = (((f64::min(input_limit, model.context_window - max_tokens) - 1024.0) * 3.0)
+            .floor())
             - suffix.chars().count() as f64
             - SUMMARIZATION_SYSTEM_PROMPT.chars().count() as f64
             - 64.0;
         if budget <= 0.0 {
             return Err(
-                "Compaction instructions and previous summary exceed the model input budget".to_string(),
+                "Compaction instructions and previous summary exceed the model input budget"
+                    .to_string(),
             );
         }
         let chunk: String = slice_chars(&conversation, offset, offset + budget as usize);
@@ -1208,45 +1261,46 @@ async fn generate_bounded_summary(
         let suffix_for_call = suffix.clone();
         let thinking_level = thinking_level.cloned();
         let signal_for_call = signal.cloned();
-        let attempt: SummaryCallFn = Arc::new(move |call_headers: Option<serde_json::Map<String, Value>>| {
-            let model = model_for_call.clone();
-            let api_key = api_key.clone();
-            let suffix = suffix_for_call.clone();
-            let thinking_level = thinking_level.clone();
-            let signal = signal_for_call.clone();
-            let chunk = chunk.clone();
-            let headers = call_headers.clone();
-            Box::pin(async move {
-                let complete = move || {
-                    let model = model.clone();
-                    let api_key = api_key.clone();
-                    let suffix = suffix.clone();
-                    let thinking_level = thinking_level.clone();
-                    let signal = signal.clone();
-                    let headers = headers.clone();
-                    let chunk = chunk.clone();
-                    Box::pin(async move {
-                        let mut options = SimpleStreamOptions::default();
-                        options.stream.max_tokens = Some(max_tokens);
-                        options.stream.api_key = Some(api_key);
-                        options.stream.signal = signal.clone();
-                        options.stream.headers = headers.as_ref().and_then(|headers| {
-                            let mut map = indexmap::IndexMap::new();
-                            for (key, value) in headers {
-                                if let Some(value) = value.as_str() {
-                                    map.insert(key.clone(), value.to_string());
+        let attempt: SummaryCallFn = Arc::new(
+            move |call_headers: Option<serde_json::Map<String, Value>>| {
+                let model = model_for_call.clone();
+                let api_key = api_key.clone();
+                let suffix = suffix_for_call.clone();
+                let thinking_level = thinking_level.clone();
+                let signal = signal_for_call.clone();
+                let chunk = chunk.clone();
+                let headers = call_headers.clone();
+                Box::pin(async move {
+                    let complete = move || {
+                        let model = model.clone();
+                        let api_key = api_key.clone();
+                        let suffix = suffix.clone();
+                        let thinking_level = thinking_level.clone();
+                        let signal = signal.clone();
+                        let headers = headers.clone();
+                        let chunk = chunk.clone();
+                        Box::pin(async move {
+                            let mut options = SimpleStreamOptions::default();
+                            options.stream.max_tokens = Some(max_tokens);
+                            options.stream.api_key = Some(api_key);
+                            options.stream.signal = signal.clone();
+                            options.stream.headers = headers.as_ref().and_then(|headers| {
+                                let mut map = indexmap::IndexMap::new();
+                                for (key, value) in headers {
+                                    if let Some(value) = value.as_str() {
+                                        map.insert(key.clone(), value.to_string());
+                                    }
+                                }
+                                Some(map)
+                            });
+                            if model.reasoning {
+                                if let Some(level) = thinking_level.as_deref() {
+                                    if level != "off" {
+                                        options.reasoning = Some(level.to_string());
+                                    }
                                 }
                             }
-                            Some(map)
-                        });
-                        if model.reasoning {
-                            if let Some(level) = thinking_level.as_deref() {
-                                if level != "off" {
-                                    options.reasoning = Some(level.to_string());
-                                }
-                            }
-                        }
-                        let context = Context {
+                            let context = Context {
                             system_prompt: Some(SUMMARIZATION_SYSTEM_PROMPT.to_string()),
                             messages: vec![Message::User(pi_ai::types::UserMessage::new(
                                 pi_ai::types::UserContent::Blocks(vec![
@@ -1258,10 +1312,10 @@ async fn generate_bounded_summary(
                             ))],
                             tools: None,
                         };
-                        let message = complete_simple(&model, &context, Some(&options)).await;
-                        // Keep one retry owner. An empty successful response is not a usable
-                        // checkpoint, so let the existing bounded provider policy retry it.
-                        if message.stop_reason == pi_ai::types::STOP_REASON_STOP
+                            let message = complete_simple(&model, &context, Some(&options)).await;
+                            // Keep one retry owner. An empty successful response is not a usable
+                            // checkpoint, so let the existing bounded provider policy retry it.
+                            if message.stop_reason == pi_ai::types::STOP_REASON_STOP
                             && !message
                                 .content
                                 .iter()
@@ -1272,18 +1326,20 @@ async fn generate_bounded_summary(
                             failed.error_message = Some("Summarization returned an empty summary".to_string());
                             return Ok(failed);
                         }
-                        Ok(message)
-                    })
-                        as pi_ai::types::BoxFuture<Result<AssistantMessage, String>>
-                };
-                complete_with_provider_retry(&complete, retry, signal.as_ref()).await
-            })
-        });
+                            Ok(message)
+                        })
+                            as pi_ai::types::BoxFuture<Result<AssistantMessage, String>>
+                    };
+                    complete_with_provider_retry(&complete, retry, signal.as_ref()).await
+                })
+            },
+        );
         let response = (summary_call)(attempt).await?;
         if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
             return Err(abort_error());
         }
-        if response.stop_reason == STOP_REASON_ERROR || response.stop_reason == STOP_REASON_ABORTED {
+        if response.stop_reason == STOP_REASON_ERROR || response.stop_reason == STOP_REASON_ABORTED
+        {
             let reason = response
                 .error_message
                 .clone()
@@ -1324,7 +1380,10 @@ fn now_millis() -> i64 {
 /// JavaScript `String.prototype.slice(start, end)` by UTF-16 code units; the
 /// port uses character offsets, which match for the text this function slices.
 fn slice_chars(text: &str, start: usize, end: usize) -> String {
-    text.chars().skip(start).take(end.saturating_sub(start)).collect()
+    text.chars()
+        .skip(start)
+        .take(end.saturating_sub(start))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1384,15 +1443,19 @@ pub async fn compact(
                         let model = model_for_request.clone();
                         let context = context_for_request.clone();
                         let options = merged_for_request.clone();
-                        Box::pin(async move {
-                            compact_simple(&model, &context, Some(&options)).await
-                        })
+                        Box::pin(
+                            async move { compact_simple(&model, &context, Some(&options)).await },
+                        )
                     };
                     let _ = headers;
                     compact_call().await
-                }) as pi_ai::types::BoxFuture<
-                    Result<Option<pi_ai::compaction::ProviderCompactionResult>, ProviderRequestError>,
-                >
+                })
+                    as pi_ai::types::BoxFuture<
+                        Result<
+                            Option<pi_ai::compaction::ProviderCompactionResult>,
+                            ProviderRequestError,
+                        >,
+                    >
             });
             let request = || {
                 let attempt = attempt.clone();
@@ -1403,10 +1466,13 @@ pub async fn compact(
                 if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
                     return Err(abort_error());
                 }
-                if !is_compaction_checkpoint(&serde_json::to_value(&remote.checkpoint).unwrap_or(Value::Null))
-                    || !compaction_matches_model(&remote.checkpoint, model)
+                if !is_compaction_checkpoint(
+                    &serde_json::to_value(&remote.checkpoint).unwrap_or(Value::Null),
+                ) || !compaction_matches_model(&remote.checkpoint, model)
                 {
-                    return Err("Provider compaction returned an incompatible checkpoint".to_string());
+                    return Err(
+                        "Provider compaction returned an incompatible checkpoint".to_string()
+                    );
                 }
                 let (read_files, modified_files) = compute_file_lists(file_ops);
                 return Ok(CompactionResult {
@@ -1442,7 +1508,10 @@ pub async fn compact(
                     thinking_level,
                     retry,
                     summary_call.clone(),
-                    settings.summary_update_policy.as_deref().unwrap_or(SUMMARY_UPDATE_POLICY_OFF),
+                    settings
+                        .summary_update_policy
+                        .as_deref()
+                        .unwrap_or(SUMMARY_UPDATE_POLICY_OFF),
                 )
                 .await
             } else {
@@ -1483,7 +1552,10 @@ pub async fn compact(
             thinking_level,
             retry,
             summary_call,
-            settings.summary_update_policy.as_deref().unwrap_or(SUMMARY_UPDATE_POLICY_OFF),
+            settings
+                .summary_update_policy
+                .as_deref()
+                .unwrap_or(SUMMARY_UPDATE_POLICY_OFF),
         )
         .await?;
         summary = result.summary.clone();

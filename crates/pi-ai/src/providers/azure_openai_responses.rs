@@ -612,14 +612,14 @@ mod tests {
 	#[test]
 	fn resolve_deployment_name_prefers_option_then_env_then_model() {
 		std::env::set_var("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", "model-1=deploy-env");
-		let model = model("azure-openai-responses", "model-1", "https://example.openai.azure.com");
-		assert_eq!(resolve_deployment_name(&model, None), "deploy-env");
+		let target = model("azure-openai-responses", "model-1", "https://example.openai.azure.com");
+		assert_eq!(resolve_deployment_name(&target, None), "deploy-env");
 
 		let options = AzureOpenAIResponsesOptions {
 			azure_deployment_name: Some("explicit".to_string()),
 			..Default::default()
 		};
-		assert_eq!(resolve_deployment_name(&model, Some(&options)), "explicit");
+		assert_eq!(resolve_deployment_name(&target, Some(&options)), "explicit");
 
 		let other = model("azure-openai-responses", "unknown-model", "https://example.openai.azure.com");
 		assert_eq!(resolve_deployment_name(&other, None), "unknown-model");

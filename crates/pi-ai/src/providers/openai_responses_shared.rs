@@ -1165,7 +1165,7 @@ pub async fn process_responses_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{ImageContent, ModelCost, ToolResultMessage, Usage};
+    use crate::types::{ImageContent, ModelCost, ToolResultMessage, Usage, UserMessage};
     use futures::stream;
     use serde_json::json;
 
@@ -1197,7 +1197,7 @@ mod tests {
         message
     }
 
-    fn allowed(providers: &[&str]) -> impl Fn(&str) -> bool + '_ {
+    fn allowed(providers: &'static [&'static str]) -> impl Fn(&str) -> bool + 'static {
         move |provider: &str| providers.contains(&provider)
     }
 

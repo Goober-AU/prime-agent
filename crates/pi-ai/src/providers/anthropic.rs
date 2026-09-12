@@ -2409,10 +2409,10 @@ async fn send_messages_request(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::types::{InputModality, Message, ModelCost, ThinkingLevelMap, Tool, UserMessage};
+	use crate::types::{ImageContent, InputModality, Message, ModelCost, ThinkingLevelMap, Tool, UserMessage};
 	use bytes::Bytes;
 
-	fn model(provider: &str, id: &str) -> Model {
+	fn test_model(provider: &str, id: &str) -> Model {
 		let mut model = Model::default();
 		model.id = id.to_string();
 		model.name = id.to_string();
@@ -2483,7 +2483,7 @@ mod tests {
 
 	#[test]
 	fn cache_control_follows_retention_and_long_cache_compat() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 
 		let none = get_cache_control(&model, Some(&"none".to_string()));
 		assert_eq!(none.retention, "none");
@@ -2508,7 +2508,7 @@ mod tests {
 
 	#[test]
 	fn anthropic_compat_defaults_to_true() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let compat = get_anthropic_compat(&model);
 		assert!(compat.supports_eager_tool_input_streaming);
 		assert!(compat.supports_long_cache_retention);
@@ -2726,7 +2726,7 @@ mod tests {
 
 	#[test]
 	fn thinking_level_effort_uses_the_map_then_the_fallback_switch() {
-		let mut mapped = model("anthropic", "claude-opus-4-6");
+		let mut mapped = test_model("anthropic", "claude-opus-4-6");
 		let mut map = ThinkingLevelMap::new();
 		map.insert("high".to_string(), Some("max".to_string()));
 		map.insert("max".to_string(), None);
@@ -2736,7 +2736,7 @@ mod tests {
 		// entry is "max".
 		assert_eq!(map_thinking_level_to_effort(&mapped, Some(&"max".to_string())), "max");
 
-		let plain = model("anthropic", "claude-sonnet-4-5");
+		let plain = test_model("anthropic", "claude-sonnet-4-5");
 		assert_eq!(map_thinking_level_to_effort(&plain, Some(&"minimal".to_string())), "low");
 		assert_eq!(map_thinking_level_to_effort(&plain, Some(&"medium".to_string())), "medium");
 		assert_eq!(map_thinking_level_to_effort(&plain, Some(&"xhigh".to_string())), "xhigh");
@@ -2745,7 +2745,7 @@ mod tests {
 
 	#[test]
 	fn build_params_sets_defaults_and_stream_flag() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let context = context_with_user("Say hello.");
 		let options = AnthropicOptions::default();
 		let params = build_params(&model, &context, false, &options, None).unwrap();
@@ -2761,7 +2761,7 @@ mod tests {
 
 	#[test]
 	fn build_params_adds_cache_control_to_system_and_last_tool() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let context = Context::new(
 			Some("System prompt".to_string()),
 			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 1))],
@@ -2805,7 +2805,7 @@ mod tests {
 
 	#[test]
 	fn build_params_omits_eager_input_streaming_when_unsupported() {
-		let mut model = model("anthropic", "claude-sonnet-4-5");
+		let mut model = test_model("anthropic", "claude-sonnet-4-5");
 		model.compat = Some(crate::types::Compat::Anthropic(crate::types::AnthropicMessagesCompat {
 			supports_eager_tool_input_streaming: Some(false),
 			supports_long_cache_retention: None,
@@ -2830,7 +2830,7 @@ mod tests {
 
 	#[test]
 	fn build_params_uses_claude_code_identity_for_oauth() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let context = Context::new(
 			Some("Extra system".to_string()),
 			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 1))],
@@ -2844,7 +2844,7 @@ mod tests {
 
 	#[test]
 	fn build_params_gates_temperature_on_thinking_and_always_on_models() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let context = context_with_user("hi");
 
 		let mut options = AnthropicOptions::default();
@@ -2857,14 +2857,14 @@ mod tests {
 		let params = build_params(&model, &context, false, &thinking, None).unwrap();
 		assert!(params.get("temperature").is_none());
 
-		let always_on = model("anthropic", "claude-fable-5");
+		let always_on = test_model("anthropic", "claude-fable-5");
 		let params = build_params(&always_on, &context, false, &options, None).unwrap();
 		assert!(params.get("temperature").is_none());
 	}
 
 	#[test]
 	fn build_params_configures_thinking_modes() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let context = context_with_user("hi");
 
 		let mut budget = AnthropicOptions::default();
@@ -2879,7 +2879,7 @@ mod tests {
 		adaptive.thinking_enabled = Some(true);
 		adaptive.effort = Some("xhigh".to_string());
 		adaptive.thinking_display = Some("omitted".to_string());
-		let adaptive_model = model("anthropic", "claude-opus-4-7");
+		let adaptive_model = test_model("anthropic", "claude-opus-4-7");
 		let params = build_params(&adaptive_model, &context, false, &adaptive, None).unwrap();
 		assert_eq!(params["thinking"]["type"], Value::String("adaptive".to_string()));
 		assert_eq!(params["thinking"]["display"], Value::String("omitted".to_string()));
@@ -2890,11 +2890,11 @@ mod tests {
 		let params = build_params(&model, &context, false, &disabled, None).unwrap();
 		assert_eq!(params["thinking"]["type"], Value::String("disabled".to_string()));
 
-		let always_on = model("anthropic", "claude-mythos-5");
+		let always_on = test_model("anthropic", "claude-mythos-5");
 		let params = build_params(&always_on, &context, false, &disabled, None).unwrap();
 		assert!(params.get("thinking").is_none());
 
-		let mut non_reasoning = model("anthropic", "claude-3-haiku");
+		let mut non_reasoning = test_model("anthropic", "claude-3-haiku");
 		non_reasoning.reasoning = false;
 		let params = build_params(&non_reasoning, &context, false, &budget, None).unwrap();
 		assert!(params.get("thinking").is_none());
@@ -2902,7 +2902,7 @@ mod tests {
 
 	#[test]
 	fn build_params_maps_metadata_and_tool_choice() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let context = context_with_user("hi");
 
 		let mut options = AnthropicOptions::default();
@@ -2923,7 +2923,7 @@ mod tests {
 
 	#[test]
 	fn convert_messages_skips_empty_content_and_merges_tool_results() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let mut empty_assistant = AssistantMessage::default();
 		empty_assistant.content = vec![ContentBlock::Text(TextContent::new("   "))];
 		let mut calling_assistant = AssistantMessage::default();
@@ -2966,7 +2966,7 @@ mod tests {
 
 	#[test]
 	fn convert_messages_rewrites_redacted_and_unsigned_thinking() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let mut assistant = AssistantMessage::default();
 		assistant.content = vec![
 			ContentBlock::Thinking(ThinkingContent {
@@ -3010,7 +3010,7 @@ mod tests {
 
 	#[test]
 	fn convert_messages_renames_tools_and_normalizes_ids_for_oauth() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let mut assistant = AssistantMessage::default();
 		assistant.provider = "other".to_string();
 		assistant.api = "other-api".to_string();
@@ -3034,7 +3034,7 @@ mod tests {
 
 	#[test]
 	fn convert_messages_appends_cache_control_to_the_last_user_message() {
-		let model = model("anthropic", "claude-sonnet-4-5");
+		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let cache_control = CacheControlEphemeral {
 			type_: "ephemeral".to_string(),
 			ttl: None,
@@ -3115,7 +3115,7 @@ mod tests {
 
 	#[test]
 	fn create_client_branches_match_the_typescript_headers() {
-		let mut copilot = model("github-copilot", "claude-sonnet-4-5");
+		let mut copilot = test_model("github-copilot", "claude-sonnet-4-5");
 		copilot.base_url = "https://api.githubcopilot.com".to_string();
 		let created = create_client(
 			&copilot,
@@ -3141,7 +3141,7 @@ mod tests {
 			Some("fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14")
 		);
 
-		let oauth = create_client(&model("anthropic", "claude-sonnet-4-5"), "sk-ant-oat01-abc", true, false, None, None, None)
+		let oauth = create_client(&test_model("anthropic", "claude-sonnet-4-5"), "sk-ant-oat01-abc", true, false, None, None, None)
 			.unwrap();
 		assert!(oauth.is_oauth_token);
 		assert_eq!(oauth.client.auth_token.as_deref(), Some("sk-ant-oat01-abc"));
@@ -3153,19 +3153,19 @@ mod tests {
 		assert_eq!(headers.get("user-agent").map(String::as_str), Some("claude-cli/2.1.261"));
 		assert_eq!(headers.get("x-app").map(String::as_str), Some("cli"));
 
-		let mut opencode = model("opencode", "claude-sonnet-4-5");
+		let mut opencode = test_model("opencode", "claude-sonnet-4-5");
 		opencode.base_url = "https://opencode.test".to_string();
 		let created = create_client(&opencode, "key", true, false, None, None, Some("session-1")).unwrap();
 		let headers = created.client.headers.unwrap();
 		assert_eq!(headers.get("User-Agent").map(String::as_str), Some("prime-agent"));
 		assert_eq!(headers.get("x-opencode-session").map(String::as_str), Some("session-1"));
 
-		let mut adaptive = model("anthropic", "claude-opus-4-6");
+		let mut adaptive = test_model("anthropic", "claude-opus-4-6");
 		adaptive.base_url = "https://api.anthropic.com".to_string();
 		let created = create_client(&adaptive, "key", true, false, None, None, None).unwrap();
 		assert!(created.client.headers.unwrap().get("anthropic-beta").is_none());
 
-		let mut cloudflare = model("cloudflare-ai-gateway", "claude-sonnet-4-5");
+		let mut cloudflare = test_model("cloudflare-ai-gateway", "claude-sonnet-4-5");
 		cloudflare.base_url = "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/gw/anthropic".to_string();
 		std::env::set_var("CLOUDFLARE_ACCOUNT_ID", "acct");
 		let created = create_client(&cloudflare, "cf-key", true, false, None, None, None).unwrap();

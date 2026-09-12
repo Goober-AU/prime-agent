@@ -2433,7 +2433,7 @@ fn command_input_from_json(value: Value) -> ConverseStreamCommandInput {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::types::{ModelCost, ThinkingLevelMap};
+	use crate::types::{InputModality, ModelCost, ThinkingLevelMap, ToolResultMessage};
 
 	fn model(id: &str, name: &str) -> Model {
 		Model {
@@ -2443,7 +2443,7 @@ mod tests {
 			provider: "amazon-bedrock".to_string(),
 			base_url: "https://bedrock-runtime.us-east-1.amazonaws.com".to_string(),
 			reasoning: true,
-			input: vec!["text".to_string()],
+			input: vec![InputModality::Text],
 			cost: ModelCost::default(),
 			context_window: 200_000.0,
 			max_tokens: 8192.0,
@@ -2611,13 +2611,13 @@ mod tests {
 
 	#[test]
 	fn thinking_effort_clamps_to_supported_levels() {
-		let model = model("global.anthropic.claude-opus-4-7", "");
-		assert_eq!(map_thinking_level_to_effort(&model, Some("low")), "low");
-		assert_eq!(map_thinking_level_to_effort(&model, Some("medium")), "medium");
-		assert_eq!(map_thinking_level_to_effort(&model, Some("high")), "high");
-		assert_eq!(map_thinking_level_to_effort(&model, Some("xhigh")), "xhigh");
-		assert_eq!(map_thinking_level_to_effort(&model, Some("max")), "max");
-		assert_eq!(map_thinking_level_to_effort(&model, None), "high");
+		let base = model("global.anthropic.claude-opus-4-7", "");
+		assert_eq!(map_thinking_level_to_effort(&base, Some("low")), "low");
+		assert_eq!(map_thinking_level_to_effort(&base, Some("medium")), "medium");
+		assert_eq!(map_thinking_level_to_effort(&base, Some("high")), "high");
+		assert_eq!(map_thinking_level_to_effort(&base, Some("xhigh")), "xhigh");
+		assert_eq!(map_thinking_level_to_effort(&base, Some("max")), "max");
+		assert_eq!(map_thinking_level_to_effort(&base, None), "high");
 
 		// xhigh/max unsupported -> clampThinkingLevel walks up to the supported level.
 		let mut clamped = model("global.anthropic.claude-opus-4-6-v1", "");
@@ -3314,8 +3314,8 @@ mod tests {
 
 	#[test]
 	fn metadata_updates_usage_and_cost() {
-		let mut model = model("global.anthropic.claude-opus-4-6-v1", "");
-		model.cost = ModelCost {
+		let mut priced = model("global.anthropic.claude-opus-4-6-v1", "");
+		priced.cost = ModelCost {
 			input: 3.0,
 			output: 15.0,
 			cache_read: 0.3,
@@ -3330,7 +3330,7 @@ mod tests {
 				"cacheReadInputTokens": 1_000_000.0,
 				"cacheWriteInputTokens": 1_000_000.0
 			}),
-			&model,
+			&priced,
 			&mut output,
 		);
 		assert_eq!(output.usage.input, 1_000_000.0);
@@ -3346,13 +3346,13 @@ mod tests {
 
 		// Missing counters default to 0 and totalTokens falls back to input + output.
 		let mut output = AssistantMessage::default();
-		handle_metadata(&json!({ "inputTokens": 5, "outputTokens": 7 }), &model, &mut output);
+		handle_metadata(&json!({ "inputTokens": 5, "outputTokens": 7 }), &priced, &mut output);
 		assert_eq!(output.usage.cache_read, 0.0);
 		assert_eq!(output.usage.total_tokens, 12.0);
 
 		// `event.usage` absent -> no update at all.
 		let mut output = AssistantMessage::default();
-		handle_metadata(&Value::Null, &model, &mut output);
+		handle_metadata(&Value::Null, &priced, &mut output);
 		assert_eq!(output.usage.total_tokens, 0.0);
 	}
 

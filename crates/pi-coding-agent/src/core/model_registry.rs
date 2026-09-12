@@ -163,27 +163,21 @@ fn validation_path(path: &str, key: &str) -> String {
     }
 }
 
-fn expect_string(value: &Value, path: &str, errors: &mut Vec<String>, min_length: usize) -> Option<String> {
+fn expect_string(value: &Value, path: &str, errors: &mut Vec<String>, min_length: usize) {
     match value.as_str() {
-        Some(text) if text.chars().count() >= min_length => Some(text.to_string()),
-        Some(_) => {
-            errors.push(format!("  - {}: Expected string length greater or equal to {}", path, min_length));
-            None
-        }
-        None => {
-            errors.push(format!("  - {}: Expected string", path));
-            None
-        }
+        Some(text) if text.chars().count() >= min_length => {}
+        Some(_) => errors.push(format!(
+            "  - {}: Expected string length greater or equal to {}",
+            path, min_length
+        )),
+        None => errors.push(format!("  - {}: Expected string", path)),
     }
 }
 
-fn expect_number(value: &Value, path: &str, errors: &mut Vec<String>) -> Option<f64> {
+fn expect_number(value: &Value, path: &str, errors: &mut Vec<String>) {
     match value.as_f64() {
-        Some(number) if number.is_finite() => Some(number),
-        _ => {
-            errors.push(format!("  - {}: Expected number", path));
-            None
-        }
+        Some(number) if number.is_finite() => {}
+        _ => errors.push(format!("  - {}: Expected number", path)),
     }
 }
 
@@ -645,7 +639,7 @@ pub fn strip_json_comments(input: &str) -> String {
             while lookahead < chars.len() && chars[lookahead].is_whitespace() {
                 lookahead += 1;
             }
-            if matches!(chars.get(lookahead), Some('}') | Some(']')) {
+            if matches!(chars.get(lookahead).copied(), Some('}') | Some(']')) {
                 index += 1;
                 continue;
             }
@@ -949,6 +943,7 @@ pub fn apply_model_override(model: &Model, override_value: &ModelOverride) -> Mo
 }
 
 fn read_openai_codex_account_id(token: &str) -> Option<String> {
+    use base64::Engine;
     let payload = token.split('.').nth(1)?;
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(payload)
@@ -1709,15 +1704,9 @@ impl ModelRegistry {
     /// models return from the disk/bundled fallback immediately and refresh in
     /// the background.
     pub async fn refresh_available_models(&mut self) -> Vec<Model> {
-        self.run_serialized_entitlement_refresh().await;
-        self.get_available()
-    }
-
-    /// `runSerializedEntitlementRefresh(task)` - the task body is
-    /// `refreshAvailableModels`'s closure.
-    async fn run_serialized_entitlement_refresh(&mut self) {
-        // The TypeScript chains promises so the next task runs after the current
-        // one settles. Rust models that with a mutex held for the whole body.
+        // `runSerializedEntitlementRefresh(async () => { ... })`: the TypeScript
+        // chains promises so the next task runs after the current one settles.
+        // Rust models that with a mutex held for the whole body.
         let chain = self.entitlement_refresh_chain.clone();
         let _guard = chain.lock().await;
 
@@ -1751,6 +1740,7 @@ impl ModelRegistry {
             previous_private_models,
         )
         .await;
+        self.get_available()
     }
 
     async fn refresh_private_prime_inference_authorization(
@@ -1768,6 +1758,7 @@ impl ModelRegistry {
         let team_id = team_headers
             .as_ref()
             .and_then(|headers| headers.get("X-Prime-Team-ID").cloned());
+        let current_team_id = team_id.clone();
         let (Some(api_key), Some(team_headers), Some(team_id)) = (api_key, team_headers, team_id) else {
             // Stale is not logout: keep fetched entitlements for explicit
             // re-selection (the auth filter still hides the models while stale) -
@@ -1775,8 +1766,8 @@ impl ModelRegistry {
             // invalidates them.
             let status = self.auth_storage.get_auth_status(PRIME_INFERENCE_PROVIDER_ID);
             if status.source.as_deref() == Some("stale")
-                && team_id.is_some()
-                && team_id == previous_team_id
+                && current_team_id.is_some()
+                && current_team_id == previous_team_id
             {
                 self.authorized_private_prime_inference_model_ids = previous_private_model_ids;
                 self.authorized_private_prime_inference_models = previous_private_models;
@@ -1864,7 +1855,7 @@ impl ModelRegistry {
                     refreshed_at: now_millis(),
                 });
             }
-            None if team_id == previous_team_id => {
+            None if previous_team_id.as_deref() == Some(team_id.as_str()) => {
                 self.authorized_private_prime_inference_model_ids = previous_private_model_ids;
                 self.authorized_private_prime_inference_models = previous_private_models;
                 self.authorized_private_prime_inference_team_id = Some(team_id);
@@ -2108,7 +2099,19 @@ impl ModelRegistry {
     }
 
     pub async fn get_executable_models(&mut self) -> Vec<Model> {
-        self.run_serialized_entitlement_refresh().await;
+        // `runSerializedEntitlementRefresh(() => this.refreshPrivatePrimeInferenceAuthorization())`
+        let chain = self.entitlement_refresh_chain.clone();
+        let _guard = chain.lock().await;
+        let previous_private_model_ids = self.authorized_private_prime_inference_model_ids.clone();
+        let previous_team_id = self.authorized_private_prime_inference_team_id.clone();
+        let previous_private_models = self.authorized_private_prime_inference_models.clone();
+        self.refresh_private_prime_inference_authorization(
+            previous_private_model_ids,
+            previous_team_id,
+            previous_private_models,
+        )
+        .await;
+
         let available_models = self.get_available();
         let codex_models: Vec<Model> = available_models
             .iter()
@@ -2806,12 +2809,17 @@ impl ModelRegistry {
     /// already registered, defined values in the incoming config override
     /// existing ones; undefined values are preserved from the stored config.
     fn upsert_registered_provider(&mut self, provider_name: &str, config: ProviderConfigInput) {
-        match self.registered_providers.get_mut(provider_name) {
-            None => {
-                self.registered_providers
-                    .insert(provider_name.to_string(), config);
-            }
-            Some(existing) => {
+        if !self.registered_providers.contains_key(provider_name) {
+            self.registered_providers
+                .insert(provider_name.to_string(), config);
+            return;
+        }
+        {
+            let existing = self
+                .registered_providers
+                .get_mut(provider_name)
+                .expect("registered provider checked above");
+            {
                 if config.name.is_some() {
                     existing.name = config.name;
                 }

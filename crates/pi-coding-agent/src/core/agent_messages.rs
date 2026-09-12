@@ -1,3 +1,20 @@
+//! Port of packages/coding-agent/src/core/agent-messages.ts
+//!
+//! Type mapping notes:
+//! - `CustomMessage<T>` is carried by `pi_agent_core::types::CustomAgentMessage::Custom`;
+//!   `AgentSessionMessage` is therefore a typed view over that variant plus the
+//!   validation helpers that the TypeScript declaration provides.
+//! - `Map`/`Set` iteration order is observable in the roster output, so ordered
+//!   `Vec` collections are used where the TypeScript sorts explicitly.
+//! - `randomUUID()` -> `uuid::Uuid::new_v4()`.
+//! - `AbortSignal` -> `tokio_util::sync::CancellationToken`.
+
+use std::collections::HashMap;
+
+use pi_agent_core::types::{AgentMessage, CustomAgentMessage, CustomMessageContent};
+use serde_json::{Map, Value};
+
+use crate::core::messages::{ASYNC_BASH_COMPLETION_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE};
 
 /// Port of `agentFamilyRelationship`'s use of `canonicalSessionPath`: the pure
 /// path canonicalisation from core/session-lease.ts, kept private here so this
@@ -15,7 +32,10 @@ fn canonical_session_path(session_path: &str) -> String {
     if let Ok(real) = std::fs::canonicalize(&resolved) {
         return real.to_string_lossy().to_string();
     }
-    match resolved.parent().and_then(|parent| std::fs::canonicalize(parent).ok()) {
+    match resolved
+        .parent()
+        .and_then(|parent| std::fs::canonicalize(parent).ok())
+    {
         Some(real_parent) => real_parent
             .join(resolved.file_name().unwrap_or_default())
             .to_string_lossy()
@@ -23,26 +43,6 @@ fn canonical_session_path(session_path: &str) -> String {
         None => resolved.to_string_lossy().to_string(),
     }
 }
-
-//! Port of packages/coding-agent/src/core/agent-messages.ts
-//!
-//! Type mapping notes:
-//! - `CustomMessage<T>` is carried by `pi_agent_core::types::CustomAgentMessage::Custom`;
-//!   `AgentSessionMessage` is therefore a typed view over that variant plus the
-//!   validation helpers that the TypeScript declaration provides.
-//! - `Map`/`Set` iteration order is observable in the roster output, so ordered
-//!   `Vec` collections are used where the TypeScript sorts explicitly.
-//! - `randomUUID()` -> `uuid::Uuid::new_v4()`.
-//! - `AbortSignal` -> `tokio_util::sync::CancellationToken`.
-
-use std::collections::HashMap;
-
-use pi_agent_core::types::{AgentMessage, CustomAgentMessage, CustomMessageContent};
-use serde_json::{Map, Value};
-
-use crate::core::messages::{
-    ASYNC_BASH_COMPLETION_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE,
-};
 
 pub const AGENT_MESSAGE_CUSTOM_TYPE: &str = "agent_message";
 pub const AGENT_MESSAGE_SKILL_NAME: &str = "agent-message";
@@ -79,7 +79,8 @@ pub const FAMILY_RELATIONSHIP_PARENT: &str = "parent";
 pub const FAMILY_RELATIONSHIP_SIBLING: &str = "sibling";
 pub const FAMILY_RELATIONSHIP_CHILD: &str = "child";
 
-pub const AGENT_FAMILY_REACH_ERROR: &str = "Agent reach is limited to parent, siblings, and children";
+pub const AGENT_FAMILY_REACH_ERROR: &str =
+    "Agent reach is limited to parent, siblings, and children";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -361,7 +362,10 @@ pub fn assert_agent_session_name_available(
             && same_agent_session_name_parent(entry, input, catalog)
     });
     if conflict {
-        return Err(format_agent_session_name_unavailable(&input.name, input.depth));
+        return Err(format_agent_session_name_unavailable(
+            &input.name,
+            input.depth,
+        ));
     }
     Ok(())
 }
@@ -378,7 +382,9 @@ pub fn build_agent_family_roster(
     current: &AgentFamilyCatalogEntry,
     catalog: &[AgentFamilyCatalogEntry],
 ) -> AgentFamilyRosterResult {
-    let parent = catalog.iter().find(|entry| is_agent_family_parent(entry, current));
+    let parent = catalog
+        .iter()
+        .find(|entry| is_agent_family_parent(entry, current));
     let mut siblings: Vec<&AgentFamilyCatalogEntry> = catalog
         .iter()
         .filter(|entry| {
@@ -389,10 +395,13 @@ pub fn build_agent_family_roster(
         .collect();
     let mut children: Vec<&AgentFamilyCatalogEntry> = catalog
         .iter()
-        .filter(|entry| entry.depth == current.depth + 1.0 && is_agent_family_parent(current, entry))
+        .filter(|entry| {
+            entry.depth == current.depth + 1.0 && is_agent_family_parent(current, entry)
+        })
         .collect();
 
-    let name_of = |entry: &AgentFamilyCatalogEntry| entry.name.clone().unwrap_or_else(|| entry.id.clone());
+    let name_of =
+        |entry: &AgentFamilyCatalogEntry| entry.name.clone().unwrap_or_else(|| entry.id.clone());
     // `localeCompare` on the default locale orders plain identifiers like Rust's
     // byte comparison for the ASCII session names this catalogue contains.
     siblings.sort_by_key(|entry| name_of(entry));
@@ -454,17 +463,21 @@ fn same_agent_family_parent(
     if left.parent_session_id.is_some() && left.parent_session_id == right.parent_session_id {
         return true;
     }
-    let has_catalog_parent_pair = |parent_session_id: Option<&String>, parent_session_path: Option<&String>| {
-        let (Some(parent_session_id), Some(parent_session_path)) = (parent_session_id, parent_session_path) else {
-            return false;
+    let has_catalog_parent_pair =
+        |parent_session_id: Option<&String>, parent_session_path: Option<&String>| {
+            let (Some(parent_session_id), Some(parent_session_path)) =
+                (parent_session_id, parent_session_path)
+            else {
+                return false;
+            };
+            catalog.iter().any(|entry| {
+                (Some(entry.id.as_str()) == Some(parent_session_id.as_str())
+                    && entry.session_path.as_deref() == Some(parent_session_path.as_str()))
+                    || (entry.parent_session_id.as_deref() == Some(parent_session_id.as_str())
+                        && entry.parent_session_path.as_deref()
+                            == Some(parent_session_path.as_str()))
+            })
         };
-        catalog.iter().any(|entry| {
-            (Some(entry.id.as_str()) == Some(parent_session_id.as_str())
-                && entry.session_path.as_deref() == Some(parent_session_path.as_str()))
-                || (entry.parent_session_id.as_deref() == Some(parent_session_id.as_str())
-                    && entry.parent_session_path.as_deref() == Some(parent_session_path.as_str()))
-        })
-    };
     if has_catalog_parent_pair(
         left.parent_session_id.as_ref(),
         right.parent_session_path.as_ref(),
@@ -487,7 +500,10 @@ fn same_agent_family_parent(
     false
 }
 
-fn is_agent_family_parent(parent: &AgentFamilyCatalogEntry, child: &AgentFamilyCatalogEntry) -> bool {
+fn is_agent_family_parent(
+    parent: &AgentFamilyCatalogEntry,
+    child: &AgentFamilyCatalogEntry,
+) -> bool {
     (child.parent_session_path.is_some() && child.parent_session_path == parent.session_path)
         || (child.parent_session_id.is_some() && child.parent_session_id == Some(parent.id.clone()))
 }
@@ -533,10 +549,7 @@ pub fn create_agent_session_message_id() -> String {
     format!("agentmsg_{}", uuid::Uuid::new_v4())
 }
 
-pub fn normalize_agent_session_message(
-    message: &str,
-    max_chars: usize,
-) -> Result<String, String> {
+pub fn normalize_agent_session_message(message: &str, max_chars: usize) -> Result<String, String> {
     let trimmed = message.trim();
     if trimmed.is_empty() {
         return Err("Agent session message cannot be empty".to_string());
@@ -578,7 +591,11 @@ pub fn assert_agent_message_queue_capacity(
 /// `[from ...]` relationship line shifting the fixed offsets by one.
 pub fn parse_agent_session_message_prompt_id(text: &str) -> Option<String> {
     let lines: Vec<&str> = text.split('\n').collect();
-    let offset = if lines.first().map(|line| line.starts_with("[from ")).unwrap_or(false) {
+    let offset = if lines
+        .first()
+        .map(|line| line.starts_with("[from "))
+        .unwrap_or(false)
+    {
         1
     } else {
         0
@@ -628,7 +645,10 @@ pub fn create_agent_session_message_prompt(payload: &AgentSessionMessagePayload)
                 .or_else(|| sender.and_then(|sender| sender.session_id.clone()))
                 .or_else(|| sender.and_then(|sender| sender.active_session_id.clone()))
                 .unwrap_or_else(|| "unknown".to_string());
-            format!("[from {relationship}:{}]", format_agent_session_message_metadata(&name))
+            format!(
+                "[from {relationship}:{}]",
+                format_agent_session_message_metadata(&name)
+            )
         }
     });
     let mut lines: Vec<String> = Vec::new();
@@ -638,7 +658,10 @@ pub fn create_agent_session_message_prompt(payload: &AgentSessionMessagePayload)
     lines.push("Agent-to-agent message received.".to_string());
     lines.push(format!("Source: {}", payload.source));
     if let Some(from) = &payload.from {
-        lines.push(format!("From: {}", format_agent_session_message_sender(from)));
+        lines.push(format!(
+            "From: {}",
+            format_agent_session_message_sender(from)
+        ));
     }
     lines.push(format!(
         "To: {}",
@@ -672,7 +695,9 @@ pub fn create_agent_session_message(
 
 pub fn is_agent_session_message(message: &AgentMessage) -> bool {
     let AgentMessage::Custom(CustomAgentMessage::Custom {
-        custom_type, details, ..
+        custom_type,
+        details,
+        ..
     }) = message
     else {
         return false;
@@ -684,12 +709,18 @@ pub fn is_agent_session_message(message: &AgentMessage) -> bool {
         return false;
     };
     details.get("id").map(Value::is_string).unwrap_or(false)
-        && details.get("message").map(Value::is_string).unwrap_or(false)
+        && details
+            .get("message")
+            .map(Value::is_string)
+            .unwrap_or(false)
 }
 
 // A message that starts a new agent run (prompt-turn boundary).
 pub fn starts_agent_run(message: &AgentMessage) -> bool {
-    if matches!(message, AgentMessage::Message(pi_ai::types::Message::User(_))) {
+    if matches!(
+        message,
+        AgentMessage::Message(pi_ai::types::Message::User(_))
+    ) {
         return true;
     }
     if is_agent_session_message(message) {
@@ -816,7 +847,11 @@ pub struct AgentSessionMessageRateLimiter {
 
 impl Default for AgentSessionMessageRateLimiter {
     fn default() -> Self {
-        Self::new(DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY, DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS, None)
+        Self::new(
+            DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY,
+            DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
+            None,
+        )
     }
 }
 
@@ -900,7 +935,11 @@ impl AgentSessionMessageRateLimiter {
 /// members; the Rust trait keeps the same three members and lets each
 /// implementation decide whether the optional ones exist.
 pub trait AgentSessionMessageController: Send + Sync {
-    fn roster(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<AgentFamilyRosterResult, String>> + Send>>;
+    fn roster(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentFamilyRosterResult, String>> + Send>,
+    >;
     fn await_pending_child_publication(
         &self,
         selector: String,
@@ -908,7 +947,9 @@ pub trait AgentSessionMessageController: Send + Sync {
     fn send_agent_message(
         &self,
         input: AgentSessionMessageSendInput,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<AgentSessionMessageReceipt, String>> + Send>>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentSessionMessageReceipt, String>> + Send>,
+    >;
 }
 
 /// `createAgentMessageHostHandlers(controller)`.
@@ -952,10 +993,20 @@ async fn handle_agent_message_send(
     let object = payload.as_object().cloned().unwrap_or_default();
     let message = match object.get("message") {
         Some(Value::String(message)) => message.clone(),
-        _ => return Err(KernelError::new("agent_message.send message must be a string")),
+        _ => {
+            return Err(KernelError::new(
+                "agent_message.send message must be a string",
+            ))
+        }
     };
-    let receiver_role = object.get("receiver_role").and_then(Value::as_str).map(str::to_string);
-    let receiver_name = object.get("receiver_name").and_then(Value::as_str).map(str::to_string);
+    let receiver_role = object
+        .get("receiver_role")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let receiver_name = object
+        .get("receiver_name")
+        .and_then(Value::as_str)
+        .map(str::to_string);
 
     let target: String;
     if let Some(Value::String(positional)) = object.get("target") {
@@ -969,10 +1020,7 @@ async fn handle_agent_message_send(
                 "agent_message.send broadcast cannot be combined with receiver_role/receiver_name",
             ));
         }
-        let roster = controller
-            .roster()
-            .await
-            .map_err(KernelError::new)?;
+        let roster = controller.roster().await.map_err(KernelError::new)?;
         let mut receipts: Vec<Value> = Vec::with_capacity(roster.entries.len());
         for entry in &roster.entries {
             let input = AgentSessionMessageSendInput {
@@ -993,23 +1041,25 @@ async fn handle_agent_message_send(
         return Ok(serde_json::json!({ "receipts": receipts }));
     }
 
-    let role = match receiver_role.as_deref() {
-        Some("parent") => FAMILY_RELATIONSHIP_PARENT.to_string(),
-        Some("sibling") => FAMILY_RELATIONSHIP_SIBLING.to_string(),
-        Some("child") => FAMILY_RELATIONSHIP_CHILD.to_string(),
-        _ => {
-            return Err(KernelError::new(
+    let role =
+        match receiver_role.as_deref() {
+            Some("parent") => FAMILY_RELATIONSHIP_PARENT.to_string(),
+            Some("sibling") => FAMILY_RELATIONSHIP_SIBLING.to_string(),
+            Some("child") => FAMILY_RELATIONSHIP_CHILD.to_string(),
+            _ => return Err(KernelError::new(
                 "agent_message.send receiver_role must be \"parent\", \"sibling\", or \"child\"",
-            ))
-        }
-    };
+            )),
+        };
     if role == FAMILY_RELATIONSHIP_PARENT && receiver_name.is_some() {
         return Err(KernelError::new(
             "agent_message.send receiver_name must be omitted for parent messages",
         ));
     }
     if role != FAMILY_RELATIONSHIP_PARENT
-        && receiver_name.as_ref().map(|name| name.trim().is_empty()).unwrap_or(true)
+        && receiver_name
+            .as_ref()
+            .map(|name| name.trim().is_empty())
+            .unwrap_or(true)
     {
         return Err(KernelError::new(
             "agent_message.send receiver_name is required for sibling and child messages",
@@ -1206,7 +1256,10 @@ mod tests {
             &DELIVERY_STATUS_DELIVERED.to_string(),
             "2026-01-01T00:00:00.000Z",
         );
-        assert_eq!(delivered.delivered_at.as_deref(), Some("2026-01-01T00:00:00.000Z"));
+        assert_eq!(
+            delivered.delivered_at.as_deref(),
+            Some("2026-01-01T00:00:00.000Z")
+        );
         assert!(delivered.queued_at.is_none());
         assert_eq!(delivered.delivery_mode.as_deref(), Some("steer"));
         let queued = create_agent_session_message_receipt(
@@ -1230,7 +1283,10 @@ mod tests {
 
     #[test]
     fn direct_target_rejects_broadcast() {
-        assert_eq!(assert_direct_agent_message_target(" sub-1 ").unwrap(), "sub-1");
+        assert_eq!(
+            assert_direct_agent_message_target(" sub-1 ").unwrap(),
+            "sub-1"
+        );
         assert!(assert_direct_agent_message_target("").is_err());
         assert!(assert_direct_agent_message_target("*").is_err());
         assert!(assert_direct_agent_message_target("ALL").is_err());
@@ -1278,9 +1334,12 @@ mod tests {
             Some("sibling")
         );
         assert!(agent_family_relationship(&current, &current).is_none());
-        assert!(agent_family_relationship(&current, &entry("far", "far", 3.0, Some("other"))).is_none());
+        assert!(
+            agent_family_relationship(&current, &entry("far", "far", 3.0, Some("other"))).is_none()
+        );
         assert_eq!(
-            assert_agent_family_reach(&current, &entry("far", "far", 3.0, Some("other"))).unwrap_err(),
+            assert_agent_family_reach(&current, &entry("far", "far", 3.0, Some("other")))
+                .unwrap_err(),
             AGENT_FAMILY_REACH_ERROR
         );
     }
@@ -1345,7 +1404,10 @@ mod tests {
             parent_session_path: None,
             depth: 0.0,
         };
-        assert_eq!(session_name_reservation_key(&root, "kid"), "[0,\"root\",\"\",\"kid\"]");
+        assert_eq!(
+            session_name_reservation_key(&root, "kid"),
+            "[0,\"root\",\"\",\"kid\"]"
+        );
     }
 
     #[test]
@@ -1362,7 +1424,9 @@ mod tests {
         assert_eq!(limiter.try_consume("k"), RateLimitResult::Ok);
         assert_eq!(
             limiter.try_consume("k"),
-            RateLimitResult::Exceeds { retry_after_ms: 1000.0 }
+            RateLimitResult::Exceeds {
+                retry_after_ms: 1000.0
+            }
         );
         limiter.refund("k");
         assert_eq!(limiter.try_consume("k"), RateLimitResult::Ok);

@@ -661,20 +661,22 @@ mod tests {
 	#[test]
 	fn default_headers_merge_model_then_options_and_reject_authorization() {
 		let _env = CleanAwsEnv::new();
-		let mut model = model("global.openai.gpt-6-astra", "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1");
-		model.headers = Some(IndexMap::from([("x-model".to_string(), "1".to_string())]));
+		let mut with_model_headers =
+			model("global.openai.gpt-6-astra", "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1");
+		with_model_headers.headers = Some(IndexMap::from([("x-model".to_string(), "1".to_string())]));
 		let mut options = BedrockResponsesAuthOptions::default();
 		options.stream.headers = Some(IndexMap::from([
 			("x-option".to_string(), "2".to_string()),
 			("x-model".to_string(), "3".to_string()),
 		]));
-		let client = create_bedrock_responses_client(&model, Some(&options)).unwrap();
+		let client = create_bedrock_responses_client(&with_model_headers, Some(&options)).unwrap();
 		assert_eq!(client.default_headers.get("x-model"), Some(&Some("3".to_string())));
 		assert_eq!(client.default_headers.get("x-option"), Some(&Some("2".to_string())));
 
-		let mut model = model("global.openai.gpt-6-astra", "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1");
-		model.headers = Some(IndexMap::from([("Authorization".to_string(), "Bearer x".to_string())]));
-		let error = create_bedrock_responses_client(&model, None).unwrap_err();
+		let mut with_authorization =
+			model("global.openai.gpt-6-astra", "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1");
+		with_authorization.headers = Some(IndexMap::from([("Authorization".to_string(), "Bearer x".to_string())]));
+		let error = create_bedrock_responses_client(&with_authorization, None).unwrap_err();
 		assert_eq!(error, "Use Bedrock apiKey or AWS credentials instead of an Authorization header.");
 	}
 

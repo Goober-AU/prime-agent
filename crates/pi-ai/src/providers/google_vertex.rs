@@ -1633,11 +1633,11 @@ mod tests {
 		assert_eq!(params["config"]["toolConfig"], json!(null));
 		assert_eq!(params["config"]["thinkingConfig"], json!({"thinkingBudget": 0}));
 
-		let gemini_three = model("gemini-3-flash");
+		let gemini_three = self::model("gemini-3-flash");
 		let params = build_params(&gemini_three, &context, Some(&options)).unwrap();
 		assert_eq!(params["config"]["thinkingConfig"], json!({"thinkingLevel": "MINIMAL"}));
 
-		let gemini_pro = model("gemini-3.1-pro");
+		let gemini_pro = self::model("gemini-3.1-pro");
 		let params = build_params(&gemini_pro, &context, Some(&options)).unwrap();
 		assert_eq!(params["config"]["thinkingConfig"], json!({"thinkingLevel": "LOW"}));
 	}

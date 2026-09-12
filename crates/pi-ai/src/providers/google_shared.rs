@@ -749,7 +749,7 @@ mod tests {
 		text.text_signature = Some("not-base64!".to_string());
 		let mut thinking = ThinkingContent::new("keep");
 		thinking.thinking_signature = Some("QUJD".to_string());
-		let other_model = model("gemini-3-flash", "google");
+		let other_model = self::model("gemini-3-flash", "google");
 		let context = Context::new(
 			None,
 			vec![assistant(

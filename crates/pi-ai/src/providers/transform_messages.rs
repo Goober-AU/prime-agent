@@ -318,6 +318,7 @@ mod tests {
 			estimated_tokens: 1.0,
 		};
 		let user = Message::user(UserMessage {
+			role: crate::types::ROLE_USER.to_string(),
 			content: UserContent::Text("hi".to_string()),
 			provider_context: Some(checkpoint.clone()),
 			timestamp: 0,
@@ -336,6 +337,7 @@ mod tests {
 			..checkpoint
 		};
 		let user = Message::user(UserMessage {
+			role: crate::types::ROLE_USER.to_string(),
 			content: UserContent::Text("hi".to_string()),
 			provider_context: Some(matching),
 			timestamp: 0,

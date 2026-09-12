@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 
 use crate::core::refinement::refinement::{
     apply_refinement_proposal, ApplyRefinementOptions, HarnessRefinementEvent, HarnessScope,
-    HarnessState, RefinementProposal, RefinementResult,
+    HarnessState, RefinementEdit, RefinementProposal, RefinementResult,
 };
 use crate::utils::atomic_file::{write_file_atomic_sync, WriteFileAtomicOptions};
 
@@ -196,6 +196,7 @@ pub fn write_json(file: &str, value: &Value) -> Result<(), String> {
             mode: Some(0o600),
             fsync: true,
             fsync_dir: true,
+            ..Default::default()
         },
     )
     .map_err(|error| error.to_string())
@@ -758,18 +759,25 @@ impl MemoryStore {
                 return Err(format!("Entry {} has changed since this edit", edit.id));
             }
             match &edit.before {
-                Some(before) => {
-                    let mut next = before.clone();
-                    next.action = if edit.after.is_some() {
+                // `{ ...edit.before, action }`: the prior entry is replayed as an edit.
+                Some(before) => edits.push(RefinementEdit {
+                    action: if edit.after.is_some() {
                         "update"
                     } else {
                         "create"
                     }
-                    .to_string();
-                    next.id = Some(edit.id.clone());
-                    edits.push(next);
-                }
-                None => edits.push(crate::core::refinement::refinement::RefinementEdit {
+                    .to_string(),
+                    kind: before.kind.as_str().to_string(),
+                    id: Some(before.id.clone()),
+                    title: Some(before.title.clone()),
+                    content: Some(before.content.clone()),
+                    path: Some(before.path.clone()),
+                    reference: Some(before.reference.clone()),
+                    arguments: Some(before.arguments.clone()),
+                    metadata: Some(before.metadata.clone()),
+                    reason: None,
+                }),
+                None => edits.push(RefinementEdit {
                     action: "delete".to_string(),
                     kind: edit.edit.kind.clone(),
                     id: Some(edit.id.clone()),

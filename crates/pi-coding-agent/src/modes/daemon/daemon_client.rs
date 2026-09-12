@@ -1031,6 +1031,10 @@ impl DaemonClientError {
     pub fn is_abort(&self) -> bool {
         matches!(self, DaemonClientError::Aborted(_))
     }
+
+    pub fn is_capability_unavailable(&self) -> bool {
+        matches!(self, DaemonClientError::CapabilityUnavailable(_))
+    }
 }
 
 impl std::fmt::Display for DaemonClientError {
@@ -1122,7 +1126,9 @@ impl PendingDaemonRequest {
         if slot.is_none() {
             *slot = Some(result);
         }
-        self.wake.notify_waiters();
+        // notify_one stores a permit when the waiter has not registered yet, so
+        // a settle that races the select still wakes it.
+        self.wake.notify_one();
     }
 }
 
@@ -1183,6 +1189,10 @@ struct ClientState {
 }
 
 /// The daemon transport a `DaemonAgentConnection` talks to.
+///
+/// The async members are boxed (`*_boxed`) because `DaemonClient`'s own
+/// connect/request take `self: &Arc<Self>`; the boxed form keeps the trait
+/// object-safe for `Arc<dyn DaemonTransportClient>`.
 pub trait DaemonTransportClient: Send + Sync {
     fn hello(&self) -> Option<DaemonHello>;
     fn is_connected(&self) -> bool;
@@ -1196,6 +1206,44 @@ pub trait DaemonTransportClient: Send + Sync {
         timeout_ms: Option<u64>,
         options: DaemonClientRequestOptions,
     ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>>;
+    fn wait_for_hello_boxed(
+        &self,
+        timeout_ms: u64,
+    ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonHello>> {
+        let _ = timeout_ms;
+        Box::pin(async move {
+            Err(DaemonClientError::Message(
+                "Daemon transport does not implement waitForHello".to_string(),
+            ))
+        })
+    }
+    fn connect_boxed(&self, timeout_ms: u64) -> futures::future::BoxFuture<'static, DaemonClientResult<()>> {
+        let _ = timeout_ms;
+        Box::pin(async move {
+            Err(DaemonClientError::Message(
+                "Daemon transport does not implement connect".to_string(),
+            ))
+        })
+    }
+    fn reconnect_boxed(&self, timeout_ms: u64) -> futures::future::BoxFuture<'static, DaemonClientResult<()>> {
+        let _ = timeout_ms;
+        Box::pin(async move {
+            Err(DaemonClientError::Message(
+                "Daemon transport does not implement reconnect".to_string(),
+            ))
+        })
+    }
+    fn disconnect_for_reconnect_boxed(&self, reason: String) -> futures::future::BoxFuture<'static, ()> {
+        let _ = reason;
+        Box::pin(async move {})
+    }
+    fn reset_transport_for_reconnect_boxed(&self) -> futures::future::BoxFuture<'static, ()> {
+        Box::pin(async move {})
+    }
+    /// True for `DaemonRoutedClient`, which already owns its direct link.
+    fn is_routed_client(&self) -> bool {
+        false
+    }
     fn close(&self);
 }
 
@@ -1211,6 +1259,9 @@ pub struct DaemonClient {
     quick_hello: StdMutex<Option<DaemonHello>>,
     quick_connected: AtomicBool,
     reconnect_busy: Mutex<()>,
+    /// Set by `DaemonClient::create`, so the boxed trait methods can reach the
+    /// `self: &Arc<Self>` implementations.
+    self_ref: StdMutex<Option<std::sync::Weak<DaemonClient>>>,
 }
 
 impl DaemonClient {
@@ -1226,7 +1277,29 @@ impl DaemonClient {
             quick_hello: StdMutex::new(None),
             quick_connected: AtomicBool::new(false),
             reconnect_busy: Mutex::new(()),
+            self_ref: StdMutex::new(None),
         }
+    }
+
+    /// Plumbing helper: build the client with its own weak self reference so the
+    /// `DaemonTransportClient` boxed methods can run the Arc-taking operations.
+    pub fn create(socket_path: &str) -> Arc<Self> {
+        let client = Arc::new(Self::new(socket_path));
+        *client.self_ref.lock().expect("self reference slot poisoned") = Some(Arc::downgrade(&client));
+        client
+    }
+
+    fn self_arc(&self) -> DaemonClientResult<Arc<Self>> {
+        self.self_ref
+            .lock()
+            .expect("self reference slot poisoned")
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| {
+                DaemonClientError::Message(
+                    "Prime Agent daemon client requires an Arc handle for this operation".to_string(),
+                )
+            })
     }
 
     pub fn socket_path(&self) -> &str {
@@ -1975,11 +2048,43 @@ impl DaemonTransportClient for DaemonClient {
         timeout_ms: Option<u64>,
         options: DaemonClientRequestOptions,
     ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>> {
-        let _ = (command, timeout_ms, options);
+        let client = self.self_arc();
+        Box::pin(async move { client?.request(command, timeout_ms, options).await })
+    }
+
+    fn wait_for_hello_boxed(
+        &self,
+        timeout_ms: u64,
+    ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonHello>> {
+        let client = self.self_arc();
+        Box::pin(async move { client?.wait_for_hello(timeout_ms).await })
+    }
+
+    fn connect_boxed(&self, timeout_ms: u64) -> futures::future::BoxFuture<'static, DaemonClientResult<()>> {
+        let client = self.self_arc();
+        Box::pin(async move { client?.connect(timeout_ms).await })
+    }
+
+    fn reconnect_boxed(&self, timeout_ms: u64) -> futures::future::BoxFuture<'static, DaemonClientResult<()>> {
+        let client = self.self_arc();
+        Box::pin(async move { client?.reconnect(timeout_ms).await })
+    }
+
+    fn disconnect_for_reconnect_boxed(&self, reason: String) -> futures::future::BoxFuture<'static, ()> {
+        let client = self.self_arc();
         Box::pin(async move {
-            Err(DaemonClientError::Message(
-                "DaemonClient requires an Arc handle for requests".to_string(),
-            ))
+            if let Ok(client) = client {
+                client.disconnect_for_reconnect(&reason).await;
+            }
+        })
+    }
+
+    fn reset_transport_for_reconnect_boxed(&self) -> futures::future::BoxFuture<'static, ()> {
+        let client = self.self_arc();
+        Box::pin(async move {
+            if let Ok(client) = client {
+                client.reset_transport_for_reconnect().await;
+            }
         })
     }
 

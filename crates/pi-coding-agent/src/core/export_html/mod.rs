@@ -10,13 +10,39 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::config::{get_export_template_dir, APP_NAME};
 use crate::core::extensions::types::ToolDefinition;
 use crate::core::export_html::tool_renderer::ToolHtmlRenderer;
 use crate::core::session_manager::{SessionEntry, SessionManager};
 use crate::modes::interactive::theme::theme::{
     get_resolved_theme_colors, get_theme_export_colors,
 };
+
+/// `APP_NAME` from config.ts (`pkg.piConfig.name`).
+/// blocked_on: needs crate::config::APP_NAME
+const APP_NAME: &str = "prime-agent";
+
+/// `getExportTemplateDir()` from config.ts.
+/// blocked_on: needs crate::config::get_export_template_dir
+fn get_export_template_dir() -> String {
+    let package_dir = match std::env::var("PI_PACKAGE_DIR") {
+        Ok(dir) if !dir.is_empty() => dir,
+        _ => std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(|parent| parent.to_string_lossy().to_string()))
+            .unwrap_or_default(),
+    };
+    let src_or_dist = if Path::new(&package_dir).join("src").exists() {
+        "src"
+    } else {
+        "dist"
+    };
+    Path::new(&package_dir)
+        .join(src_or_dist)
+        .join("core")
+        .join("export-html")
+        .to_string_lossy()
+        .to_string()
+}
 
 /// Pre-rendered HTML for a custom tool call and result.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

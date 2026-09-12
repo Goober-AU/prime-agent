@@ -32,7 +32,11 @@ pub struct ReplayOptions {
 }
 
 /// Bounded read through the descriptor: the size check and the allocation see the same fd, so a concurrent grow cannot bypass the bound.
-fn read_all_sync(file: &mut std::fs::File, max_bytes: Option<u64>, path: &str) -> std::io::Result<Vec<u8>> {
+fn read_all_sync(
+    file: &mut std::fs::File,
+    max_bytes: Option<u64>,
+    path: &str,
+) -> std::io::Result<Vec<u8>> {
     let size = file.metadata()?.len();
     if let Some(max_bytes) = max_bytes {
         if size > max_bytes {
@@ -206,7 +210,9 @@ impl EventLog {
             let mut last_byte = [0u8; 1];
             file.seek(SeekFrom::Start(size - 1))
                 .map_err(|error| error.to_string())?;
-            let read = file.read(&mut last_byte).map_err(|error| error.to_string())?;
+            let read = file
+                .read(&mut last_byte)
+                .map_err(|error| error.to_string())?;
             if read != 1 || last_byte[0] == 0x0a {
                 return Ok(());
             }
@@ -229,7 +235,10 @@ impl EventLog {
             .unwrap_or(0) as u64;
         file.set_len(keep).map_err(|error| error.to_string())?;
         if let Some(log) = &self.options.log {
-            log(format!("truncated torn final line ({} bytes)", first.len() as u64 - keep));
+            log(format!(
+                "truncated torn final line ({} bytes)",
+                first.len() as u64 - keep
+            ));
         }
         Ok(())
     }
@@ -259,19 +268,30 @@ mod tests {
     use serde_json::json;
 
     fn parse_line(line: &str, index: usize) -> Result<Option<serde_json::Value>, String> {
-        serde_json::from_str::<serde_json::Value>(line).map(Some).map_err(|error| {
-            format!("corrupt semantic-edge ledger line {}: {}", index + 1, error)
-        })
+        serde_json::from_str::<serde_json::Value>(line)
+            .map(Some)
+            .map_err(|error| format!("corrupt semantic-edge ledger line {}: {}", index + 1, error))
     }
 
     #[test]
     fn missing_file_replays_empty_unless_it_must_throw() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("missing.jsonl");
-        let log = EventLog::new(path.to_string_lossy().to_string(), EventLogOptions::default());
-        assert!(log.replay_sync(parse_line, ReplayOptions::default()).unwrap().is_empty());
+        let log = EventLog::new(
+            path.to_string_lossy().to_string(),
+            EventLogOptions::default(),
+        );
+        assert!(log
+            .replay_sync(parse_line, ReplayOptions::default())
+            .unwrap()
+            .is_empty());
         let error = log
-            .replay_sync(parse_line, ReplayOptions { missing_file_throws: true })
+            .replay_sync(
+                parse_line,
+                ReplayOptions {
+                    missing_file_throws: true,
+                },
+            )
             .unwrap_err();
         assert!(!error.is_empty());
     }
@@ -280,10 +300,15 @@ mod tests {
     fn append_then_replay_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("log.jsonl");
-        let log = EventLog::new(path.to_string_lossy().to_string(), EventLogOptions::default());
+        let log = EventLog::new(
+            path.to_string_lossy().to_string(),
+            EventLogOptions::default(),
+        );
         log.append_sync(&[json!({"a": 1}), json!({"b": 2})], false, None)
             .unwrap();
-        let events = log.replay_sync(parse_line, ReplayOptions::default()).unwrap();
+        let events = log
+            .replay_sync(parse_line, ReplayOptions::default())
+            .unwrap();
         assert_eq!(events, vec![json!({"a": 1}), json!({"b": 2})]);
     }
 
@@ -294,10 +319,14 @@ mod tests {
         let path_str = path.to_string_lossy().to_string();
         std::fs::write(&path, b"{\"a\":1}\n{\"b\":2}").unwrap();
         let log = EventLog::new(path_str.clone(), EventLogOptions::default());
-        let events = log.replay_sync(parse_line, ReplayOptions::default()).unwrap();
+        let events = log
+            .replay_sync(parse_line, ReplayOptions::default())
+            .unwrap();
         assert_eq!(events, vec![json!({"a": 1})]);
         log.append_sync(&[json!({"c": 3})], false, None).unwrap();
-        let events = log.replay_sync(parse_line, ReplayOptions::default()).unwrap();
+        let events = log
+            .replay_sync(parse_line, ReplayOptions::default())
+            .unwrap();
         assert_eq!(events, vec![json!({"a": 1}), json!({"c": 3})]);
     }
 
@@ -306,8 +335,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.jsonl");
         std::fs::write(&path, b"{\"a\":1}\nnot json\n{\"b\":2}\n").unwrap();
-        let log = EventLog::new(path.to_string_lossy().to_string(), EventLogOptions::default());
-        let error = log.replay_sync(parse_line, ReplayOptions::default()).unwrap_err();
+        let log = EventLog::new(
+            path.to_string_lossy().to_string(),
+            EventLogOptions::default(),
+        );
+        let error = log
+            .replay_sync(parse_line, ReplayOptions::default())
+            .unwrap_err();
         assert!(error.starts_with("corrupt semantic-edge ledger line 2:"));
     }
 
@@ -324,7 +358,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let error = bytes_log.replay_sync(parse_line, ReplayOptions::default()).unwrap_err();
+        let error = bytes_log
+            .replay_sync(parse_line, ReplayOptions::default())
+            .unwrap_err();
         assert!(error.contains("exceeds 4 bytes"));
         let records_log = EventLog::new(
             path_str,
@@ -333,7 +369,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        let error = records_log.replay_sync(parse_line, ReplayOptions::default()).unwrap_err();
+        let error = records_log
+            .replay_sync(parse_line, ReplayOptions::default())
+            .unwrap_err();
         assert!(error.contains("exceeds 1 records"));
     }
 
@@ -341,19 +379,33 @@ mod tests {
     fn create_hook_records_lead_the_first_payload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("created.jsonl");
-        let log = EventLog::new(path.to_string_lossy().to_string(), EventLogOptions::default());
+        let log = EventLog::new(
+            path.to_string_lossy().to_string(),
+            EventLogOptions::default(),
+        );
         log.append_sync(
             &[json!({"second": true})],
             false,
             Some(&|| vec![json!({"first": true})]),
         )
         .unwrap();
-        let events = log.replay_sync(parse_line, ReplayOptions::default()).unwrap();
-        assert_eq!(events, vec![json!({"first": true}), json!({"second": true})]);
-        // A second append does not re-run the create hook.
-        log.append_sync(&[json!({"third": true})], false, Some(&|| vec![json!({"again": true})]))
+        let events = log
+            .replay_sync(parse_line, ReplayOptions::default())
             .unwrap();
-        let events = log.replay_sync(parse_line, ReplayOptions::default()).unwrap();
+        assert_eq!(
+            events,
+            vec![json!({"first": true}), json!({"second": true})]
+        );
+        // A second append does not re-run the create hook.
+        log.append_sync(
+            &[json!({"third": true})],
+            false,
+            Some(&|| vec![json!({"again": true})]),
+        )
+        .unwrap();
+        let events = log
+            .replay_sync(parse_line, ReplayOptions::default())
+            .unwrap();
         assert_eq!(events.len(), 3);
     }
 
@@ -376,6 +428,8 @@ mod tests {
         );
         log.append_sync(&[json!({"c": 3})], false, None).unwrap();
         let messages = messages.lock().unwrap();
-        assert!(messages.iter().any(|message| message.starts_with("truncated torn final line")));
+        assert!(messages
+            .iter()
+            .any(|message| message.starts_with("truncated torn final line")));
     }
 }

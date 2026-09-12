@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::utils::child_process::{exec_file_hidden, spawn_sync_hidden, SpawnOptions};
-use crate::utils::fs_watch::{close_watcher, watch_with_error_handler, FsWatcher, FS_WATCH_RETRY_DELAY_MS};
+use crate::utils::fs_watch::{
+    close_watcher, watch_with_error_handler, FsWatcher, FS_WATCH_RETRY_DELAY_MS,
+};
 use crate::utils::git::{find_git_paths, GitPaths};
 
 /// Ask git for the current branch. Returns null on detached HEAD or if git is unavailable.
@@ -151,7 +153,9 @@ impl FooterDataProvider {
 
     /// Subscribe to git branch changes. Returns unsubscribe function.
     pub fn on_branch_change(&self, callback: Arc<dyn Fn() + Send + Sync>) -> Unsubscribe {
-        let id = self.next_branch_change_callback_id.fetch_add(1, Ordering::SeqCst);
+        let id = self
+            .next_branch_change_callback_id
+            .fetch_add(1, Ordering::SeqCst);
         self.branch_change_callbacks
             .lock()
             .unwrap()
@@ -301,7 +305,9 @@ impl FooterDataProvider {
         if changed {
             self.notify_branch_change();
         }
-        if self.refresh_pending.swap(false, Ordering::SeqCst) && !self.disposed.load(Ordering::SeqCst) {
+        if self.refresh_pending.swap(false, Ordering::SeqCst)
+            && !self.disposed.load(Ordering::SeqCst)
+        {
             self.schedule_refresh();
         }
     }
@@ -314,7 +320,8 @@ impl FooterDataProvider {
         let content = content.trim().to_string();
         if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
             if branch == ".invalid" {
-                return resolve_branch_with_git_sync(&git_paths.repo_dir).or_else(|| Some("detached".to_string()));
+                return resolve_branch_with_git_sync(&git_paths.repo_dir)
+                    .or_else(|| Some("detached".to_string()));
             }
             return Some(branch.to_string());
         }

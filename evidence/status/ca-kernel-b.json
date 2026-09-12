@@ -1,0 +1,23 @@
+{
+ "slice": "ca-kernel-b",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/kernel/bootstrap-cli.ts",
+   "rust": "crates/pi-coding-agent/src/core/kernel/bootstrap_cli.rs",
+   "status": "ported",
+   "functions_mapped": 2,
+   "notes": "Written by the lead (13 LOC). Wrapper over bootstrap::ensure_kernel_python; same output text 'kernel python: {python}' and exit code 1 on failure; error_message helper reused."
+  },
+  {
+   "src": "packages/coding-agent/src/core/kernel/repl-manager.ts",
+   "rust": "crates/pi-coding-agent/src/core/kernel/repl_manager.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "Still 0 bytes. Two workers died at their output limit. Re-sliced into four sequential 500-line passes."
+  }
+ ],
+ "build": "not run",
+ "tests": "not run",
+ "blocked_on": "repl-manager.ts is 1913 LOC and needs budgeted multi-pass work",
+ "honest_summary": "bootstrap_cli.rs is done by the lead. repl_manager.rs remains unwritten; the slice now instructs the worker to work in four sequential 500-line passes instead of one pass."
+}

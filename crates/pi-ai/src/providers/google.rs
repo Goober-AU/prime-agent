@@ -1341,15 +1341,15 @@ mod tests {
 		let params = build_params(&model, &context, Some(&options)).unwrap();
 		assert_eq!(params["config"]["thinkingConfig"], json!({"thinkingLevel": "LOW"}));
 
-		let flash = model("gemini-3-flash");
+		let flash = self::model("gemini-3-flash");
 		let params = build_params(&flash, &context, Some(&options)).unwrap();
 		assert_eq!(params["config"]["thinkingConfig"], json!({"thinkingLevel": "MINIMAL"}));
 
-		let gemma = model("gemma-4-9b");
+		let gemma = self::model("gemma-4-9b");
 		let params = build_params(&gemma, &context, Some(&options)).unwrap();
 		assert_eq!(params["config"]["thinkingConfig"], json!({"thinkingLevel": "MINIMAL"}));
 
-		let gemini_two = model("gemini-2.5-flash");
+		let gemini_two = self::model("gemini-2.5-flash");
 		let params = build_params(&gemini_two, &context, Some(&options)).unwrap();
 		assert_eq!(params["config"]["thinkingConfig"], json!({"thinkingBudget": 0}));
 	}

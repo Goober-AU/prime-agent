@@ -18,6 +18,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
+use std::io::Write;
 use std::rc::Rc;
 
 const KITTY_SEQUENCE_PREFIX: &str = "\x1b_G";
@@ -198,12 +199,8 @@ pub struct InputListenerResult {
 
 pub type InputListener = Box<dyn Fn(&str) -> InputListenerResult>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameSelectionRegion {
-    pub line: usize,
-    pub col: usize,
-    pub width: usize,
-}
+/// Port of the `FrameSelectionRegion` shape; the fullscreen viewport owns the type.
+pub use crate::fullscreen::FrameSelectionRegion;
 
 /// Port of the `TuiStopOptions` interface.
 #[derive(Debug, Clone, Copy, Default)]
@@ -220,8 +217,9 @@ pub struct FullscreenOptions {
     pub viewport_controls: bool,
 }
 
+/// Port of the `ExitFullscreenOptions` interface.
 #[derive(Debug, Clone, Copy)]
-struct ExitFullscreenOptions {
+pub struct ExitFullscreenOptions {
     flush: bool,
     leave_alt_screen: bool,
 }
@@ -590,7 +588,11 @@ impl TUI {
 
     /// Show an overlay component with configurable positioning and sizing.
     /// Returns a handle to control the overlay's visibility.
-    pub fn show_overlay(&mut self, component: Box<dyn Component>, options: OverlayOptions) -> OverlayHandle {
+    pub fn show_overlay(
+        &mut self,
+        component: Rc<RefCell<dyn Component>>,
+        options: OverlayOptions,
+    ) -> OverlayHandle {
         self.focus_order_counter += 1;
         let shared = Rc::new(OverlayShared {
             hidden: Cell::new(false),
@@ -600,7 +602,7 @@ impl TUI {
             unfocus_requested: Cell::new(false),
             focus_order: Cell::new(self.focus_order_counter),
         });
-        let component: Rc<RefCell<dyn Component>> = Rc::new(RefCell::new(component));
+        let component = component;
         let non_capturing = options.non_capturing;
         let entry = OverlayEntry {
             component: component.clone(),
@@ -1466,7 +1468,10 @@ impl TUI {
             return true;
         }
 
-        set_cell_dimensions(width_px as u32, height_px as u32);
+        set_cell_dimensions(crate::terminal_image::CellDimensions {
+            width_px,
+            height_px,
+        });
         // Invalidate all components so images re-render with correct dimensions.
         self.invalidate();
         self.request_render();
@@ -1486,7 +1491,7 @@ impl TUI {
     ) -> OverlayLayout {
         let opt = match options {
             Some(options) => options,
-            None => &DEFAULT_OVERLAY_OPTIONS,
+            None => &OverlayOptions::default(),
         };
 
         // Parse margin (clamp to non-negative)
@@ -1538,7 +1543,7 @@ impl TUI {
         let col: i64;
 
         match opt.row.as_ref() {
-            Some(SizeValue::Percent(text)) => match PERCENT_PATTERN.captures(text) {
+            Some(SizeValue::Percent(text)) => match PERCENT_PATTERN.captures(text.as_str()) {
                 Some(caps) => {
                     // Percentage: 0% = top, 100% = bottom (overlay stays within bounds)
                     let max_row = (avail_height - effective_height).max(0);
@@ -1558,7 +1563,7 @@ impl TUI {
         }
 
         match opt.col.as_ref() {
-            Some(SizeValue::Percent(text)) => match PERCENT_PATTERN.captures(text) {
+            Some(SizeValue::Percent(text)) => match PERCENT_PATTERN.captures(text.as_str()) {
                 Some(caps) => {
                     // Percentage: 0% = left, 100% = right (overlay stays within bounds)
                     let max_col = (avail_width - width).max(0);
@@ -1852,9 +1857,6 @@ fn subtract_selection_coverage(
     }
 }
 
-thread_local! {
-    static DEFAULT_OVERLAY_OPTIONS: OverlayOptions = OverlayOptions::default();
-}
 impl TUI {
     fn apply_line_resets(&self, lines: &mut [String]) {
         let reset = Self::SEGMENT_RESET;
@@ -2054,7 +2056,8 @@ impl TUI {
         }
     }
 
-    fn do_render(&mut self) {
+    /// Port of `doRender`: paints one frame (fullscreen or inline differ).
+    pub fn do_render(&mut self) {
         if self.stopped {
             return;
         }
@@ -2082,7 +2085,6 @@ impl TUI {
             self.previous_viewport_top
         };
         let mut viewport_top = prev_viewport_top;
-        let mut hardware_cursor_row = self.hardware_cursor_row;
         let compute_line_diff = |target_row: usize, hardware_cursor_row: usize, prev_viewport_top: usize, viewport_top: usize| -> i64 {
             let current_screen_row = hardware_cursor_row as i64 - prev_viewport_top as i64;
             let target_screen_row = target_row as i64 - viewport_top as i64;
@@ -2117,7 +2119,7 @@ impl TUI {
 
         // Helper to clear the viewport and repaint the current screen. Do not
         // clear terminal scrollback: users rely on it to read long prior messages.
-        let mut full_render = |clear: bool, preserve_viewport: bool,
+        let full_render = |clear: bool, preserve_viewport: bool,
                                terminal: &mut Box<dyn Terminal>,
                                previous_lines: &mut Vec<String>,
                                previous_kitty_image_ids: &mut HashSet<u32>,
@@ -2905,20 +2907,22 @@ mod tests {
         tui.add_child(focusable.clone());
         assert!(is_focusable(Some(focusable.clone())));
         tui.set_focus(Some(focusable.clone()));
-        assert!(focusable.borrow().as_focusable().unwrap().focused());
+        assert!(focusable.borrow_mut().as_focusable().unwrap().focused());
         tui.set_focus(None);
-        assert!(!focusable.borrow().as_focusable().unwrap().focused());
+        assert!(!focusable.borrow_mut().as_focusable().unwrap().focused());
     }
 
     #[test]
     fn overlay_handle_requests_are_applied_by_sync() {
         let mut tui = TUI::new(Box::new(FakeTerminal::new(80, 24)), Some(false));
         let component = Rc::new(RefCell::new(Line("overlay"))) as Rc<RefCell<dyn Component>>;
-        let handle = tui.show_overlay(OverlayOptions {
-            component: Some(component.clone()),
-            non_capturing: true,
-            ..OverlayOptions::default()
-        });
+        let handle = tui.show_overlay(
+            component.clone(),
+            OverlayOptions {
+                non_capturing: true,
+                ..OverlayOptions::default()
+            },
+        );
         assert!(tui.has_overlay());
         assert!(!handle.is_focused());
 

@@ -61,7 +61,7 @@ pub enum SessionLifecycle {
 }
 
 /// Heuristic activity of a live session.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionActivity {
     Working,
@@ -213,7 +213,7 @@ impl SessionSummary {
         let id = id.into();
         Self {
             id: id.clone(),
-            session_id,
+            session_id: session_id.into(),
             cwd: cwd.into(),
             lifecycle: SessionLifecycle::Live,
             activity: SessionActivity::Idle,
@@ -239,7 +239,7 @@ impl SessionSummary {
 }
 
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UnifiedSessionHeartbeat {
     pub active_count: i64,
@@ -247,13 +247,13 @@ pub struct UnifiedSessionHeartbeat {
     pub next_run_at: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentConnectionSavedSessionState {
     pub status: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentConnectionAgentStatus {
     pub summary: String,
@@ -261,7 +261,7 @@ pub struct AgentConnectionAgentStatus {
     pub based_on_message_count: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentConnectionSavedSessionInfo {
     pub path: String,
@@ -312,7 +312,7 @@ pub struct AgentCronJob {
     pub run_count: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentConnectionHeartbeat {
     pub job: AgentCronJob,
@@ -320,7 +320,7 @@ pub struct AgentConnectionHeartbeat {
     pub first_message: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UnifiedSessionRecord {
     pub daemon: Option<SessionSummary>,
@@ -334,14 +334,14 @@ pub struct UnifiedSessionRecord {
     pub heartbeat: Option<UnifiedSessionHeartbeat>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentsViewScopeKey {
     pub session_id: String,
     pub active_session_id: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AgentsViewScopeFrame {
     pub scope: AgentsViewScopeKey,

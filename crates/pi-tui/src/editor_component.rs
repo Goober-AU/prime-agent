@@ -1,6 +1,6 @@
 //! Port of packages/tui/src/editor-component.ts.
 
-use crate::autocomplete::{AutocompleteItem, AutocompleteProvider, AutocompleteSuggestions};
+use crate::autocomplete::AutocompleteProvider;
 use crate::tui::Component;
 use std::rc::Rc;
 use std::cell::RefCell;
@@ -140,8 +140,8 @@ mod tests {
         editor.set_text("yo");
         assert_eq!(editor.get_text(), "yo");
         let _: &dyn AutocompleteProvider = &Unused;
-        let _ = std::mem::size_of::<AutocompleteSuggestions>();
-        let _ = std::mem::size_of::<AutocompleteItem>();
+        let _ = std::mem::size_of::<crate::autocomplete::AutocompleteSuggestions>();
+        let _ = std::mem::size_of::<crate::autocomplete::AutocompleteItem>();
     }
 
     struct Unused;
@@ -155,7 +155,7 @@ mod tests {
             _cursor_col: usize,
             _signal: &crate::autocomplete::AbortSignal,
             _force: bool,
-        ) -> Option<AutocompleteSuggestions> {
+        ) -> Option<crate::autocomplete::AutocompleteSuggestions> {
             None
         }
 
@@ -164,7 +164,7 @@ mod tests {
             _lines: &[String],
             _cursor_line: usize,
             _cursor_col: usize,
-            _item: &AutocompleteItem,
+            _item: &crate::autocomplete::AutocompleteItem,
             _prefix: &str,
         ) -> crate::autocomplete::ApplyCompletionResult {
             crate::autocomplete::ApplyCompletionResult {

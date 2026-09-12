@@ -9,7 +9,9 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
-use crate::utils::child_process::{spawn_hidden, wait_for_child_process, SpawnOptions};
+use crate::utils::child_process::{
+    signal_process_group_or_process, spawn_hidden, wait_for_child_process, Signal, SpawnOptions,
+};
 
 /// Options for executing shell commands.
 #[derive(Debug, Clone, Default)]
@@ -111,20 +113,14 @@ pub async fn exec_command(
                 return;
             }
             if let Some(pid) = child_id {
-                let _ = crate::utils::child_process::signal_process_group_or_process(
-                    pid as i32,
-                    crate::utils::child_process::Signal::Term,
-                );
+                signal_process_group_or_process(pid as i32, Signal::Term);
             }
             let killed_inner = Arc::clone(&killed);
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(5000)).await;
                 if killed_inner.load(std::sync::atomic::Ordering::SeqCst) {
                     if let Some(pid) = child_id {
-                        let _ = crate::utils::child_process::signal_process_group_or_process(
-                            pid as i32,
-                            crate::utils::child_process::Signal::Kill,
-                        );
+                        signal_process_group_or_process(pid as i32, Signal::Kill);
                     }
                 }
             });
@@ -156,7 +152,7 @@ pub async fn exec_command(
 
     // Wait for process termination without hanging on inherited stdio handles
     // held open by detached descendants.
-    let code = wait_for_child_process(child).await.unwrap_or(1);
+    let code = wait_for_child_process(child).await.unwrap_or(Some(1));
     if let Some(task) = timeout_task {
         task.abort();
     }

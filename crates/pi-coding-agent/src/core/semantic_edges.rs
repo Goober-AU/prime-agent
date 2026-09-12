@@ -22,7 +22,8 @@
 //! request even when the session never runs another turn. Failed or cancelled
 //! compactions leave pending for the next turn.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -103,7 +104,10 @@ pub struct SemanticEdgesResult {
 }
 
 /// The one derivation of where a session's ledger lives; recorder and outbox must agree.
-pub fn semantic_edge_ledger_path(rlm_session_dir: Option<&str>, session_artifact_dir: Option<&str>) -> Option<String> {
+pub fn semantic_edge_ledger_path(
+    rlm_session_dir: Option<&str>,
+    session_artifact_dir: Option<&str>,
+) -> Option<String> {
     let dir = rlm_session_dir.or(session_artifact_dir)?;
     Some(
         std::path::Path::new(dir)
@@ -149,7 +153,11 @@ pub fn hash_turn_body(
         "serviceTier": options.and_then(|options| options.stream.service_tier.clone()),
     });
     let mut hasher = Sha256::new();
-    hasher.update(serde_json::to_string(&payload).unwrap_or_default().as_bytes());
+    hasher.update(
+        serde_json::to_string(&payload)
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     format!("{:x}", hasher.finalize())
 }
 
@@ -204,13 +212,15 @@ impl SemanticEdgeRecorder {
         };
 
         let existing = match recorder.event_log.as_ref() {
-            Some(event_log) => match event_log.replay_sync(parse_semantic_edge_line, ReplayOptions::default()) {
-                Ok(events) => events,
-                Err(error) => {
-                    recorder.disable(&error);
-                    return recorder;
+            Some(event_log) => {
+                match event_log.replay_sync(parse_semantic_edge_line, ReplayOptions::default()) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        recorder.disable(&error);
+                        return recorder;
+                    }
                 }
-            },
+            }
             None => Vec::new(),
         };
         let registered = existing.iter().any(|event| {
@@ -243,7 +253,10 @@ impl SemanticEdgeRecorder {
             return;
         }
         self.disabled = true;
-        eprintln!("semantic-edge ledger disabled at {}: {error}", self.log_target);
+        eprintln!(
+            "semantic-edge ledger disabled at {}: {error}",
+            self.log_target
+        );
     }
 
     pub fn last_turn_request_id(&self) -> Option<String> {
@@ -341,7 +354,11 @@ impl SemanticEdgeRecorder {
         }
     }
 
-    pub fn finish_compaction(&mut self, compaction_id: &str, status: CompactionStatus) -> Result<(), String> {
+    pub fn finish_compaction(
+        &mut self,
+        compaction_id: &str,
+        status: CompactionStatus,
+    ) -> Result<(), String> {
         if self.disabled {
             return Ok(());
         }
@@ -403,7 +420,9 @@ impl SemanticEdgeRecorder {
                 compaction_id,
                 status,
             } => {
-                if self.open_compactions.remove(compaction_id) && status == COMPACTION_STATUS_COMPLETED {
+                if self.open_compactions.remove(compaction_id)
+                    && status == COMPACTION_STATUS_COMPLETED
+                {
                     self.epoch += 1;
                 }
             }
@@ -429,7 +448,10 @@ impl SemanticEdgeRecorder {
     }
 }
 
-fn parse_semantic_edge_line(line: &str, index: usize) -> Result<Option<SemanticEdgeLedgerEvent>, String> {
+fn parse_semantic_edge_line(
+    line: &str,
+    index: usize,
+) -> Result<Option<SemanticEdgeLedgerEvent>, String> {
     match serde_json::from_str::<SemanticEdgeLedgerEvent>(line) {
         Ok(event) => Ok(Some(event)),
         Err(error) => Err(format!(
@@ -495,11 +517,13 @@ pub fn derive_semantic_edges(ledgers: &[Vec<SemanticEdgeLedgerEvent>]) -> Semant
                 spawned_by_request_id,
                 ..
             } => {
-                sessions.entry(session_id.clone()).or_insert_with(|| FoldSession {
-                    spawned_by_request_id: spawned_by_request_id.clone(),
-                    spawn_claimed: false,
-                    pending: Vec::new(),
-                });
+                sessions
+                    .entry(session_id.clone())
+                    .or_insert_with(|| FoldSession {
+                        spawned_by_request_id: spawned_by_request_id.clone(),
+                        spawn_claimed: false,
+                        pending: Vec::new(),
+                    });
             }
             SemanticEdgeLedgerEvent::RequestStarted {
                 request_id,
@@ -615,8 +639,11 @@ pub fn derive_semantic_edges(ledgers: &[Vec<SemanticEdgeLedgerEvent>]) -> Semant
                         // nano's source-only suppression, applied at flush time: a pending edge
                         // from X replaces the slice's generated continuation from X, whatever
                         // the pending edge's type, so the flush can never emit a duplicate.
-                        let sources: BTreeSet<String> =
-                            state.pending.iter().map(|edge| edge.source.clone()).collect();
+                        let sources: BTreeSet<String> = state
+                            .pending
+                            .iter()
+                            .map(|edge| edge.source.clone())
+                            .collect();
                         for source in sources {
                             if let Some(position) = edges.iter().position(|edge| {
                                 edge.source_request_id == source
@@ -666,51 +693,88 @@ pub fn derive_semantic_edges(ledgers: &[Vec<SemanticEdgeLedgerEvent>]) -> Semant
     SemanticEdgesResult { edges }
 }
 
-/// Port of `wrapStreamFnWithSemanticEdges`: bind a stream function to one
-/// session's recorder. Re-wrapping an already wrapped function rebinds the
-/// original, so a child session that inherits its parent's streamFn attributes
-/// calls to its own ledger. request_started is appended before the wire call;
-/// the request commits or fails when its stream resolves (an error/aborted
-/// final message is a failure). When the recorder is disabled (its ledger
-/// failed), calls carry no request ID at all.
-///
-/// The TypeScript wrapper stores the inner function on a symbol property.
-/// Rust has no property bags on `Arc<dyn Fn>`, so the inner function is passed
-/// explicitly and the "rebind the original" rule is preserved by always
-/// wrapping the innermost function the caller supplies.
-pub fn wrap_stream_fn_with_semantic_edges(
-    inner: pi_agent_core::types::StreamFn,
-    recorder: std::sync::Arc<std::sync::Mutex<SemanticEdgeRecorder>>,
+/// `Symbol.for("prime-agent.semantic-edges.inner-stream-fn")` has no Rust
+/// equivalent on a trait object, so wrapped functions are keyed in a
+/// process-local registry by the address of the wrapped allocation. The entry is
+/// removed when that allocation is dropped, so a key can never outlive its value.
+type InnerStreamFnRegistry = Mutex<HashMap<usize, pi_agent_core::types::StreamFn>>;
+
+fn inner_stream_fn_registry() -> &'static InnerStreamFnRegistry {
+    static REGISTRY: std::sync::OnceLock<InnerStreamFnRegistry> = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Holds the registry key of one wrapped stream function and removes it on drop.
+struct InnerStreamFnRegistration {
+    key: Arc<std::sync::OnceLock<usize>>,
+}
+
+impl Drop for InnerStreamFnRegistration {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.get() {
+            inner_stream_fn_registry().lock().unwrap().remove(key);
+        }
+    }
+}
+
+/// Unwrap a semantic-edge-bound stream function; aux calls outside session history use this.
+pub fn unwrap_semantic_edge_stream_fn(
+    stream_fn: &pi_agent_core::types::StreamFn,
 ) -> pi_agent_core::types::StreamFn {
-    std::sync::Arc::new(move |model, context, options| {
-        let body_hash = hash_turn_body(&model, &context, Some(&options));
-        let request_id = {
-            let mut recorder = recorder.lock().unwrap();
-            recorder.start_turn_request(Some(body_hash))
-        };
+    let key = Arc::as_ptr(stream_fn) as *const () as usize;
+    inner_stream_fn_registry()
+        .lock()
+        .unwrap()
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| stream_fn.clone())
+}
+
+/// Bind a stream function to one session's recorder. Re-wrapping an already
+/// wrapped function rebinds the original, so a child session that inherits its
+/// parent's streamFn attributes calls to its own ledger. request_started is
+/// appended before the wire call; the request commits or fails when its stream
+/// resolves (an error/aborted final message is a failure). When the recorder is
+/// disabled (its ledger failed), calls carry no request ID at all.
+pub fn wrap_stream_fn_with_semantic_edges(
+    stream_fn: pi_agent_core::types::StreamFn,
+    recorder: Arc<Mutex<SemanticEdgeRecorder>>,
+) -> pi_agent_core::types::StreamFn {
+    let inner = unwrap_semantic_edge_stream_fn(&stream_fn);
+    let key = Arc::new(std::sync::OnceLock::new());
+    let registration = InnerStreamFnRegistration { key: key.clone() };
+    let wrapped: pi_agent_core::types::StreamFn = Arc::new(move |model, context, options| {
+        let _keep_registration = &registration;
+        let request_id = recorder
+            .lock()
+            .unwrap()
+            .start_turn_request(Some(hash_turn_body(&model, &context, Some(&options))));
         let Some(request_id) = request_id else {
             return inner(model, context, options);
         };
         let mut call_options = options.clone();
-        let headers = call_options.stream.headers.get_or_insert_with(indexmap::IndexMap::new);
-        for (key, value) in model_request_headers(&request_id) {
+        let headers = call_options
+            .stream
+            .headers
+            .get_or_insert_with(indexmap::IndexMap::new);
+        for (header, value) in model_request_headers(&request_id) {
             if let Value::String(value) = value {
-                headers.insert(key, value);
+                headers.insert(header, value);
             }
         }
         let stream = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             inner(model, context, call_options)
         })) {
             Ok(stream) => stream,
-            Err(_) => {
+            Err(payload) => {
                 recorder.lock().unwrap().fail_request(Some(&request_id));
-                panic!("semantic-edge stream function panicked");
+                std::panic::resume_unwind(payload);
             }
         };
         let observed = stream.clone();
         let recorder_for_result = recorder.clone();
         let request_id_for_result = request_id.clone();
-        tokio::spawn(async move {
+        let observe = async move {
             let message = observed.result().await;
             let mut recorder = recorder_for_result.lock().unwrap();
             if message.stop_reason == pi_ai::types::STOP_REASON_ERROR
@@ -720,9 +784,22 @@ pub fn wrap_stream_fn_with_semantic_edges(
             } else {
                 recorder.finish_request(Some(&request_id_for_result));
             }
-        });
-        stream
-    })
+        };
+        // The TypeScript `void stream.result().then(...)` detaches the observation.
+        // Without a runtime nothing can drive the stream, so the observation is
+        // skipped rather than blocking the caller.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(observe);
+        }
+        Box::pin(async move { stream })
+    });
+    let address = Arc::as_ptr(&wrapped) as *const () as usize;
+    let _ = key.set(address);
+    inner_stream_fn_registry()
+        .lock()
+        .unwrap()
+        .insert(address, inner);
+    wrapped
 }
 
 #[cfg(test)]
@@ -730,7 +807,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn started(request_id: &str, session_id: &str, compaction_id: Option<&str>) -> SemanticEdgeLedgerEvent {
+    fn started(
+        request_id: &str,
+        session_id: &str,
+        compaction_id: Option<&str>,
+    ) -> SemanticEdgeLedgerEvent {
         SemanticEdgeLedgerEvent::RequestStarted {
             request_id: request_id.to_string(),
             session_id: session_id.to_string(),
@@ -801,7 +882,12 @@ mod tests {
         let edges = derive_semantic_edges(&[ledger]).edges;
         let pairs: Vec<(&str, &str)> = edges
             .iter()
-            .map(|edge| (edge.source_request_id.as_str(), edge.target_request_id.as_str()))
+            .map(|edge| {
+                (
+                    edge.source_request_id.as_str(),
+                    edge.target_request_id.as_str(),
+                )
+            })
             .collect();
         assert_eq!(pairs, vec![("r1", "r3")]);
     }
@@ -905,7 +991,10 @@ mod tests {
     #[test]
     fn headers_and_ledger_paths_match_the_wire_contract() {
         let headers = model_request_headers("req-1");
-        assert_eq!(headers.get("X-ACP-Model-Request-ID").unwrap(), &json!("req-1"));
+        assert_eq!(
+            headers.get("X-ACP-Model-Request-ID").unwrap(),
+            &json!("req-1")
+        );
         assert_eq!(headers.get("Idempotency-Key").unwrap(), &json!("req-1"));
         assert_eq!(
             semantic_edge_ledger_path(Some("C:/sessions/sub-1"), None).unwrap(),
@@ -926,7 +1015,13 @@ mod tests {
 
     #[test]
     fn hash_turn_body_is_stable_and_body_sensitive() {
-        let model = pi_ai::types::Model::new("gpt-5", "GPT-5", "openai-responses", "openai", "https://api.openai.com/v1");
+        let model = pi_ai::types::Model::new(
+            "gpt-5",
+            "GPT-5",
+            "openai-responses",
+            "openai",
+            "https://api.openai.com/v1",
+        );
         let context = pi_ai::types::Context {
             system_prompt: Some("sys".to_string()),
             messages: vec![pi_ai::types::Message::User(pi_ai::types::UserMessage::new(
@@ -947,14 +1042,30 @@ mod tests {
     #[test]
     fn recorder_registers_once_and_replays_on_resume() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("semantic-edges.jsonl").to_string_lossy().to_string();
+        let path = dir
+            .path()
+            .join("semantic-edges.jsonl")
+            .to_string_lossy()
+            .to_string();
         {
-            let mut recorder =
-                SemanticEdgeRecorder::new(Some(path.clone()), "s".to_string(), Some("p".to_string()), None);
-            let request_id = recorder.start_turn_request(Some("hash".to_string())).unwrap();
+            let mut recorder = SemanticEdgeRecorder::new(
+                Some(path.clone()),
+                "s".to_string(),
+                Some("p".to_string()),
+                None,
+            );
+            let request_id = recorder
+                .start_turn_request(Some("hash".to_string()))
+                .unwrap();
             recorder.finish_request(Some(&request_id));
-            assert_eq!(recorder.last_committed_request_id().as_deref(), Some(request_id.as_str()));
-            assert_eq!(recorder.last_turn_request_id().as_deref(), Some(request_id.as_str()));
+            assert_eq!(
+                recorder.last_committed_request_id().as_deref(),
+                Some(request_id.as_str())
+            );
+            assert_eq!(
+                recorder.last_turn_request_id().as_deref(),
+                Some(request_id.as_str())
+            );
         }
         let events = read_semantic_edge_ledger(&path).unwrap();
         assert_eq!(events.len(), 3);
@@ -971,7 +1082,8 @@ mod tests {
             other => panic!("unexpected event {other:?}"),
         }
 
-        let mut resumed = SemanticEdgeRecorder::new(Some(path.clone()), "s".to_string(), None, None);
+        let mut resumed =
+            SemanticEdgeRecorder::new(Some(path.clone()), "s".to_string(), None, None);
         assert_eq!(
             resumed.last_committed_request_id(),
             Some(events[2].clone().into_request_id().unwrap())
@@ -979,23 +1091,33 @@ mod tests {
         assert!(resumed.last_turn_request_id().is_some());
         // A replayed request has no body hash, so a parked retry can never reuse it.
         resumed.prepare_turn_retry();
-        let reused = resumed.start_turn_request(Some("hash".to_string())).unwrap();
+        let reused = resumed
+            .start_turn_request(Some("hash".to_string()))
+            .unwrap();
         assert_ne!(reused, events[2].clone().into_request_id().unwrap());
     }
 
     #[test]
     fn parked_retry_reuses_the_same_id_for_the_same_body() {
         let mut recorder = SemanticEdgeRecorder::new(None, "s".to_string(), None, None);
-        let first = recorder.start_turn_request(Some("hash".to_string())).unwrap();
+        let first = recorder
+            .start_turn_request(Some("hash".to_string()))
+            .unwrap();
         recorder.prepare_turn_retry();
-        let second = recorder.start_turn_request(Some("hash".to_string())).unwrap();
+        let second = recorder
+            .start_turn_request(Some("hash".to_string()))
+            .unwrap();
         assert_eq!(first, second);
         recorder.prepare_turn_retry();
-        let third = recorder.start_turn_request(Some("other".to_string())).unwrap();
+        let third = recorder
+            .start_turn_request(Some("other".to_string()))
+            .unwrap();
         assert_ne!(first, third);
         recorder.prepare_turn_retry();
         recorder.clear_turn_retry();
-        let fourth = recorder.start_turn_request(Some("other".to_string())).unwrap();
+        let fourth = recorder
+            .start_turn_request(Some("other".to_string()))
+            .unwrap();
         assert_ne!(third, fourth);
     }
 
@@ -1014,7 +1136,9 @@ mod tests {
                 .unwrap_err(),
             format!("unknown semantic-edge compaction: {compaction_id}")
         );
-        assert!(recorder.finish_compaction("missing", "failed".to_string()).is_err());
+        assert!(recorder
+            .finish_compaction("missing", "failed".to_string())
+            .is_err());
     }
 
     #[test]
@@ -1024,7 +1148,9 @@ mod tests {
         let path = dir.path().to_string_lossy().to_string();
         let mut recorder = SemanticEdgeRecorder::new(Some(path), "s".to_string(), None, None);
         assert!(recorder.start_turn_request(None).is_none());
-        assert!(recorder.finish_compaction("x", "failed".to_string()).is_ok());
+        assert!(recorder
+            .finish_compaction("x", "failed".to_string())
+            .is_ok());
     }
 
     #[test]

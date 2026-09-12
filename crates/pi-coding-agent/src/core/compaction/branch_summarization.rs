@@ -17,11 +17,11 @@ use pi_ai::types::{
 use serde_json::Value;
 
 use crate::core::compaction::compaction::estimate_tokens;
+use crate::core::compaction::compaction::ProviderRetryPolicy;
 use crate::core::compaction::utils::{
     compute_file_lists, create_file_ops, extract_file_ops_from_message, format_file_operations,
     serialize_conversation, FileOperations, SUMMARIZATION_SYSTEM_PROMPT,
 };
-use crate::core::compaction::compaction::ProviderRetryPolicy;
 use crate::core::messages::{
     branch_summary_to_agent_message, compaction_summary_to_agent_message, convert_to_llm,
     create_branch_summary_message, create_compaction_summary_message, create_custom_message,
@@ -181,11 +181,9 @@ fn get_message_from_entry(entry: &SessionEntry) -> Option<AgentMessage> {
             from_id,
             timestamp,
             ..
-        } => Some(branch_summary_to_agent_message(create_branch_summary_message(
-            summary.clone(),
-            from_id.clone(),
-            timestamp,
-        ))),
+        } => Some(branch_summary_to_agent_message(
+            create_branch_summary_message(summary.clone(), from_id.clone(), timestamp),
+        )),
         SessionEntry::Compaction {
             summary,
             tokens_before,
@@ -237,7 +235,9 @@ pub fn prepare_branch_entries(entries: &[SessionEntry], token_budget: f64) -> Br
                             }
                         }
                     }
-                    if let Some(modified_files) = details.get("modifiedFiles").and_then(Value::as_array) {
+                    if let Some(modified_files) =
+                        details.get("modifiedFiles").and_then(Value::as_array)
+                    {
                         for path in modified_files {
                             if let Some(path) = path.as_str() {
                                 file_ops.edited.insert(path.to_string());
@@ -362,15 +362,16 @@ pub async fn generate_branch_summary(
     } else {
         BRANCH_SUMMARY_PROMPT.to_string()
     };
-    let prompt_text = format!("<conversation>\n{conversation_text}\n</conversation>\n\n{instructions}");
+    let prompt_text =
+        format!("<conversation>\n{conversation_text}\n</conversation>\n\n{instructions}");
 
     let model_for_call = model.clone();
     let api_key_for_call = api_key.clone();
     let headers_for_call = headers.clone();
     let signal_for_call = signal.clone();
     let prompt_text_for_call = prompt_text.clone();
-    let attempt: crate::core::compaction::compaction::SummaryCallFn =
-        std::sync::Arc::new(move |call_headers: Option<serde_json::Map<String, Value>>| {
+    let attempt: crate::core::compaction::compaction::SummaryCallFn = std::sync::Arc::new(
+        move |call_headers: Option<serde_json::Map<String, Value>>| {
             let model = model_for_call.clone();
             let api_key = api_key_for_call.clone();
             let headers = headers_for_call.clone();
@@ -399,16 +400,19 @@ pub async fn generate_branch_summary(
                 let context = Context {
                     system_prompt: Some(SUMMARIZATION_SYSTEM_PROMPT.to_string()),
                     messages: vec![Message::User(pi_ai::types::UserMessage::new(
-                        pi_ai::types::UserContent::Blocks(vec![pi_ai::types::ImageOrTextContent::Text(
-                            pi_ai::types::TextContent::new(prompt_text),
-                        )]),
+                        pi_ai::types::UserContent::Blocks(vec![
+                            pi_ai::types::ImageOrTextContent::Text(pi_ai::types::TextContent::new(
+                                prompt_text,
+                            )),
+                        ]),
                         now_millis(),
                     ))],
                     tools: None,
                 };
                 Ok(complete_simple(&model, &context, Some(&options)).await)
             })
-        });
+        },
+    );
     let runner = crate::core::compaction::compaction::default_summary_call_runner(None);
     let response = match (runner)(attempt).await {
         Ok(response) => response,
@@ -475,15 +479,20 @@ fn now_millis() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use pi_ai::types::{AssistantMessage, ContentBlock, TextContent, ToolCall};
+    use std::collections::HashMap;
 
     struct FakeSession {
         entries: HashMap<String, SessionEntry>,
         branches: HashMap<String, Vec<SessionEntry>>,
     }
 
-    fn message_entry(id: &str, parent_id: Option<&str>, role: &str, timestamp: i64) -> SessionEntry {
+    fn message_entry(
+        id: &str,
+        parent_id: Option<&str>,
+        role: &str,
+        timestamp: i64,
+    ) -> SessionEntry {
         let message = if role == "assistant" {
             AgentMessage::Message(Message::Assistant(AssistantMessage {
                 content: vec![ContentBlock::Text(TextContent::new("answer"))],
@@ -494,7 +503,9 @@ mod tests {
             AgentMessage::Message(Message::ToolResult(pi_ai::types::ToolResultMessage::new(
                 "call",
                 "read",
-                vec![pi_ai::types::ImageOrTextContent::Text(TextContent::new("out"))],
+                vec![pi_ai::types::ImageOrTextContent::Text(TextContent::new(
+                    "out",
+                ))],
                 false,
                 timestamp,
             )))
@@ -522,7 +533,10 @@ mod tests {
         }
         let mut branches = HashMap::new();
         branches.insert("old".to_string(), vec![root.clone(), branch_old.clone()]);
-        branches.insert("target".to_string(), vec![root.clone(), branch_target.clone()]);
+        branches.insert(
+            "target".to_string(),
+            vec![root.clone(), branch_target.clone()],
+        );
         let session = FakeSession { entries, branches };
 
         let result = collect_entries_for_branch_summary(&session, Some("old"), "target");
@@ -654,15 +668,11 @@ mod tests {
             id: "a".to_string(),
             parent_id: None,
             message: AgentMessage::Message(Message::Assistant(AssistantMessage {
-                content: vec![ContentBlock::ToolCall(ToolCall::new(
-                    "id",
-                    "edit",
-                    {
-                        let mut args = serde_json::Map::new();
-                        args.insert("path".to_string(), serde_json::json!("edited.ts"));
-                        args
-                    },
-                ))],
+                content: vec![ContentBlock::ToolCall(ToolCall::new("id", "edit", {
+                    let mut args = serde_json::Map::new();
+                    args.insert("path".to_string(), serde_json::json!("edited.ts"));
+                    args
+                }))],
                 timestamp: 1,
                 ..Default::default()
             })),

@@ -1644,7 +1644,7 @@ pub fn close_openai_codex_web_socket_sessions(session_id: Option<&str>) {
 fn register_web_socket_session_cleanup() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
-        register_session_resource_cleanup(Arc::new(|session_id: Option<&str>| {
+        let _cleanup = register_session_resource_cleanup(Arc::new(|session_id: Option<&str>| {
             close_openai_codex_web_socket_sessions(session_id);
         }));
     });
@@ -2528,7 +2528,6 @@ async fn process_web_socket_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::openai_responses_shared::ResponsesEventStream;
     use crate::types::{ContentBlock, Message, TextContent, UserContent, UserMessage};
     use serde_json::json;
 
@@ -2930,10 +2929,11 @@ mod tests {
         let result = tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(connect_web_socket("wss://example.test", &IndexMap::new(), None));
-        assert_eq!(
-            result.unwrap_err().message,
-            "WebSocket transport is not available in this runtime"
-        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected connect_web_socket to fail without a constructor"),
+        };
+        assert_eq!(error.message, "WebSocket transport is not available in this runtime");
     }
 
     /// Minimal fake socket: records sends and can emit events to its listeners.
@@ -2955,7 +2955,7 @@ mod tests {
                 .cloned()
                 .unwrap_or_default();
             for listener in listeners {
-                listener(event);
+                listener(event.clone());
             }
         }
     }
@@ -3281,10 +3281,11 @@ mod tests {
         set_web_socket_constructor(None);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let result = runtime.block_on(acquire_web_socket("wss://example.test", &IndexMap::new(), None, None));
-        assert_eq!(
-            result.unwrap_err().message,
-            "WebSocket transport is not available in this runtime"
-        );
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("expected acquire_web_socket to fail without a constructor"),
+        };
+        assert_eq!(error.message, "WebSocket transport is not available in this runtime");
     }
 
     #[test]

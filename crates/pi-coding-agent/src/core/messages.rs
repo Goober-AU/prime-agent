@@ -30,7 +30,8 @@ pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before thi
 
 pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 
-pub const BRANCH_SUMMARY_PREFIX: &str = "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
+pub const BRANCH_SUMMARY_PREFIX: &str =
+    "The following is a summary of a branch that this conversation came back from:\n\n<summary>\n";
 
 pub const BRANCH_SUMMARY_SUFFIX: &str = "</summary>";
 
@@ -47,7 +48,6 @@ pub const RLM_CHILD_FAILURE_CUSTOM_TYPE: &str = "rlm_child_failure";
 pub const RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE: &str = "rlm_child_terminal_notice";
 pub const ASYNC_BASH_COMPLETION_CUSTOM_TYPE: &str = "async_bash_completion";
 pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Shell message received";
-
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -122,7 +122,8 @@ pub struct HarnessDigestDetails {
     pub digest: String,
 }
 
-pub const HARNESS_DIGEST_PREFIX: &str = "The persistent memories produced across this session so far:\n\n<harness_state>\n";
+pub const HARNESS_DIGEST_PREFIX: &str =
+    "The persistent memories produced across this session so far:\n\n<harness_state>\n";
 
 pub const HARNESS_DIGEST_SUFFIX: &str = "\n</harness_state>";
 
@@ -190,7 +191,10 @@ pub struct AsyncBashCompletionDetails {
     pub exit_code: i64,
 }
 
-pub fn create_async_bash_completion_message(details: AsyncBashCompletionDetails, timestamp: i64) -> CustomAgentMessage {
+pub fn create_async_bash_completion_message(
+    details: AsyncBashCompletionDetails,
+    timestamp: i64,
+) -> CustomAgentMessage {
     CustomAgentMessage::Custom {
         custom_type: ASYNC_BASH_COMPLETION_CUSTOM_TYPE.to_string(),
         content: CustomMessageContent::Text(format!(
@@ -205,7 +209,10 @@ pub fn create_async_bash_completion_message(details: AsyncBashCompletionDetails,
     }
 }
 
-pub fn create_rlm_child_failure_message(details: RlmChildFailureDetails, timestamp: i64) -> CustomAgentMessage {
+pub fn create_rlm_child_failure_message(
+    details: RlmChildFailureDetails,
+    timestamp: i64,
+) -> CustomAgentMessage {
     CustomAgentMessage::Custom {
         custom_type: RLM_CHILD_FAILURE_CUSTOM_TYPE.to_string(),
         content: CustomMessageContent::Text(format!(
@@ -414,7 +421,9 @@ pub(crate) fn branch_summary_to_agent_message(message: BranchSummaryMessage) -> 
     })
 }
 
-pub(crate) fn compaction_summary_to_agent_message(message: CompactionSummaryMessage) -> AgentMessage {
+pub(crate) fn compaction_summary_to_agent_message(
+    message: CompactionSummaryMessage,
+) -> AgentMessage {
     AgentMessage::Custom(CustomAgentMessage::CompactionSummary {
         summary: message.summary,
         provider_context: message.provider_context,
@@ -537,15 +546,17 @@ mod tests {
             items: vec![Map::new()],
             estimated_tokens: 1.0,
         };
-        let messages = vec![AgentMessage::Custom(CustomAgentMessage::CompactionSummary {
-            summary: "sum".to_string(),
-            provider_context: Some(checkpoint),
-            tokens_before: 10.0,
-            retained_message_count: None,
-            custom_instructions: None,
-            harness_digest: Some("digest".to_string()),
-            timestamp: 11,
-        })];
+        let messages = vec![AgentMessage::Custom(
+            CustomAgentMessage::CompactionSummary {
+                summary: "sum".to_string(),
+                provider_context: Some(checkpoint),
+                tokens_before: 10.0,
+                retained_message_count: None,
+                custom_instructions: None,
+                harness_digest: Some("digest".to_string()),
+                timestamp: 11,
+            },
+        )];
         let converted = convert_to_llm(&messages, &empty_options());
         assert_eq!(converted.len(), 2);
         let first = converted[0].as_user().unwrap();
@@ -555,20 +566,25 @@ mod tests {
             format!("{COMPACTION_SUMMARY_PREFIX}sum{COMPACTION_SUMMARY_SUFFIX}")
         );
         let second = converted[1].as_user().unwrap();
-        assert_eq!(second.content.text(), format!("{HARNESS_DIGEST_PREFIX}digest{HARNESS_DIGEST_SUFFIX}"));
+        assert_eq!(
+            second.content.text(),
+            format!("{HARNESS_DIGEST_PREFIX}digest{HARNESS_DIGEST_SUFFIX}")
+        );
     }
 
     #[test]
     fn convert_to_llm_keeps_digest_before_summary_without_provider_context() {
-        let messages = vec![AgentMessage::Custom(CustomAgentMessage::CompactionSummary {
-            summary: "sum".to_string(),
-            provider_context: None,
-            tokens_before: 10.0,
-            retained_message_count: None,
-            custom_instructions: None,
-            harness_digest: Some("digest".to_string()),
-            timestamp: 11,
-        })];
+        let messages = vec![AgentMessage::Custom(
+            CustomAgentMessage::CompactionSummary {
+                summary: "sum".to_string(),
+                provider_context: None,
+                tokens_before: 10.0,
+                retained_message_count: None,
+                custom_instructions: None,
+                harness_digest: Some("digest".to_string()),
+                timestamp: 11,
+            },
+        )];
         let converted = convert_to_llm(&messages, &empty_options());
         assert_eq!(converted.len(), 1);
         assert_eq!(
@@ -594,7 +610,9 @@ mod tests {
         let filtered = without_harness_digests_for_compaction(&messages);
         assert_eq!(filtered.len(), 1);
         match &filtered[0] {
-            AgentMessage::Custom(CustomAgentMessage::CompactionSummary { harness_digest, .. }) => {
+            AgentMessage::Custom(CustomAgentMessage::CompactionSummary {
+                harness_digest, ..
+            }) => {
                 assert!(harness_digest.is_none());
             }
             other => panic!("unexpected message {other:?}"),
@@ -688,7 +706,11 @@ mod tests {
 // (the real port target for packages/coding-agent/src/core/messages.ts).
 // ---------------------------------------------------------------------------
 
-pub fn create_branch_summary_message(summary: String, from_id: String, timestamp: &str) -> BranchSummaryMessage {
+pub fn create_branch_summary_message(
+    summary: String,
+    from_id: String,
+    timestamp: &str,
+) -> BranchSummaryMessage {
     BranchSummaryMessage {
         role: "branchSummary".to_string(),
         summary,
@@ -788,22 +810,25 @@ pub fn create_compaction_outcome_message(
     }
 }
 
-fn refinement_outcome_details(result: &RefinementResult, source: Option<RefinementSource>) -> Value {
+fn refinement_outcome_details(
+    result: &RefinementResult,
+    source: Option<RefinementSource>,
+) -> Value {
     let mut object = Map::new();
-    object.insert(
-        "refinementId".to_string(),
-        Value::String(result.id.clone()),
-    );
+    object.insert("refinementId".to_string(), Value::String(result.id.clone()));
     object.insert("summary".to_string(), Value::String(result.summary.clone()));
     object.insert(
         "scope".to_string(),
-        Value::String(result.scope.unwrap_or(HarnessScope::Local).as_str().to_string()),
+        Value::String(
+            result
+                .scope
+                .unwrap_or(HarnessScope::Local)
+                .as_str()
+                .to_string(),
+        ),
     );
     if let Some(rollback_of) = &result.rollback_of {
-        object.insert(
-            "rollbackOf".to_string(),
-            Value::String(rollback_of.clone()),
-        );
+        object.insert("rollbackOf".to_string(), Value::String(rollback_of.clone()));
     }
     object.insert(
         "edits".to_string(),
@@ -856,8 +881,14 @@ fn is_record(value: &Value) -> bool {
 fn has_valid_custom_message_envelope(message: &Map<String, Value>, custom_type: &str) -> bool {
     message.get("role").and_then(Value::as_str) == Some("custom")
         && message.get("customType").and_then(Value::as_str) == Some(custom_type)
-        && message.get("content").map(Value::is_string).unwrap_or(false)
-        && message.get("display").map(Value::is_boolean).unwrap_or(false)
+        && message
+            .get("content")
+            .map(Value::is_string)
+            .unwrap_or(false)
+        && message
+            .get("display")
+            .map(Value::is_boolean)
+            .unwrap_or(false)
         && message
             .get("timestamp")
             .and_then(Value::as_f64)
@@ -880,9 +911,18 @@ pub fn is_session_slash_command(value: &Value) -> bool {
     {
         return false;
     }
-    let name = object.get("name").and_then(Value::as_str).unwrap_or_default();
-    let args = object.get("args").and_then(Value::as_str).unwrap_or_default();
-    let text = object.get("text").and_then(Value::as_str).unwrap_or_default();
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let args = object
+        .get("args")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let text = object
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     match parse_session_slash_command(text) {
         Some(parsed) => parsed.name == name && parsed.args == args && parsed.text == text,
         None => false,
@@ -915,7 +955,10 @@ pub fn is_session_slash_command_message(message: &Value) -> bool {
     if !is_session_slash_command(command) {
         return false;
     }
-    let content = object.get("content").and_then(Value::as_str).unwrap_or_default();
+    let content = object
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let command_text = command
         .as_object()
         .and_then(|command| command.get("text"))
@@ -940,7 +983,10 @@ pub fn is_session_slash_command_result_message(message: &Value) -> bool {
     if !is_session_slash_command(command) {
         return false;
     }
-    let success_ok = details.get("success").map(Value::is_boolean).unwrap_or(false);
+    let success_ok = details
+        .get("success")
+        .map(Value::is_boolean)
+        .unwrap_or(false);
     let severity_ok = matches!(
         details.get("severity").and_then(Value::as_str),
         Some("info") | Some("warning") | Some("error")
@@ -950,7 +996,10 @@ pub fn is_session_slash_command_result_message(message: &Value) -> bool {
         Some(Value::String(_)) => true,
         Some(_) => false,
     };
-    success_ok && severity_ok && error_ok && is_valid_command_entry_id(details.get("commandEntryId"))
+    success_ok
+        && severity_ok
+        && error_ok
+        && is_valid_command_entry_id(details.get("commandEntryId"))
 }
 
 pub fn is_compaction_outcome_message(message: &Value) -> bool {
@@ -981,7 +1030,10 @@ fn is_applied_refinement_edit(value: &Value) -> bool {
         Some("create") | Some("update") | Some("delete")
     ) && object.get("kind").map(Value::is_string).unwrap_or(false)
         && object.get("id").map(Value::is_string).unwrap_or(false)
-        && object.get("applied").map(Value::is_boolean).unwrap_or(false)
+        && object
+            .get("applied")
+            .map(Value::is_boolean)
+            .unwrap_or(false)
 }
 
 pub fn is_refinement_outcome_message(message: &Value) -> bool {
@@ -994,7 +1046,10 @@ pub fn is_refinement_outcome_message(message: &Value) -> bool {
     let Some(details) = object.get("details").and_then(Value::as_object) else {
         return false;
     };
-    details.get("summary").map(Value::is_string).unwrap_or(false)
+    details
+        .get("summary")
+        .map(Value::is_string)
+        .unwrap_or(false)
         && matches!(
             details.get("scope").and_then(Value::as_str),
             Some("local") | Some("global")
@@ -1061,15 +1116,17 @@ pub fn without_harness_digests_for_compaction(messages: &[AgentMessage]) -> Vec<
                 custom_instructions,
                 harness_digest,
                 timestamp,
-            }) if harness_digest.is_some() => AgentMessage::Custom(CustomAgentMessage::CompactionSummary {
-                summary: summary.clone(),
-                provider_context: provider_context.clone(),
-                tokens_before: *tokens_before,
-                retained_message_count: *retained_message_count,
-                custom_instructions: custom_instructions.clone(),
-                harness_digest: None,
-                timestamp: *timestamp,
-            }),
+            }) if harness_digest.is_some() => {
+                AgentMessage::Custom(CustomAgentMessage::CompactionSummary {
+                    summary: summary.clone(),
+                    provider_context: provider_context.clone(),
+                    tokens_before: *tokens_before,
+                    retained_message_count: *retained_message_count,
+                    custom_instructions: custom_instructions.clone(),
+                    harness_digest: None,
+                    timestamp: *timestamp,
+                })
+            }
             other => other.clone(),
         })
         .collect()
@@ -1115,9 +1172,9 @@ pub fn convert_to_llm(
                     };
                     ConvertedItem::One(Message::User(UserMessage {
                         role: ROLE_USER.to_string(),
-                        content: UserContent::Blocks(vec![ImageOrTextContent::Text(TextContent::new(
-                            bash_execution_to_text(&bash),
-                        ))]),
+                        content: UserContent::Blocks(vec![ImageOrTextContent::Text(
+                            TextContent::new(bash_execution_to_text(&bash)),
+                        )]),
                         provider_context: None,
                         timestamp: *timestamp,
                     }))
@@ -1137,9 +1194,9 @@ pub fn convert_to_llm(
                     ConvertedItem::None
                 } else {
                     let blocks = match content {
-                        CustomMessageContent::Text(text) => vec![ImageOrTextContent::Text(TextContent::new(
-                            text.clone(),
-                        ))],
+                        CustomMessageContent::Text(text) => {
+                            vec![ImageOrTextContent::Text(TextContent::new(text.clone()))]
+                        }
                         CustomMessageContent::Blocks(blocks) => blocks
                             .iter()
                             .map(|block| match block {
@@ -1161,14 +1218,12 @@ pub fn convert_to_llm(
                 }
             }
             AgentMessage::Custom(CustomAgentMessage::BranchSummary {
-                summary,
-                timestamp,
-                ..
+                summary, timestamp, ..
             }) => ConvertedItem::One(Message::User(UserMessage {
                 role: ROLE_USER.to_string(),
-                content: UserContent::Blocks(vec![ImageOrTextContent::Text(TextContent::new(format!(
-                    "{BRANCH_SUMMARY_PREFIX}{summary}{BRANCH_SUMMARY_SUFFIX}"
-                )))]),
+                content: UserContent::Blocks(vec![ImageOrTextContent::Text(TextContent::new(
+                    format!("{BRANCH_SUMMARY_PREFIX}{summary}{BRANCH_SUMMARY_SUFFIX}"),
+                ))]),
                 provider_context: None,
                 timestamp: *timestamp,
             })),
@@ -1180,7 +1235,9 @@ pub fn convert_to_llm(
                 ..
             }) => {
                 let digest_block = match harness_digest {
-                    Some(digest) => format!("{HARNESS_DIGEST_PREFIX}{digest}{HARNESS_DIGEST_SUFFIX}\n\n"),
+                    Some(digest) => {
+                        format!("{HARNESS_DIGEST_PREFIX}{digest}{HARNESS_DIGEST_SUFFIX}\n\n")
+                    }
                     None => String::new(),
                 };
                 let text = (if provider_context.is_some() {
@@ -1192,7 +1249,9 @@ pub fn convert_to_llm(
                     + COMPACTION_SUMMARY_SUFFIX;
                 let carrier = Message::User(UserMessage {
                     role: ROLE_USER.to_string(),
-                    content: UserContent::Blocks(vec![ImageOrTextContent::Text(TextContent::new(text))]),
+                    content: UserContent::Blocks(vec![ImageOrTextContent::Text(TextContent::new(
+                        text,
+                    ))]),
                     provider_context: provider_context.clone(),
                     timestamp: *timestamp,
                 });
@@ -1200,9 +1259,9 @@ pub fn convert_to_llm(
                 if provider_context.is_some() && !digest_block.is_empty() {
                     let memory = Message::User(UserMessage {
                         role: ROLE_USER.to_string(),
-                        content: UserContent::Blocks(vec![ImageOrTextContent::Text(TextContent::new(
-                            digest_block.trim_end().to_string(),
-                        ))]),
+                        content: UserContent::Blocks(vec![ImageOrTextContent::Text(
+                            TextContent::new(digest_block.trim_end().to_string()),
+                        )]),
                         provider_context: None,
                         timestamp: *timestamp,
                     });
@@ -1224,4 +1283,3 @@ pub fn convert_to_llm(
     }
     converted
 }
-

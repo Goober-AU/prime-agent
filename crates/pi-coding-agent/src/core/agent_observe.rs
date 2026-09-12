@@ -116,16 +116,23 @@ pub struct AgentObserveMessagePreview {
 pub trait AgentObserveController: Send + Sync {
     fn list_agents(
         &self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<AgentObserveListResult, String>> + Send>>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentObserveListResult, String>> + Send>,
+    >;
     fn get_agent(
         &self,
         target: String,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<AgentObserveAgentSnapshot, String>> + Send>>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentObserveAgentSnapshot, String>> + Send>,
+    >;
     fn recent_messages(
         &self,
         input: AgentObserveRecentMessagesInput,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<AgentObserveRecentMessagesResult, String>> + Send>,
+        Box<
+            dyn std::future::Future<Output = Result<AgentObserveRecentMessagesResult, String>>
+                + Send,
+        >,
     >;
 }
 
@@ -156,7 +163,9 @@ pub fn create_agent_observe_host_handlers(
         Box::pin(async move {
             let object = payload.as_object().cloned().unwrap_or_default();
             let Some(Value::String(target)) = object.get("target") else {
-                return Err(KernelError::new("agent_observe.get target must be a string"));
+                return Err(KernelError::new(
+                    "agent_observe.get target must be a string",
+                ));
             };
             match controller.get_agent(target.clone()).await {
                 Ok(result) => Ok(serde_json::to_value(result).unwrap_or(Value::Null)),
@@ -172,12 +181,16 @@ pub fn create_agent_observe_host_handlers(
         Box::pin(async move {
             let object = payload.as_object().cloned().unwrap_or_default();
             let Some(Value::String(target)) = object.get("target") else {
-                return Err(KernelError::new("agent_observe.recent target must be a string"));
+                return Err(KernelError::new(
+                    "agent_observe.recent target must be a string",
+                ));
             };
-            let limit = match normalize_optional_integer(object.get("limit"), "agent_observe.recent limit") {
-                Ok(limit) => limit,
-                Err(error) => return Err(KernelError::new(error)),
-            };
+            let limit =
+                match normalize_optional_integer(object.get("limit"), "agent_observe.recent limit")
+                {
+                    Ok(limit) => limit,
+                    Err(error) => return Err(KernelError::new(error)),
+                };
             let max_chars = match normalize_optional_integer(
                 object.get("max_chars").or_else(|| object.get("maxChars")),
                 "agent_observe.recent max_chars",
@@ -207,8 +220,16 @@ pub fn normalize_observe_limit(limit: Option<i64>, default_limit: i64) -> Result
     clamp_integer(limit.unwrap_or(default_limit), 1, 50, "agent_observe limit")
 }
 
-pub fn normalize_observe_max_chars(max_chars: Option<i64>, default_max_chars: i64) -> Result<i64, String> {
-    clamp_integer(max_chars.unwrap_or(default_max_chars), 80, 2_000, "agent_observe max_chars")
+pub fn normalize_observe_max_chars(
+    max_chars: Option<i64>,
+    default_max_chars: i64,
+) -> Result<i64, String> {
+    clamp_integer(
+        max_chars.unwrap_or(default_max_chars),
+        80,
+        2_000,
+        "agent_observe max_chars",
+    )
 }
 
 pub fn create_agent_observe_message_preview(
@@ -219,11 +240,15 @@ pub fn create_agent_observe_message_preview(
     let text = message_text(message);
     let (clipped_text, truncated) = truncate(&text, max_chars);
     let tool_calls = match message {
-        AgentMessage::Message(pi_ai::types::Message::Assistant(_)) => Some(assistant_tool_calls(message)),
+        AgentMessage::Message(pi_ai::types::Message::Assistant(_)) => {
+            Some(assistant_tool_calls(message))
+        }
         _ => None,
     };
     let custom_type = match message {
-        AgentMessage::Custom(CustomAgentMessage::Custom { custom_type, .. }) => Some(custom_type.clone()),
+        AgentMessage::Custom(CustomAgentMessage::Custom { custom_type, .. }) => {
+            Some(custom_type.clone())
+        }
         _ => None,
     };
     AgentObserveMessagePreview {
@@ -242,12 +267,18 @@ pub fn create_agent_observe_message_preview(
 fn message_timestamp(message: &AgentMessage) -> Option<i64> {
     match message {
         AgentMessage::Message(pi_ai::types::Message::User(user)) => Some(user.timestamp),
-        AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) => Some(assistant.timestamp),
-        AgentMessage::Message(pi_ai::types::Message::ToolResult(tool_result)) => Some(tool_result.timestamp),
+        AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) => {
+            Some(assistant.timestamp)
+        }
+        AgentMessage::Message(pi_ai::types::Message::ToolResult(tool_result)) => {
+            Some(tool_result.timestamp)
+        }
         AgentMessage::Custom(CustomAgentMessage::BashExecution { timestamp, .. })
         | AgentMessage::Custom(CustomAgentMessage::Custom { timestamp, .. })
         | AgentMessage::Custom(CustomAgentMessage::BranchSummary { timestamp, .. })
-        | AgentMessage::Custom(CustomAgentMessage::CompactionSummary { timestamp, .. }) => Some(*timestamp),
+        | AgentMessage::Custom(CustomAgentMessage::CompactionSummary { timestamp, .. }) => {
+            Some(*timestamp)
+        }
     }
 }
 
@@ -299,7 +330,9 @@ fn message_text(message: &AgentMessage) -> String {
             CustomMessageContent::Blocks(blocks) => content_text_blocks(blocks),
         },
         AgentMessage::Custom(CustomAgentMessage::BranchSummary { summary, .. }) => summary.clone(),
-        AgentMessage::Custom(CustomAgentMessage::CompactionSummary { summary, .. }) => summary.clone(),
+        AgentMessage::Custom(CustomAgentMessage::CompactionSummary { summary, .. }) => {
+            summary.clone()
+        }
     }
 }
 
@@ -322,7 +355,9 @@ fn content_text_assistant(assistant: &pi_ai::types::AssistantMessage) -> String 
         .map(|block| match block {
             pi_ai::types::ContentBlock::Text(text) => text.text.clone(),
             pi_ai::types::ContentBlock::Thinking(thinking) => thinking.thinking.clone(),
-            pi_ai::types::ContentBlock::ToolCall(tool_call) => format!("[tool_call:{}]", tool_call.name),
+            pi_ai::types::ContentBlock::ToolCall(tool_call) => {
+                format!("[tool_call:{}]", tool_call.name)
+            }
         })
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
@@ -372,7 +407,8 @@ fn empty_object() -> Map<String, Value> {
 mod tests {
     use super::*;
     use pi_ai::types::{
-        AssistantMessage, ContentBlock, ImageOrTextContent, TextContent, ToolCall, UserContent, UserMessage,
+        AssistantMessage, ContentBlock, ImageOrTextContent, TextContent, ToolCall, UserContent,
+        UserMessage,
     };
     use serde_json::json;
 

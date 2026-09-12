@@ -64,7 +64,7 @@ pub fn format_session_list_table(sessions: &[SessionSummary], now_ms: f64) -> St
             vec![
                 row.name.clone(),
                 row.id.clone(),
-                format_list_cell(row),
+                row.status_text(),
                 row.age.clone(),
                 row.model.clone(),
                 row.messages.clone(),
@@ -72,7 +72,14 @@ pub fn format_session_list_table(sessions: &[SessionSummary], now_ms: f64) -> St
             ]
         })
         .collect();
-    format_table(&columns, &cells)
+    // `formatListCell` runs on the padded cell, so the ANSI escapes never
+    // influence the column widths.
+    format_table(&columns, &cells, &|row_index, column_index, value| {
+        if column_index != 2 {
+            return value.to_string();
+        }
+        format_list_cell(&rows[row_index], value)
+    })
 }
 
 fn sort_sessions_for_list(sessions: &[SessionSummary]) -> Vec<&SessionSummary> {
@@ -81,12 +88,11 @@ fn sort_sessions_for_list(sessions: &[SessionSummary]) -> Vec<&SessionSummary> {
     indexed.into_iter().map(|(_, session)| session).collect()
 }
 
-fn format_list_cell(row: &ListRow) -> String {
-    let value = row.status_text();
+fn format_list_cell(row: &ListRow, padded_value: &str) -> String {
     match row.status {
-        ListStatus::Working => red(&value),
-        ListStatus::Idle => blue(&value),
-        ListStatus::Archived => dim(&value),
+        ListStatus::Working => red(padded_value),
+        ListStatus::Idle => blue(padded_value),
+        ListStatus::Archived => dim(padded_value),
     }
 }
 
@@ -140,7 +146,11 @@ fn format_session_model(model: Option<&SessionModel>) -> String {
 }
 
 /// Shared table renderer: column widths from the widest cell, two-space gutter.
-fn format_table(columns: &[&str], rows: &[Vec<String>]) -> String {
+fn format_table(
+    columns: &[&str],
+    rows: &[Vec<String>],
+    format_cell: &dyn Fn(usize, usize, &str) -> String,
+) -> String {
     let widths: Vec<usize> = columns
         .iter()
         .enumerate()
@@ -158,11 +168,11 @@ fn format_table(columns: &[&str], rows: &[Vec<String>]) -> String {
         .map(|(index, column)| pad_end(column, widths[index]))
         .collect::<Vec<_>>()
         .join("  ")];
-    for row in rows {
+    for (row_index, row) in rows.iter().enumerate() {
         lines.push(
             row.iter()
                 .enumerate()
-                .map(|(index, value)| pad_end(value, widths[index]))
+                .map(|(index, value)| format_cell(row_index, index, &pad_end(value, widths[index])))
                 .collect::<Vec<_>>()
                 .join("  "),
         );
@@ -278,11 +288,40 @@ mod tests {
         ];
         let table = format_session_list_table(&sessions, 1_767_225_600_000.0);
         let lines: Vec<&str> = table.lines().collect();
-        assert_eq!(lines[0], "name             id            status    age  model        messages  clients");
-        assert!(lines[1].contains("working"));
+        assert_eq!(lines[0], "name                 id            status    age  model        messages  clients");
         assert!(lines[1].starts_with("agent-aaaaaaaaaaaa3"));
         assert!(lines[2].contains("idle"));
         assert!(lines[3].contains("archived"));
+    }
+
+    #[test]
+    fn status_colour_wraps_the_padded_cell() {
+        let sessions = vec![summary("aaaaaaaaaaaa1", "live", "working", None)];
+        let table = format_session_list_table(&sessions, 0.0);
+        let row = table.lines().nth(1).unwrap();
+        assert!(row.contains("\u{1b}[31mworking\u{1b}[39m"), "{row}");
+        let stripped = strip_ansi(row);
+        assert_eq!(
+            stripped,
+            "agent-aaaaaaaaaaaa1  456789abcdef  working   alpha/m1  2         1"
+        );
+    }
+
+    fn strip_ansi(value: &str) -> String {
+        let mut output = String::new();
+        let mut chars = value.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' {
+                for inner in chars.by_ref() {
+                    if inner.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            output.push(ch);
+        }
+        output
     }
 
     #[test]

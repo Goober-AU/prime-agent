@@ -7,7 +7,10 @@
 
 use crate::bun::register_bedrock::register_bedrock;
 use crate::bun::restore_sandbox_env::restore_sandbox_env;
-use crate::config::APP_NAME;
+
+/// `APP_NAME` from config.ts (`pkg.piConfig.name`).
+/// blocked_on: needs crate::config::APP_NAME
+const APP_NAME: &str = "prime-agent";
 
 /// Port of the module body of `bun/cli.ts`.
 ///

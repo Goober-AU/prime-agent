@@ -268,15 +268,31 @@ mod tests {
 
     #[test]
     fn markers_wrap_and_strip() {
-        let line = mark_table_cell("cell", 0, 0, 0, "cell");
+        let lines = vec![
+            mark_table_start(""),
+            mark_table_cell("cell", 0, 0, 0, "cell"),
+            mark_table_end(""),
+        ];
         let mut identity = |_: usize| 1usize;
-        let (clean, regions) = extract_table_cell_selection_regions(&[line], &mut identity);
-        assert_eq!(clean, vec!["cell".to_string()]);
+        let (clean, regions) = extract_table_cell_selection_regions(&lines, &mut identity);
+        assert_eq!(clean, vec!["".to_string(), "cell".to_string(), "".to_string()]);
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].row, 0);
         assert_eq!(regions[0].column, 0);
         assert_eq!(regions[0].content, "cell");
         assert_eq!(regions[0].width, 4);
+    }
+
+    #[test]
+    fn cell_end_without_an_open_table_stays_in_the_line() {
+        // Port of the TypeScript branch order: a marker outside a table is
+        // appended to the clean line instead of being treated as a region end.
+        let line = mark_table_cell("cell", 0, 0, 0, "cell");
+        let mut identity = |_: usize| 1usize;
+        let (clean, regions) = extract_table_cell_selection_regions(&[line], &mut identity);
+        assert!(regions.is_empty());
+        assert!(clean[0].starts_with("cell"));
+        assert!(clean[0].contains(TABLE_MARKER_PREFIX));
     }
 
     #[test]

@@ -2,7 +2,6 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static KITTY_PROTOCOL_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -32,12 +31,13 @@ pub enum KeyEventType {
 pub type KeyId = str;
 
 /// Port of the `Key` constant: key-name identifiers accepted by [`matches_key`].
+#[allow(non_upper_case_globals)]
 pub mod key {
     // Key-name identifiers (e.g. `Key::escape`, `Key::page_up`).
     pub const escape: &str = "escape";
     pub const esc: &str = "esc";
     pub const enter: &str = "enter";
-    pub const return: &str = "return";
+    pub const r#return: &str = "return";
     pub const tab: &str = "tab";
     pub const space: &str = "space";
     pub const backspace: &str = "backspace";

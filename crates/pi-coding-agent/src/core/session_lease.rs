@@ -233,7 +233,7 @@ fn read_lease_owner(directory: &str) -> Result<LeaseOwnerState, String> {
             .unwrap_or(false);
     if !valid {
         return Err(format!(
-            "Corrupt session lease owner file: {owner_path_text} - {error_message_invalid()}",
+            "Corrupt session lease owner file: {owner_path_text} - missing or invalid required fields",
         ));
     }
     match serde_json::from_value::<SessionLeaseOwner>(parsed) {
@@ -244,9 +244,7 @@ fn read_lease_owner(directory: &str) -> Result<LeaseOwnerState, String> {
     }
 }
 
-fn error_message_invalid() -> &'static str {
-    "missing or invalid required fields"
-}
+
 
 // ---------------------------------------------------------------------------
 // Process start identity
@@ -593,7 +591,7 @@ pub fn acquire_session_lease(
     session_path: Option<&str>,
     agent_dir: &str,
     environment: Option<&[(String, String)]>,
-) -> Result<Option<SessionLease>, String> {
+) -> Result<Option<SessionLease>, AcquireSessionLeaseError> {
     let session_path = match session_path {
         Some(session_path) if !session_path.is_empty() => session_path,
         _ => return Ok(None),
@@ -616,7 +614,7 @@ pub fn acquire_session_lease(
 
     let canonical_path = canonical_session_path(session_path);
     let root = Path::new(agent_dir).join("session-leases");
-    std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&root).map_err(|error| AcquireSessionLeaseError::Other(error.to_string()))?;
     let directory = lease_directory(agent_dir, &canonical_path);
     let owner_id = match environment {
         Some(environment) => environment
@@ -626,7 +624,8 @@ pub fn acquire_session_lease(
         None => std::env::var(SESSION_LEASE_OWNER_ID_ENV).ok(),
     };
 
-    with_lease_guard(&directory, || {
+    let acquired = with_lease_guard(&directory, || {
+        let read_owner_error = |message: String| AcquireSessionLeaseError::Other(message);
         for _attempt in 0..LEASE_ACQUIRE_ATTEMPTS {
             let token = Uuid::new_v4().to_string();
             let candidate_directory =
@@ -640,13 +639,16 @@ pub fn acquire_session_lease(
                 session_path: canonical_path.clone(),
                 created_at: iso_now(),
             };
-            std::fs::create_dir_all(&candidate_directory).map_err(|error| error.to_string())?;
+            std::fs::create_dir_all(&candidate_directory)
+                .map_err(|error| AcquireSessionLeaseError::Other(error.to_string()))?;
             let owner_path = Path::new(&candidate_directory).join(LEASE_OWNER_FILE);
             let body = format!(
                 "{}\n",
-                serde_json::to_string_pretty(&owner).map_err(|error| error.to_string())?
+                serde_json::to_string_pretty(&owner)
+                    .map_err(|error| AcquireSessionLeaseError::Other(error.to_string()))?
             );
-            std::fs::write(&owner_path, body).map_err(|error| error.to_string())?;
+            std::fs::write(&owner_path, body)
+                .map_err(|error| AcquireSessionLeaseError::Other(error.to_string()))?;
             match std::fs::rename(&candidate_directory, &directory) {
                 Ok(()) => {
                     return Ok(Some(SessionLease::new(
@@ -663,41 +665,50 @@ pub fn acquire_session_lease(
                         continue;
                     }
                     if is_rename_target_contention(&directory, code.as_deref(), platform_name()) {
-                        let existing_owner = read_lease_owner(&directory)?;
+                        let existing_owner =
+                            read_lease_owner(&directory).map_err(read_owner_error)?;
                         if existing_owner == LeaseOwnerState::Unreadable {
                             continue;
                         }
                         if let LeaseOwnerState::Owner(existing_owner) = &existing_owner {
                             if is_lease_owner_alive(existing_owner) {
-                                return Err(format!(
-                                    "session_already_active:{}",
-                                    existing_owner.active_session_id.clone().unwrap_or_default()
+                                return Err(AcquireSessionLeaseError::AlreadyActive(
+                                    SessionAlreadyActiveError::new(
+                                        canonical_path.clone(),
+                                        existing_owner.active_session_id.clone(),
+                                    ),
                                 ));
                             }
                         }
                         reclaim_stale_lease(&directory);
                         continue;
                     }
-                    return Err(error.to_string());
+                    return Err(AcquireSessionLeaseError::Other(error.to_string()));
                 }
             }
         }
 
         let owner = if Path::new(&directory).exists() {
-            read_lease_owner(&directory)?
+            read_lease_owner(&directory).map_err(read_owner_error)?
         } else {
             LeaseOwnerState::Absent
         };
         if let LeaseOwnerState::Owner(owner) = &owner {
             if is_lease_owner_alive(owner) {
-                return Err(format!(
-                    "session_already_active:{}",
-                    owner.active_session_id.clone().unwrap_or_default()
+                return Err(AcquireSessionLeaseError::AlreadyActive(
+                    SessionAlreadyActiveError::new(
+                        canonical_path.clone(),
+                        owner.active_session_id.clone(),
+                    ),
                 ));
             }
         }
-        Err(format!("Could not acquire session lease: {canonical_path}"))
-    })?
+        Err(AcquireSessionLeaseError::Other(format!(
+            "Could not acquire session lease: {canonical_path}"
+        )))
+    })
+    .map_err(AcquireSessionLeaseError::Other)?;
+    acquired
 }
 
 fn platform_name() -> &'static str {
@@ -742,18 +753,24 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Rebuild the typed error from the sentinel string used across the guard closure.
-pub fn session_already_active_from(error: &str) -> Option<SessionAlreadyActiveError> {
-    error.strip_prefix("session_already_active:").map(|rest| {
-        let active_session_id = if rest.is_empty() {
-            None
-        } else {
-            Some(rest.to_string())
-        };
-        // The path is added by the caller, which knows the canonical path.
-        SessionAlreadyActiveError::new("", active_session_id)
-    })
+/// Errors surfaced by `acquireSessionLease`: the typed already-active error plus
+/// the plain `Error` cases the TypeScript throws for coordination failures.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcquireSessionLeaseError {
+    AlreadyActive(SessionAlreadyActiveError),
+    Other(String),
 }
+
+impl std::fmt::Display for AcquireSessionLeaseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AcquireSessionLeaseError::AlreadyActive(error) => error.fmt(f),
+            AcquireSessionLeaseError::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for AcquireSessionLeaseError {}
 
 #[cfg(test)]
 mod tests {
@@ -828,7 +845,13 @@ mod tests {
 
         let second = acquire_session_lease(Some(&session_path), &agent_dir, Some(&environment));
         let error = second.err().expect("second acquisition must fail");
-        assert!(error.starts_with("session_already_active:"), "{error}");
+        match error {
+            AcquireSessionLeaseError::AlreadyActive(error) => {
+                assert_eq!(error.session_path, canonical_session_path(&session_path));
+                assert_eq!(error.to_string(), format!("Session is already active in another process: {}", error.session_path));
+            }
+            other => panic!("expected already-active, got {other:?}"),
+        }
 
         lease.release();
         let third = acquire_session_lease(Some(&session_path), &agent_dir, Some(&environment))

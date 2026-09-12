@@ -1,0 +1,522 @@
+==========active_session_state.rs
+pub fn create_active_session_id(existing_ids: Option<&dyn ActiveSessionIdIndex>) -> String {
+    loop
+pub fn resolve_active_session_state(
+    sessions: &HashMap<String, Arc<StdMutex<ActiveSessionState>>>,
+    selector: &str,
+) -> Result<Arc<StdMutex<ActiveSessionState>>, ResolveActiveSessionError>
+pub fn extension_ui_payload_fields(payload: &Value) -> Vec<String> {
+    payload
+        .as_object()
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests
+pub struct AgentStatus {
+pub trait AgentStatusWriter: Send + Sync {
+pub struct ActiveSessionRuntimeSession {
+pub struct AgentSessionRuntimeMetadata {
+pub struct AgentSessionRuntime {
+pub enum DaemonExtensionUIResponse {
+pub struct DaemonSocketClient {
+pub struct ActiveSessionExtensionUiRequest {
+pub struct ActiveSessionState {
+pub trait ActiveSessionIdIndex {
+pub struct AmbiguousActiveSessionError {
+pub enum ResolveActiveSessionError {
+==========agent_roster.rs
+pub fn classify_agent_status(input: AgentStatusInput) -> AgentRosterStatus {
+    if input.queued_child
+pub fn is_session_summary_busy(is_session_active: bool, has_running_rlm_children: Option<bool>) -> bool {
+    is_session_active || has_running_rlm_children == Some(true)
+}
+
+/// The `SessionSummary` fields the roster classifier reads.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RosterSummaryView
+pub fn classify_session_roster_status(summary: &RosterSummaryView, queued_child: bool) -> AgentRosterStatus {
+    classify_agent_status(AgentStatusInput
+pub fn roster_agent_id_for_summary(
+    runtime_kind: Option<&str>,
+    rlm_child_id: Option<&str>,
+    session_id: &str,
+    parent_session_path: Option<&str>,
+    parent_active_session_id: Option<&str>,
+) -> String
+pub fn roster_agent_id_for_entry(summary: &RosterSessionSummary) -> String {
+    roster_agent_id_for_summary(
+        summary.runtime_kind.as_deref(),
+        summary.rlm_child_id.as_deref(),
+        &summary.session_id,
+        summary.parent_session_path.as_deref(),
+        summary.parent_active_session_id.as_deref(),
+    )
+}
+
+pub fn worker_roster_entry_from_summary(summary: &RosterSessionSummary) -> WorkerRosterEntry
+pub fn passivated_worker_roster_entry(
+    entry: &WorkerRosterEntry,
+    registrations: Option<RegisteredHeartbeatFlags>,
+) -> WorkerRosterEntry
+pub fn session_summary_from_roster_entry(
+    summary: &RosterSessionSummary,
+    roster_status: Option<AgentRosterStatus>,
+    status_label: Option<&str>,
+    last_heard_from_at: Option<&str>,
+) -> RosterSessionSummary
+pub fn canonical_session_path(session_path: &str) -> String {
+    let resolved = lexical_resolve(session_path);
+    std::fs::canonicalize(&resolved)
+        .map(|path| path.to_string_lossy().to_string())
+        .unwrap_or(resolved)
+}
+
+fn lexical_resolve(path: &str) -> String
+pub enum AgentRosterStatus {
+pub struct AgentStatusInput {
+pub struct RosterSummaryView {
+pub struct RosterSessionSummary {
+pub struct WorkerRosterEntry {
+pub struct AgentRosterEntry {
+pub struct RegisteredHeartbeatFlags {
+pub enum AgentRosterMutation {
+pub struct AgentRoster {
+pub struct RosterEntryMarks {
+==========compact_session_stream.rs
+pub fn create_compact_assistant_delta(
+    outbound: &Value,
+) -> Result<Option<CompactAssistantDelta>, String>
+pub fn is_compact_assistant_delta(value: &Value) -> bool {
+    let Some(candidate) = value.as_object() else
+pub fn tool_call_content(tool_call: ToolCall) -> ContentBlock {
+    ContentBlock::ToolCall(tool_call)
+}
+
+#[cfg(test)]
+mod tests
+pub struct CompactAssistantDelta {
+pub struct CompactAssistantStreamReconstructor {
+==========daemon_client_env.rs
+pub fn filter_client_env(env: Option<&EnvMap>) -> Option<EnvMap> {
+    let env = env?;
+    let mut filtered: EnvMap = HashMap::new();
+    for key in DAEMON_CLIENT_ENV_KEYS
+pub fn exec_env_for_session(client_env: Option<&EnvMap>) -> HashMap<String, Option<String>> {
+    let mut env: HashMap<String, Option<String>> = HashMap::new();
+    for key in DAEMON_CLIENT_ENV_KEYS
+pub async fn with_client_env<T, F, Fut>(env: Option<&EnvMap>, fn_: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = T>,
+pub type EnvMap = HashMap<String, String>;
+==========daemon_errors.rs
+pub fn serialize_daemon_error(error: &DaemonError) -> Option<DaemonErrorInfo> {
+    match error
+pub fn deserialize_daemon_create_error(response: &DaemonErrorResponse) -> DaemonError {
+    let error = deserialize_daemon_error(response);
+    if response.error_info.is_some()
+pub fn deserialize_daemon_error(response: &DaemonErrorResponse) -> DaemonError {
+    match &response.error_info
+pub struct SessionCwdIssue {
+pub struct DaemonSessionRecoveringError {
+pub struct MissingSessionCwdError {
+pub struct SessionImportFileNotFoundError {
+pub struct SessionAlreadyActiveError {
+pub enum DaemonErrorInfo {
+pub enum DaemonError {
+pub struct DaemonSessionCreateError {
+pub struct DaemonErrorResponse {
+==========daemon_session_list.rs
+pub fn resolve_attach_model_fallback_message(
+    summary: &SessionSummary,
+    startup_model_fallback_message: Option<&str>,
+) -> Option<String>
+pub fn scheduled_job_registrations(scheduled_jobs: &[AgentCronJob]) -> ScheduledJobRegistrations {
+    let mut registrations = ScheduledJobRegistrations::default();
+    for job in scheduled_jobs
+pub fn is_evictable_empty_session_summary(summary: &SessionSummary) -> bool {
+    summary.message_count == 0
+        && summary.session_name.is_none()
+        && !is_session_summary_busy(summary.is_session_active, summary.has_running_rlm_children)
+        && summary.has_registered_cron_job != Some(true)
+}
+
+pub fn build_session_list(
+    active_sessions: &[Arc<StdMutex<ActiveSessionState>>],
+    saved_sessions: &[SessionInfo],
+    scheduled_jobs: &[AgentCronJob],
+) -> Vec<SessionSummary>
+pub fn summary_for_active_session(
+    active_session: &Arc<StdMutex<ActiveSessionState>>,
+    saved_session: Option<&SessionInfo>,
+    has_active_heartbeat: bool,
+    has_registered_heartbeat: bool,
+    has_registered_cron_job: bool,
+) -> SessionSummary
+pub fn latest_message_activity_at(timestamps: &[f64]) -> Option<String> {
+    let mut latest: Option<f64> = None;
+    for timestamp in timestamps
+pub fn is_summary_current(state: &ActiveSessionState) -> bool {
+    state
+        .summary_state
+        .as_ref()
+        .is_some_and(|status| status.based_on_message_count == state.runtime.session.messages_len)
+}
+
+pub fn summary_for_inactive_session(
+    session: &SessionInfo,
+    has_registered_heartbeat: bool,
+    has_registered_cron_job: bool,
+) -> SessionSummary
+pub fn has_live_session_work(state: &ActiveSessionState) -> bool {
+    let session = &state.runtime.session;
+    session.is_session_active || session.has_running_rlm_children
+}
+
+pub fn active_activity_for_session(state: &ActiveSessionState) -> SessionActivity
+pub fn inactive_lifecycle_for_session(session: &SessionInfo) -> SessionLifecycle {
+    let status = session.state.as_ref().and_then(|state| state.status.as_deref());
+    if status == Some("archived") || status == Some("crash")
+pub fn active_lifecycle_for_session(state: &ActiveSessionState) -> SessionLifecycle {
+    // A resident subagent is a spawned worker, not a user draft.
+    if state.runtime.metadata.as_ref().and_then(|metadata| metadata.kind.as_deref()) == Some("subagent")
+pub fn compact_rlm_text(text: &str, max: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<&str>>().join(" ");
+    if normalized.chars().count() > max
+pub enum SessionLifecycle {
+pub enum SessionActivity {
+pub const SPAWN_CODE_MAX_CHARS: usize = 4000;
+pub struct SessionInfo {
+pub struct SessionState {
+pub struct AgentStatusRecord {
+pub struct AgentCronJob {
+pub struct SessionSummary {
+pub struct ScheduledJobRegistrations {
+==========daemon_socket.rs
+pub fn default_daemon_socket_path() -> String {
+    if crate::utils::pi_user_agent::process_platform() == "win32"
+pub async fn acquire_daemon_socket_path_lease(
+    socket_path: &str,
+) -> Option<std::sync::Arc<DaemonSocketPathLease>>
+pub async fn prepare_daemon_socket_path(
+    socket_path: &str,
+    lease: Option<std::sync::Arc<DaemonSocketPathLease>>,
+) -> Result<(), DaemonSocketError>
+pub fn restrict_daemon_socket_path(socket_path: &str) {
+    if crate::utils::pi_user_agent::process_platform() == "win32"
+pub fn get_daemon_socket_identity(socket_path: &str) -> Option<DaemonSocketIdentity> {
+    if crate::utils::pi_user_agent::process_platform() == "win32"
+pub fn cleanup_daemon_socket_path(
+    socket_path: &str,
+    expected_identity: Option<DaemonSocketIdentity>,
+    lease: Option<&DaemonSocketPathLease>,
+)
+pub fn default_daemon_socket_dir() -> String {
+    let suffix = current_uid().map(|uid| uid.to_string()).unwrap_or_else(|| "user".to_string());
+    Path::new(&std::env::temp_dir())
+        .join(format!("prime-agent-
+pub fn normalize_socket_path_for_daemon(path: &str, base_dir: Option<&str>) -> String {
+    normalize_socket_path(path, base_dir)
+}
+
+#[cfg(test)]
+mod tests
+pub type DaemonSocketCompromiseListener = Box<dyn Fn(&DaemonSocketError) + Send + Sync>;
+pub struct DaemonSocketError {
+pub struct DaemonSocketPathLease {
+pub struct DaemonSocketIdentity {
+==========daemon_supervisor_ownership.rs
+pub fn default_daemon_supervisor_registry_dir() -> String {
+    default_daemon_supervisor_registry_dir_for(std::env::var(DAEMON_SUPERVISOR_REGISTRY_DIR_ENV).ok())
+}
+
+pub fn default_daemon_supervisor_registry_dir_for(environment_value: Option<String>) -> String
+pub fn legacy_daemon_supervisor_registry_dir() -> Option<String> {
+    legacy_daemon_supervisor_registry_dir_for(std::env::var(DAEMON_SUPERVISOR_REGISTRY_DIR_ENV).ok())
+}
+
+pub fn legacy_daemon_supervisor_registry_dir_for(environment_value: Option<String>) -> Option<String>
+pub fn read_legacy_owners_for_socket(
+    legacy_registry_dir: &str,
+    normalized_socket_path: &str,
+) -> Vec<DaemonSupervisorOwnerRecord>
+pub async fn with_daemon_supervisor_registry_guard<T, F>(
+    registry_dir: &str,
+    action: F,
+) -> Result<T, DaemonSupervisorRegistryGuardError>
+where
+    F: FnOnce() -> Result<T, String>,
+pub async fn mutate_daemon_supervisor_owner(
+    generation: &str,
+    expected_token: &str,
+    mutation: Box<dyn FnOnce(&mut DaemonSupervisorOwnerRecord) + Send>,
+    registry_dir: Option<&str>,
+) -> Result<Option<DaemonSupervisorOwnerRecord>, String>
+pub async fn acquire_daemon_supervisor_ownership(
+    options: AcquireDaemonSupervisorOwnershipOptions,
+) -> Result<DaemonSupervisorOwnership, String>
+pub fn is_owner_process_alive(pid: i64) -> bool {
+    static CONFIRMATIONS: once_cell::sync::Lazy<StdMutex<HashMap<i64, i64>>> =
+        once_cell::sync::Lazy::new(|| StdMutex::new(HashMap::new()));
+    if !process_id_exists(pid as i32)
+pub async fn assert_daemon_supervisor_owner_current(
+    owner: &DaemonSupervisorOwnerRecord,
+    validated_fingerprint: Option<&str>,
+    registry_dir: Option<&str>,
+    legacy_registry_dir: Option<&str>,
+) -> Result<String, DaemonSupervisorOwnershipLostError>
+pub async fn acquire_daemon_shutdown_admission() -> Result<Arc<DaemonShutdownAdmission>, String> {
+    let registry_dir = default_daemon_supervisor_registry_dir();
+    let process_start_id = get_process_start_id(std::process::id() as i64);
+    loop
+pub async fn is_daemon_shutdown_admission_active() -> Result<bool, String> {
+    let registry_dir = default_daemon_supervisor_registry_dir();
+    with_daemon_supervisor_registry_guard(&registry_dir,
+pub async fn persist_daemon_startup_fence_from_owner(
+    socket_path: &str,
+    hello: &DaemonSupervisorHelloIdentity,
+    registry_dir: Option<&str>,
+    legacy_registry_dir: Option<&str>,
+) -> Result<(), String>
+pub async fn wait_for_daemon_startup_fence(
+    socket_path: &str,
+    timeout_ms: u64,
+    registry_dir: Option<&str>,
+) -> Result<(), String>
+pub fn is_process_identity_alive(identity: &ProcessIdentity) -> bool {
+    if !is_process_alive(identity.pid as i32)
+pub fn matches_exact_process_identity(identity: &ProcessIdentity) -> bool {
+    if !is_process_alive(identity.pid as i32)
+pub fn canonicalize_filesystem_path(path: &str) -> String {
+    let mut existing_ancestor = resolve_path(path);
+    let mut missing_suffix: Vec<String> = Vec::new();
+    loop
+pub fn owner_directory_path(registry_dir: &str, generation: &str) -> Result<String, String> {
+    if !generation
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-'))
+pub fn is_daemon_supervisor_owner_record(value: &Value) -> bool {
+    let Some(record) = value.as_object() else
+pub fn is_daemon_supervisor_owner_scope(value: &Value) -> bool {
+    let Some(scope) = value.as_object() else
+pub fn read_startup_fence(path: &str) -> Result<Option<DaemonStartupFenceRecord>, String> {
+    let contents = match std::fs::read_to_string(path)
+pub fn startup_fence_path(directory: &str, socket_path: &str) -> String {
+    use sha2::
+pub const DAEMON_SUPERVISOR_REGISTRY_DIR_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR";
+pub type DaemonSupervisorOwnerPhase = String;
+pub const OWNER_PHASE_STARTING: &str = "starting";
+pub const OWNER_PHASE_OWNER: &str = "owner";
+pub const OWNER_PHASE_STOPPING: &str = "stopping";
+pub struct ProcessIdentity {
+pub struct DaemonSupervisorOwnerRecord {
+pub struct DaemonShutdownAdmissionRecord {
+pub struct DaemonSupervisorOwnerScope {
+pub struct DaemonStartupFenceRecord {
+pub struct DaemonSupervisorHelloIdentity {
+pub struct AcquireDaemonSupervisorOwnershipOptions {
+pub struct DaemonSupervisorAlreadyRunningError {
+pub struct DaemonSupervisorOwnershipLostError {
+pub struct DaemonShutdownAdmissionError {
+pub struct DaemonSupervisorRegistryGuardError {
+pub struct RenewableRegistryRecord {
+pub struct DaemonSupervisorOwnership {
+pub struct DaemonShutdownAdmission {
+==========daemon_worker_protocol.rs
+pub fn is_daemon_worker_frame_header(value: &Value) -> bool {
+    let Some(candidate) = value.as_object() else
+pub fn durable_daemon_create_command(command: &DaemonCommand) -> DurableDaemonCreateCommand {
+    DurableDaemonCreateCommand
+pub fn durable_create_command_from_value(value: &Value) -> Option<DurableDaemonCreateCommand> {
+    let candidate = value.as_object()?;
+    if candidate.get("type").and_then(Value::as_str) != Some("create")
+pub fn durable_daemon_worker_descriptor(descriptor: &DaemonWorkerDescriptor) -> DaemonWorkerDescriptor {
+    let version_one_config = if descriptor.version == 1
+pub fn is_daemon_worker_process(environment: &HashMap<String, String>) -> bool {
+    environment.get(DAEMON_WORKER_ROLE_ENV).map(String::as_str) == Some("1")
+}
+
+pub fn is_daemon_worker_process_from_env() -> bool
+pub fn wait_for_daemon_worker_startup_gate(environment: &mut HashMap<String, String>) -> Result<(), String> {
+    let Some(raw_fd) = environment.remove(DAEMON_WORKER_STARTUP_GATE_FD_ENV) else
+pub fn wait_for_daemon_worker_startup_gate(environment: &mut HashMap<String, String>) -> Result<(), String> {
+    let Some(_raw_fd) = environment.remove(DAEMON_WORKER_STARTUP_GATE_FD_ENV) else
+pub fn daemon_worker_instance_id(environment: &HashMap<String, String>) -> Option<String> {
+    environment
+        .get(DAEMON_WORKER_INSTANCE_ID_ENV)
+        .filter(|value| !value.is_empty())
+        .cloned()
+}
+
+pub fn require_daemon_worker_authentication_token(environment: &HashMap<String, String>) -> Result<String, String>
+pub fn worker_command(type_: &str, fields: &[(&str, Value)]) -> DaemonCommand {
+    let mut command = DaemonCommand::new(type_);
+    for (key, value) in fields
+pub fn worker_command_body(command: &DaemonCommand) -> Map<String, Value> {
+    command.body_without_id()
+}
+
+pub fn hello_from_value(value: &Value) -> Option<DaemonHello>
+pub fn join_path(base: &str, name: &str) -> String {
+    let base = base.trim_end_matches(['/', '\\']);
+    format!("
+pub fn file_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+#[cfg(test)]
+mod tests
+pub const SESSION_LEASE_OWNER_ID_ENV: &str = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
+pub const SESSION_LEASES_ENABLED_ENV: &str = "PRIME_AGENT_INTERNAL_SESSION_LEASES";
+pub const DAEMON_WORKER_ROLE_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER";
+pub const DAEMON_WORKER_TOKEN_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN";
+pub const DAEMON_WORKER_INSTANCE_ID_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_INSTANCE_ID";
+pub const DAEMON_WORKER_ACTIVE_SESSION_ID_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
+pub const DAEMON_WORKER_SUPERVISOR_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
+pub const DAEMON_WORKER_RECOVERY_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
+pub const DAEMON_WORKER_STARTUP_GATE_FD_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_STARTUP_GATE_FD";
+pub const DAEMON_WORKER_STARTUP_GATE_COMMIT: &str = "start\n";
+pub const DAEMON_WORKER_ROSTER_CAPABILITY: &str = "agent_roster";
+pub const DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY: &str = "peer_transport";
+pub const ROSTER_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
+pub type DaemonWorkerLifecycle = &'static str;
+pub const DAEMON_WORKER_LIFECYCLE_STARTING: &str = "starting";
+pub const DAEMON_WORKER_LIFECYCLE_READY: &str = "ready";
+pub const DAEMON_WORKER_LIFECYCLE_RECOVERING: &str = "recovering";
+pub const DAEMON_WORKER_LIFECYCLE_STOPPING: &str = "stopping";
+pub const DAEMON_WORKER_LIFECYCLE_FAILED: &str = "failed";
+pub enum DaemonWorkerRosterOutbound {
+pub enum DaemonWorkerFrameHeader {
+pub struct DaemonWorkerPeerGrant {
+pub struct DaemonPeerTransportTicket {
+pub struct DaemonSocketIdentity {
+pub struct DurableDaemonCreateCommand {
+pub struct DaemonWorkerDescriptor {
+==========mutation_drain_latch.rs
+pub struct MutationDrainLatch {
+==========rlm_ledger.rs
+pub async fn read_legacy_rlm_subagent_registry(
+    path: &str,
+    options: ReadLegacyRlmSubagentRegistryOptions,
+) -> Result<Vec<LegacyRlmSubagentRegistryEntry>, std::io::Error>
+pub fn create_rlm_ledger_registry_seed_source() -> Arc<dyn RlmLedgerSeedSource> {
+    Arc::new(RegistrySeedSource)
+}
+
+/// Canonicalize a directory: realpath when it exists, plain resolve otherwise.
+fn canonicalize_dir_path(dir: &str) -> String
+pub fn rlm_ledger_path(agent_dir: &str, sessions_dir: &str) -> String {
+    let canonical = canonicalize_dir_path(sessions_dir);
+    let hash =
+pub fn parse_ledger_line(line: &str, index: usize) -> Result<Option<RlmLedgerRecord>, String> {
+    let parsed: Value = serde_json::from_str(line)
+        .map_err(|error| format!("Malformed RLM ledger line
+pub async fn with_passive_rlm_descendant_infos(
+    saved_sessions: Vec<SessionInfo>,
+    ledger: &RlmSpawnLedger,
+    options: WithPassiveRlmDescendantInfosOptions,
+) -> Vec<SessionInfo>
+pub async fn tombstone_saved_session_delete(
+    ledger: &RlmSpawnLedger,
+    session_path: &str,
+    known_summary_runtime_kind: Option<&str>,
+) -> TombstoneSavedSessionDeleteResult
+pub const RLM_LEDGER_DIR: &str = "rlm-ledger";
+pub const RLM_LEDGER_MAX_BYTES: u64 = 32 * 1024 * 1024;
+pub const RLM_LEDGER_MAX_RECORDS: usize = 100_000;
+pub enum RlmLedgerDeleteReason {
+pub struct RlmLedgerMetaRecord {
+pub struct RlmLedgerSpawnRecord {
+pub struct RlmLedgerRenameRecord {
+pub struct RlmLedgerDeleteRecord {
+pub enum RlmLedgerRecord {
+pub struct RlmLedgerEdge {
+pub struct RlmLedgerSeedRegistryEntry {
+pub struct LegacyRlmSubagentRegistryEntry {
+pub struct ReadLegacyRlmSubagentRegistryOptions {
+pub trait RlmLedgerSeedSource: Send + Sync {
+pub struct RegistrySeedSource;
+pub struct RlmSpawnLedger {
+pub struct RlmSpawnInput {
+pub struct WithPassiveRlmDescendantInfosOptions {
+pub struct TombstoneSavedSessionDeleteResult {
+==========rlm_subagent_display.rs
+pub fn rlm_subagent_display_path(session_dir: &str) -> String {
+    Path::new(session_dir)
+        .join(RLM_SUBAGENT_DISPLAY_FILE)
+        .to_string_lossy()
+        .to_string()
+}
+
+pub fn is_rlm_subagent_display_entry(value: &serde_json::Value) -> bool
+pub fn write_rlm_subagent_display_entry(entry: &RlmSubagentDisplayEntry) -> Result<bool, std::io::Error> {
+    let path = rlm_subagent_display_path(&entry.session_dir);
+    if entry.status != "deleted"
+pub async fn read_rlm_subagent_display_entry(
+    session_dir: &str,
+    on_read_error: Option<&(dyn Fn() + Send + Sync)>,
+) -> Option<RlmSubagentDisplayEntry>
+pub struct RlmSubagentModel {
+pub struct RlmSubagentDisplayEntry {
+==========saved_session_info.rs
+pub fn serialize_saved_session_info(session: &SessionInfo) -> DaemonSavedSessionInfo {
+    DaemonSavedSessionInfo
+pub fn deserialize_saved_session_info(session: &DaemonSavedSessionInfo) -> AgentConnectionSavedSessionInfo {
+    AgentConnectionSavedSessionInfo
+pub struct AgentConnectionSavedSessionInfo {
+==========snapshot_transcript_cache.rs
+pub fn create_snapshot_transcript_chunks(
+    options: CreateSnapshotTranscriptChunksOptions,
+) -> SnapshotTranscriptChunks
+pub const SNAPSHOT_TARGET_CHUNK_BYTES: usize = 512 * 1024;
+pub const SNAPSHOT_MEMORY_CACHE_BYTES: usize = 4 * 1024 * 1024;
+pub struct SnapshotTranscriptCacheOptions {
+pub struct CreateSnapshotTranscriptChunksOptions {
+pub struct SnapshotTranscriptAborted;
+pub struct SnapshotTranscriptChunks {
+pub struct SnapshotTranscriptCache {
+pub struct SnapshotTranscriptRetain {
+==========worker_recovery_journal.rs
+pub fn is_worker_recovery_record(value: &Value) -> bool {
+    let Some(candidate) = value.as_object() else
+pub struct WorkerRecoveryRecord {
+pub struct WorkerRecoveryRecordInput {
+pub struct WorkerRecoveryJournal {
+==========daemon_extension_binding.rs
+pub fn slim_session_event_for_wire(event: &Value) -> Value {
+    let Some(candidate) = event.as_object() else
+pub async fn bind_active_session_state(
+    state: &mut ActiveSessionState,
+    session: Arc<dyn DaemonExtensionBindingSession>,
+    callbacks: ActiveSessionBindingCallbacks,
+)
+pub fn register_extension_ui_request(
+    state: &mut ActiveSessionState,
+    request_id: &str,
+    resolve: Box<dyn FnOnce(DaemonExtensionUIResponse) + Send>,
+)
+pub async fn reload_with_client_env(
+    session: Arc<dyn DaemonExtensionBindingSession>,
+    client_env: Option<EnvMap>,
+)
+pub fn exec_env_provider(client_env: Option<&EnvMap>) -> std::collections::HashMap<String, Option<String>> {
+    exec_env_for_session(client_env)
+}
+
+#[cfg(test)]
+mod tests
+pub enum DaemonOutbound {
+pub trait DaemonExtensionBindingSession: Send + Sync {
+pub struct ExtensionBindingInput {
+pub struct ExtensionBindingError {
+pub struct ActiveSessionBindingCallbacks {
+pub struct ExtensionUiContext {
+pub type DialogFuture = futures::future::BoxFuture<'static, DialogResult>;
+pub enum DialogResponseKind {
+pub struct DialogResult {
+pub struct CommandContextActions {

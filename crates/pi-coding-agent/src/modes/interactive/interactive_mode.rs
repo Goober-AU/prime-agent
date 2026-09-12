@@ -48,7 +48,7 @@ pub const AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL: &str = "Message";
 /// `ASYNC_BASH_COMPLETION_PREVIEW_LABEL`
 pub const ASYNC_BASH_COMPLETION_PREVIEW_LABEL: &str = "Bash";
 
-/// `APP_NAME`
+/// `APP_NAME` (config.ts). The TypeScript constant is `piConfigName || "pi"`.
 pub fn app_name() -> String {
     crate::utils::tools_manager::app_name()
 }
@@ -326,7 +326,7 @@ impl BrandSplashHeader {
             Some(logo) => logo.split('\n').map(|line| line.to_string()).collect(),
             None => {
                 if logo_max_rows >= 8.0 && logo_max_width >= 16.0 {
-                    super::super::themes::optimus_logo::get_optimus_logo(logo_max_width, logo_max_rows)
+                    crate::themes::optimus_logo::get_optimus_logo(logo_max_width, logo_max_rows)
                 } else {
                     Vec::new()
                 }
@@ -538,11 +538,11 @@ pub fn initial_render_messages(messages: Vec<AgentMessage>) -> Vec<AgentMessage>
     }
     let mut tool_call_messages: HashMap<String, (usize, AgentMessage)> = HashMap::new();
     for (index, message) in messages.iter().enumerate() {
-        let AgentMessage::Assistant(assistant) = message else {
+        let AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) = message else {
             continue;
         };
         for content in &assistant.content {
-            if let pi_ai::types::AssistantContent::ToolCall(tool_call) = content {
+            if let pi_ai::types::ContentBlock::ToolCall(tool_call) = content {
                 tool_call_messages.insert(tool_call.id.clone(), (index, message.clone()));
             }
         }
@@ -553,11 +553,11 @@ pub fn initial_render_messages(messages: Vec<AgentMessage>) -> Vec<AgentMessage>
         let visible_messages = &messages[start_index..];
         let mut visible_tool_call_ids: HashSet<String> = HashSet::new();
         for message in visible_messages {
-            let AgentMessage::Assistant(assistant) = message else {
+            let AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) = message else {
                 continue;
             };
             for content in &assistant.content {
-                if let pi_ai::types::AssistantContent::ToolCall(tool_call) = content {
+                if let pi_ai::types::ContentBlock::ToolCall(tool_call) = content {
                     visible_tool_call_ids.insert(tool_call.id.clone());
                 }
             }
@@ -565,7 +565,7 @@ pub fn initial_render_messages(messages: Vec<AgentMessage>) -> Vec<AgentMessage>
 
         let mut required_tool_call_ids_by_message: HashMap<usize, (AgentMessage, HashSet<String>)> = HashMap::new();
         for message in visible_messages {
-            let AgentMessage::ToolResult(tool_result) = message else {
+            let AgentMessage::Message(pi_ai::types::Message::ToolResult(tool_result)) = message else {
                 continue;
             };
             if visible_tool_call_ids.contains(&tool_result.tool_call_id) {
@@ -596,14 +596,14 @@ pub fn initial_render_messages(messages: Vec<AgentMessage>) -> Vec<AgentMessage>
         let required_tool_call_messages: Vec<AgentMessage> = required_entries
             .into_iter()
             .map(|(_, message, tool_call_ids)| {
-                let AgentMessage::Assistant(mut assistant) = message else {
+                let AgentMessage::Message(pi_ai::types::Message::Assistant(mut assistant)) = message else {
                     return message;
                 };
                 assistant.content.retain(|content| match content {
-                    pi_ai::types::AssistantContent::ToolCall(tool_call) => tool_call_ids.contains(&tool_call.id),
+                    pi_ai::types::ContentBlock::ToolCall(tool_call) => tool_call_ids.contains(&tool_call.id),
                     _ => true,
                 });
-                AgentMessage::Assistant(assistant)
+                AgentMessage::Message(pi_ai::types::Message::Assistant(assistant))
             })
             .collect();
         let mut combined = required_tool_call_messages;
@@ -620,15 +620,15 @@ pub fn omit_orphan_tool_results(messages: Vec<AgentMessage>) -> Vec<AgentMessage
     let mut renderable_messages: Vec<AgentMessage> = Vec::new();
     for message in messages {
         match &message {
-            AgentMessage::Assistant(assistant) => {
+            AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) => {
                 for content in &assistant.content {
-                    if let pi_ai::types::AssistantContent::ToolCall(tool_call) = content {
+                    if let pi_ai::types::ContentBlock::ToolCall(tool_call) = content {
                         rendered_tool_call_ids.insert(tool_call.id.clone());
                     }
                 }
                 renderable_messages.push(message);
             }
-            AgentMessage::ToolResult(tool_result) => {
+            AgentMessage::Message(pi_ai::types::Message::ToolResult(tool_result)) => {
                 if rendered_tool_call_ids.contains(&tool_result.tool_call_id) {
                     renderable_messages.push(message);
                 }
@@ -782,7 +782,7 @@ pub fn update_args_include_self(args: &[String]) -> bool {
         return true;
     };
     let normalized = positional.to_lowercase();
-    normalized == "self" || normalized == "pi" || normalized == APP_NAME.to_lowercase()
+    normalized == "self" || normalized == "pi" || normalized == app_name().to_lowercase()
 }
 
 /// Port of `argsIncludeSessionSelection`.
@@ -1070,8 +1070,8 @@ pub struct SubagentSummaryLine {
     pub get_context_label: Box<dyn Fn() -> Option<String> + Send + Sync>,
     pub get_override_label: Box<dyn Fn() -> Option<String> + Send + Sync>,
     pub focused: bool,
-    counts: SubagentSummaryCounts,
-    openable: bool,
+    pub counts: SubagentSummaryCounts,
+    pub openable: bool,
 }
 
 impl SubagentSummaryLine {
@@ -1171,6 +1171,12 @@ pub fn count_roster_subagent_statuses(
         }
     }
     counts
+}
+
+/// `{ summaries(): SessionSummary[]; dispose(): Promise<void> }`
+pub trait RosterBar: Send + Sync {
+    fn summaries(&self) -> Vec<SessionSummary>;
+    fn dispose(&self) -> futures::future::BoxFuture<'static, ()>;
 }
 
 /// Port of `InteractiveMode`.
@@ -3111,9 +3117,7 @@ fn basename(path: &str) -> String {
     path.replace('\\', "/").split('/').next_back().unwrap_or("").to_string()
 }
 
-fn home_dir() -> String {
-    std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()
-}
+
 
 fn resolve_path(path: &str) -> String {
     std::fs::canonicalize(path)
@@ -3229,7 +3233,7 @@ fn format_key_text(keys: &[String], platform: &str) -> String {
 fn starts_agent_run(message: &AgentMessage) -> bool {
     match message {
         AgentMessage::Message(pi_ai::types::Message::User(_)) => true,
-        AgentMessage::Custom(custom) => custom.role() != "assistant",
+        AgentMessage::Custom(custom) => custom.role != "assistant",
         _ => false,
     }
 }
@@ -3627,5 +3631,745 @@ impl InteractiveMode {
     /// Port of `remapImageMarkers`.
     pub fn remap_image_markers(&self, text: &str, remaps: &HashMap<i64, i64>) -> String {
         remap_image_markers(text, remaps)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_ai::types::{ContentBlock, TextContent, ToolCall, ToolResultMessage};
+
+    fn assistant_with_tool_calls(ids: &[&str]) -> AgentMessage {
+        let content = ids
+            .iter()
+            .map(|id| {
+                ContentBlock::ToolCall(ToolCall::new(*id, "read", serde_json::Map::new()))
+            })
+            .collect();
+        AgentMessage::Message(pi_ai::types::Message::Assistant(pi_ai::types::AssistantMessage {
+            content,
+            ..Default::default()
+        }))
+    }
+
+    fn tool_result(id: &str) -> AgentMessage {
+        AgentMessage::Message(pi_ai::types::Message::ToolResult(ToolResultMessage::new(
+            id,
+            "read",
+            Vec::new(),
+        )))
+    }
+
+    fn user_message(text: &str) -> AgentMessage {
+        AgentMessage::Message(pi_ai::types::Message::User(pi_ai::types::UserMessage::new(
+            pi_ai::types::UserContent::Text(text.to_string()),
+            0,
+        )))
+    }
+
+    #[test]
+    fn start_hints_and_random_selection() {
+        assert_eq!(START_HINTS.len(), 5);
+        assert_eq!(START_HINTS[0], "Try \"refactor @<filepath>\"");
+        assert_eq!(get_random_start_hint(&|| 0.0), START_HINTS[0]);
+        assert_eq!(get_random_start_hint(&|| 0.99), START_HINTS[4]);
+        // A random value of exactly 1 clamps to the last hint instead of panicking.
+        assert_eq!(get_random_start_hint(&|| 1.0), START_HINTS[4]);
+    }
+
+    #[test]
+    fn queued_preview_labels_only_unlabeled_messages() {
+        assert_eq!(format_queued_message_preview("hello", QueueLabel::Steering), "Steering: hello");
+        assert_eq!(format_queued_message_preview("hello", QueueLabel::FollowUp), "Follow-up: hello");
+        assert_eq!(format_queued_message_preview("Heartbeat: ping", QueueLabel::Steering), "Heartbeat: ping");
+        assert_eq!(format_queued_message_preview("Goal: x", QueueLabel::Steering), "Goal: x");
+        assert_eq!(format_queued_message_preview("Message: x", QueueLabel::Steering), "Message: x");
+        assert_eq!(format_queued_message_preview("Bash: x", QueueLabel::Steering), "Bash: x");
+    }
+
+    #[test]
+    fn splash_cwd_shortens_the_home_directory() {
+        let home = home_dir().replace('\\', "/");
+        if !home.is_empty() {
+            assert_eq!(format_splash_cwd(&home), "~");
+            assert_eq!(format_splash_cwd(&format!("{home}/work")), "~/work");
+        }
+        assert_eq!(format_splash_cwd("C:\\work\\repo"), "C:/work/repo");
+    }
+
+    #[test]
+    fn merge_subagent_snapshot_keeps_previous_identity_for_active_updates() {
+        let previous = AgentConnectionRlmChildAgentSnapshot {
+            id: "c1".into(),
+            parent_id: Some("p1".into()),
+            active_session_id: Some("s1".into()),
+            status: "running".into(),
+            activity: Some("working".into()),
+            ..Default::default()
+        };
+        let incoming = AgentConnectionRlmChildAgentSnapshot {
+            id: "c1".into(),
+            status: "running".into(),
+            ..Default::default()
+        };
+        let merged = merge_subagent_snapshot(&previous, &incoming);
+        assert_eq!(merged.parent_id.as_deref(), Some("p1"));
+        assert_eq!(merged.active_session_id.as_deref(), Some("s1"));
+        assert_eq!(merged.activity.as_deref(), Some("working"));
+
+        let terminal = AgentConnectionRlmChildAgentSnapshot {
+            id: "c1".into(),
+            status: "completed".into(),
+            ..Default::default()
+        };
+        let merged = merge_subagent_snapshot(&previous, &terminal);
+        assert_eq!(merged.active_session_id, None);
+        assert_eq!(merged.activity, None);
+    }
+
+    #[test]
+    fn truncate_path_middle_keeps_the_tail() {
+        assert_eq!(truncate_path_middle("src/a.rs", 100.0), "src/a.rs");
+        assert_eq!(truncate_path_middle("/very/long/path/file.rs", 12.0), "\u{2026}/path/file.rs");
+        assert_eq!(truncate_path_middle("/x/y.rs", 1.0), "\u{2026}");
+    }
+
+    #[test]
+    fn payload_getters_match_the_typescript_type_checks() {
+        let payload = serde_json::json!({
+            "text": "hello",
+            "number": 3,
+            "boolean": true,
+            "strings": ["a", "b"],
+            "mixed": ["a", 1],
+            "notify": "warning",
+            "placement": "belowEditor",
+            "indicator": { "frames": ["a"], "intervalMs": 250 }
+        });
+        assert_eq!(get_payload_string(&payload, "text").as_deref(), Some("hello"));
+        assert_eq!(get_payload_string(&payload, "number"), None);
+        assert_eq!(get_payload_number(&payload, "number"), Some(3.0));
+        assert_eq!(get_payload_boolean(&payload, "boolean"), Some(true));
+        assert_eq!(get_payload_string_array(&payload, "strings"), Some(vec!["a".into(), "b".into()]));
+        assert_eq!(get_payload_string_array(&payload, "mixed"), None);
+        assert_eq!(get_payload_string_array(&payload, "missing"), None);
+        assert_eq!(get_payload_notify_type(&payload, "notify"), Some(NotifyType::Warning));
+        assert_eq!(get_payload_notify_type(&payload, "text"), None);
+        assert_eq!(get_payload_widget_placement(&payload, "placement"), Some(WidgetPlacement::BelowEditor));
+        assert_eq!(get_payload_widget_placement(&payload, "text"), None);
+        let indicator = get_payload_working_indicator_options(&payload, "indicator").expect("indicator");
+        assert_eq!(indicator.frames, Some(vec!["a".to_string()]));
+        assert_eq!(indicator.interval_ms, Some(250.0));
+        assert_eq!(get_payload_working_indicator_options(&payload, "strings"), None);
+    }
+
+    #[test]
+    fn update_args_include_self_follows_the_flag_rules() {
+        let args = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<String>>();
+        assert!(update_args_include_self(&args(&[])));
+        assert!(update_args_include_self(&args(&["--self"])));
+        assert!(!update_args_include_self(&args(&["--self", "--extensions"])));
+        assert!(!update_args_include_self(&args(&["--extension", "foo"])));
+        assert!(update_args_include_self(&args(&["self"])));
+        assert!(update_args_include_self(&args(&["pi"])));
+        assert!(update_args_include_self(&args(&[&app_name()])));
+        assert!(!update_args_include_self(&args(&["other"])));
+        // `--daemon-socket <path>` consumes its value, so the path is never positional.
+        assert!(update_args_include_self(&args(&["--daemon-socket", "other"])));
+    }
+
+    #[test]
+    fn relaunch_and_child_args_keep_the_daemon_socket() {
+        let args = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<String>>();
+        assert_eq!(
+            build_update_relaunch_args(&args(&["--verbose"]), Some("/tmp/s.json")),
+            args(&["--verbose", "--resume", "/tmp/s.json"])
+        );
+        assert_eq!(
+            build_update_relaunch_args(&args(&["--continue"]), Some("/tmp/s.json")),
+            args(&["--continue"])
+        );
+        assert_eq!(build_update_relaunch_args(&args(&["--verbose"]), None), args(&["--verbose"]));
+        assert_eq!(
+            build_update_child_args(&args(&["--verbose"]), "/tmp/d.sock"),
+            args(&["--verbose", "--daemon-socket", "/tmp/d.sock"])
+        );
+        assert_eq!(
+            build_update_child_args(&args(&["--daemon-socket", "/x"]), "/tmp/d.sock"),
+            args(&["--daemon-socket", "/x"])
+        );
+        assert_eq!(resolve_interactive_update_daemon_socket_path(&args(&["--daemon-socket", "/x"]), "/a"), "/x");
+        assert_eq!(resolve_interactive_update_daemon_socket_path(&args(&["--daemon-socket"]), "/a"), "/a");
+        assert_eq!(resolve_interactive_update_daemon_socket_path(&args(&["--verbose"]), "/a"), "/a");
+    }
+
+    #[test]
+    fn execve_failure_throws_requires_node_26_1() {
+        assert!(execve_failure_throws("26.1.0"));
+        assert!(execve_failure_throws("27.0.0"));
+        assert!(!execve_failure_throws("26.0.0"));
+        assert!(!execve_failure_throws("22.11.0"));
+        assert!(!execve_failure_throws("not-a-version"));
+    }
+
+    #[test]
+    fn try_exec_update_relaunch_skips_unsupported_platforms() {
+        let launch = CliSubprocessLaunchSpec { command: "node".into(), args: vec!["index.js".into()] };
+        let mut options = UpdateRelaunchExecOptions {
+            platform: "win32".into(),
+            node_version: "26.1.0".into(),
+            cwd: "/tmp".into(),
+            previous_cwd: "/".into(),
+            environment: HashMap::new(),
+            chdir: Box::new(|_| {}),
+            execve: Some(Box::new(|_, _, _| {})),
+        };
+        assert!(!try_exec_update_relaunch(&launch, &mut options));
+        options.platform = "linux".into();
+        assert!(try_exec_update_relaunch(&launch, &mut options));
+        options.execve = None;
+        assert!(!try_exec_update_relaunch(&launch, &mut options));
+    }
+
+    #[test]
+    fn initial_render_messages_keeps_orphan_tool_calls_attached() {
+        // Under the limit: the messages are returned unchanged.
+        let small = vec![user_message("hi"), assistant_with_tool_calls(&["t1"]), tool_result("t1")];
+        assert_eq!(initial_render_messages(small.clone()).len(), small.len());
+
+        // Over the limit: the required assistant tool call is prepended.
+        let mut messages: Vec<AgentMessage> = Vec::new();
+        messages.push(assistant_with_tool_calls(&["old"]));
+        for index in 0..INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT {
+            messages.push(user_message(&format!("m{index}")));
+        }
+        messages.push(tool_result("old"));
+        let rendered = initial_render_messages(messages);
+        assert_eq!(rendered.len(), INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT + 2);
+        assert_eq!(rendered[0].role(), "assistant");
+        assert_eq!(rendered[1].role(), "toolResult");
+    }
+
+    #[test]
+    fn omit_orphan_tool_results_drops_unmatched_results() {
+        let messages = vec![
+            assistant_with_tool_calls(&["t1"]),
+            tool_result("t1"),
+            tool_result("t2"),
+            user_message("hi"),
+        ];
+        let kept = omit_orphan_tool_results(messages);
+        assert_eq!(kept.len(), 3);
+        assert_eq!(kept[1].role(), "toolResult");
+    }
+
+    #[test]
+    fn dead_terminal_errors_match_the_known_codes() {
+        assert!(is_dead_terminal_error(Some("EIO")));
+        assert!(is_dead_terminal_error(Some("EPIPE")));
+        assert!(is_dead_terminal_error(Some("ENOTCONN")));
+        assert!(!is_dead_terminal_error(Some("ECONNRESET")));
+        assert!(!is_dead_terminal_error(None));
+    }
+
+    #[test]
+    fn agent_depth_label_hides_the_root_without_children() {
+        assert_eq!(format_agent_depth_label(None, false), None);
+        assert_eq!(format_agent_depth_label(Some(0.0), false), None);
+        assert_eq!(format_agent_depth_label(Some(0.0), true), Some("depth 0".to_string()));
+        assert_eq!(format_agent_depth_label(Some(2.0), false), Some("depth 2".to_string()));
+    }
+
+    #[test]
+    fn merge_older_history_rejects_a_discontinuous_range() {
+        let current = LoadedAgentConnectionHistory {
+            window: AgentConnectionHistoryWindow {
+                version: 1.0,
+                generation: "g".into(),
+                representation: "jsonl".into(),
+                tip_entry_id: Some("t".into()),
+                total_message_count: 3.0,
+                start_index: 1.0,
+                entry_ids: vec!["b".into(), "c".into()],
+                has_older: true,
+                order: "chronological".into(),
+            },
+            messages: vec![user_message("b"), user_message("c")],
+        };
+        let good = AgentConnectionHistoryRange {
+            window: AgentConnectionHistoryWindow {
+                version: 1.0,
+                generation: "g".into(),
+                representation: "jsonl".into(),
+                tip_entry_id: Some("t".into()),
+                total_message_count: 3.0,
+                start_index: 0.0,
+                entry_ids: vec!["a".into()],
+                has_older: false,
+                order: "chronological".into(),
+            },
+            messages: vec![user_message("a")],
+        };
+        let merged = merge_older_agent_connection_history(&current, &good).expect("merged");
+        assert_eq!(merged.window.entry_ids, vec!["a".to_string(), "b".into(), "c".into()]);
+        assert_eq!(merged.messages.len(), 3);
+
+        let mut bad = good.clone();
+        bad.window.generation = "other".into();
+        assert_eq!(
+            merge_older_agent_connection_history(&current, &bad).unwrap_err(),
+            "Older history range does not continue the pinned snapshot"
+        );
+
+        let mut overlapping = good;
+        overlapping.window.entry_ids = vec!["b".into()];
+        overlapping.messages = vec![user_message("b")];
+        assert_eq!(
+            merge_older_agent_connection_history(&current, &overlapping).unwrap_err(),
+            "Older history range overlaps already loaded messages"
+        );
+    }
+
+    #[test]
+    fn get_path_command_argument_handles_quotes_and_spaces() {
+        let mode = test_mode();
+        assert_eq!(mode.get_path_command_argument("/export", "/export"), None);
+        assert_eq!(mode.get_path_command_argument("/export ", "/export"), None);
+        assert_eq!(mode.get_path_command_argument("/export a.md", "/export"), Some("a.md".to_string()));
+        assert_eq!(
+            mode.get_path_command_argument("/export \"a b.md\"", "/export"),
+            Some("a b.md".to_string())
+        );
+        assert_eq!(mode.get_path_command_argument("/import 'a.md'", "/import"), Some("a.md".to_string()));
+        assert_eq!(mode.get_path_command_argument("/export \"unclosed", "/export"), None);
+    }
+
+    #[test]
+    fn capitalize_key_keeps_esc_lowercase() {
+        let mode = test_mode();
+        assert_eq!(mode.capitalize_key("ctrl+o"), "Ctrl+O");
+        assert_eq!(mode.capitalize_key("esc"), "esc");
+        assert_eq!(mode.capitalize_key("shift+esc/ctrl+o"), "Shift+esc/Ctrl+O");
+    }
+
+    #[test]
+    fn format_goal_elapsed_scales_units() {
+        let mode = test_mode();
+        assert_eq!(mode.format_goal_elapsed(5.0), "5s");
+        assert_eq!(mode.format_goal_elapsed(65.0), "1m 05s");
+        assert_eq!(mode.format_goal_elapsed(3661.0), "1h 01m");
+    }
+
+    #[test]
+    fn format_working_elapsed_scales_units() {
+        let mode = test_mode();
+        assert_eq!(mode.format_working_elapsed(1_000.0), "1s");
+        assert_eq!(mode.format_working_elapsed(65_000.0), "1m 05s");
+        assert_eq!(mode.format_working_elapsed(3_661_000.0), "1h 01m 01s");
+        assert_eq!(mode.format_working_elapsed(90_000_000.0), "1d 01h 00m 00s");
+    }
+
+    #[test]
+    fn queue_selection_and_tray_labels_use_the_connection_state() {
+        let mut mode = test_mode();
+        mode.connection_state = Some(AgentConnectionState {
+            session_id: "s1".into(),
+            cwd: "/repo".into(),
+            message_count: 2.0,
+            model: Some(Model::new("glm-5.3", "GLM 5.3", "openai-completions", "anthropic", "https://x.invalid")),
+            thinking_level: ThinkingLevel::High,
+            service_tier: Some(Some("priority".to_string())),
+            ..Default::default()
+        });
+        assert_eq!(mode.get_current_cwd(), "/repo");
+        assert_eq!(mode.get_current_model_id().as_deref(), Some("glm-5.3"));
+        assert_eq!(mode.get_model_tray_label(), "GLM 5.3 \u{2022} high \u{2022} fast");
+        assert!(!mode.is_new_chat());
+
+        let mut fresh = test_mode();
+        fresh.connection_state = Some(AgentConnectionState::default());
+        assert!(fresh.is_new_chat());
+        assert_eq!(fresh.get_model_tray_label(), "\u{2014}");
+    }
+
+    #[test]
+    fn context_usage_adds_in_flight_tokens_only_while_streaming() {
+        let mut mode = test_mode();
+        mode.connection_state = Some(AgentConnectionState {
+            context_usage: ContextUsage { tokens: Some(100.0), context_window: 1000.0, percent: Some(10.0) },
+            is_streaming: false,
+            ..Default::default()
+        });
+        let usage = mode.get_connection_context_usage().expect("usage");
+        assert_eq!(usage.tokens, Some(100.0));
+        assert_eq!(usage.percent, Some(10.0));
+    }
+
+    #[test]
+    fn goal_tray_labels_follow_the_status() {
+        let mode = test_mode();
+        let mut goal = GoalState::empty();
+        goal.status = "active".to_string();
+        goal.time_used_seconds = 61.0;
+        assert_eq!(mode.get_tray_goal_label_for(&goal).as_deref(), Some("Pursuing goal (1m 01s)"));
+        goal.status = "idle".to_string();
+        assert_eq!(mode.get_tray_goal_label_for(&goal), None);
+    }
+
+    #[test]
+    fn goal_announcements_track_status_and_reason_changes() {
+        let mut mode = test_mode();
+        let mut goal = GoalState::empty();
+        mode.set_goal_announcement_baseline(&goal);
+        assert!(!mode.should_announce_goal_update(&goal));
+
+        goal.status = "active".to_string();
+        assert!(mode.should_announce_goal_update(&goal));
+        assert!(!mode.should_announce_goal_update(&goal));
+
+        goal.status = "paused".to_string();
+        goal.last_reason = Some("budget".to_string());
+        assert!(mode.should_announce_goal_update(&goal));
+        goal.last_reason = Some("other".to_string());
+        assert!(mode.should_announce_goal_update(&goal));
+        assert!(!mode.should_announce_goal_update(&goal));
+    }
+
+    #[test]
+    fn subagent_summary_seeding_and_removal_follow_the_status_rules() {
+        let mut mode = test_mode();
+        let child = AgentConnectionRlmChildAgentSnapshot {
+            id: "c1".into(),
+            parent_id: Some("p1".into()),
+            status: "running".into(),
+            activity: Some("working".into()),
+            ..Default::default()
+        };
+        mode.seed_subagent_summary(Some(&[child.clone()]));
+        assert_eq!(mode.subagent_snapshots.len(), 1);
+        assert_eq!(mode.subagent_summary_line.counts.running, 1);
+        assert_eq!(mode.subagent_summary_line.counts.total, 1);
+
+        let cancelled = AgentConnectionRlmChildAgentSnapshot { status: "cancelled".into(), ..child.clone() };
+        mode.update_subagent_summary(cancelled);
+        assert!(mode.subagent_snapshots.is_empty());
+    }
+
+    #[test]
+    fn remove_subagent_snapshot_removes_descendants() {
+        let mut mode = test_mode();
+        let parent = AgentConnectionRlmChildAgentSnapshot { id: "p".into(), status: "running".into(), ..Default::default() };
+        let child = AgentConnectionRlmChildAgentSnapshot {
+            id: "c".into(),
+            parent_id: Some("p".into()),
+            status: "running".into(),
+            ..Default::default()
+        };
+        mode.subagent_snapshots.insert("p".into(), parent);
+        mode.subagent_snapshots.insert("c".into(), child);
+        mode.remove_subagent_snapshot("p");
+        assert!(mode.subagent_snapshots.is_empty());
+    }
+
+    #[test]
+    fn connection_state_events_patch_the_snapshot() {
+        let mut mode = test_mode();
+        mode.connection_state = Some(AgentConnectionState::default());
+        mode.update_connection_state_from_event(&AgentConnectionSessionEvent::AgentStart);
+        assert!(mode.is_agent_streaming());
+        mode.update_connection_state_from_event(&AgentConnectionSessionEvent::AgentEnd { messages: Vec::new() });
+        assert!(!mode.is_agent_streaming());
+        mode.update_connection_state_from_event(&AgentConnectionSessionEvent::MessageEnd {
+            message: user_message("hi"),
+        });
+        assert_eq!(mode.connection_state.as_ref().expect("state").message_count, 1.0);
+        mode.update_connection_state_from_event(&AgentConnectionSessionEvent::BashStart {
+            command: "ls".into(),
+            exclude_from_context: false,
+            transient: None,
+            run_id: None,
+        });
+        assert!(mode.is_bash_running());
+        mode.update_connection_state_from_event(&AgentConnectionSessionEvent::BashEnd {
+            exit_code: Some(0),
+            cancelled: false,
+            truncated: false,
+            full_output_path: None,
+            error_message: None,
+            transient: None,
+            run_id: None,
+        });
+        assert!(!mode.is_bash_running());
+        mode.update_connection_state_from_event(&AgentConnectionSessionEvent::SessionInfoChanged {
+            name: Some("named".into()),
+        });
+        assert_eq!(mode.get_current_session_name().as_deref(), Some("named"));
+    }
+
+    #[test]
+    fn escape_repeat_arms_and_consumes_the_action_once() {
+        let mut mode = test_mode();
+        mode.arm_escape_repeat("tree");
+        assert_eq!(mode.take_escape_repeat_action(), Some("tree"));
+        assert_eq!(mode.take_escape_repeat_action(), None);
+    }
+
+    #[test]
+    fn ctrl_c_exit_hint_expires_and_clears() {
+        let mut mode = test_mode();
+        assert!(!mode.is_ctrl_c_exit_hint_visible());
+        mode.show_ctrl_c_exit_hint();
+        assert!(mode.is_ctrl_c_exit_hint_visible());
+        mode.clear_ctrl_c_exit_hint(false);
+        assert!(!mode.is_ctrl_c_exit_hint_visible());
+    }
+
+    #[test]
+    fn pasted_images_evict_oldest_beyond_the_cap() {
+        let mut mode = test_mode();
+        let image = |data: &str| ImageContent::new(data, "image/png");
+        mode.remember_pasted_image(image("aaa"), 3.0);
+        mode.remember_pasted_image(image("bbb"), 3.0);
+        assert_eq!(mode.pasted_images.len(), 2);
+        assert_eq!(mode.format_image_marker(1), "[image #1]");
+        assert_eq!(mode.collect_images_for("see [image #2]").len(), 1);
+        assert!(mode.has_pasted_images_for("[image #1]"));
+        assert!(!mode.has_pasted_images_for("no markers"));
+    }
+
+    #[test]
+    fn queue_helpers_use_the_connection_queue() {
+        let mut mode = test_mode();
+        mode.connection_state = Some(AgentConnectionState {
+            session_actions: super::super::interactive_mode_services::SessionActionSnapshot {
+                steering: vec!["s1".into()],
+                follow_ups: vec!["f1".into()],
+                queued_count: 2,
+                active: None,
+            },
+            ..Default::default()
+        });
+        let queue = mode.get_connection_queue();
+        assert_eq!(queue.steering, vec!["s1".to_string()]);
+        assert_eq!(queue.follow_up, vec!["f1".to_string()]);
+        assert_eq!(mode.get_queued_action_count(), 2);
+        assert!(mode.should_suppress_feature_hint());
+        assert_eq!(mode.browse_queue_selection("draft", -1), Some("f1".to_string()));
+    }
+
+    #[test]
+    fn scoped_heartbeats_only_keep_the_session() {
+        let mut mode = test_mode();
+        mode.connection_state = Some(AgentConnectionState {
+            session_id: "s1".into(),
+            active_session_id: Some("a1".into()),
+            ..Default::default()
+        });
+        mode.heartbeat_catalog = vec![
+            AgentConnectionHeartbeat {
+                job: super::super::interactive_mode_services::AgentCronJob {
+                    id: "own".into(),
+                    active_session_id: "a1".into(),
+                    status: "paused".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            AgentConnectionHeartbeat {
+                job: super::super::interactive_mode_services::AgentCronJob {
+                    id: "foreign".into(),
+                    active_session_id: "a2".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ];
+        let heartbeats = mode.get_scoped_heartbeats();
+        assert_eq!(heartbeats.len(), 1);
+        assert_eq!(mode.get_tray_heartbeat_label().as_deref(), Some("1 heartbeat \u{b7} 1 paused"));
+    }
+
+    #[test]
+    fn compact_labels_deduplicate_non_package_extensions() {
+        let mode = test_mode();
+        let extensions = vec![
+            ("/home/u/a/index.ts".to_string(), None),
+            ("/home/u/b/index.ts".to_string(), None),
+        ];
+        let labels = mode.get_compact_extension_labels(&extensions);
+        assert_eq!(labels.len(), 2);
+        assert_ne!(labels[0], labels[1]);
+    }
+
+    #[test]
+    fn compact_package_source_labels_strip_the_prefixes() {
+        let mode = test_mode();
+        let npm = super::super::interactive_mode_services::AgentConnectionSourceInfo {
+            source: "npm:pkg@1.0.0".into(),
+            scope: "user".into(),
+            ..Default::default()
+        };
+        assert_eq!(mode.get_compact_package_source_label(Some(&npm)), "pkg@1.0.0");
+        assert_eq!(mode.get_autocomplete_source_tag(Some(&npm)).as_deref(), Some("user:npm:pkg@1.0.0"));
+        assert_eq!(mode.get_autocomplete_source_label(Some(&npm)).as_deref(), Some("#user:npm:pkg@1.0.0"));
+    }
+
+    #[test]
+    fn scope_groups_follow_the_source_and_scope() {
+        let mode = test_mode();
+        let info = |source: &str, scope: &str| super::super::interactive_mode_services::AgentConnectionSourceInfo {
+            source: source.to_string(),
+            scope: scope.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(mode.get_scope_group(Some(&info("local", "user"))), "user");
+        assert_eq!(mode.get_scope_group(Some(&info("local", "project"))), "project");
+        assert_eq!(mode.get_scope_group(Some(&info("cli", "project"))), "path");
+        assert_eq!(mode.get_scope_group(Some(&info("local", "temporary"))), "path");
+        assert_eq!(mode.get_scope_group(None), "project");
+    }
+
+    #[test]
+    fn thinking_level_completions_mark_the_current_level() {
+        let mut mode = test_mode();
+        mode.connection_state = Some(AgentConnectionState {
+            available_thinking_levels: vec![ThinkingLevel::Off, ThinkingLevel::High],
+            thinking_level: ThinkingLevel::High,
+            ..Default::default()
+        });
+        let completions = mode.get_thinking_level_completions("").expect("completions");
+        assert_eq!(completions.len(), 2);
+        assert_eq!(completions[1].description.as_deref(), Some("Deep reasoning (~16k tokens) (current)"));
+        assert_eq!(mode.get_thinking_level_completions("zzz"), None);
+
+        let mut off_only = test_mode();
+        off_only.connection_state = Some(AgentConnectionState {
+            available_thinking_levels: vec![ThinkingLevel::Off],
+            ..Default::default()
+        });
+        assert_eq!(off_only.get_thinking_level_completions(""), None);
+    }
+
+    #[test]
+    fn heartbeat_argument_completions_filter_by_prefix() {
+        let mode = test_mode();
+        assert_eq!(mode.get_heartbeat_argument_completions("").expect("all").len(), 4);
+        assert_eq!(mode.get_heartbeat_argument_completions("st").expect("filtered").len(), 2);
+        assert_eq!(mode.get_heartbeat_argument_completions("zzz"), None);
+    }
+
+    #[test]
+    fn user_message_helpers_handle_text_and_blocks() {
+        let mode = test_mode();
+        let text = pi_ai::types::UserMessage::new(pi_ai::types::UserContent::Text("hi".into()), 0);
+        assert_eq!(mode.get_user_message_text(&text), "hi");
+        assert!(mode.is_text_only_user_message(&text));
+
+        let blocks = pi_ai::types::UserMessage::new(
+            pi_ai::types::UserContent::Blocks(vec![
+                pi_ai::types::ImageOrTextContent::Text(TextContent::new("a")),
+                pi_ai::types::ImageOrTextContent::Image(ImageContent::new("data", "image/png")),
+            ]),
+            0,
+        );
+        assert_eq!(mode.get_user_message_text(&blocks), "a");
+        assert!(!mode.is_text_only_user_message(&blocks));
+    }
+
+    #[test]
+    fn goal_status_formatting_matches_the_typescript_branches() {
+        let mode = test_mode();
+        let mut goal = GoalState::empty();
+        assert_eq!(mode.format_goal_status(&goal, 120.0), "No active goal");
+        goal.status = "active".to_string();
+        assert_eq!(mode.format_goal_status(&goal, 120.0), "Pursuing goal");
+        goal.objective = Some("ship it".to_string());
+        assert_eq!(mode.format_goal_status(&goal, 120.0), "Goal: ship it");
+        goal.status = "complete".to_string();
+        assert_eq!(mode.format_goal_status(&goal, 120.0), "Goal complete");
+        goal.last_reason = Some("done".to_string());
+        assert_eq!(mode.format_goal_status(&goal, 120.0), "Goal complete: done");
+        goal.status = "error".to_string();
+        goal.last_error = Some("boom".to_string());
+        assert_eq!(mode.format_goal_status(&goal, 120.0), "Goal error: boom");
+    }
+
+    #[test]
+    fn goal_detail_suffix_hides_narrow_details() {
+        let mode = test_mode();
+        assert_eq!(mode.format_goal_detail_suffix(None, 0.0, 120.0), "");
+        assert_eq!(mode.format_goal_detail_suffix(Some("   "), 0.0, 120.0), "");
+        assert_eq!(mode.format_goal_detail_suffix(Some("a\n b"), 0.0, 120.0), ": a b");
+        // The available width must reach 8 columns before the detail is appended.
+        assert_eq!(mode.format_goal_detail_suffix(Some("detail"), 100.0, 104.0), "");
+    }
+
+    #[test]
+    fn model_fallback_warning_prefers_the_live_connection() {
+        let mut mode = test_mode();
+        assert_eq!(mode.get_model_fallback_warning_action(None), ModelFallbackWarningAction::Suppress);
+        assert_eq!(
+            mode.get_model_fallback_warning_action(Some("boom")),
+            ModelFallbackWarningAction::Show
+        );
+        let no_models = crate::core::auth_guidance::format_no_models_available_message();
+        assert_eq!(
+            mode.get_model_fallback_warning_action(Some(&no_models)),
+            ModelFallbackWarningAction::Show
+        );
+        mode.connection_state = Some(AgentConnectionState {
+            model: Some(Model::new("m", "M", "openai-completions", "p", "https://x.invalid")),
+            ..Default::default()
+        });
+        assert_eq!(
+            mode.get_model_fallback_warning_action(Some(&no_models)),
+            ModelFallbackWarningAction::Suppress
+        );
+    }
+
+    #[test]
+    fn run_result_source_defaults_to_the_stash_session_id() {
+        let mut mode = test_mode();
+        mode.prompt_stash_session_id = Some("stash-session".to_string());
+        let result = futures::executor::block_on(mode.run());
+        assert_eq!(result.type_, InteractiveModeRunResultType::AgentsView);
+        assert_eq!(result.type_.as_str(), "agents_view");
+        assert_eq!(result.source.session_id, "stash-session");
+    }
+
+    /// A minimal mode with no connection: enough for the pure helpers above.
+    fn test_mode() -> InteractiveMode {
+        let services = InteractiveModeUiServices {
+            settings_manager: Arc::new(super::super::interactive_mode_services::SettingsManager),
+            model_registry: Arc::new(super::super::interactive_mode_services::ModelRegistry::in_memory()),
+            get_initial_cwd: Box::new(|| "/initial".to_string()),
+            get_initial_session_name: Box::new(|| Some("initial".to_string())),
+            get_themes: Box::new(Vec::new),
+            refresh_mcp_providers: None,
+        };
+        let options = InteractiveModeOptions {
+            migrated_providers: None,
+            model_fallback_message: None,
+            startup_notice: None,
+            initial_message: None,
+            initial_images: None,
+            initial_messages: None,
+            initial_prompts: None,
+            verbose: false,
+            agent_connection: Arc::new(()),
+            daemon_socket_path: None,
+            local_session_host: None,
+            bind_local_session_extensions: false,
+            ui_services: Some(services),
+            on_shutdown: None,
+            return_to_agents_view: false,
+            force_fullscreen: false,
+            agents_view_owns_startup_notices: false,
+            session_depth: None,
+            session_has_children: false,
+            prompt_stash_store: None,
+            prompt_stash_session_id: None,
+        };
+        InteractiveMode::new(options).expect("mode")
     }
 }

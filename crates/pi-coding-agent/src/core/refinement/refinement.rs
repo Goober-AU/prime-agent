@@ -2027,7 +2027,7 @@ pub async fn plan_refinement(
             .unwrap_or(REFINEMENT_MAX_OUTPUT_TOKENS),
     );
     let mut fingerprints: Vec<RefinementOutputFingerprint> = Vec::new();
-    let mut prompt = user_prompt;
+    let mut prompt = user_prompt.clone();
     for attempt in [1u8, 2u8] {
         let response = call_completion(
             &request.complete,
@@ -3217,16 +3217,16 @@ mod tests {
             .build()
             .unwrap();
         let result = runtime
-            .block_on(refine_harness(PlanRefinementRequest {
-                messages: &[],
-                state: &state,
-                history: &[],
-                model: RefineModel { max_tokens: 1000.0 },
-                api_key: "test".to_string(),
-                options: RefineOptions::default(),
-                headers: None,
-                thinking_level: None,
-                complete: Arc::new(|_| {
+            .block_on(refine_harness(
+                &[],
+                &mut state,
+                &[],
+                RefineModel { max_tokens: 1000.0 },
+                "test",
+                RefineOptions::default(),
+                None,
+                None,
+                Arc::new(|_| {
                     Box::pin(async {
                         AssistantMessage {
                             content: vec![AssistantContent::Text {
@@ -3239,7 +3239,7 @@ mod tests {
                         }
                     })
                 }),
-            }))
+            ))
             .expect("refine");
         assert!(result.applied_edits[0].applied);
         assert_eq!(result.scope, Some(HarnessScope::Local));

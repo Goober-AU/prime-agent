@@ -936,7 +936,10 @@ mod tests {
         let model = model();
         let previous = std::env::var("OPENAI_API_KEY").ok();
         std::env::remove_var("OPENAI_API_KEY");
-        let error = create_client(&model, &Context::default(), Some(""), None, None, None).unwrap_err();
+        let error = match create_client(&model, &Context::default(), Some(""), None, None, None) {
+            Err(error) => error,
+            Ok(_) => panic!("expected create_client to fail without an API key"),
+        };
         assert_eq!(
             error,
             "OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument."

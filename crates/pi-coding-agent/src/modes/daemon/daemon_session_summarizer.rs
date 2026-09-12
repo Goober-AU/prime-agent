@@ -320,7 +320,7 @@ pub async fn generate_agent_status(params: GenerateAgentStatusParams) -> Option<
                 &messages, is_working,
             )))]),
             provider_context: None,
-            timestamp: crate::utils::pi_user_agent::now_millis(),
+            timestamp: now_millis(),
         })],
         None,
     );
@@ -506,6 +506,15 @@ fn getrandom_f64(bytes: &mut [u8; 8]) -> Option<f64> {
 
 fn is_session_working(state: &ActiveSessionState) -> bool {
     state.runtime.session.is_session_active
+}
+
+/// `state.runtime.session !== session` for cloned snapshots.
+fn session_identity(session: &ActiveSessionRuntimeSession) -> (String, Option<String>) {
+    (session.session_id.clone(), session.session_file.clone())
+}
+
+fn now_millis() -> i64 {
+    chrono::Utc::now().timestamp_millis()
 }
 
 #[derive(Clone)]
@@ -742,8 +751,7 @@ impl DaemonSessionSummarizer {
             if let Some(failed) = &failed {
                 if failed.content_key == content_key
                     && failed.attempts >= IDLE_GENERATION_ATTEMPT_LIMIT
-                    && crate::utils::pi_user_agent::now_millis() as f64 - failed.last_failure_at
-                        < IDLE_GENERATION_RETRY_BACKOFF_MS as f64
+                    && now_millis() as f64 - failed.last_failure_at < IDLE_GENERATION_RETRY_BACKOFF_MS as f64
                 {
                     return;
                 }
@@ -807,7 +815,7 @@ impl DaemonSessionSummarizer {
                     FailedIdleGeneration {
                         content_key: content_key.clone(),
                         attempts,
-                        last_failure_at: crate::utils::pi_user_agent::now_millis() as f64,
+                        last_failure_at: now_millis() as f64,
                     },
                 );
         }
@@ -827,22 +835,25 @@ impl DaemonSessionSummarizer {
             }
         });
         let Some(result) = result else {
-            self.finish_pass(self, &id, state, false);
+            self.finish_pass(&id, state);
             return;
         };
         // Discard if the session closed, was swapped, or moved to a new turn.
+        let discard = {
+            let state_guard = state.lock().expect("state poisoned");
+            let current_session = state_guard.runtime.session.clone();
+            controller.is_cancelled()
+                || session_identity(&current_session) != session_identity(&session)
+                || is_session_working(&state_guard) != is_working
+                || current_session.messages.len() != message_count
+        };
+        if discard {
+            self.finish_pass(&id, state);
+            return;
+        }
         {
             let mut state = state.lock().expect("state poisoned");
             let current_session = state.runtime.session.clone();
-            if controller.is_cancelled()
-                || current_session.identity() != session.identity()
-                || is_session_working(&state) != is_working
-                || current_session.messages.len() != message_count
-            {
-                drop(state);
-                self.finish_pass(self, &id, state, false);
-                return;
-            }
             // A working refresh carries no verdict; keep the prior one at the same
             // message count so a still-valid needs_input isn't dropped.
             let task_state = result.task_state.clone().or_else(|| {
@@ -886,16 +897,10 @@ impl DaemonSessionSummarizer {
                 }
             }
         }
-        self.finish_pass(self, &id, state, true);
+        self.finish_pass(&id, state);
     }
 
-    fn finish_pass(
-        self: &Arc<Self>,
-        _summarizer: &Arc<Self>,
-        id: &str,
-        state: Arc<StdMutex<ActiveSessionState>>,
-        _completed: bool,
-    ) {
+    fn finish_pass(self: &Arc<Self>, id: &str, state: Arc<StdMutex<ActiveSessionState>>) {
         self.in_flight.lock().expect("in flight poisoned").remove(id);
         // Re-debounce a request that arrived mid-pass instead of dropping it.
         if self.rerun_requested.lock().expect("rerun poisoned").remove(id) {

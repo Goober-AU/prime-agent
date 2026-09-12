@@ -445,11 +445,38 @@ impl DaemonWorkerClient {
     }
 
     pub async fn close(&self) {
-        self.reject_all(DaemonClientError::Message(
-            "Daemon worker client closed".to_string(),
-        ))
-        .await;
-        *self.writer.lock().await = None;
+        self.close_now();
+    }
+
+    /// Synchronous close: `fallbackToSupervisor()` calls `direct.close()` from a
+    /// sync context, so the socket teardown must not require an await.
+    pub fn close_now(&self) {
+        {
+            let mut pending = self.pending.try_lock();
+            if let Ok(pending) = pending.as_mut() {
+                let keys: Vec<String> = pending.keys().cloned().collect();
+                let entries: Vec<PendingWorkerRequest> = keys
+                    .into_iter()
+                    .filter_map(|key| pending.remove(&key))
+                    .collect();
+                for entry in entries {
+                    entry.settle(Err(DaemonClientError::Message(
+                        "Daemon worker client closed".to_string(),
+                    )));
+                }
+            }
+        }
+        if let Ok(mut waiters) = self.hello_waiters.try_lock() {
+            let entries: Vec<WorkerHelloWaiter> = std::mem::take(&mut *waiters);
+            for waiter in entries {
+                let _ = waiter.sender.send(Err(DaemonClientError::Message(
+                    "Daemon worker client closed".to_string(),
+                )));
+            }
+        }
+        if let Ok(mut writer) = self.writer.try_lock() {
+            *writer = None;
+        }
         let task = self.reader_task.lock().expect("worker reader slot poisoned").take();
         if let Some(task) = task {
             task.abort();

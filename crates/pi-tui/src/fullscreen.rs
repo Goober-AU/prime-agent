@@ -1107,18 +1107,27 @@ mod tests {
     #[test]
     fn paint_diffs_rows_and_addresses_absolutely() {
         let mut viewport = FullscreenViewport::new();
-        let mut output = String::new();
-        let mut write = |data: &str| output.push_str(data);
-        viewport.paint(&mut write, &lines(&["a", "b"]), 10, 2, None);
-        assert!(output.starts_with("\x1b[?2026h\x1b[2J\x1b[H"));
-        assert!(output.contains("\x1b[1;1H\x1b[2Ka"));
-        assert!(output.ends_with("\x1b[?2026l"));
+        let output = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        {
+            let output = output.clone();
+            let mut write = move |data: &str| output.borrow_mut().push_str(data);
+            viewport.paint(&mut write, &lines(&["a", "b"]), 10, 2, None);
+        }
+        let first = output.borrow().clone();
+        assert!(first.starts_with("\x1b[?2026h\x1b[2J\x1b[H"));
+        assert!(first.contains("\x1b[1;1H\x1b[2Ka"));
+        assert!(first.ends_with("\x1b[?2026l"));
 
-        output.clear();
-        viewport.paint(&mut write, &lines(&["a", "c"]), 10, 2, None);
-        assert!(!output.contains("\x1b[2J"));
-        assert!(output.contains("\x1b[2;1H\x1b[2Kc"));
-        assert!(!output.contains("\x1b[1;1H"));
+        output.borrow_mut().clear();
+        {
+            let output = output.clone();
+            let mut write = move |data: &str| output.borrow_mut().push_str(data);
+            viewport.paint(&mut write, &lines(&["a", "c"]), 10, 2, None);
+        }
+        let second = output.borrow().clone();
+        assert!(!second.contains("\x1b[2J"));
+        assert!(second.contains("\x1b[2;1H\x1b[2Kc"));
+        assert!(!second.contains("\x1b[1;1H"));
     }
 
     #[test]

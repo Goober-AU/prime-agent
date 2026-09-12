@@ -129,9 +129,9 @@ fn is_assistant_entry(entry: &ContextTreeEntry) -> Option<&AssistantMessage> {
         return None;
     };
     match message {
-        pi_agent_core::types::AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) => {
-            Some(assistant)
-        }
+        pi_agent_core::types::AgentMessage::Message(pi_ai::types::Message::Assistant(
+            assistant,
+        )) => Some(assistant),
         _ => None,
     }
 }
@@ -280,8 +280,10 @@ pub fn branch_entries(entries: &[ContextTreeEntry]) -> Vec<ContextTreeEntry> {
     if entries.is_empty() {
         return Vec::new();
     }
-    let by_id: BTreeMap<String, &ContextTreeEntry> =
-        entries.iter().map(|entry| (entry.id().to_string(), entry)).collect();
+    let by_id: BTreeMap<String, &ContextTreeEntry> = entries
+        .iter()
+        .map(|entry| (entry.id().to_string(), entry))
+        .collect();
     let mut branch: Vec<ContextTreeEntry> = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut current: Option<&ContextTreeEntry> = entries.last();
@@ -291,7 +293,9 @@ pub fn branch_entries(entries: &[ContextTreeEntry]) -> Vec<ContextTreeEntry> {
         }
         seen.insert(entry.id().to_string());
         branch.push(entry.clone());
-        current = entry.parent_id().and_then(|parent| by_id.get(parent).copied());
+        current = entry
+            .parent_id()
+            .and_then(|parent| by_id.get(parent).copied());
     }
     branch.reverse();
     branch
@@ -332,7 +336,11 @@ fn find_session_file(dir: &str) -> Option<String> {
             continue;
         };
         let candidate = (path.to_string_lossy().to_string(), modified);
-        if newest.as_ref().map(|(_, current)| modified > *current).unwrap_or(true) {
+        if newest
+            .as_ref()
+            .map(|(_, current)| modified > *current)
+            .unwrap_or(true)
+        {
             newest = Some(candidate);
         }
     }
@@ -405,7 +413,9 @@ pub fn load_context_tree_child_from_disk(
     let mut label = String::new();
     for entry in &branch {
         if let ContextTreeEntry::Message { message, .. } = entry {
-            if let pi_agent_core::types::AgentMessage::Message(pi_ai::types::Message::User(user)) = message {
+            if let pi_agent_core::types::AgentMessage::Message(pi_ai::types::Message::User(user)) =
+                message
+            {
                 label = compact_label(&read_user_message_text(&user.content), 80);
                 if !label.is_empty() {
                     break;
@@ -501,7 +511,9 @@ pub fn context_tree_entry_from_json(value: &Value) -> Option<ContextTreeEntry> {
     match entry_type {
         "message" => {
             let message = object.get("message")?;
-            let message = serde_json::from_value::<pi_agent_core::types::AgentMessage>(message.clone()).ok()?;
+            let message =
+                serde_json::from_value::<pi_agent_core::types::AgentMessage>(message.clone())
+                    .ok()?;
             Some(ContextTreeEntry::Message {
                 id,
                 parent_id,
@@ -548,15 +560,22 @@ mod tests {
     use pi_ai::types::{AssistantMessage, Message, UserContent, UserMessage};
     use serde_json::json;
 
-    fn assistant_entry(id: &str, parent: Option<&str>, usage: Usage, stop_reason: &str) -> ContextTreeEntry {
+    fn assistant_entry(
+        id: &str,
+        parent: Option<&str>,
+        usage: Usage,
+        stop_reason: &str,
+    ) -> ContextTreeEntry {
         ContextTreeEntry::Message {
             id: id.to_string(),
             parent_id: parent.map(str::to_string),
-            message: pi_agent_core::types::AgentMessage::Message(Message::Assistant(AssistantMessage {
-                usage,
-                stop_reason: stop_reason.to_string(),
-                ..Default::default()
-            })),
+            message: pi_agent_core::types::AgentMessage::Message(Message::Assistant(
+                AssistantMessage {
+                    usage,
+                    stop_reason: stop_reason.to_string(),
+                    ..Default::default()
+                },
+            )),
         }
     }
 
@@ -680,7 +699,8 @@ mod tests {
             },
         ];
         let build = |_entries: &[ContextTreeEntry]| Vec::new();
-        let usage = compute_context_usage_from_entries(&branch, &branch, Some(1000.0), &build).unwrap();
+        let usage =
+            compute_context_usage_from_entries(&branch, &branch, Some(1000.0), &build).unwrap();
         assert!(usage.tokens.is_none());
         assert!(usage.percent.is_none());
         assert_eq!(usage.context_window, 1000.0);
@@ -705,7 +725,8 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let usage = compute_context_usage_from_entries(&branch, &branch, Some(1000.0), &build).unwrap();
+        let usage =
+            compute_context_usage_from_entries(&branch, &branch, Some(1000.0), &build).unwrap();
         assert_eq!(usage.tokens, Some(120.0));
         assert_eq!(usage.percent, Some(12.0));
         assert!(compute_context_usage_from_entries(&branch, &branch, None, &build).is_none());
@@ -786,13 +807,9 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        let node = load_context_tree_child_from_disk(
-            child.to_str().unwrap(),
-            &resolver,
-            &loader,
-            &build,
-        )
-        .unwrap();
+        let node =
+            load_context_tree_child_from_disk(child.to_str().unwrap(), &resolver, &loader, &build)
+                .unwrap();
         assert_eq!(node.id, "sub-1");
         assert_eq!(node.label, "hello");
         assert_eq!(node.status, "done");
@@ -850,7 +867,9 @@ mod tests {
             &build,
         );
         assert_eq!(skipped.len(), 1);
-        assert!(load_context_tree_children_from_disk(None, &resolver, None, &loader, &build).is_empty());
+        assert!(
+            load_context_tree_children_from_disk(None, &resolver, None, &loader, &build).is_empty()
+        );
         assert!(load_context_tree_children_from_disk(
             Some("missing-dir-xyz"),
             &resolver,

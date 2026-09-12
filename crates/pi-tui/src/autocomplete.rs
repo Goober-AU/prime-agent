@@ -3,7 +3,7 @@
 use crate::fuzzy::fuzzy_filter;
 use crate::slash_command_context::get_slash_command_context;
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -223,7 +223,7 @@ pub fn walk_directory_with_fd(
         return Vec::new();
     }
 
-    let mut child = match std::process::Command::new(fd_path)
+    let child = match std::process::Command::new(fd_path)
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1196,7 +1196,8 @@ mod tests {
             takes_argument: None,
         };
         let result = provider.apply_completion(&lines(&["@\"sr"]), 0, 4, &item, "@\"sr");
-        assert_eq!(result.lines, lines(&["@\"src/\" "]));
+        // Directory completions get no trailing space so the user can keep typing.
+        assert_eq!(result.lines, lines(&["@\"src/\""]));
         assert_eq!(result.cursor_col, 6);
     }
 

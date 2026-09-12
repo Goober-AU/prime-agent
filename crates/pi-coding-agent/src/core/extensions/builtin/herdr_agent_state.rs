@@ -107,6 +107,12 @@ fn parse_duration_env(name: &str, fallback: u64) -> u64 {
     }
 }
 
+/// The event's own JSON shape (`{ type, ...payload }`), like the TypeScript
+/// object that handlers receive.
+fn event_value(event: &ExtensionEvent) -> Value {
+    serde_json::to_value(event).unwrap_or(Value::Null)
+}
+
 fn last_assistant_message(messages: &[Value]) -> Option<&Value> {
     for index in (0..messages.len()).rev() {
         let message = &messages[index];
@@ -253,8 +259,9 @@ struct ReporterState {
     current_agent_session_id: Option<String>,
     current_agent_session_path: Option<String>,
     /// Object identity of the first session manager that starts, like
-    /// `boundSessionManager` in the TypeScript.
-    bound_session_manager: Option<*const ()>,
+    /// `boundSessionManager` in the TypeScript. Stored as an address because a
+    /// raw pointer is not `Send`.
+    bound_session_manager: Option<usize>,
     send_in_flight: bool,
     queued_state: Option<QueuedState>,
     released: bool,
@@ -273,9 +280,9 @@ struct ReporterState {
 const SOURCE: &str = "herdr:pi";
 const AGENT_LABEL: &str = "prime-agent";
 
-fn session_manager_ptr(context: &Arc<dyn ExtensionContext>) -> Option<*const ()> {
+fn session_manager_ptr(context: &Arc<dyn ExtensionContext>) -> Option<usize> {
     let manager = context.session_manager();
-    Some(Arc::as_ptr(&manager) as *const ())
+    Some(Arc::as_ptr(&manager) as usize)
 }
 
 impl Reporter {
@@ -323,7 +330,7 @@ impl Reporter {
         })
     }
 
-    fn queue_state(&self, state: AgentState, message: Option<String>) {
+    fn queue_state(self: &Arc<Self>, state: AgentState, message: Option<String>) {
         let seq = next_report_seq();
         let should_drain = {
             let mut guard = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -443,7 +450,7 @@ impl Reporter {
         (AgentState::Idle, None)
     }
 
-    fn publish_state(&self, force: bool) {
+    fn publish_state(self: &Arc<Self>, force: bool) {
         let (state, message) = self.desired_state();
         {
             let mut guard = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -513,5 +520,339 @@ impl Reporter {
                 reporter.publish_state(false);
             }),
         );
+    }
+}
+
+/// Build the built-in Herdr reporter factory. `getLoadedExtensionPaths`
+/// returns the extension files the resource loader actually loaded in the
+/// current cycle; it is re-checked on every factory invocation (i.e. on every
+/// session load and `/reload`), so installing Herdr's own file-based
+/// integration and reloading hands the pane over to it without also keeping
+/// the built-in active — while a file that exists but never loads (settings
+/// overrides, legacy paths) does not silence the built-in.
+pub fn create_herdr_agent_state_extension(
+    get_loaded_extension_paths: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+) -> ExtensionFactory {
+    Arc::new(move |pi: Arc<dyn ExtensionApi>| {
+        let get_paths = get_loaded_extension_paths.clone();
+        Box::pin(async move {
+            herdr_agent_state_extension_impl(pi, get_paths);
+            Ok(())
+        })
+    })
+}
+
+/// Built-in reporter with no file-based deferral, for tests and embedders.
+pub fn herdr_agent_state_extension() -> ExtensionFactory {
+    create_herdr_agent_state_extension(Arc::new(Vec::new))
+}
+
+fn herdr_agent_state_extension_impl(
+    pi: Arc<dyn ExtensionApi>,
+    get_loaded_extension_paths: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+) {
+    // Captured per factory invocation: the resource loader runs this during
+    // session load, inside the daemon's client-env window, so these reflect the
+    // session's own Herdr pane rather than the daemon's startup environment.
+    let socket_path = std::env::var("HERDR_SOCKET_PATH").ok();
+    let pane_id = std::env::var("HERDR_PANE_ID").ok();
+    let enabled = std::env::var("HERDR_ENV").map(|value| value == "1").unwrap_or(false)
+        && socket_path.is_some()
+        && pane_id.is_some();
+    if !enabled || has_file_based_herdr_integration(&get_loaded_extension_paths()) {
+        return;
+    }
+    let (Some(socket_path), Some(pane_id)) = (socket_path, pane_id) else {
+        return;
+    };
+    let socket_target = herdr_socket_target(&socket_path, current_platform());
+
+    let reporter = Arc::new(Reporter {
+        socket_path: socket_target,
+        pane_id,
+        idle_debounce_ms: parse_duration_env("HERDR_PI_IDLE_DEBOUNCE_MS", 250),
+        retry_grace_ms: parse_duration_env("HERDR_PI_RETRY_GRACE_MS", 2500),
+        state: Mutex::new(ReporterState::default()),
+    });
+
+    {
+        let reporter = reporter.clone();
+        let handler: ExtensionHandler = Arc::new(move |_event, ctx| {
+            let reporter = reporter.clone();
+            Box::pin(async move {
+                if !reporter.is_bound_session(&ctx) {
+                    return None;
+                }
+                {
+                    let mut guard = reporter
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if guard.bound_session_manager.is_none() {
+                        guard.bound_session_manager = session_manager_ptr(&ctx);
+                    }
+                }
+                reporter.update_session_ref(&ctx);
+                // A reload can re-create this reporter mid-turn (daemon-driven
+                // reloads and extension ctx.reload() are not gated on idle). Seed
+                // the active flag from the session so the fresh instance does not
+                // report idle while the agent is still streaming, which would also
+                // make the guard in agent_end swallow the turn's real end
+                // transition.
+                let idle = ctx.is_idle();
+                {
+                    let mut guard = reporter
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    guard.agent_active = !idle;
+                }
+                reporter.publish_state(true);
+                None
+            })
+        });
+        pi.on("session_start", handler);
+    }
+
+    let blocked_handler: Arc<dyn Fn(Value) + Send + Sync> = {
+        let reporter = reporter.clone();
+        Arc::new(move |data: Value| {
+            let active = data.get("active").and_then(Value::as_bool).unwrap_or(false);
+            if !active {
+                {
+                    let mut guard = reporter
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    guard.blocked_count = (guard.blocked_count - 1).max(0);
+                    if guard.blocked_count == 0 {
+                        guard.blocked_message = None;
+                    }
+                }
+                reporter.publish_state(false);
+                return;
+            }
+
+            reporter.clear_pending_timers();
+            // clear_pending_timers cancelled the retry timer; settle the hold the
+            // way the timer would have, or retryHoldActive keeps desiredState()
+            // at "working" forever once the block lifts.
+            {
+                let mut guard = reporter
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                if guard.retry_hold_active {
+                    guard.retry_hold_active = false;
+                    guard.failure_blocked = true;
+                }
+                guard.blocked_count += 1;
+                guard.blocked_message = data
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+            reporter.publish_state(false);
+        })
+    };
+    let unsubscribe_blocked = pi.events().on("herdr:blocked", blocked_handler);
+
+    {
+        let reporter = reporter.clone();
+        let handler: ExtensionHandler = Arc::new(move |_event, ctx| {
+            let reporter = reporter.clone();
+            Box::pin(async move {
+                if !reporter.is_bound_session(&ctx) {
+                    return None;
+                }
+                reporter.clear_pending_timers();
+                reporter.clear_failure_state();
+                reporter
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .agent_active = true;
+                reporter.publish_state(false);
+                None
+            })
+        });
+        pi.on("agent_start", handler);
+    }
+
+    {
+        let reporter = reporter.clone();
+        let handler: ExtensionHandler = Arc::new(move |event, ctx| {
+            let reporter = reporter.clone();
+            Box::pin(async move {
+                if !reporter.is_bound_session(&ctx) {
+                    return None;
+                }
+                let active = reporter
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .agent_active;
+                if !active {
+                    // Duplicate/late end events can arrive while auto-retry is
+                    // already holding the pane in Working. Do not let an
+                    // unqualified duplicate end cancel the retry hold and publish
+                    // a false Idle.
+                    return None;
+                }
+
+                reporter
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .agent_active = false;
+
+                let payload = event_value(&event);
+                if let Some(hold_message) = error_hold_message(&payload) {
+                    reporter.hold_for_retry(hold_message);
+                    return None;
+                }
+
+                // Queued follow-up/steer messages start another loop right away;
+                // debounce so the pane does not flicker done -> working. With
+                // nothing queued, report idle immediately so Herdr flips to done
+                // as streaming finishes.
+                if ctx.has_pending_messages() {
+                    reporter.schedule_idle();
+                    return None;
+                }
+
+                reporter.clear_pending_timers();
+                reporter.clear_failure_state();
+                reporter.publish_state(false);
+                None
+            })
+        });
+        pi.on("agent_end", handler);
+    }
+
+    {
+        let reporter = reporter.clone();
+        let handler: ExtensionHandler = Arc::new(move |event, ctx| {
+            let reporter = reporter.clone();
+            Box::pin(async move {
+                if !reporter.is_bound_session(&ctx) {
+                    return None;
+                }
+                reporter.clear_pending_timers();
+                // The event bus is shared across reloads and session replacements,
+                // so a listener left behind would keep this stale instance
+                // reporting with a captured (possibly wrong) pane identity
+                // forever.
+                unsubscribe_blocked();
+                // On session replacement (new/resume/fork) or reload, a successor
+                // instance in this same pane re-reports immediately. Releasing
+                // here races that report: two independent socket writes with no
+                // ordering, and a release that lands after the successor's report
+                // clears the pane. Only a real quit should release; every shutdown
+                // silences this instance so no stale queued report lands around
+                // the successor's.
+                let reason = event_value(&event);
+                let reason = reason.get("reason").and_then(Value::as_str).unwrap_or("");
+                if reason != "quit" {
+                    let mut guard = reporter
+                        .state
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    guard.released = true;
+                    guard.queued_state = None;
+                    return None;
+                }
+                reporter.release_agent().await;
+                None
+            })
+        });
+        pi.on("session_shutdown", handler);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_based_integration_is_detected_by_basename() {
+        assert!(has_file_based_herdr_integration(&[
+            "/home/u/.prime/agent/extensions/herdr-agent-state.ts".to_string()
+        ]));
+        assert!(has_file_based_herdr_integration(&[
+            "/home/u/ext/herdr-agent-state.js".to_string()
+        ]));
+        assert!(!has_file_based_herdr_integration(&[
+            "/home/u/ext/herdr-agent-state.ts.bak".to_string(),
+            "/home/u/ext/other.ts".to_string()
+        ]));
+        assert!(!has_file_based_herdr_integration(&[]));
+    }
+
+    #[test]
+    fn windows_socket_targets_are_namespaced_once() {
+        assert_eq!(
+            herdr_socket_target("/tmp/herdr.sock", "linux"),
+            "/tmp/herdr.sock"
+        );
+        assert_eq!(
+            herdr_socket_target("\\\\.\\pipe\\herdr", "win32"),
+            "\\\\.\\pipe\\herdr"
+        );
+        assert_eq!(
+            herdr_socket_target("\\\\?\\pipe\\herdr", "win32"),
+            "\\\\?\\pipe\\herdr"
+        );
+        assert_eq!(
+            herdr_socket_target("herdr-pane-1", "win32"),
+            "\\\\.\\pipe\\herdr-pane-1"
+        );
+    }
+
+    #[test]
+    fn duration_env_falls_back_on_invalid_values() {
+        assert_eq!(parse_duration_env("HERDR_PI_TEST_MISSING", 250), 250);
+        std::env::set_var("HERDR_PI_TEST_DURATION", "1200");
+        assert_eq!(parse_duration_env("HERDR_PI_TEST_DURATION", 250), 1200);
+        std::env::set_var("HERDR_PI_TEST_DURATION", "-5");
+        assert_eq!(parse_duration_env("HERDR_PI_TEST_DURATION", 250), 250);
+        std::env::set_var("HERDR_PI_TEST_DURATION", "abc");
+        assert_eq!(parse_duration_env("HERDR_PI_TEST_DURATION", 250), 250);
+        std::env::remove_var("HERDR_PI_TEST_DURATION");
+    }
+
+    #[test]
+    fn report_seq_is_monotonic_and_time_seeded() {
+        let first = next_report_seq();
+        let second = next_report_seq();
+        assert!(second > first);
+        assert!(first >= now_ms() * 1000);
+    }
+
+    #[test]
+    fn error_hold_message_requires_an_error_assistant_end() {
+        let ok = json!({"messages": [{"role": "assistant", "stopReason": "stop"}]});
+        assert_eq!(error_hold_message(&ok), None);
+        let failed = json!({
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "stopReason": "error", "errorMessage": "boom"}
+            ]
+        });
+        assert_eq!(error_hold_message(&failed), Some("boom".to_string()));
+        let blank = json!({"messages": [{"role": "assistant", "stopReason": "error"}]});
+        assert_eq!(error_hold_message(&blank), Some("provider error".to_string()));
+        assert_eq!(error_hold_message(&json!({})), None);
+    }
+
+    #[test]
+    fn last_assistant_message_scans_backwards() {
+        let messages = vec![
+            json!({"role": "assistant", "id": 1}),
+            json!({"role": "user"}),
+            json!({"role": "assistant", "id": 2}),
+        ];
+        assert_eq!(last_assistant_message(&messages).unwrap()["id"], json!(2));
+        assert!(last_assistant_message(&[json!({"role": "user"})]).is_none());
     }
 }

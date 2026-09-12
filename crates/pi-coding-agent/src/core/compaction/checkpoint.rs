@@ -9,7 +9,9 @@ fn is_legacy_checkpoint(details: &serde_json::Map<String, Value>) -> bool {
 
 pub fn has_provider_checkpoint(details: &Value) -> bool {
     match details {
-        Value::Object(object) => object.contains_key("providerCheckpoint") || is_legacy_checkpoint(object),
+        Value::Object(object) => {
+            object.contains_key("providerCheckpoint") || is_legacy_checkpoint(object)
+        }
         _ => false,
     }
 }
@@ -84,7 +86,8 @@ fn serialize_with_image_replacer(value: &Value, images: &mut usize) -> String {
                 .map(|(key, item)| {
                     let replaced = match item {
                         Value::String(text)
-                            if (key == "image_url" || key == "url") && text.starts_with("data:image/") =>
+                            if (key == "image_url" || key == "url")
+                                && text.starts_with("data:image/") =>
                         {
                             *images += 1;
                             Some(Value::String("(image)".to_string()))
@@ -111,7 +114,9 @@ mod tests {
 
     #[test]
     fn detects_provider_checkpoint_key() {
-        assert!(has_provider_checkpoint(&json!({"providerCheckpoint": null})));
+        assert!(has_provider_checkpoint(
+            &json!({"providerCheckpoint": null})
+        ));
         assert!(has_provider_checkpoint(&json!({
             "strategy": "openai-responses-compaction-v2"
         })));

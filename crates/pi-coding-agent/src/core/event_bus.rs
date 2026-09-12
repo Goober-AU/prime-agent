@@ -62,7 +62,8 @@ impl EventBus for EventBusImpl {
             let channel_name = channel.to_string();
             // `safeHandler` awaits the listener and logs failures instead of
             // propagating them; a panic is reported the same way.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(data.clone())));
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(data.clone())));
             if result.is_err() {
                 eprintln!("Event handler error ({channel_name}): handler panicked");
             }

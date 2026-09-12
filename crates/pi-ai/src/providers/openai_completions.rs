@@ -319,6 +319,7 @@ fn thinking_level_mapped(model: &Model, level: &str) -> Option<Option<String>> {
 // ---------------------------------------------------------------------------
 
 /// TS: `createClient(...)` result - the pieces the request needs.
+#[derive(Debug)]
 pub(crate) struct OpenAIClient {
 	pub api_key: String,
 	pub base_url: String,
@@ -2922,7 +2923,7 @@ mod message_tests {
 				3,
 			)),
 		];
-		let params = convert_messages(&base_model(), &context(messages), &full_compat()).unwrap();
+		let params = convert_messages(&base_model(), &context(messages.clone()), &full_compat()).unwrap();
 		assert!(params[1].get("name").is_none());
 		assert_eq!(params[1]["role"], json!("tool"));
 		assert_eq!(params[1]["content"], json!("file contents"));
@@ -3026,7 +3027,7 @@ mod message_tests {
 
 	#[test]
 	fn normalize_tool_call_id_truncates_pipe_separated_ids() {
-		let long_id = format!("{}+/={}|tail", "a".repeat(60));
+		let long_id = format!("{{}}+/={{}}|tail{}", "a".repeat(40));
 		let messages = vec![
 			assistant_message(
 				vec![ContentBlock::ToolCall(ToolCall::new(&long_id, "echo", Map::new()))],

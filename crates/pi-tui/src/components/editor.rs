@@ -594,7 +594,7 @@ impl Editor {
         };
         if self.padding_x != new_padding {
             self.padding_x = new_padding;
-            self.tui.borrow().request_render();
+            self.tui.borrow_mut().request_render();
         }
     }
 
@@ -610,7 +610,7 @@ impl Editor {
         };
         if self.autocomplete_max_visible != new_max_visible {
             self.autocomplete_max_visible = new_max_visible;
-            self.tui.borrow().request_render();
+            self.tui.borrow_mut().request_render();
         }
     }
 
@@ -2664,7 +2664,7 @@ impl Editor {
             Some(suggestions) if !suggestions.items.is_empty() => suggestions,
             _ => {
                 self.cancel_autocomplete();
-                self.tui.borrow().request_render();
+                self.tui.borrow_mut().request_render();
                 return;
             }
         };
@@ -2688,7 +2688,7 @@ impl Editor {
             self.state.cursor_line = result.cursor_line;
             self.set_cursor_col(result.cursor_col);
             self.emit_change();
-            self.tui.borrow().request_render();
+            self.tui.borrow_mut().request_render();
             return;
         }
 
@@ -2700,7 +2700,7 @@ impl Editor {
                 AutocompleteState::Regular
             },
         );
-        self.tui.borrow().request_render();
+        self.tui.borrow_mut().request_render();
     }
 
     fn is_autocomplete_request_current(
@@ -2737,7 +2737,7 @@ impl Editor {
         if self.autocomplete_overlay.is_none() {
             let anchor = self.autocomplete_anchor_marker.clone();
             let overlay = self.tui.borrow_mut().show_overlay(
-                Box::new(EditorOverlayComponent),
+                std::rc::Rc::new(std::cell::RefCell::new(EditorOverlayComponent)) as std::rc::Rc<std::cell::RefCell<dyn Component>>,
                 OverlayOptions {
                     width: Some(SizeValue::Percent("100%".to_string())),
                     above_marker: Some(anchor),
