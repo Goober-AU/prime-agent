@@ -1,0 +1,13 @@
+{
+ "gate": "gate43",
+ "timestamp": "2026-09-12T21:51:36",
+ "crate": "pi-coding-agent",
+ "command": "cargo check -p pi-coding-agent --tests --message-format=json",
+ "complete": true,
+ "crate_warnings": 708,
+ "unique_errors": 0,
+ "finished": true,
+ "test_attrs_in_crate": 2062,
+ "commit": "30e90b9f3",
+ "note": "First time pi-coding-agent compiles. All 57 daemon_adapter members and all 15 in_process_adapter members written; 31 real forwards + 26 explicit blocked_on members."
+}
