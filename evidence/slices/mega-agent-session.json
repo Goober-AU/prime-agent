@@ -1,7 +1,0 @@
-{
- "slice": "mega-agent-session",
- "crate": "pi-coding-agent",
- "files": [],
- "loc": 0,
- "note": "Largest hand-written file. Write in APPENDED CHUNKS of ~300-400 lines. NOTE: agent_session.rs (agent-session.ts) is TRUNCATED and moved to the mega-agent-session-finish slice. It is not owned here."
-}
