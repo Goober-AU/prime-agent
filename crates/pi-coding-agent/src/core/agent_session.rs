@@ -39,14 +39,25 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::agent_messages::{
-    assert_agent_message_queue_capacity, assert_agent_session_name_available,
-    assert_direct_agent_message_target, create_agent_message_host_handlers,
-    format_agent_session_name_unavailable, is_agent_session_message,
-    is_agent_session_message_prompt, normalize_agent_session_message,
-    parse_agent_session_message_prompt_id, starts_agent_run, AgentFamilyCatalogEntry,
-    AgentSessionMessageListResult, AgentSessionMessageReceipt, AgentSessionNameAvailabilityInput,
-    AgentSessionNameScope, DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
-    AGENT_MESSAGE_CUSTOM_TYPE, AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
+    AGENT_MESSAGE_CUSTOM_TYPE,
+    AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
+    AgentFamilyCatalogEntry,
+    AgentSessionMessageListResult,
+    AgentSessionMessageReceipt,
+    AgentSessionNameAvailabilityInput,
+    AgentSessionNameScope,
+    DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+    HostRequestHandlers,
+    assert_agent_message_queue_capacity,
+    assert_agent_session_name_available,
+    assert_direct_agent_message_target,
+    create_agent_message_host_handlers,
+    format_agent_session_name_unavailable,
+    is_agent_session_message,
+    is_agent_session_message_prompt,
+    normalize_agent_session_message,
+    parse_agent_session_message_prompt_id,
+    starts_agent_run,
 };
 use crate::core::agent_observe::{
     create_agent_observe_host_handlers, normalize_observe_limit, normalize_observe_max_chars,
@@ -81,20 +92,44 @@ use crate::core::goals::{
     GOAL_SKILL_NAME, GOAL_STATE_CUSTOM_TYPE,
 };
 use crate::core::messages::{
-    convert_to_llm, create_async_bash_completion_message, create_compaction_outcome_message,
-    create_custom_message, create_harness_digest_message, create_heartbeat_prompt_message,
-    create_refinement_notice_message, create_refinement_outcome_message,
-    create_rlm_child_failure_message, create_rlm_child_terminal_notice_message,
-    create_session_slash_command_message, create_session_slash_command_result_message,
-    is_compaction_outcome_message, is_session_slash_command, is_session_slash_command_message,
-    without_harness_digests_for_compaction, AsyncBashCompletionDetails, BashExecutionMessage,
-    CompactionOutcome, CompactionOutcomeDetails, CompactionOutcomeReason, CustomMessage,
-    HarnessDigestDetails, RefinementSource, RlmChildFailureDetails, RlmChildTerminalNoticeDetails,
-    ASYNC_BASH_COMPLETION_CUSTOM_TYPE, ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
-    HARNESS_DIGEST_CUSTOM_TYPE, HEARTBEAT_PROMPT_CUSTOM_TYPE, HEARTBEAT_PROMPT_PREVIEW_LABEL,
-    IPYTHON_STATE_RESTORED_CUSTOM_TYPE, RLM_CHILD_FAILURE_CUSTOM_TYPE,
-    RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE, SESSION_SLASH_COMMAND_CUSTOM_TYPE,
+    ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+    ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
+    AsyncBashCompletionDetails,
+    BashExecutionMessage,
+    CompactionOutcome,
+    CompactionOutcomeDetails,
+    CompactionOutcomeReason,
+    CustomMessage,
+    HARNESS_DIGEST_CUSTOM_TYPE,
+    HEARTBEAT_PROMPT_CUSTOM_TYPE,
+    HEARTBEAT_PROMPT_PREVIEW_LABEL,
+    HarnessDigestDetails,
+    IPYTHON_STATE_RESTORED_CUSTOM_TYPE,
+    REFINEMENT_SOURCE_SELF,
+    RLM_CHILD_FAILURE_CUSTOM_TYPE,
+    RLM_CHILD_TERMINAL_NOTICE_CUSTOM_TYPE,
+    RefinementSource,
+    RlmChildFailureDetails,
+    RlmChildTerminalNoticeDetails,
+    SESSION_SLASH_COMMAND_CUSTOM_TYPE,
     SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
+    SessionSlashCommandResultDetails,
+    convert_to_llm,
+    create_async_bash_completion_message,
+    create_compaction_outcome_message,
+    create_custom_message,
+    create_harness_digest_message,
+    create_heartbeat_prompt_message,
+    create_refinement_notice_message,
+    create_refinement_outcome_message,
+    create_rlm_child_failure_message,
+    create_rlm_child_terminal_notice_message,
+    create_session_slash_command_message,
+    create_session_slash_command_result_message,
+    is_compaction_outcome_message,
+    is_session_slash_command,
+    is_session_slash_command_message,
+    without_harness_digests_for_compaction,
 };
 use crate::core::model_tool_output_policy::{
     apply_model_tool_output_policy, ModelToolOutputPolicy, ModelToolOutputPolicyOptions,
@@ -112,11 +147,30 @@ use crate::core::refinement::refinement::{
     REFINEMENT_FAILURE_CUSTOM_TYPE,
 };
 use crate::core::session_action_store::{
-    can_select_session_action, queued_message_lane_delivery_policy, transition_session_action,
-    ActionLifecycle, ActionStore, ActionTicket, DeliveryMessage, DeliveryPolicy, DeliveryRecord,
-    DeliveryRecordRole, QueuedMessageLane, QueuedMessageMutation, QueuedMessageMutationStatus,
-    RuntimeActivity, SessionAction, SessionActionPayload, SessionActionSnapshot, SessionCommandPayload,
-    SessionTurnPayload, WakePolicy,
+    ActionLifecycle,
+    ActionStore,
+    ActionTicket,
+    DeliveryMessage,
+    DeliveryPolicy,
+    DeliveryRecord,
+    DeliveryRecordRole,
+    QueuedMessageLane,
+    QueuedMessageMutation,
+    QueuedMessageMutationStatus,
+    RollbackProof,
+    RuntimeActivity,
+    SessionAction,
+    SessionActionPayload,
+    SessionActionPhase,
+    SessionActionSnapshot,
+    SessionActionSnapshotActive,
+    SessionActionSnapshotKind,
+    SessionCommandPayload,
+    SessionTurnPayload,
+    WakePolicy,
+    can_select_session_action,
+    queued_message_lane_delivery_policy,
+    transition_session_action,
 };
 use crate::core::session_manager::{
     get_latest_compaction_entry, SessionContext, SessionEntry, SessionManager,
@@ -134,6 +188,9 @@ use crate::core::usage::{
     subtract_assistant_usage, SessionUsageSummary,
 };
 use crate::core::websearch_credential::{SERPER_CREDENTIAL_ID, SERPER_ENV_VAR, WEBSEARCH_SKILL_NAME};
+use crate::core::cron_jobs::normalize_heartbeat_delivery_mode;
+use crate::modes::agent_connection::daemon_agent_connection::now_iso;
+use pi_ai::models::get_supported_thinking_levels;
 
 // ---------------------------------------------------------------------------
 // Private plumbing for cross-slice seams
@@ -3714,7 +3771,12 @@ impl AgentSession {
         let message = match create_goal_context_message(
             &goal,
             crate::core::goals::GoalContextKind::from_str(kind),
-            images.map(|images| images.iter().map(image_to_value).collect()),
+            images.map(|images| {
+                images
+                    .iter()
+                    .map(|image| serde_json::to_value(image).unwrap_or(Value::Null))
+                    .collect()
+            }),
         ) {
             Ok(message) => message,
             Err(_) => return,
@@ -3855,7 +3917,7 @@ impl AgentSession {
         let review = self.maybe_auto_refine(AutoRefineReason::Compact).await;
         let _ = review;
         self.schedule_auto_refine_after_compaction(true);
-        self.compact(None, Some(CompactOptions { skip_abort: true }))
+        self.compact(None, true)
             .await
             .is_err()
             || true
@@ -4035,8 +4097,10 @@ impl AgentSession {
                     let entries = self.session_manager.lock().unwrap().get_branch(None);
                     let settings = self.compaction_settings();
                     let session_manager = self.session_manager.clone();
-                    let path_entries: Vec<CompactionSessionEntry> =
-                        entries.iter().map(compaction_entry_from_session_entry).collect();
+                    let path_entries: Vec<CompactionSessionEntry> = entries
+                        .iter()
+                        .filter_map(compaction_session_entry_from)
+                        .collect();
                     prepare_compaction(&path_entries, &settings, &move |path_entries| {
                         let _ = (&session_manager, path_entries);
                         Vec::new()
@@ -12991,6 +13055,34 @@ impl AgentSession {
             headers: resolved.headers.unwrap_or_default(),
         })
     }
+}
+
+/// `rlmHeartbeatHostResponse(job)` - the heartbeat row the host receives.
+///
+/// Field names and null-vs-absent choices follow the TypeScript exactly:
+/// `label`, `next_run_at`, `last_run_at` and `last_error` are `null` when
+/// absent (not omitted), and `delivery_mode` defaults to `"steer"`.
+fn rlm_heartbeat_host_response(job: &AgentCronJob) -> Value {
+    // `job.deliveryMode ?? "steer"`. The Rust alias is a `String`, so a plain
+    // fallback matches the TypeScript default exactly.
+    let delivery_mode = match &job.delivery_mode {
+        Some(mode) if !mode.is_empty() => mode.clone(),
+        _ => "steer".to_string(),
+    };
+    serde_json::json!({
+        "id": job.id,
+        "status": job.status,
+        "label": job.label,
+        "delivery_mode": delivery_mode,
+        "instruction": job.prompt,
+        "schedule": job.schedule,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "next_run_at": job.next_run_at,
+        "last_run_at": job.last_run_at,
+        "last_error": job.last_error,
+        "run_count": job.run_count,
+    })
 }
 
 /// `pathEntries` -> the compaction module's entry shapes.
