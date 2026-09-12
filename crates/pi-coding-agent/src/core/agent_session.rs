@@ -6373,13 +6373,19 @@ impl AgentSession {
     async fn drain_pending_refinement_for_disposal(self: &Arc<Self>) {
         self.scheduled_auto_refine_timers.lock().unwrap().clear();
         // Wait for in-flight refinement (including serialized background plan) to settle.
-        while self.refine_in_flight.lock().unwrap().is_some()
-            || self.refine_plan_in_flight.lock().unwrap().is_some()
-            || self.serialized_plan_in_flight.lock().unwrap().is_some()
-        {
-            if self.refine_in_flight.lock().unwrap().is_some() {
+        // The predicate is read into owned booleans first: a guard in the `while` condition stays live
+        // across the body's `yield_now().await`, which makes this future non-`Send`.
+        while {
+            let refine_in_flight = { self.refine_in_flight.lock().unwrap().is_some() };
+            let refine_plan_in_flight = { self.refine_plan_in_flight.lock().unwrap().is_some() };
+            let serialized_plan_in_flight = {
+                self.serialized_plan_in_flight.lock().unwrap().is_some()
+            };
+            refine_in_flight || refine_plan_in_flight || serialized_plan_in_flight
+        } {
+            if { self.refine_in_flight.lock().unwrap().is_some() } {
                 self.refine_in_flight.lock().unwrap().take();
-            } else if self.refine_plan_in_flight.lock().unwrap().is_some() {
+            } else if { self.refine_plan_in_flight.lock().unwrap().is_some() } {
                 self.refine_plan_in_flight.lock().unwrap().take();
             } else {
                 tokio::task::yield_now().await;
@@ -11760,13 +11766,19 @@ impl AgentSession {
         if skip_abort && self.is_streaming() {
             return Err("Cannot refine without aborting while the agent is running.".to_string());
         }
-        while self.refine_in_flight.lock().unwrap().is_some()
-            || self.refine_plan_in_flight.lock().unwrap().is_some()
-            || self.serialized_plan_in_flight.lock().unwrap().is_some()
-        {
-            if self.refine_in_flight.lock().unwrap().is_some() {
+        // The predicate is read into owned booleans first: a guard in the `while` condition would stay
+        // live across the awaits below, so no scoping trick can make this future `Send`.
+        while {
+            let refine_in_flight = { self.refine_in_flight.lock().unwrap().is_some() };
+            let refine_plan_in_flight = { self.refine_plan_in_flight.lock().unwrap().is_some() };
+            let serialized_plan_in_flight = {
+                self.serialized_plan_in_flight.lock().unwrap().is_some()
+            };
+            refine_in_flight || refine_plan_in_flight || serialized_plan_in_flight
+        } {
+            if { self.refine_in_flight.lock().unwrap().is_some() } {
                 self.wait_for_refine_idle().await;
-            } else if self.refine_plan_in_flight.lock().unwrap().is_some() {
+            } else if { self.refine_plan_in_flight.lock().unwrap().is_some() } {
                 let in_flight = self.refine_plan_in_flight.lock().unwrap().take();
                 if let Some(in_flight) = in_flight {
                     let _ = in_flight.await;
@@ -11849,11 +11861,17 @@ impl AgentSession {
         if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
             return Ok(());
         }
-        while self.serialized_plan_in_flight.lock().unwrap().is_some()
-            || self.refine_in_flight.lock().unwrap().is_some()
-            || self.refine_plan_in_flight.lock().unwrap().is_some()
-        {
-            if self.serialized_plan_in_flight.lock().unwrap().is_some() {
+        // Owned-boolean predicate: see drain_pending_refinement_for_disposal. A guard in the
+        // `while` condition would be live across the awaits in the body.
+        while {
+            let serialized_plan_in_flight = {
+                self.serialized_plan_in_flight.lock().unwrap().is_some()
+            };
+            let refine_in_flight = { self.refine_in_flight.lock().unwrap().is_some() };
+            let refine_plan_in_flight = { self.refine_plan_in_flight.lock().unwrap().is_some() };
+            serialized_plan_in_flight || refine_in_flight || refine_plan_in_flight
+        } {
+            if { self.serialized_plan_in_flight.lock().unwrap().is_some() } {
                 let in_flight = self.serialized_plan_in_flight.lock().unwrap().take();
                 if let Some(in_flight) = in_flight {
                     let _ = in_flight.await;
@@ -11933,11 +11951,14 @@ impl AgentSession {
 
     /// `_waitForRefineIdle()`.
     async fn wait_for_refine_idle(self: &Arc<Self>) {
-        while self.refine_in_flight.lock().unwrap().is_some() {
-            let in_flight = self.refine_in_flight.lock().unwrap().take();
-            if let Some(in_flight) = in_flight {
-                let _ = in_flight.await;
-            }
+        // Each iteration takes the in-flight promise out of its slot in a scoped block, so no guard
+        // survives into the await below.
+        loop {
+            let in_flight = { self.refine_in_flight.lock().unwrap().take() };
+            let Some(in_flight) = in_flight else {
+                break;
+            };
+            let _ = in_flight.await;
         }
     }
 

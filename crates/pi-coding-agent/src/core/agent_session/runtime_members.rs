@@ -2512,11 +2512,15 @@ impl AgentSession {
             return;
         };
         let _ = promise.await;
-        let mut slot = self.retry_promise.lock().unwrap();
-        if slot.is_none() {
-            *slot = Some(Box::pin(async { Ok(()) }));
+        // The slot is refilled inside its own block so the guard is dropped at the block's end.
+        // `drop(slot)` is not enough here: the binding still lives to the end of the scope, which
+        // would make this future non-`Send` across the await below.
+        {
+            let mut slot = self.retry_promise.lock().unwrap();
+            if slot.is_none() {
+                *slot = Some(Box::pin(async { Ok(()) }));
+            }
         }
-        drop(slot);
         self.agent.wait_for_idle().await;
     }
 
