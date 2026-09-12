@@ -1,5 +1,8 @@
-Hish's rule (2026-09-11, REVISED after a crash): TOTAL sub-agents must never exceed 15, counting EVERY depth
-(depth 1, depth 2, ...). One crashed the session at 20+. Therefore keep at most 13-14 depth-1 children live,
-and sub-agents must NEVER spawn their own children (that is what pushes the total over the cap).
-Model for every sub-agent: ollama-cloud/deepseek-v4.1-flash only. No fallback model: if it is blocked or out
-of tokens, stop and wait for the reset.
+Hish's rule (2026-09-11, final): TOTAL sub-agents must never exceed 15, counting EVERY depth
+(depth 1, depth 2, ...). A prior run CRASHED the session at 20+ concurrent agents.
+CAP ARITHMETIC: the lead is also an agent. So the live depth-1 child count must be <= 14
+  total agents = 1 (lead) + N (depth-1 children) + M (depth-2 grandchildren) <= 15
+  => N <= 14 while M = 0, and sub-agents must NEVER spawn their own children (keeps M = 0).
+TARGET: keep 12-13 depth-1 children live as the safe operating point.
+Model for every sub-agent: ollama-cloud/deepseek-v4.1-flash only. No fallback: if that model is
+blocked or out of tokens, stop and wait for the reset.
