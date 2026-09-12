@@ -73,16 +73,6 @@
    "loc": 59
   },
   {
-   "src": "packages/coding-agent/src/cli/owned-session-worker.ts",
-   "rust": "crates/pi-coding-agent/src/cli/owned_session_worker.rs",
-   "loc": 533
-  },
-  {
-   "src": "packages/coding-agent/src/cli/public-command.ts",
-   "rust": "crates/pi-coding-agent/src/cli/public_command.rs",
-   "loc": 447
-  },
-  {
    "src": "packages/coding-agent/src/cli/session-resolver.ts",
    "rust": "crates/pi-coding-agent/src/cli/session_resolver.rs",
    "loc": 1
@@ -93,5 +83,5 @@
    "loc": 61
   }
  ],
- "loc": 6571
+ "loc": 5591
 }

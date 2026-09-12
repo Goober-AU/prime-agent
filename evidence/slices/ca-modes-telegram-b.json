@@ -1,0 +1,18 @@
+{
+ "slice": "ca-modes-telegram-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/telegram/bridge.ts",
+   "rust": "crates/pi-coding-agent/src/modes/telegram/bridge.rs",
+   "loc": 387
+  },
+  {
+   "src": "packages/coding-agent/src/modes/telegram/worker.ts",
+   "rust": "crates/pi-coding-agent/src/modes/telegram/worker.rs",
+   "loc": 174
+  }
+ ],
+ "note": "Remaining telegram files from ca-modes-rest (the others are written).",
+ "loc": 561
+}

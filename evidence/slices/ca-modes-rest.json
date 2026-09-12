@@ -48,11 +48,6 @@
    "loc": 132
   },
   {
-   "src": "packages/coding-agent/src/modes/acp/acp-mode.ts",
-   "rust": "crates/pi-coding-agent/src/modes/acp/acp_mode.rs",
-   "loc": 1109
-  },
-  {
    "src": "packages/coding-agent/src/modes/acp/acp-stop-reason.ts",
    "rust": "crates/pi-coding-agent/src/modes/acp/acp_stop_reason.rs",
    "loc": 29
@@ -68,11 +63,6 @@
    "loc": 163
   },
   {
-   "src": "packages/coding-agent/src/modes/telegram/bridge.ts",
-   "rust": "crates/pi-coding-agent/src/modes/telegram/bridge.rs",
-   "loc": 387
-  },
-  {
    "src": "packages/coding-agent/src/modes/telegram/commands.ts",
    "rust": "crates/pi-coding-agent/src/modes/telegram/commands.rs",
    "loc": 324
@@ -86,11 +76,6 @@
    "src": "packages/coding-agent/src/modes/telegram/store.ts",
    "rust": "crates/pi-coding-agent/src/modes/telegram/store.rs",
    "loc": 173
-  },
-  {
-   "src": "packages/coding-agent/src/modes/telegram/worker.ts",
-   "rust": "crates/pi-coding-agent/src/modes/telegram/worker.rs",
-   "loc": 174
   },
   {
    "src": "packages/coding-agent/src/modes/agent-connection/in-process-agent-connection.ts",
@@ -136,12 +121,7 @@
    "src": "packages/coding-agent/src/modes/model-autocomplete.ts",
    "rust": "crates/pi-coding-agent/src/modes/model_autocomplete.rs",
    "loc": 28
-  },
-  {
-   "src": "packages/coding-agent/src/modes/print-mode.ts",
-   "rust": "crates/pi-coding-agent/src/modes/print_mode.rs",
-   "loc": 172
   }
  ],
- "loc": 7471
+ "loc": 5629
 }
