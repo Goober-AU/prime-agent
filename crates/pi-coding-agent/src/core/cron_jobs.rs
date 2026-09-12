@@ -539,6 +539,15 @@ pub struct AgentCronJobStore {
     heartbeat_change_listeners: Arc<Mutex<Vec<Option<Arc<dyn Fn() + Send + Sync>>>>>,
 }
 
+impl std::fmt::Debug for AgentCronJobStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AgentCronJobStore")
+            .field("file_path", &self.file_path)
+            .field("session_artifact_mode", &self.session_artifact_mode)
+            .finish_non_exhaustive()
+    }
+}
+
 /// `updateRlmHeartbeat(activeSessionId, id, update)`.
 #[derive(Debug, Clone, Default)]
 pub struct RlmHeartbeatUpdate {
@@ -1920,6 +1929,7 @@ impl AgentCronScheduler {
 /// `parseAgentCronSchedule(input, now = new Date())`.
 ///
 /// Returns the schedule and the next run time in milliseconds.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ParsedAgentCronSchedule {
     pub schedule: AgentCronSchedule,
     pub next_run_at_ms: f64,

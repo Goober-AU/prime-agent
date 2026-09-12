@@ -175,7 +175,7 @@ mod tests {
             pid: Some(42),
             uptime_seconds: Some(90.0),
             version: Some("0.9.3".to_string()),
-            protocol_version: Some(7),
+            protocol_version: Some(7.0),
             schema_id: Some("protocol-7-schema-29".to_string()),
             build_id: Some("build".to_string()),
             executable_path: None,

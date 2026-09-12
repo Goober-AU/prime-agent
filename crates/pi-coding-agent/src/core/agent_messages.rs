@@ -1195,18 +1195,18 @@ mod tests {
 
     #[test]
     fn prompt_with_relationship_line_keeps_the_id_offsets() {
-        let mut payload = payload();
-        payload.from_relationship = Some(FAMILY_RELATIONSHIP_SIBLING.to_string());
-        let prompt = create_agent_session_message_prompt(&payload);
+        let mut sibling = payload();
+        sibling.from_relationship = Some(FAMILY_RELATIONSHIP_SIBLING.to_string());
+        let prompt = create_agent_session_message_prompt(&sibling);
         assert!(prompt.starts_with("[from sibling:parent]"));
         assert_eq!(
             parse_agent_session_message_prompt_id(&prompt).as_deref(),
             Some("agentmsg_1")
         );
         let parent = {
-            let mut payload = payload();
-            payload.from_relationship = Some(FAMILY_RELATIONSHIP_PARENT.to_string());
-            create_agent_session_message_prompt(&payload)
+            let mut parent_payload = payload();
+            parent_payload.from_relationship = Some(FAMILY_RELATIONSHIP_PARENT.to_string());
+            create_agent_session_message_prompt(&parent_payload)
         };
         assert!(parent.starts_with("[from parent]"));
         assert_eq!(

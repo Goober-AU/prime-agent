@@ -46,6 +46,7 @@ pub const DAEMON_CLIENT_COMMANDS: [&str; 22] = [
     "open",
 ];
 
+#[derive(Debug)]
 pub struct ParsedDaemonClientCommand {
     pub command: String,
     pub socket_path: String,
@@ -381,6 +382,7 @@ async fn run_open_attached(
     run_attach(client, &active_session_id, io).await
 }
 
+#[derive(Debug)]
 pub struct ParsedSessionArgs {
     pub daemon_args: Vec<String>,
     pub name: Option<String>,
@@ -503,6 +505,7 @@ pub fn parse_session_args(args: &[String], cwd: &str) -> Result<ParsedSessionArg
     })
 }
 
+#[derive(Debug)]
 pub struct ParsedSessionOption {
     pub consumed: usize,
     pub daemon_arg: Option<String>,
@@ -1261,6 +1264,7 @@ async fn run_send(
     Ok(())
 }
 
+#[derive(Debug)]
 pub struct ParsedSendArgs {
     pub target_active_session_id: String,
     pub from_active_session_id: Option<String>,
@@ -3075,17 +3079,18 @@ mod tests {
 
     #[test]
     fn shutdown_parses_only_the_force_flag() {
-        let mut logged: Vec<String> = Vec::new();
-        let errors: Vec<String> = Vec::new();
+        let logged: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let errors: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
         let io = DaemonCommandIo {
-            log: &|line: &str| logged.push(line.to_string()),
-            error: &|line: &str| errors.push(line.to_string()),
+            log: &|line: &str| logged.borrow_mut().push(line.to_string()),
+            error: &|line: &str| errors.borrow_mut().push(line.to_string()),
             set_exit_code: &|_code: i32| {},
             stdin_is_tty: None,
             prompt_yes_no: &|_message: &str| false,
             cwd: "/work".to_string(),
         };
         assert!(run_help(&io).is_ok());
+        let logged = logged.borrow();
         assert_eq!(logged[0], "Usage: prime-agent daemon <command> [args...]");
         assert!(logged[1].starts_with("Commands: start, ps, list, create"));
     }

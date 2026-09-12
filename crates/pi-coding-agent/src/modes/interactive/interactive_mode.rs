@@ -481,7 +481,7 @@ impl StartupPromptBarrierOutcome {
 }
 
 /// `GoalAnnouncementSnapshot`
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct GoalAnnouncementSnapshot {
     pub goal_id: Option<String>,
     /// `GoalState["status"]` - the TypeScript snapshot copies the union verbatim,
@@ -490,6 +490,20 @@ pub struct GoalAnnouncementSnapshot {
     pub objective: Option<String>,
     pub last_reason: Option<String>,
     pub last_error: Option<String>,
+}
+
+impl Default for GoalAnnouncementSnapshot {
+    /// A snapshot is only ever built from a live goal (`goalAnnouncementSnapshot`), so
+    /// the default mirrors `emptyGoalState()`: idle with no details.
+    fn default() -> Self {
+        Self {
+            goal_id: None,
+            status: GoalStatus::Idle,
+            objective: None,
+            last_reason: None,
+            last_error: None,
+        }
+    }
 }
 
 /// `ModelFallbackWarningAction`
@@ -1360,8 +1374,10 @@ impl InteractiveMode {
         };
         let bind_local_session_extensions =
             options.bind_local_session_extensions || options.local_session_host.is_some();
-        // `options` is moved into the mode below, so read the host out first.
+        // `options` is moved into the mode below, so read out everything the mode
+        // needs from it first.
         let local_session_host = options.local_session_host.clone();
+        let agent_connection = options_agent_connection(&options);
         if bind_local_session_extensions && options.local_session_host.is_none() {
             return Err("Local extension binding requires localSessionHost".to_string());
         }
@@ -1389,7 +1405,7 @@ impl InteractiveMode {
             footer_slot: super::interactive_mode_services::Container::new(),
             editor_container: super::interactive_mode_services::Container::new(),
             ui_services,
-            agent_connection: options_agent_connection(&options),
+            agent_connection,
             local_session_host,
             bind_local_session_extensions,
             prompt_stash_store,

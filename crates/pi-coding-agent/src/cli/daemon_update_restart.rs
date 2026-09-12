@@ -684,6 +684,7 @@ fn read_coordinator_record(path: &str) -> Result<Option<DaemonUpdateRestartCoord
     }))
 }
 
+#[derive(Debug)]
 pub struct DaemonUpdateRestartCoordinatorLease {
     pub record: DaemonUpdateRestartCoordinatorRecord,
     registry_dir: String,

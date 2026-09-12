@@ -45,8 +45,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::extensions::types::{
     AgentEndPayload, ExtensionError, ExtensionEvent, MessageStartPayload, MessageUpdatePayload,
-    ModelSelectPayload, ToolExecutionEndPayload, ToolExecutionStartPayload,
-    ToolExecutionUpdatePayload, TurnEndPayload, TurnStartPayload,
+    ModelSelectPayload, ToolCallEvent, ToolExecutionEndPayload, ToolExecutionStartPayload,
+    ToolExecutionUpdatePayload, ToolResultEvent, TurnEndPayload, TurnStartPayload,
 };
 use crate::core::agent_messages::{
     AGENT_MESSAGE_CUSTOM_TYPE,
@@ -296,13 +296,9 @@ pub struct ToolResultHookResult {
     pub is_error: Option<bool>,
 }
 
-/// `Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>`.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct BeforeAgentStartResult {
-    pub prompt: Option<String>,
-    pub images: Option<Vec<ImageContent>>,
-    pub system_prompt: Option<String>,
-}
+/// `Awaited<ReturnType<ExtensionRunner["emitBeforeAgentStart"]>>` is
+/// `BeforeAgentStartCombinedResult`, owned by `core::extensions::runner`.
+pub use crate::core::extensions::runner::BeforeAgentStartCombinedResult as BeforeAgentStartResult;
 
 /// `CustomMessagePayload` content (`string | (TextContent | ImageContent)[]`)
 /// as the session's `CustomMessageContent`.
@@ -1022,7 +1018,7 @@ impl crate::core::session_action_store::SessionPayload for QueuedActionPayload {
 /// `PreparedPromptPreparation`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreparedPromptPreparation {
-    pub result: BeforeAgentStartResult,
+    pub result: Option<BeforeAgentStartResult>,
     pub base_prompt_snapshot: String,
 }
 
@@ -2056,7 +2052,7 @@ pub struct AgentSession {
     goal_abort_in_progress: AtomicBool,
     autonomous_state: Mutex<crate::core::autonomous::AutonomousRuntimeState>,
     autonomous_continuation_suppression_depth: AtomicU64,
-    autonomous_continuation_suppressed_messages: Mutex<HashSet<i64>>,
+    autonomous_continuation_suppressed_messages: Mutex<HashSet<String>>,
     compaction_abort_controller: Mutex<Option<CancellationToken>>,
     auto_compaction_abort_controller: Mutex<Option<CancellationToken>>,
     compaction_operation: Mutex<Option<BoxFuture<Result<(), String>>>>,
@@ -2126,6 +2122,8 @@ pub struct AgentSession {
     tool_prompt_snippets: Mutex<BTreeMap<String, String>>,
     tool_prompt_guidelines: Mutex<BTreeMap<String, Vec<String>>>,
     base_system_prompt: Mutex<String>,
+    /// `_baseSystemPromptOptions` retained for `emitBeforeAgentStart`.
+    base_system_prompt_options: Mutex<Option<BuildSystemPromptOptions>>,
     assistant_turns_since_auto_refine: AtomicU64,
     last_auto_refine_review_at: Mutex<f64>,
     auto_refine_in_progress: AtomicBool,
@@ -2184,6 +2182,28 @@ pub struct AgentSession {
     extension_error_listener: Option<Arc<dyn Fn(Value) + Send + Sync>>,
     extension_shutdown_handler: Option<Arc<dyn Fn(Value) -> BoxFuture<()> + Send + Sync>>,
     own_usage_memo: Mutex<Option<OwnUsageMemo>>,
+}
+
+/// Adapter from the canonical `AcpMcpServerConfig` (owned by
+/// `core/mcp/acp_mcp_types.rs`) to the `tools::acp_mcp::AcpMcpServerConfig`
+/// read shape used by `acp_mcp_tool_names` (another slice's file). The adapter
+/// keeps the server name and forwards every other member verbatim.
+fn acp_mcp_tool_configs(
+    servers: &[crate::core::mcp::acp_mcp_types::AcpMcpServerConfig],
+) -> Vec<crate::core::tools::acp_mcp::AcpMcpServerConfig> {
+    servers
+        .iter()
+        .map(|server| {
+            let extra = serde_json::to_value(server)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            crate::core::tools::acp_mcp::AcpMcpServerConfig {
+                name: server.name().to_string(),
+                extra,
+            }
+        })
+        .collect()
 }
 
 /// `pendingRequestedCompaction`.
@@ -2389,6 +2409,7 @@ impl AgentSession {
             tool_prompt_snippets: Mutex::new(BTreeMap::new()),
             tool_prompt_guidelines: Mutex::new(BTreeMap::new()),
             base_system_prompt: Mutex::new(String::new()),
+            base_system_prompt_options: Mutex::new(None),
             assistant_turns_since_auto_refine: AtomicU64::new(0),
             last_auto_refine_review_at: Mutex::new(0.0),
             auto_refine_in_progress: AtomicBool::new(false),
@@ -2483,11 +2504,17 @@ impl AgentSession {
         }
 
         let listener_session = Arc::downgrade(&session);
-        let unsubscribe = session.agent.subscribe(Arc::new(move |event: AgentEvent| {
-            if let Some(session) = listener_session.upgrade() {
-                session.handle_agent_event(event);
-            }
-        }));
+        let unsubscribe = session.agent.subscribe(Arc::new(
+            move |event: AgentEvent, signal: Option<CancellationToken>| {
+                let listener_session = listener_session.clone();
+                Box::pin(async move {
+                    if let Some(session) = listener_session.upgrade() {
+                        let _ = signal;
+                        session.handle_agent_event(event);
+                    }
+                })
+            },
+        ));
         *session.unsubscribe_agent.lock().unwrap() = Some(Arc::new(unsubscribe));
         session.install_agent_tool_hooks();
         session.install_agent_turn_hook();
@@ -2532,7 +2559,7 @@ impl AgentSession {
 
     /// `replaceAcpMcpServers`.
     pub fn replace_acp_mcp_servers(
-        &self,
+        self: &Arc<Self>,
         servers: &[crate::core::mcp::acp_mcp_types::AcpMcpServerConfig],
         owner_id: &str,
     ) -> Result<(), String> {
@@ -2551,9 +2578,11 @@ impl AgentSession {
         if !servers.is_empty() && self.ipython_kernel_provisioner.lock().unwrap().is_none() {
             return Err("ACP MCP servers require the built-in cpython tool".to_string());
         }
-        let names = crate::core::tools::acp_mcp::acp_mcp_tool_names(servers)?;
+        let tool_configs = acp_mcp_tool_configs(servers);
+        let names = crate::core::tools::acp_mcp::acp_mcp_tool_names(&tool_configs)?;
         self.assert_acp_mcp_tool_names_available(&names)?;
-        if !manager.lock().unwrap().replace_acp_servers(servers, owner_id) {
+        let replaced = manager.lock().unwrap().replace_acp_servers(servers, owner_id)?;
+        if !replaced {
             return Ok(());
         }
         self.rebuild_runtime_for_acp_mcp_servers();
@@ -2684,7 +2713,7 @@ impl AgentSession {
     }
 
     /// `_rebuildRuntimeForAcpMcpServers`.
-    fn rebuild_runtime_for_acp_mcp_servers(&self) {
+    fn rebuild_runtime_for_acp_mcp_servers(self: &Arc<Self>) {
         let previous_tool_names: HashSet<String> = self
             .acp_mcp_tools
             .lock()
@@ -2697,7 +2726,9 @@ impl AgentSession {
             .as_ref()
             .map(|manager| manager.lock().unwrap().get_acp_servers())
             .unwrap_or_default();
-        let next_tool_names = crate::core::tools::acp_mcp::acp_mcp_tool_names(&servers).unwrap_or_default();
+        let next_tool_names =
+            crate::core::tools::acp_mcp::acp_mcp_tool_names(&acp_mcp_tool_configs(&servers))
+                .unwrap_or_default();
         let _ = self.assert_acp_mcp_tool_names_available(&next_tool_names);
         let mut active_tool_names: Vec<String> = self
             .get_active_tool_names()
@@ -2757,7 +2788,10 @@ impl AgentSession {
                                 .unwrap_or_default(),
                         })
                         .await;
-                    Ok(result)
+                    Ok(result.map(|result| BeforeToolCallResult {
+                        block: result.block,
+                        reason: result.reason,
+                    }))
                 })
             }));
 
@@ -2799,17 +2833,19 @@ impl AgentSession {
                         None => return Ok(None),
                     };
 
+                    let content = match hook_result.content {
+                        Some(content) => Some(
+                            serde_json::from_value::<Vec<pi_agent_core::types::ContentBlock>>(
+                                Value::Array(content),
+                            )
+                            .unwrap_or_default(),
+                        ),
+                        None => None,
+                    };
                     Ok(Some(AfterToolCallResult {
-                        content: hook_result
-                            .content
-                            .and_then(|content| {
-                                serde_json::from_value::<Vec<pi_agent_core::types::ContentBlock>>(
-                                    Value::Array(content),
-                                )
-                                .ok()
-                            }),
+                        content,
                         details: hook_result.details,
-                        is_error: Some(hook_result.is_error.unwrap_or(context.is_error)),
+                        is_error: hook_result.is_error.or(Some(context.is_error)),
                         terminate: None,
                     }))
                 })
@@ -3732,7 +3768,7 @@ impl AgentSession {
         self.pending_next_turn_messages
             .lock()
             .unwrap()
-            .push(goal_context_custom_message(message));
+            .push(goal_context_custom_message(&message));
     }
 
     /// `_handleGoalSlashCommand`.
@@ -3782,9 +3818,6 @@ impl AgentSession {
         let delta = goal_token_delta_for_usage(crate::core::goals::GoalUsage {
             input: message.usage.input,
             output: message.usage.output,
-            cache_read: message.usage.cache_read,
-            cache_write: message.usage.cache_write,
-            total_tokens: message.usage.total_tokens,
         });
         let mut next = self.goal_state.lock().unwrap().clone();
         next.tokens_used += delta;
@@ -3930,7 +3963,10 @@ impl AgentSession {
         } else if !terminal && self.queue_goal_continuation_for_threshold_compaction(&context.message) {
             self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
         } else if !terminal
-            && self.queue_autonomous_continuation_for_threshold_compaction(&context.message)
+            && self
+                .queue_autonomous_continuation_for_threshold_compaction(&context.message)
+                .await
+                .is_some()
         {
             self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
         }
@@ -3952,11 +3988,57 @@ impl AgentSession {
         state.last_gate_failure_snapshot = snapshot.state.last_gate_failure_snapshot;
     }
 
-    /// `_queueAutonomousContinuationForThresholdCompaction`.
-    fn queue_autonomous_continuation_for_threshold_compaction(&self, message: &AssistantMessage) {
+    /// `_queueAutonomousContinuationForThresholdCompaction(message)`.
+    async fn queue_autonomous_continuation_for_threshold_compaction(
+        self: &Arc<Self>,
+        message: &AssistantMessage,
+    ) -> Option<AgentMessage> {
         let key = assistant_message_key(message);
+        {
+            let already = self
+                .queued_autonomous_threshold_continuations
+                .lock()
+                .unwrap()
+                .get(&key)
+                .cloned();
+            if let Some(queued) = already {
+                if self
+                    .post_compaction_continuation_messages
+                    .lock()
+                    .unwrap()
+                    .contains(&queued)
+                {
+                    return Some(queued);
+                }
+            }
+        }
         let snapshot = self.snapshot_autonomous_runtime_state();
-        let queued = AgentMessage::from(message.clone());
+        let arrival_epoch = self.session_input_arrival_epoch.load(Ordering::SeqCst);
+        let options = crate::core::autonomous::AutonomousOperationOptions {
+            cwd: Some(self.cwd.clone()),
+            signal: self.agent.signal(),
+        };
+        let autonomous_message = {
+            let mut state = self.autonomous_state.lock().unwrap();
+            crate::core::autonomous::next_autonomous_continuation(
+                &mut state,
+                message,
+                options,
+                now_ms(),
+            )
+            .await
+            .ok()
+            .flatten()
+        };
+        let autonomous_message = match autonomous_message {
+            Some(message) => message,
+            None => return None,
+        };
+        if self.session_input_arrival_epoch.load(Ordering::SeqCst) != arrival_epoch {
+            self.restore_autonomous_runtime_snapshot(snapshot);
+            return None;
+        }
+        let queued = AgentMessage::from(autonomous_message);
         self.queued_autonomous_threshold_continuations
             .lock()
             .unwrap()
@@ -3964,12 +4046,32 @@ impl AgentSession {
         self.queued_autonomous_continuation_snapshots
             .lock()
             .unwrap()
-            .insert(assistant_message_key(message), snapshot);
+            .insert(agent_message_key_of(&queued), snapshot);
+        self.post_compaction_continuation_messages
+            .lock()
+            .unwrap()
+            .push(queued.clone());
         self.pending_threshold_compaction_autonomous_messages
             .lock()
             .unwrap()
-            .push(queued);
+            .push(queued.clone());
+        let (text, images) = normalize_message_content(&custom_message_content_parts(
+            &custom_message_of(&queued).content,
+        ));
+        self.queue_prepared_prompt(
+            "followUp",
+            &text,
+            images,
+            Some(PreparedTurnActionOptions {
+                message: Some(queued.clone()),
+                resume_if_idle: Some(true),
+                ..Default::default()
+            }),
+        )
+        .await;
+        Some(queued)
     }
+
 
     /// `_queueGoalContinuationForThresholdCompaction`.
     fn queue_goal_continuation_for_threshold_compaction(&self, message: &AssistantMessage) -> bool {
@@ -3985,7 +4087,7 @@ impl AgentSession {
             crate::core::goals::GoalContextKind::Continuation,
             None,
         ) {
-            Ok(message) => message,
+            Ok(message) => goal_context_custom_message(&message),
             Err(_) => return false,
         };
         let queued = AgentMessage::Custom(CustomAgentMessage::Custom {
@@ -4268,7 +4370,7 @@ impl AgentSession {
                     payload
                         .get("delivery_mode")
                         .or_else(|| payload.get("deliveryMode")),
-                );
+                )?;
                 let heartbeat = controller.create_rlm_heartbeat(
                     crate::core::cron_jobs::RlmHeartbeatCreateInput {
                         instruction: payload
@@ -4300,7 +4402,7 @@ impl AgentSession {
                         }
                     }
                 }
-                if let Some(status) = payload.get("status") {
+                if let Some(status) = payload.get("status").and_then(Value::as_str) {
                     if !is_rlm_heartbeat_status_update(status) {
                         return Err(
                             "rlm_heartbeat.update status must be \"pause\" or \"resume\" when provided"
@@ -4311,7 +4413,7 @@ impl AgentSession {
                 let raw_delivery_mode = payload
                     .get("delivery_mode")
                     .or_else(|| payload.get("deliveryMode"));
-                let delivery_mode = normalize_heartbeat_delivery_mode(raw_delivery_mode);
+                let delivery_mode = normalize_heartbeat_delivery_mode(raw_delivery_mode)?;
                 if payload.get("instruction").is_none()
                     && payload.get("interval").is_none()
                     && payload.get("label").is_none()
@@ -4418,7 +4520,7 @@ impl AgentSession {
         match request_type {
             "agent_observe.list" => Ok(Box::pin(async move {
                 controller
-                    .list_agents(Value::Null)
+                    .list_agents()
                     .await
                     .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
             })),
@@ -4429,7 +4531,7 @@ impl AgentSession {
                 };
                 Ok(Box::pin(async move {
                     controller
-                        .snapshot(serde_json::json!({ "target": target }))
+                        .get_agent(target)
                         .await
                         .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
                 }))
@@ -4452,11 +4554,11 @@ impl AgentSession {
                 )?;
                 Ok(Box::pin(async move {
                     controller
-                        .recent_messages(serde_json::json!({
-                            "target": target,
-                            "limit": limit,
-                            "maxChars": max_chars,
-                        }))
+                        .recent_messages(crate::core::agent_observe::AgentObserveRecentMessagesInput {
+                            target,
+                            limit: Some(limit),
+                            max_chars: Some(max_chars),
+                        })
                         .await
                         .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
                 }))
@@ -5267,7 +5369,7 @@ impl AgentSession {
                         let _ = store.update_action(&next);
                         if started_primary {
                             if let Ok(ticket) = self.action_store.lock().unwrap().ticket_for(&action) {
-                                ticket.settle_delivered("delivered");
+                                ticket.settle_delivered(DeliveryOutcome::Delivered);
                             }
                             self.settle_agent_message(action.agent_message_id.as_deref(), "delivery", None);
                         }
@@ -5660,7 +5762,10 @@ impl AgentSession {
                     None
                 };
                 let did_retry = self
-                    .handle_retryable_error(&message, retry_concrete_auth_failure, auth_source_tokens)
+                    // REPAIR CURSOR: TS passes `{ markAuthStaleOnFailure, authSourceTokens }`; the
+                    // canonical Rust `handle_retryable_error(message)` takes no options. Auth-source
+                    // tracking still happens above via `retry_concrete_auth_failure`.
+                    .handle_retryable_error(&message)
                     .await;
                 if did_retry {
                     // Retry was initiated, don't proceed to compaction
@@ -5914,11 +6019,17 @@ impl AgentSession {
             return;
         }
         let session = Arc::downgrade(self);
-        let unsubscribe = self.agent.subscribe(Arc::new(move |event: AgentEvent| {
-            if let Some(session) = session.upgrade() {
-                session.handle_agent_event(event);
-            }
-        }));
+        let unsubscribe = self.agent.subscribe(Arc::new(
+            move |event: AgentEvent, signal: Option<CancellationToken>| {
+                let session = session.clone();
+                Box::pin(async move {
+                    if let Some(session) = session.upgrade() {
+                        let _ = signal;
+                        session.handle_agent_event(event);
+                    }
+                })
+            },
+        ));
         *self.unsubscribe_agent.lock().unwrap() = Some(Arc::new(unsubscribe));
     }
 
@@ -6067,7 +6178,8 @@ impl AgentSession {
                 run.lock().unwrap().suppress_terminal_notice = Some(true);
                 child_session.dispose_async(None).await;
                 if !run.lock().unwrap().settled {
-                    self.finish_rlm_run_deletion(&run).await;
+                    let run_snapshot = run.lock().unwrap().clone();
+                    self.finish_rlm_run_deletion(&run_snapshot).await;
                 }
             } else {
                 child_session.dispose_async(None).await;
@@ -6525,8 +6637,22 @@ impl AgentSession {
             allow_recursion: Some(self.rlm_depth < self.rlm_max_depth()),
             rlm_depth: Some(self.rlm_depth as f64),
             rlm_parent_agent: self.rlm_parent_agent.clone(),
+            generic_mcp_servers: Some(
+                self.mcp_manager
+                    .as_ref()
+                    .map(|manager| {
+                        manager
+                            .lock()
+                            .unwrap()
+                            .get_enabled_persistent_generic_servers()
+                    })
+                    .unwrap_or_default(),
+            ),
             ..Default::default()
         };
+        // `_baseSystemPromptOptions` is retained so `emitBeforeAgentStart` can be
+        // re-invoked with the exact options the base prompt was built from.
+        *self.base_system_prompt_options.lock().unwrap() = Some(options.clone());
         build_system_prompt(&options)
     }
 
@@ -6564,7 +6690,7 @@ impl AgentSession {
 
     /// `_normalizeSubmission`.
     fn normalize_submission(
-        &self,
+        self: &Arc<Self>,
         text: &str,
         images: Option<Vec<ImageContent>>,
         policy: &SubmissionNormalizationPolicy,
@@ -6625,11 +6751,114 @@ impl AgentSession {
     }
 
     /// `_prepareForCommit`.
+    /// The `prepare` leg of `_startPreparedTurnActions`'s `_prepareForCommit`
+    /// steps: emit `before_agent_start` once for the newest preparing turn and
+    /// share the result with every preparing turn in the batch.
+    async fn prepare_active_turns(
+        self: &Arc<Self>,
+        epoch: u64,
+        execution_policy: &TurnExecutionPolicy,
+        actions: &[QueuedSessionAction],
+    ) -> Result<Option<PreparedPromptPreparation>, String> {
+        let active_turns = |session: &Arc<Self>| -> Vec<QueuedSessionAction> {
+            actions
+                .iter()
+                .filter(|action| {
+                    matches!(action.payload, QueuedActionPayload::Turn(_))
+                        && session.action_state_of(&action.id)
+                            == Some(ActionLifecycleState::Preparing)
+                })
+                .cloned()
+                .collect()
+        };
+        if !execution_policy.run_before_agent_start {
+            return Ok(active_turns(self).first().and_then(|action| match &action.payload {
+                QueuedActionPayload::Turn(turn) => turn.prepared.clone(),
+                QueuedActionPayload::SessionCommand(_) => None,
+            }));
+        }
+        let needs_preparation = |session: &Arc<Self>| -> bool {
+            active_turns(session).iter().any(|action| match &action.payload {
+                QueuedActionPayload::Turn(turn) => turn.prepared.is_none(),
+                QueuedActionPayload::SessionCommand(_) => false,
+            })
+        };
+        while needs_preparation(self) {
+            if self.is_session_input_handoff_deferred(epoch) {
+                return Err(DEFERRED_SESSION_INPUT_ERROR_MESSAGE.to_string());
+            }
+            let preparation_action = match active_turns(self).pop() {
+                Some(action) => action,
+                None => return Ok(None),
+            };
+            let (text, images) = match &preparation_action.payload {
+                QueuedActionPayload::Turn(turn) => (turn.base.text.clone(), turn.images.clone()),
+                QueuedActionPayload::SessionCommand(_) => return Ok(None),
+            };
+            let base_prompt_snapshot = self.base_system_prompt.lock().unwrap().clone();
+            let result = self
+                .emit_before_agent_start_from_base_prompt(text, images, &base_prompt_snapshot)
+                .await;
+            let newest = active_turns(self).pop();
+            let still_newest = newest
+                .as_ref()
+                .map(|candidate| candidate.id == preparation_action.id)
+                .unwrap_or(false);
+            if !still_newest {
+                continue;
+            }
+            let prepared = PreparedPromptPreparation {
+                result,
+                base_prompt_snapshot,
+            };
+            for action in active_turns(self) {
+                let mut next = action.clone();
+                if let QueuedActionPayload::Turn(turn) = &mut next.payload {
+                    turn.prepared = Some(prepared.clone());
+                }
+                let _ = self.action_store.lock().unwrap().update_action(&next);
+            }
+        }
+        if self.is_session_input_handoff_deferred(epoch) {
+            return Err(DEFERRED_SESSION_INPUT_ERROR_MESSAGE.to_string());
+        }
+        Ok(active_turns(self)
+            .first()
+            .and_then(|action| match &action.payload {
+                QueuedActionPayload::Turn(turn) => turn.prepared.clone(),
+                QueuedActionPayload::SessionCommand(_) => None,
+            }))
+    }
+
+    /// `emitBeforeAgentStart(prompt, images, basePromptSnapshot, basePromptOptions)`.
+    async fn emit_before_agent_start_from_base_prompt(
+        self: &Arc<Self>,
+        prompt: String,
+        images: Option<Vec<ImageContent>>,
+        base_prompt_snapshot: &str,
+    ) -> Option<BeforeAgentStartResult> {
+        let runner = self.extension_runner()?;
+        let options = self
+            .base_system_prompt_options
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        runner
+            .emit_before_agent_start(
+                prompt,
+                images,
+                base_prompt_snapshot.to_string(),
+                options,
+            )
+            .await
+    }
+
     async fn prepare_for_commit(
         self: &Arc<Self>,
         policy: &CommitPreparationPolicy,
-        prepare: impl std::future::Future<Output = Result<PreparedPromptPreparation, String>>,
-        should_commit: Option<Arc<dyn Fn(&PreparedPromptPreparation) -> bool + Send + Sync>>,
+        prepare: impl std::future::Future<Output = Result<Option<PreparedPromptPreparation>, String>>,
+        should_commit: Option<Arc<dyn Fn(Option<&PreparedPromptPreparation>) -> bool + Send + Sync>>,
     ) -> Result<Option<PreparedPromptPreparation>, String> {
         if policy.initial_refine_barrier == REFINE_BARRIER_ALWAYS
             || (policy.initial_refine_barrier == REFINE_BARRIER_IF_IN_FLIGHT
@@ -6661,7 +6890,7 @@ impl AgentSession {
 
         let prepared = prepare.await?;
         if let Some(should_commit) = should_commit {
-            if !should_commit(&prepared) {
+            if !should_commit(prepared.as_ref()) {
                 return Ok(None);
             }
         }
@@ -6680,7 +6909,9 @@ impl AgentSession {
         preparation: Option<&PreparedPromptPreparation>,
         preserve_empty_extension_prompt: bool,
     ) {
-        let extension_prompt = preparation.and_then(|preparation| preparation.result.system_prompt.clone());
+        let extension_prompt = preparation
+            .and_then(|preparation| preparation.result.as_ref())
+            .and_then(|result| result.system_prompt.clone());
         let has_extension_prompt = if preserve_empty_extension_prompt {
             extension_prompt.is_some()
         } else {
@@ -8668,23 +8899,26 @@ impl AgentSession {
                 pending.insert(index, message);
             }
         };
+        let session_for_should_commit = self.clone();
+        let actions_for_should_commit = actions.to_vec();
         let prepared = self
             .prepare_for_commit(
-                session_preparation_policy_from(&execution_policy),
-                Box::new({
-                    let session = self.clone();
-                    let actions = actions.to_vec();
-                    let execution_policy = execution_policy.clone();
-                    move |prepared_result: PreparedTurnActionState| {
-                        Box::pin(async move {
-                            let _ = &actions;
-                            let _ = &execution_policy;
-                            let _ = &session;
-                            let _ = prepared_result;
-                            Ok(())
-                        })
+                &execution_policy.preparation,
+                async {
+                    if execution_policy.next_turn_context_timing
+                        == NEXT_TURN_CONTEXT_TIMING_PREPARATION
+                    {
+                        next_turn_messages = self.clone().take_pending_next_turn_messages();
                     }
-                }),
+                    self.prepare_active_turns(epoch, &execution_policy, actions)
+                        .await
+                },
+                Some(Arc::new(move |_prepared: Option<&PreparedPromptPreparation>| {
+                    actions_for_should_commit.iter().any(|action| {
+                        session_for_should_commit.action_state_of(&action.id)
+                            == Some(ActionLifecycleState::Preparing)
+                    })
+                })),
             )
             .await;
         let prepared_turn = match prepared {
@@ -8719,6 +8953,7 @@ impl AgentSession {
                 &execution_policy,
                 epoch,
                 &mut next_turn_messages,
+                prepared_turn.as_ref(),
             )
             .await;
         commit_fence.release();
@@ -8782,6 +9017,7 @@ impl AgentSession {
         execution_policy: &TurnExecutionPolicy,
         epoch: u64,
         next_turn_messages: &mut Vec<CustomMessage>,
+        prepared_turn: Option<&PreparedPromptPreparation>,
     ) -> Result<(), String> {
         let is_deferred = self.is_session_input_handoff_deferred(epoch)
             || self.is_streaming()
@@ -8799,7 +9035,13 @@ impl AgentSession {
             // cancelled first turn strips it with the rest of the turn.
             let digest = self.harness_digest();
             if self.latest_context_harness_digest() != Some(digest.clone()) {
-                next_turn_messages.insert(0, create_harness_digest_message(digest, now_ms_i64()));
+                next_turn_messages.insert(
+                    0,
+                    custom_message_from_agent_message(create_harness_digest_message(
+                        digest,
+                        now_ms_i64(),
+                    )),
+                );
             }
         }
         let first_id = turns[0].id.clone();
@@ -8858,11 +9100,9 @@ impl AgentSession {
         if execution_policy.run_before_agent_start {
             self.append_before_agent_start_messages(
                 &prepared_messages,
-                prepared_turn.as_ref().map(|state| &state.result),
+                prepared_turn.and_then(|state| state.result.as_ref()),
             );
-            let prepared_state = prepared_turn
-                .as_ref()
-                .and_then(|state| state.prepared.as_ref());
+            let prepared_state = prepared_turn;
             self.apply_prepared_system_prompt(
                 prepared_state,
                 execution_policy.preserve_empty_extension_prompt,
@@ -8929,7 +9169,9 @@ impl AgentSession {
                         Err(error) => {
                             // Only a failure of the refinement itself is a refine failure; a later
                             // result-row persist error must not report a completed refinement as failed.
-                            self.emit_refine_failed(&self.as_error(&error));
+                            self.emit(AgentSessionEvent::RefineFailed {
+                                error: self.as_error(&error),
+                            });
                             return Err(error);
                         }
                     },
@@ -8950,10 +9192,11 @@ impl AgentSession {
                 self.handle_goal_slash_command(&input.base.text)
                     .await?;
                 let goal = self.goal_state();
-                result_text = Some(if !goal.objective.is_empty() {
-                    format!("Goal {}: {}", goal_status_name(&goal.status), goal.objective)
-                } else {
-                    "No active goal.".to_string()
+                result_text = Some(match goal.objective.as_deref() {
+                    Some(objective) if !objective.is_empty() => {
+                        format!("Goal {}: {}", goal_status_name(&goal.status), objective)
+                    }
+                    _ => "No active goal.".to_string(),
                 });
             }
             "autonomous" => {
@@ -8995,20 +9238,23 @@ impl AgentSession {
         if appended.is_err() {
             // The result row is also the command-correlated UI settle edge.
             let message = create_session_slash_command_result_message(
-                &format!("Command failed: {command_error}"),
+                format!("Command failed: {command_error}"),
                 SessionSlashCommandResultDetails {
                     command: input.base.command.clone(),
                     success: false,
                     severity: "error".to_string(),
                     error: Some(command_error.clone()),
+                    command_entry_id: None,
                 },
                 true,
                 now_ms_i64(),
             );
             self.emit(AgentSessionEvent::MessageStart {
-                message: message.clone(),
+                message: custom_message_agent_message(&message),
             });
-            self.emit(AgentSessionEvent::MessageEnd { message });
+            self.emit(AgentSessionEvent::MessageEnd {
+                message: custom_message_agent_message(&message),
+            });
         }
         Err(command_error)
     }
@@ -9024,7 +9270,7 @@ impl AgentSession {
     ) {
         let message = if is_result {
             create_session_slash_command_result_message(
-                content,
+                content.to_string(),
                 SessionSlashCommandResultDetails {
                     command: command.clone(),
                     success: !is_error,
@@ -9039,12 +9285,18 @@ impl AgentSession {
                     } else {
                         None
                     },
+                    command_entry_id: None,
                 },
                 display,
                 now_ms_i64(),
             )
         } else {
-            create_session_slash_command_message(command.clone(), now_ms_i64())
+            create_session_slash_command_message(
+                command.clone(),
+                crate::core::messages::SessionSlashCommandDetails::default(),
+                true,
+                now_ms_i64(),
+            )
         };
         // Persist before touching live state so a failed write cannot leave an
         // unsaved leaf that the next entry would silently parent onto.
@@ -9053,17 +9305,19 @@ impl AgentSession {
             .unwrap()
             .append_custom_message_entry_with_rollback(
                 &message.custom_type,
-                message.content.clone(),
+                &custom_message_entry_content(&message.content),
                 message.display,
                 message.details.clone(),
             );
         let mut state = self.agent.state();
-        state.messages.push(message.clone());
+        state.messages.push(custom_message_agent_message(&message));
         self.agent.set_state(state);
         self.emit(AgentSessionEvent::MessageStart {
-            message: message.clone(),
+            message: custom_message_agent_message(&message),
         });
-        self.emit(AgentSessionEvent::MessageEnd { message });
+        self.emit(AgentSessionEvent::MessageEnd {
+            message: custom_message_agent_message(&message),
+        });
     }
 
     /// `_throwIfExtensionCommand(text)`.
@@ -9090,12 +9344,12 @@ impl AgentSession {
         deliver_as: Option<String>,
     ) -> Result<(), String> {
         let app_message = CustomMessage {
+            role: "custom".to_string(),
             custom_type: message.custom_type.clone(),
             content: message.content.clone(),
             display: message.display,
             details: message.details.clone(),
             timestamp: now_ms_i64(),
-            ..Default::default()
         };
         if deliver_as.as_deref() == Some("nextTurn") {
             self.pending_next_turn_messages
@@ -11178,7 +11432,7 @@ impl AgentSession {
             .unwrap()
             .append_custom_message_entry_with_rollback(
                 &message.custom_type,
-                message.content.clone(),
+                &custom_message_entry_content(&message.content),
                 message.display,
                 message.details.clone(),
             );
@@ -11444,7 +11698,7 @@ fn delivery_message_from_value(value: &Value) -> DeliveryMessage {
     }
     match serde_json::from_value::<CustomMessage>(value.clone()) {
         Ok(custom) => DeliveryMessage::Custom(custom),
-        Err(_) => DeliveryMessage::Custom(CustomMessage::default()),
+        Err(_) => DeliveryMessage::Custom(custom_message_baseline()),
     }
 }
 
@@ -11529,6 +11783,30 @@ fn agent_message_from_value(value: &Value) -> AgentMessage {
     })
 }
 
+/// `CustomMessage` as the `AgentMessage` the agent state and events carry.
+pub fn custom_message_agent_message(message: &CustomMessage) -> AgentMessage {
+    AgentMessage::Custom(CustomAgentMessage::Custom {
+        custom_type: message.custom_type.clone(),
+        content: message.content.clone(),
+        display: message.display,
+        details: message.details.clone(),
+        timestamp: message.timestamp,
+    })
+}
+
+/// Baseline `CustomMessage` for struct-literal updates: the canonical type has
+/// no `Default` impl, so `role` and `content` are filled in explicitly.
+pub fn custom_message_baseline() -> CustomMessage {
+    CustomMessage {
+        role: "custom".to_string(),
+        custom_type: String::new(),
+        content: CustomMessageContent::Text(String::new()),
+        display: false,
+        details: None,
+        timestamp: 0,
+    }
+}
+
 /// `customMessageOf(message)` - the custom payload of a non-user message.
 fn custom_message_of(message: &AgentMessage) -> CustomMessage {
     match message {
@@ -11539,14 +11817,14 @@ fn custom_message_of(message: &AgentMessage) -> CustomMessage {
             details,
             timestamp,
         }) => CustomMessage {
+            role: "custom".to_string(),
             custom_type: custom_type.clone(),
             content: content.clone(),
             display: *display,
             details: details.clone(),
             timestamp: *timestamp,
-            ..Default::default()
         },
-        _ => CustomMessage::default(),
+        _ => custom_message_baseline(),
     }
 }
 
