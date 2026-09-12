@@ -126,3 +126,20 @@ Reference command:
 `NUL` at the repo root (68 KB seen). `NUL` is a Windows reserved device name, so the file cannot be
 read normally and it pollutes `git status`. Use `> /dev/null` instead, or `2> file.log`.
 Removed once already (2026-09-12); if it reappears, a worker's command is the cause.
+
+## COMMIT POLICY (incident 2026-09-12: I truncated a live worker's file)
+
+`git add -A crates/` while workers were writing swept a file in mid-save. Commit `18e979533` froze
+`modes/daemon/daemon_mode.rs` **12 lines short** of the worktree (the `"create"` match arm and part of
+the `list_saved_sessions` tail were missing, so rustc reported a bogus `unexpected closing delimiter`
+at L4157 and emitted only 2 errors for the file). Pack C caught this and repaired it in the worktree.
+The next commit (`4eccd4341`) captured the repaired content, so HEAD is whole (verified: `"create" =>`
+and 5 `list_saved_sessions` sites present, rustfmt exit 0).
+
+RULE: never stage a file that a LIVE pack owns. Commits take only `docs/`, `evidence/`, and files the
+lead explicitly edited (or files from FINISHED packs). Helper: `safe_commit(msg, my_files=[...])`,
+which resets every live-pack path before committing. Exclusions come from
+`evidence/diagnostics/packs-{index,ijkl}.json` (35 live files at the time of writing).
+
+The old habit of `git add -A crates/` is what made 27 live-pack files land in a single commit; treat
+any commit touching a live pack's file as suspect and re-diff the worktree before trusting it.
