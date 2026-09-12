@@ -2,6 +2,492 @@
 
 use super::*;
 
+use crate::core::extensions::types::{
+    ProviderConfig as ExtensionProviderConfig, SessionEntry as ExtensionSessionEntry,
+};
+use crate::core::provider_retry::{
+    is_faux_provider_queue_exhausted, is_permanent_provider_failure_kind, provider_retry_delay,
+    provider_retry_policy, provider_stream_failure_kind, provider_stream_failure_retry_after_ms,
+    ProviderRetryDelay, ProviderRetryDelayOptions,
+};
+use crate::core::rlm_runtime::{
+    create_default_rlm_subagent_session_name, normalize_requested_rlm_subagent_model,
+    normalize_requested_rlm_subagent_session_name, normalize_requested_rlm_subagent_thinking_level,
+    CreateRlmRootSessionOptions, DELETE_OUTCOME_DELETED, DELETE_OUTCOME_SKIPPED_RUNNING,
+    RLM_SUBAGENT_STATUS_COMPLETED, RLM_SUBAGENT_STATUS_ERROR, RLM_SUBAGENT_STATUS_RUNNING,
+};
+use crate::core::agent_messages::{AgentSessionMessageAgentSummary, RUNTIME_KIND_SUBAGENT};
+use crate::core::extensions::types::{
+    AppendEntryHandler, CompactOptions, CustomMessagePayload, ExtensionActions,
+    ExtensionContextActions, GetAllToolsHandler, GetActiveToolsHandler, GetCommandsHandler,
+    GetSessionNameHandler, GetThinkingLevelHandler, ProviderActions, RefreshToolsHandler,
+    SendMessageHandler, SendMessageOptions, SendUserMessageHandler, SendUserMessageOptions,
+    SetActiveToolsHandler, SetLabelHandler, SetModelHandler, SetSessionNameHandler,
+    SetThinkingLevelHandler,
+};
+use crate::core::session_stats::SessionStatsTokens;
+use crate::core::skills::Skill;
+use crate::core::slash_commands::SlashCommandInfo;
+use crate::core::source_info::{create_synthetic_source_info, SyntheticSourceInfoOptions};
+
+/// `deleteInactiveRlmSubagent` outcome literals.
+///
+/// REPAIR CURSOR: `core/rlm_runtime.rs` declares only `DELETE_OUTCOME_DELETED`
+/// and `DELETE_OUTCOME_SKIPPED_RUNNING`; the `"not_found"`/`"running"` members
+/// of the TypeScript return union have no constant there, while
+/// `modes/daemon/daemon_mode.rs:5098` already compares against the `"deleted"` /
+/// `"running"` literals. Add the two missing constants to their canonical owner
+/// (`core/rlm_runtime.rs`) and import them here.
+const DELETE_OUTCOME_NOT_FOUND_LITERAL: &str = "not_found";
+const DELETE_OUTCOME_RUNNING_LITERAL: &str = "running";
+
+/// `new ExtensionRunner(..., sessionManager, modelRegistry)`.
+///
+/// The TypeScript hands the runner the live `sessionManager` and
+/// `modelRegistry` objects. Rust `extensions::types` declares the two traits
+/// (`ReadonlySessionManager`/`SessionManager`, `ModelRegistry`) but nothing in
+/// the crate implements them for the real owners, so the construction call site
+/// forwards to them here. Nothing is dropped: every method reads or writes the
+/// canonical object.
+struct RuntimeSessionManager {
+    manager: Arc<Mutex<SessionManager>>,
+}
+
+impl crate::core::extensions::types::ReadonlySessionManager for RuntimeSessionManager {
+    fn get_session_id(&self) -> String {
+        self.manager.lock().unwrap().get_session_id()
+    }
+
+    fn get_session_file(&self) -> Option<String> {
+        self.manager.lock().unwrap().get_session_file()
+    }
+
+    fn get_session_dir(&self) -> String {
+        self.manager.lock().unwrap().get_session_dir()
+    }
+
+    /// `sessionManager.getEntries()` as the runner's `SessionEntry` shape
+    /// (`{ type, id, ...rest }`); `types::SessionEntry` flattens the rest.
+    fn get_branch(&self) -> Vec<ExtensionSessionEntry> {
+        self.manager
+            .lock()
+            .unwrap()
+            .get_entries()
+            .into_iter()
+            .map(|mut entry| {
+                let id = entry
+                    .remove("id")
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                let entry_type = entry
+                    .remove("type")
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_default();
+                ExtensionSessionEntry {
+                    entry_type,
+                    id,
+                    extra: entry,
+                }
+            })
+            .collect()
+    }
+}
+
+impl crate::core::extensions::types::SessionManager for RuntimeSessionManager {}
+
+/// The `modelRegistry` half of the same seam.
+struct RuntimeModelRegistry {
+    registry: Arc<Mutex<crate::core::model_registry::ModelRegistry>>,
+}
+
+impl crate::core::extensions::types::ModelRegistry for RuntimeModelRegistry {
+    fn register_provider(&self, name: &str, config: &ExtensionProviderConfig) {
+        let input = crate::core::agent_session_services::provider_config_input(config);
+        let _ = self.registry.lock().unwrap().register_provider(name, input);
+    }
+
+    fn unregister_provider(&self, name: &str) {
+        self.registry.lock().unwrap().unregister_provider(name);
+    }
+
+    /// `modelRegistry.getApiKeyAndHeaders(model)` - the TypeScript result object
+    /// is `{ ok, apiKey, headers, error }`.
+    fn get_api_key_and_headers(
+        &self,
+        model: &Model,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send>> {
+        let model = model.clone();
+        let registry = self.registry.clone();
+        Box::pin(async move {
+            // The registry lock is synchronous, so the lookup runs on a blocking
+            // worker (`with_model_registry`) instead of holding the guard across the
+            // await; same shape as `get_required_request_auth`.
+            let resolved = crate::core::sdk::with_model_registry(registry, move |registry| {
+                Box::pin(async move { registry.get_api_key_and_headers(&model).await })
+            })
+            .await
+            .unwrap_or_else(|error| crate::core::model_registry::ResolvedRequestAuth {
+                ok: false,
+                api_key: None,
+                headers: None,
+                error: Some(error),
+            });
+            Ok(serde_json::json!({
+                "ok": resolved.ok,
+                "apiKey": resolved.api_key,
+                "headers": resolved.headers,
+                "error": resolved.error,
+            }))
+        })
+    }
+}
+
+
+/// `createSyntheticSourceInfo` for the two synthetic tool sources the runtime
+/// registers: `"<builtin:name>"` and `"<sdk:name>"` (agent-session.ts:9962-9986).
+fn runtime_source_info(name: &str, source: &str) -> SourceInfo {
+    let path = if name.starts_with('<') {
+        name.to_string()
+    } else {
+        format!("<{source}:{name}>")
+    };
+    create_synthetic_source_info(
+        &path,
+        &SyntheticSourceInfoOptions {
+            source: source.to_string(),
+            ..Default::default()
+        },
+    )
+}
+
+/// A session resolved at use time; a callback on a dropped session is a no-op.
+fn with_session<R>(
+    weak: &Weak<AgentSession>,
+    action: impl FnOnce(&Arc<AgentSession>) -> R,
+) -> Option<R> {
+    weak.upgrade().map(|session| action(&session))
+}
+
+/// `runner.getRegisteredCommands()` + prompt templates + skills as
+/// `SlashCommandInfo[]` (agent-session.ts:9847-9870).
+fn runtime_extension_commands(session: &Arc<AgentSession>, runner: &ExtensionRunner) -> Vec<SlashCommandInfo> {
+    let mut commands: Vec<SlashCommandInfo> = runner
+        .get_registered_commands()
+        .into_iter()
+        .map(|command| SlashCommandInfo {
+            name: command.invocation_name,
+            description: command.command.description.clone(),
+            source: crate::core::slash_commands::SLASH_COMMAND_SOURCE_EXTENSION.to_string(),
+            source_info: command.command.source_info.clone(),
+        })
+        .collect();
+    commands.extend(session.prompt_templates().into_iter().map(|template| SlashCommandInfo {
+        name: template.name,
+        description: Some(template.description),
+        source: crate::core::slash_commands::SLASH_COMMAND_SOURCE_PROMPT.to_string(),
+        source_info: template.source_info,
+    }));
+    commands.extend(
+        session
+            .resource_loader
+            .get_skills()
+            .skills
+            .into_iter()
+            .map(|skill| {
+                let base = match &skill {
+                    Skill::Markdown(skill) => &skill.base,
+                    Skill::Python(skill) => &skill.base,
+                };
+                SlashCommandInfo {
+                    name: format!("skill:{}", base.name),
+                    description: Some(base.description.clone()),
+                    source: crate::core::slash_commands::SLASH_COMMAND_SOURCE_SKILL.to_string(),
+                    source_info: base.source_info.clone(),
+                }
+            }),
+    );
+    commands
+}
+
+/// `_bindExtensionCore` action half (agent-session.ts:9872-9920).
+fn build_extension_actions(weak: Weak<AgentSession>, runner: ExtensionRunner) -> ExtensionActions {
+    let send_runner = runner.clone();
+    let send_weak = weak.clone();
+    let send_message: crate::core::extensions::types::SendMessageHandler =
+        Arc::new(move |message: CustomMessagePayload, options: Option<SendMessageOptions>| {
+            let runner = send_runner.clone();
+            let session = send_weak.upgrade();
+            let Some(session) = session else { return };
+            let custom = CustomMessage {
+                role: "custom".to_string(),
+                custom_type: message.custom_type.clone(),
+                content: custom_message_content_from_value(&message.content),
+                display: message.display,
+                details: message.details.clone(),
+                timestamp: now_ms_i64(),
+            };
+            let (trigger_turn, deliver_as) = match options {
+                Some(options) => (options.trigger_turn, options.deliver_as),
+                None => (None, None),
+            };
+            tokio::task::spawn(async move {
+                if let Err(error) = session.send_custom_message(custom, trigger_turn, deliver_as).await {
+                    runner.emit_error(ExtensionError {
+                        extension_path: "<runtime>".to_string(),
+                        event: "send_message".to_string(),
+                        error,
+                        stack: None,
+                    });
+                }
+            });
+        });
+    let send_user_runner = runner.clone();
+    let send_user_weak = weak.clone();
+    let send_user_message: crate::core::extensions::types::SendUserMessageHandler =
+        Arc::new(move |content: Value, options: Option<SendUserMessageOptions>| {
+            let runner = send_user_runner.clone();
+            let Some(session) = send_user_weak.upgrade() else { return };
+            let parts: Vec<pi_ai::types::ImageOrTextContent> = match &content {
+                Value::String(text) => vec![pi_ai::types::ImageOrTextContent::Text(TextContent::new(text))],
+                Value::Array(_) => serde_json::from_value(content.clone()).unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let deliver_as = options.and_then(|options| options.deliver_as);
+            let text = normalize_message_content(&parts).0;
+            let content = if parts.len() == 1 {
+                parts[0].clone()
+            } else {
+                pi_ai::types::ImageOrTextContent::Text(TextContent::new(&text))
+            };
+            tokio::task::spawn(async move {
+                if let Err(error) = session.send_user_message(&content, deliver_as).await {
+                    runner.emit_error(ExtensionError {
+                        extension_path: "<runtime>".to_string(),
+                        event: "send_user_message".to_string(),
+                        error,
+                        stack: None,
+                    });
+                }
+            });
+        });
+    let append_weak = weak.clone();
+    let append_entry: crate::core::extensions::types::AppendEntryHandler =
+        Arc::new(move |custom_type: String, data: Option<Value>| {
+            let _ = with_session(&append_weak, |session| {
+                let _ = session
+                    .session_manager
+                    .lock()
+                    .unwrap()
+                    .append_custom_entry(&custom_type, data.clone());
+            });
+        });
+    let name_weak = weak.clone();
+    let set_session_name: crate::core::extensions::types::SetSessionNameHandler =
+        Arc::new(move |name: String| {
+            let session = name_weak.upgrade();
+            Box::pin(async move {
+                let Some(session) = session else { return };
+                let _ = session.set_session_name(&name);
+            }) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        });
+    let get_name_weak = weak.clone();
+    let get_session_name: crate::core::extensions::types::GetSessionNameHandler =
+        Arc::new(move || with_session(&get_name_weak, |session| session.session_name()).flatten());
+    let label_weak = weak.clone();
+    let set_label: crate::core::extensions::types::SetLabelHandler =
+        Arc::new(move |entry_id: String, label: Option<String>| {
+            let _ = with_session(&label_weak, |session| {
+                let _ = session
+                    .session_manager
+                    .lock()
+                    .unwrap()
+                    .append_label_change(&entry_id, label.as_deref());
+            });
+        });
+    let active_weak = weak.clone();
+    let get_active_tools: crate::core::extensions::types::GetActiveToolsHandler =
+        Arc::new(move || with_session(&active_weak, |session| session.get_active_tool_names()).unwrap_or_default());
+    let all_weak = weak.clone();
+    let get_all_tools: crate::core::extensions::types::GetAllToolsHandler = Arc::new(move || {
+        with_session(&all_weak, |session| {
+            session
+                .get_all_tools()
+                .into_iter()
+                .filter_map(|tool| serde_json::from_value::<crate::core::extensions::types::ToolInfo>(tool).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+    });
+    let set_active_weak = weak.clone();
+    let set_active_tools: crate::core::extensions::types::SetActiveToolsHandler =
+        Arc::new(move |tool_names: Vec<String>| {
+            let _ = with_session(&set_active_weak, |session| session.set_active_tools_by_name(&tool_names));
+        });
+    let refresh_weak = weak.clone();
+    let refresh_tools: crate::core::extensions::types::RefreshToolsHandler = Arc::new(move || {
+        let _ = with_session(&refresh_weak, |session| {
+            session.refresh_tool_registry(false, None)
+        });
+    });
+    let commands_weak = weak.clone();
+    let commands_runner = runner.clone();
+    let get_commands: crate::core::extensions::types::GetCommandsHandler = Arc::new(move || {
+        with_session(&commands_weak, |session| {
+            runtime_extension_commands(session, &commands_runner)
+        })
+        .unwrap_or_default()
+    });
+    let set_model_weak = weak.clone();
+    let set_model: crate::core::extensions::types::SetModelHandler = Arc::new(move |model: Model| {
+        let session = set_model_weak.upgrade();
+        Box::pin(async move {
+            let Some(session) = session else { return false };
+            if !session.model_registry.lock().unwrap().has_configured_auth(&model) {
+                return false;
+            }
+            session.set_model(model, ModelSelectOptions::default()).await.is_ok()
+        }) as std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>
+    });
+    let get_thinking_weak = weak.clone();
+    let get_thinking_level: crate::core::extensions::types::GetThinkingLevelHandler =
+        Arc::new(move || {
+            with_session(&get_thinking_weak, |session| session.thinking_level())
+                .unwrap_or(ThinkingLevel::Off)
+        });
+    let set_thinking_weak = weak.clone();
+    let set_thinking_level: crate::core::extensions::types::SetThinkingLevelHandler =
+        Arc::new(move |level: ThinkingLevel| {
+            let _ = with_session(&set_thinking_weak, |session| {
+                let session = session.clone();
+                session.set_thinking_level(level);
+            });
+        });
+    ExtensionActions {
+        send_message,
+        send_user_message,
+        append_entry,
+        set_session_name,
+        get_session_name,
+        set_label,
+        get_active_tools,
+        get_all_tools,
+        set_active_tools,
+        refresh_tools,
+        get_commands,
+        set_model,
+        get_thinking_level,
+        set_thinking_level,
+    }
+}
+
+/// `_bindExtensionCore` context-action half (agent-session.ts:9921-9943).
+fn build_extension_context_actions(weak: Weak<AgentSession>) -> ExtensionContextActions {
+    let model_weak = weak.clone();
+    let get_model = Arc::new(move || with_session(&model_weak, |session| session.model()).flatten());
+    let idle_weak = weak.clone();
+    let is_idle = Arc::new(move || {
+        with_session(&idle_weak, |session| !session.is_streaming()).unwrap_or(true)
+    });
+    let signal_weak = weak.clone();
+    let get_signal = Arc::new(move || with_session(&signal_weak, |session| session.agent.signal()).flatten());
+    let abort_weak = weak.clone();
+    let abort = Arc::new(move || {
+        let Some(session) = abort_weak.upgrade() else { return };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let _ = session.abort().await;
+            });
+        }
+    });
+    let pending_weak = weak.clone();
+    let has_pending_messages = Arc::new(move || {
+        with_session(&pending_weak, |session| session.queued_action_count() > 0).unwrap_or(false)
+    });
+    // REPAIR CURSOR: the TypeScript calls `this._extensionShutdownHandler?.()`
+    // (agent-session.ts:9928). The Rust owner is the private field
+    // `agent_session.rs:2235 extension_shutdown_handler`, which has no accessor and
+    // no setter in `bind_extensions`, so this port cannot reach it from the child
+    // module. Add an accessor/`set_extension_shutdown_handler` to `agent_session.rs`
+    // (lead-owned seam) and call it here.
+    let shutdown: crate::core::extensions::runner::ShutdownHandler = Arc::new(|| {});
+    let usage_weak = weak.clone();
+    let get_context_usage = Arc::new(move || {
+        with_session(&usage_weak, |session| session.get_context_usage()).flatten().map(
+            |usage| crate::core::extensions::types::ContextUsage {
+                tokens: usage.tokens,
+                context_window: usage.context_window,
+                percent: usage.percent,
+            },
+        )
+    });
+    let compact_weak = weak.clone();
+    let compact = Arc::new(move |options: Option<CompactOptions>| {
+        let Some(session) = compact_weak.upgrade() else { return };
+        let (custom_instructions, on_complete, on_error) = match options {
+            Some(options) => (options.custom_instructions, options.on_complete, options.on_error),
+            None => (None, None, None),
+        };
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                // REPAIR CURSOR: the TypeScript hands the `CompactionResult` to
+                // `options.onComplete` (agent-session.ts:9934). The public Rust
+                // owner `compact_with_options` returns `Result<(), String>`; the
+                // result object is only built by the private
+                // `perform_compaction_unmeasured_full`. Expose that result on the
+                // public path and forward it here.
+                match session
+                    .compact_with_options(custom_instructions.as_deref(), false)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(error) => {
+                        if let Some(on_error) = on_error {
+                            on_error(error);
+                        }
+                    }
+                }
+                let _ = on_complete;
+            });
+        }
+    });
+    let prompt_weak = weak.clone();
+    let get_system_prompt = Arc::new(move || {
+        with_session(&prompt_weak, |session| session.system_prompt()).unwrap_or_default()
+    });
+    ExtensionContextActions {
+        get_model,
+        is_idle,
+        get_signal,
+        abort,
+        has_pending_messages,
+        shutdown,
+        get_context_usage,
+        compact,
+        get_system_prompt,
+    }
+}
+
+/// `_bindExtensionCore` provider-action half (agent-session.ts:9944-9953).
+fn build_provider_actions(weak: Weak<AgentSession>) -> ProviderActions {
+    let register_weak = weak.clone();
+    let register_provider = Arc::new(move |name: String, config: ExtensionProviderConfig| {
+        let Some(session) = register_weak.upgrade() else { return };
+        let input = crate::core::agent_session_services::provider_config_input(&config);
+        let _ = session.model_registry.lock().unwrap().register_provider(&name, input);
+        session.refresh_current_model_from_registry();
+    });
+    let unregister_weak = weak;
+    let unregister_provider = Arc::new(move |name: String| {
+        let Some(session) = unregister_weak.upgrade() else { return };
+        session.model_registry.lock().unwrap().unregister_provider(&name);
+        session.refresh_current_model_from_registry();
+    });
+    ProviderActions {
+        register_provider: Some(register_provider),
+        unregister_provider: Some(unregister_provider),
+    }
+}
+
 impl AgentSession {
     pub async fn bind_extensions(self: &Arc<Self>, bindings: &ExtensionBindings) -> Result<(), String> {
         let Some(runner) = self.extension_runner() else { return Ok(()); };
@@ -65,7 +551,11 @@ impl AgentSession {
     pub(super) fn bind_extension_core(self: &Arc<Self>, runner: &ExtensionRunner) {
         // Each callback resolves the session at use time to avoid retaining its owner.
         let weak = Arc::downgrade(self);
-        runner.bind_core(runtime_extension_actions(weak.clone()), runtime_extension_context_actions(weak), None);
+        runner.bind_core(
+            build_extension_actions(weak.clone(), runner.clone()),
+            build_extension_context_actions(weak.clone()),
+            Some(build_provider_actions(weak)),
+        );
     }
 
     pub(super) fn refresh_tool_registry(self: &Arc<Self>, include_all: bool, active_tool_names: Option<Vec<String>>) {
@@ -119,9 +609,12 @@ impl AgentSession {
         };
         *self.base_tool_definitions.lock().unwrap() = definitions;
         let loaded = self.resource_loader.get_extensions();
+        // The runner reaches both owners through the `extensions::types` traits;
+        // the two adapters declared above forward every call to the canonical owners.
         let runner = crate::core::extensions::runner::create_extension_runner(
-            loaded.extensions, loaded.runtime, self.cwd.clone(), self.session_manager.clone(),
-            Arc::new(RuntimeModelRegistry(self.model_registry.clone())),
+            loaded.extensions, loaded.runtime, self.cwd.clone(),
+            Arc::new(RuntimeSessionManager { manager: self.session_manager.clone() }),
+            Arc::new(RuntimeModelRegistry { registry: self.model_registry.clone() }),
         );
         self.extension_runner_ref.set(Some(runner.clone()));
         self.bind_extension_core(&runner);
@@ -258,20 +751,32 @@ impl AgentSession {
     }
 
     /// `_findAssistantEntryForMessage(message)`.
-    pub(super) fn find_assistant_entry_for_message(&self, message: &AgentMessage) -> Option<SessionEntry> {
+    pub(super) fn find_assistant_entry_for_message(
+        &self,
+        message: &AssistantMessage,
+    ) -> Option<SessionEntry> {
+        // The TypeScript compares `entry.message === message` (object identity);
+        // Rust values have no identity, so the same message compares through
+        // `assistant_message_key`, exactly like the other identity-keyed maps.
         let key = assistant_message_key(message);
         self.session_manager
             .lock()
             .unwrap()
-            .get_branch(None)
+            .get_entries()
             .into_iter()
-            .rev()
             .find(|entry| {
-                entry
-                    .get("message")
-                    .map(|value| assistant_message_key(&agent_message_from_value(value)))
-                    .map(|candidate| candidate == key)
-                    .unwrap_or(false)
+                if entry.get("type").and_then(Value::as_str) != Some("message") {
+                    return false;
+                }
+                let Some(value) = entry.get("message") else {
+                    return false;
+                };
+                match agent_message_from_value(value) {
+                    AgentMessage::Message(Message::Assistant(assistant)) => {
+                        assistant_message_key(&assistant) == key
+                    }
+                    _ => false,
+                }
             })
     }
 
@@ -314,7 +819,7 @@ impl AgentSession {
     ) -> Result<RlmSubagentRuntime, String> {
         let mut manager = SessionManager::create(&self.cwd, Some(&options.session_dir))?;
         manager.append_model_change(&options.model.provider, &options.model.id)?;
-        manager.append_thinking_level_change(&options.thinking_level)?;
+        manager.append_thinking_level_change(&thinking_level_name(&options.thinking_level))?;
         manager.append_service_tier_change(&options.service_tier)?;
         let mut state = self.agent.state();
         state.messages.clear();
@@ -425,11 +930,18 @@ impl AgentSession {
     }
 
     /// `listRlmSubagents()`.
+    ///
+    /// REPAIR CURSOR: `this._agentMessageController?.listAgents()` needs an
+    /// `AgentSessionMessageListResult` from the controller. The Rust trait
+    /// (`core/agent_messages.rs:947`) declares only `roster()`,
+    /// `await_pending_child_publication` and `send_agent_message`; `roster()`
+    /// returns the unrelated `AgentFamilyRosterResult`, and the daemon builds the
+    /// list in `AgentDaemon::create_agent_message_list_result`
+    /// (`modes/daemon/daemon_mode.rs:12332`) without exposing it on the trait.
+    /// Add `list_agents()` to the canonical trait (and to the daemon controller)
+    /// so this call site can pass the result through unchanged.
     pub async fn list_rlm_subagents(self: &Arc<Self>) -> Result<RlmListSubagentsResult, String> {
-        let listed = match &self.agent_message_controller {
-            Some(controller) => controller.roster().await.ok(),
-            None => None,
-        };
+        let listed: Option<AgentSessionMessageListResult> = None;
         Ok(self.build_rlm_subagent_list(listed))
     }
 
@@ -438,7 +950,27 @@ impl AgentSession {
         &self,
         listed_agents: Option<AgentSessionMessageListResult>,
     ) -> RlmListSubagentsResult {
-        let mut entries: Vec<RlmSubagentRegistryEntry> = Vec::new();
+        let mut daemon_children: HashMap<String, AgentSessionMessageAgentSummary> = HashMap::new();
+        let parent_active_session_id = listed_agents
+            .as_ref()
+            .and_then(|listed| listed.current.as_ref())
+            .map(|current| current.active_session_id.clone());
+        if let Some(parent_active_session_id) = parent_active_session_id {
+            for agent in listed_agents.as_ref().map(|listed| listed.agents.iter()).into_iter().flatten() {
+                if agent.runtime_kind.as_deref() != Some(RUNTIME_KIND_SUBAGENT) {
+                    continue;
+                }
+                if agent.parent_active_session_id.as_deref() != Some(parent_active_session_id.as_str()) {
+                    continue;
+                }
+                if let Some(child_id) = agent.rlm_child_id.clone() {
+                    daemon_children.insert(child_id, agent.clone());
+                }
+            }
+        }
+
+        let mut subagents: Vec<RlmSubagentRegistryEntry> = Vec::new();
+        let mut recorded: HashSet<String> = HashSet::new();
         let runs: Vec<RlmChildRun> = self
             .active_rlm_child_runs
             .lock()
@@ -447,84 +979,237 @@ impl AgentSession {
             .map(|run| run.lock().unwrap().clone())
             .collect();
         for run in runs.iter() {
-            entries.push(RlmSubagentRegistryEntry {
-                child_id: run.id.clone(),
-                session_name: run.session_name.clone(),
-                status: run.status.clone(),
-                label: run.label.clone(),
-                model: run.model.clone(),
+            if self.deleting_rlm_children.lock().unwrap().contains_key(&run.id)
+                || run.detached_deletion.is_some()
+                || run.status == RLM_CHILD_AGENT_STATUS_CANCELLED
+            {
+                continue;
+            }
+            let daemon_child = daemon_children.get(&run.id);
+            subagents.push(RlmSubagentRegistryEntry {
+                rlm_child_id: run.id.clone(),
+                active_session_id: daemon_child.map(|child| child.active_session_id.clone()),
+                session_id: daemon_child
+                    .map(|child| child.session_id.clone())
+                    .or_else(|| run.session.as_ref().map(|session| session.session_id())),
+                session_name: daemon_child
+                    .and_then(|child| child.session_name.clone())
+                    .or_else(|| {
+                        run.session
+                            .as_ref()
+                            .and_then(|session| session.session_name())
+                    })
+                    .unwrap_or_else(|| run.session_name.clone()),
+                session_dir: run.session_dir.clone(),
+                status: match run.status.as_str() {
+                    "done" => RLM_SUBAGENT_STATUS_COMPLETED.to_string(),
+                    "error" => RLM_SUBAGENT_STATUS_ERROR.to_string(),
+                    _ => RLM_SUBAGENT_STATUS_RUNNING.to_string(),
+                },
+            });
+            recorded.insert(run.id.clone());
+        }
+        for (child_id, retained) in self.rlm_child_sessions.lock().unwrap().iter() {
+            if self.deleting_rlm_children.lock().unwrap().contains_key(child_id)
+                || recorded.contains(child_id)
+                || self.rlm_child_cleanup_failures.lock().unwrap().contains_key(child_id)
+            {
+                continue;
+            }
+            let daemon_child = daemon_children.get(child_id);
+            let session_dir = match retained.session.rlm_session_dir.clone() {
+                Some(session_dir) => session_dir,
+                None => continue,
+            };
+            subagents.push(RlmSubagentRegistryEntry {
+                rlm_child_id: child_id.clone(),
+                active_session_id: daemon_child.map(|child| child.active_session_id.clone()),
+                session_id: daemon_child
+                    .map(|child| child.session_id.clone())
+                    .or_else(|| Some(retained.session.session_id())),
+                session_name: daemon_child
+                    .and_then(|child| child.session_name.clone())
+                    .or_else(|| retained.session.session_name())
+                    .unwrap_or_else(|| {
+                        create_default_rlm_subagent_session_name("", child_id)
+                    }),
+                session_dir,
+                status: RLM_SUBAGENT_STATUS_COMPLETED.to_string(),
+            });
+            recorded.insert(child_id.clone());
+        }
+        for (child_id, daemon_child) in daemon_children.iter() {
+            if recorded.contains(child_id)
+                || self.deleting_rlm_children.lock().unwrap().contains_key(child_id)
+                || self.deleted_rlm_child_ids.lock().unwrap().contains(child_id)
+                || self.rlm_child_cleanup_failures.lock().unwrap().contains_key(child_id)
+            {
+                continue;
+            }
+            let Some(session_dir) = daemon_child.session_dir.clone() else {
+                continue;
+            };
+            subagents.push(RlmSubagentRegistryEntry {
+                rlm_child_id: child_id.clone(),
+                active_session_id: Some(daemon_child.active_session_id.clone()),
+                session_id: Some(daemon_child.session_id.clone()),
+                session_name: daemon_child
+                    .session_name
+                    .clone()
+                    .unwrap_or_else(|| create_default_rlm_subagent_session_name("", child_id)),
+                session_dir,
+                status: if daemon_child.rlm_child_registry_status.as_deref()
+                    == Some(RLM_SUBAGENT_STATUS_COMPLETED)
+                {
+                    RLM_SUBAGENT_STATUS_COMPLETED.to_string()
+                } else {
+                    RLM_SUBAGENT_STATUS_ERROR.to_string()
+                },
             });
         }
-        if let Some(listed) = listed_agents {
-            for agent in listed.subagents.iter() {
-                if entries.iter().any(|entry| entry.rlm_child_id == agent.session_id) {
-                    continue;
-                }
-                entries.push(RlmSubagentRegistryEntry {
-                    child_id: agent.session_id.clone(),
-                    session_name: agent.session_name.clone(),
-                    status: RLM_CHILD_AGENT_STATUS_DONE.to_string(),
-                    label: None,
-                    model: None,
-                });
-            }
-        }
-        let max_depth = self.rlm_max_depth();
-        RlmListSubagentsResult {
-            agents: entries,
-            max_depth,
-            depth: self.rlm_depth,
-        }
+        RlmListSubagentsResult { subagents }
     }
 
     /// `_rlmSubagentMatchesTarget(entry, target)`.
     pub(super) fn rlm_subagent_matches_target(&self, entry: &RlmSubagentRegistryEntry, target: &str) -> bool {
-        entry.rlm_child_id == target || entry.session_name == target
-            || entry.active_session_id.as_deref() == Some(target) || entry.session_id.as_deref() == Some(target)
+        entry.rlm_child_id == target
+            || entry.active_session_id.as_deref() == Some(target)
+            || entry.session_id.as_deref() == Some(target)
+            || entry.session_name == target
+    }
+
+    /// `_rlmSubtreeSessions()` - this session plus every live direct or nested
+    /// child, de-duplicated by identity so a child in both maps is visited once.
+    pub(super) fn rlm_subtree_sessions(self: &Arc<Self>) -> Vec<Arc<AgentSession>> {
+        let mut visited: Vec<Arc<AgentSession>> = vec![self.clone()];
+        let mut stack: Vec<Arc<AgentSession>> = vec![self.clone()];
+        let mut sessions: Vec<Arc<AgentSession>> = Vec::new();
+        while let Some(session) = stack.pop() {
+            sessions.push(session.clone());
+            let children: Vec<Arc<AgentSession>> = session
+                .active_rlm_child_runs
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|run| run.lock().unwrap().session.clone())
+                .chain(
+                    session
+                        .rlm_child_sessions
+                        .lock()
+                        .unwrap()
+                        .values()
+                        .map(|retained| retained.session.clone()),
+                )
+                .collect();
+            for child in children {
+                if visited.iter().any(|candidate| Arc::ptr_eq(candidate, &child)) {
+                    continue;
+                }
+                visited.push(child.clone());
+                stack.push(child);
+            }
+        }
+        sessions
     }
 
     /// `_resolveDirectRlmSubagent(target)`.
     pub(super) async fn resolve_direct_rlm_subagent(
         self: &Arc<Self>,
         target: &str,
-    ) -> Result<Option<RlmSubagentRegistryEntry>, String> {
-        let listed = self.list_rlm_subagents().await?;
-        Ok(listed
-            .agents
+    ) -> Result<RlmSubagentRegistryEntry, String> {
+        let mut candidates = self.list_rlm_subagents().await?.subagents;
+        candidates.extend(
+            self.rlm_child_cleanup_failures
+                .lock()
+                .unwrap()
+                .values()
+                .cloned(),
+        );
+        let matches: Vec<RlmSubagentRegistryEntry> = candidates
             .into_iter()
-            .find(|entry| self.rlm_subagent_matches_target(entry, target)))
+            .filter(|entry| self.rlm_subagent_matches_target(entry, target))
+            .collect();
+        if matches.is_empty() {
+            return Err(format!(
+                "No direct RLM subagent matches \"{target}\" in the current parent session"
+            ));
+        }
+        if matches.len() > 1 {
+            return Err(format!(
+                "RLM subagent selector \"{target}\" is ambiguous in the current parent session"
+            ));
+        }
+        Ok(matches.into_iter().next().expect("checked length"))
     }
 
-    /// `deleteInactiveRlmSubagent(...)`.
+    /// `deleteInactiveRlmSubagent(childId, isExternallyRunning)`.
     pub async fn delete_inactive_rlm_subagent(
         self: &Arc<Self>,
-        target: &str,
-        status: Option<&str>,
-    ) -> Result<RlmDeleteSubagentResult, String> {
-        let resolved = self.resolve_direct_rlm_subagent(target).await?;
-        let resolved = match resolved {
-            Some(resolved) => resolved,
-            None => {
-                return Ok(RlmDeleteSubagentResult {
-                    deleted: false,
-                    child_id: None,
-                    message: Some(format!("No subagent matched {target}")),
-                })
+        child_id: &str,
+        is_externally_running: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<String, String> {
+        for owner in self.rlm_subtree_sessions() {
+            let is_running = {
+                let owner = owner.clone();
+                let child_id = child_id.to_string();
+                let is_externally_running = is_externally_running.clone();
+                Arc::new(move || {
+                    let status = owner
+                        .active_rlm_child_runs
+                        .lock()
+                        .unwrap()
+                        .get(&child_id)
+                        .map(|run| run.lock().unwrap().status.clone());
+                    matches!(status.as_deref(), Some("queued") | Some("running"))
+                        || is_externally_running()
+                }) as Arc<dyn Fn() -> bool + Send + Sync>
+            };
+            if is_running() {
+                return Ok(DELETE_OUTCOME_RUNNING_LITERAL.to_string());
             }
-        };
-        if let Some(status) = status {
-            if resolved.status != status {
-                return Ok(RlmDeleteSubagentResult {
-                    deleted: false,
-                    child_id: Some(resolved.rlm_child_id.clone()),
-                    message: Some(format!(
-                        "Subagent {} is {}",
-                        resolved.rlm_child_id, resolved.status
-                    )),
-                });
+            let mut candidates = owner.list_rlm_subagents().await?.subagents;
+            candidates.extend(
+                owner
+                    .rlm_child_cleanup_failures
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .cloned(),
+            );
+            let subagent = candidates
+                .into_iter()
+                .find(|entry| entry.rlm_child_id == child_id);
+            let Some(subagent) = subagent else { continue };
+            if is_running() {
+                return Ok(DELETE_OUTCOME_RUNNING_LITERAL.to_string());
             }
+            let is_running_for_deletion = is_running.clone();
+            let subagent_for_deletion = subagent.clone();
+            let result = owner
+                .track_rlm_subagent_deletion(
+                    &subagent,
+                    Box::new(move |owner| {
+                        let is_running = is_running_for_deletion.clone();
+                        let subagent = subagent_for_deletion.clone();
+                        Box::pin(async move {
+                            if is_running() {
+                                return Ok(RlmDeleteSubagentResult {
+                                    subagent,
+                                    outcome: Some(DELETE_OUTCOME_SKIPPED_RUNNING.to_string()),
+                                });
+                            }
+                            owner.delete_resolved_rlm_subagent(&subagent).await
+                        })
+                    }),
+                )
+                .await?;
+            return Ok(if result.outcome.as_deref() == Some(DELETE_OUTCOME_SKIPPED_RUNNING) {
+                DELETE_OUTCOME_RUNNING_LITERAL.to_string()
+            } else {
+                DELETE_OUTCOME_DELETED.to_string()
+            });
         }
-        self.delete_resolved_rlm_subagent(&resolved).await
+        Ok(DELETE_OUTCOME_NOT_FOUND_LITERAL.to_string())
     }
 
     /// `deleteRlmSubagent(target)`.
@@ -532,111 +1217,448 @@ impl AgentSession {
         self: &Arc<Self>,
         target: &str,
     ) -> Result<RlmDeleteSubagentResult, String> {
-        let resolved = self.resolve_direct_rlm_subagent(target).await?;
-        let resolved = match resolved {
-            Some(resolved) => resolved,
-            None => {
-                return Ok(RlmDeleteSubagentResult {
-                    deleted: false,
-                    child_id: None,
-                    message: Some(format!("No subagent matched {target}")),
-                })
-            }
+        // Running and retained children can be reserved synchronously. This keeps
+        // them hidden immediately while the async daemon listing checks for a
+        // conflicting passive selector.
+        // REPAIR CURSOR: `this._deletingRlmChildren` in the TypeScript maps
+        // selector -> `{ subagent, promise }`, so the `inFlight` ambiguity guard
+        // below cannot be evaluated here: `AgentSession::deleting_rlm_children`
+        // (core/agent_session.rs:2120) stores `Arc<AgentMessageDeferred>` only.
+        // Store `{ subagent, promise }` there (or add a sibling map) and filter it
+        // by `rlm_subagent_matches_target` before `local_matches`.
+        let mut local_matches = self.build_rlm_subagent_list(None).subagents;
+        local_matches.extend(
+            self.rlm_child_cleanup_failures
+                .lock()
+                .unwrap()
+                .values()
+                .cloned(),
+        );
+        let local_matches: Vec<RlmSubagentRegistryEntry> = local_matches
+            .into_iter()
+            .filter(|entry| self.rlm_subagent_matches_target(entry, target))
+            .collect();
+        let matching_child_ids: HashSet<String> = local_matches
+            .iter()
+            .map(|subagent| subagent.rlm_child_id.clone())
+            .collect();
+        if matching_child_ids.len() > 1 || local_matches.len() > 1 {
+            return Err(format!(
+                "RLM subagent selector \"{target}\" is ambiguous in the current parent session"
+            ));
+        }
+        if let Some(subagent) = local_matches.into_iter().next() {
+            let target = target.to_string();
+            let subagent_for_deletion = subagent.clone();
+            return self
+                .track_rlm_subagent_deletion(
+                    &subagent,
+                    Box::new(move |owner| {
+                        let subagent = subagent_for_deletion.clone();
+                        let target = target.clone();
+                        Box::pin(async move {
+                            let listed_subagents =
+                                owner.build_rlm_subagent_list(None).subagents;
+                            let passive_matches: Vec<RlmSubagentRegistryEntry> = listed_subagents
+                                .into_iter()
+                                .filter(|entry| {
+                                    entry.rlm_child_id != subagent.rlm_child_id
+                                        && owner.rlm_subagent_matches_target(entry, &target)
+                                })
+                                .collect();
+                            if !passive_matches.is_empty() {
+                                return Err(format!(
+                                    "RLM subagent selector \"{target}\" is ambiguous in the current parent session"
+                                ));
+                            }
+                            owner.delete_resolved_rlm_subagent(&subagent).await
+                        })
+                    }),
+                )
+                .await;
+        }
+
+        let mut direct_matches = self.list_rlm_subagents().await?.subagents;
+        direct_matches.extend(
+            self.rlm_child_cleanup_failures
+                .lock()
+                .unwrap()
+                .values()
+                .cloned(),
+        );
+        let direct_matches: Vec<RlmSubagentRegistryEntry> = direct_matches
+            .into_iter()
+            .filter(|entry| self.rlm_subagent_matches_target(entry, target))
+            .collect();
+        let direct_child_ids: HashSet<String> = direct_matches
+            .iter()
+            .map(|subagent| subagent.rlm_child_id.clone())
+            .collect();
+        if direct_child_ids.len() > 1 {
+            return Err(format!(
+                "RLM subagent selector \"{target}\" is ambiguous in the current parent session"
+            ));
+        }
+        let subagent = match direct_matches.into_iter().next() {
+            Some(subagent) => subagent,
+            None => self.resolve_direct_rlm_subagent(target).await?,
         };
-        self.delete_resolved_rlm_subagent(&resolved).await
+        let subagent_for_deletion = subagent.clone();
+        self.track_rlm_subagent_deletion(
+            &subagent,
+            Box::new(move |owner| {
+                let subagent = subagent_for_deletion.clone();
+                Box::pin(async move { owner.delete_resolved_rlm_subagent(&subagent).await })
+            }),
+        )
+        .await
     }
 
-    /// `_trackRlmSubagentDeletion(...)`.
+    /// `_trackRlmSubagentDeletion(subagent, startDeletion)`.
+    ///
+    /// REPAIR CURSOR: the TypeScript reserves the selector with
+    /// `{ subagent, promise }` and returns the SAME accepted result to a repeated
+    /// call. `deleting_rlm_children` only stores the deferred, so a repeated call
+    /// awaits the reservation and then re-reports the accepted result.
     pub(super) async fn track_rlm_subagent_deletion(
         self: &Arc<Self>,
-        child_id: &str,
-    ) -> Result<AgentMessageDeferred, String> {
-        self.deleted_rlm_child_ids
+        subagent: &RlmSubagentRegistryEntry,
+        start_deletion: Box<
+            dyn FnOnce(Arc<Self>) -> BoxFuture<Result<RlmDeleteSubagentResult, String>> + Send,
+        >,
+    ) -> Result<RlmDeleteSubagentResult, String> {
+        let child_id = subagent.rlm_child_id.clone();
+        let existing = self
+            .deleting_rlm_children
             .lock()
             .unwrap()
-            .insert(child_id.to_string());
-        let deferred = Arc::new(create_agent_message_deferred());
+            .get(&child_id)
+            .cloned();
+        if let Some(existing) = existing {
+            existing.wait().await?;
+            return Ok(RlmDeleteSubagentResult {
+                subagent: subagent.clone(),
+                outcome: None,
+            });
+        }
+        let deletion = Arc::new(create_agent_message_deferred());
         self.deleting_rlm_children
             .lock()
             .unwrap()
-            .insert(child_id.to_string(), deferred.clone());
-        Ok((*deferred).clone())
+            .insert(child_id.clone(), deletion.clone());
+        let result = start_deletion(self.clone()).await;
+        // `finally`: release the reservation unless the detached run still owns
+        // the selector until its deletion reservation settles.
+        let detached = self
+            .active_rlm_child_runs
+            .lock()
+            .unwrap()
+            .get(&child_id)
+            .map(|run| run.lock().unwrap().detached_deletion.is_some())
+            .unwrap_or(false);
+        if detached {
+            let reservation = self
+                .active_rlm_child_runs
+                .lock()
+                .unwrap()
+                .get(&child_id)
+                .map(|run| run.lock().unwrap().deletion_reservation.clone());
+            if let Some(reservation) = reservation {
+                let session = self.clone();
+                let deletion = deletion.clone();
+                tokio::spawn(async move {
+                    let _ = reservation.wait().await;
+                    let accepted = session
+                        .deleting_rlm_children
+                        .lock()
+                        .unwrap()
+                        .get(&child_id)
+                        .cloned();
+                    if accepted
+                        .map(|accepted| Arc::ptr_eq(&accepted, &deletion))
+                        .unwrap_or(false)
+                    {
+                        session.deleting_rlm_children.lock().unwrap().remove(&child_id);
+                    }
+                });
+            }
+        } else {
+            let accepted = self
+                .deleting_rlm_children
+                .lock()
+                .unwrap()
+                .get(&child_id)
+                .cloned();
+            if accepted
+                .map(|accepted| Arc::ptr_eq(&accepted, &deletion))
+                .unwrap_or(false)
+            {
+                self.deleting_rlm_children.lock().unwrap().remove(&child_id);
+            }
+        }
+        result
     }
 
     /// `_deleteRlmSubagentSession(childId, session?)`.
-    pub(super) fn delete_rlm_subagent_session(&self, child_id: &str, session: Option<&Arc<AgentSession>>) -> Result<(), String> {
-        if let Some(session) = session {
-            let _ = session;
+    pub(super) async fn delete_rlm_subagent_session(
+        &self,
+        child_id: &str,
+        session: Option<&Arc<AgentSession>>,
+    ) -> Result<(), String> {
+        let host = self.subagent_runtime_host.lock().unwrap().clone();
+        if let Some(host) = host {
+            return host.delete_rlm_subagent_runtime(child_id, session).await;
         }
-        let mut children = self.rlm_child_sessions.lock().unwrap();
-        children.remove(child_id);
+        if let Some(session) = session {
+            session.dispose_async(None).await;
+        }
         Ok(())
     }
 
     /// `_ensureRlmRunDeletionCleanup(run, session)`.
-    pub(super) fn ensure_rlm_run_deletion_cleanup(&self, run: &RlmChildRun, session: &Arc<AgentSession>) {
-        let _ = (run, session);
+    pub(super) async fn ensure_rlm_run_deletion_cleanup(
+        self: &Arc<Self>,
+        run: &RlmChildRun,
+        session: &Arc<AgentSession>,
+    ) -> Arc<AgentMessageDeferred> {
+        if let Some(cleanup) = run.deletion_cleanup.clone() {
+            return cleanup;
+        }
+        let cleanup = Arc::new(create_agent_message_deferred());
+        if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
+            entry.lock().unwrap().deletion_cleanup = Some(cleanup.clone());
+        }
+        let session_for_cleanup = session.clone();
+        let owner = self.clone();
+        let child_id = run.id.clone();
+        let cleanup_for_task = cleanup.clone();
+        tokio::spawn(async move {
+            let result = owner
+                .delete_rlm_subagent_session(&child_id, Some(&session_for_cleanup))
+                .await;
+            match result {
+                Ok(()) => cleanup_for_task.resolve(),
+                Err(error) => cleanup_for_task.reject(error),
+            }
+        });
+        cleanup
     }
 
-    /// `_recordRlmRunDeletionCleanupFailure(...)`.
+    /// `_recordRlmRunDeletionCleanupFailure(run, subagent, session, error)`.
     pub(super) async fn record_rlm_run_deletion_cleanup_failure(
-        &self,
+        self: &Arc<Self>,
         run: &RlmChildRun,
+        subagent: &RlmSubagentRegistryEntry,
+        session: &Arc<AgentSession>,
         error: &str,
     ) {
-        let entry = RlmSubagentRegistryEntry {
-            child_id: run.id.clone(),
-            session_name: run.session_name.clone(),
-            status: RLM_CHILD_AGENT_STATUS_ERROR.to_string(),
-            label: run.label.clone(),
-            model: run.model.clone(),
-        };
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
+                entry.lock().unwrap().suppress_terminal_notice = Some(true);
+            }
+            session.dispose_async(None).await;
+            let settled = self
+                .active_rlm_child_runs
+                .lock()
+                .unwrap()
+                .get(&run.id)
+                .map(|entry| entry.lock().unwrap().settled)
+                .unwrap_or(true);
+            if !settled {
+                self.finish_rlm_run_deletion(run).await;
+            }
+            return;
+        }
+        if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
+            let mut entry = entry.lock().unwrap();
+            entry.deletion_cleanup = None;
+            entry.deletion_cleanup_observer = None;
+            entry.deletion_cleanup_failed = Some(true);
+            entry.session = Some(session.clone());
+            entry.deletion_reservation.resolve();
+        }
         self.rlm_child_cleanup_failures
             .lock()
             .unwrap()
-            .insert(run.id.clone(), entry);
-        let _ = error;
+            .insert(run.id.clone(), subagent.clone());
+        // Make retry admission available before waking the parent model with the
+        // retry-required notice.
+        let report = self
+            .active_rlm_child_runs
+            .lock()
+            .unwrap()
+            .get(&run.id)
+            .and_then(|entry| entry.lock().unwrap().report_deletion_cleanup_failure.clone());
+        if let Some(report) = report {
+            report(error.to_string()).await;
+        }
     }
 
     /// `_finishRlmRunDeletion(run)`.
     pub(super) async fn finish_rlm_run_deletion(self: &Arc<Self>, run: &RlmChildRun) {
-        self.remove_rlm_subagent_tracking(&run.id, Some(run));
-        if let Some(deferred) = self.deleting_rlm_children.lock().unwrap().remove(&run.id) {
-            deferred.resolve();
+        let complete_deletion = self
+            .active_rlm_child_runs
+            .lock()
+            .unwrap()
+            .get(&run.id)
+            .and_then(|entry| entry.lock().unwrap().complete_deletion.clone());
+        if let Some(complete_deletion) = complete_deletion {
+            complete_deletion().await;
         }
+        let current = self
+            .active_rlm_child_runs
+            .lock()
+            .unwrap()
+            .get(&run.id)
+            .cloned();
+        if let Some(current) = current {
+            self.remove_rlm_subagent_tracking(&run.id, Some(&current.lock().unwrap().clone()));
+        }
+        if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
+            let mut entry = entry.lock().unwrap();
+            entry.settled = true;
+            entry.settlement.resolve();
+            entry.deletion_reservation.resolve();
+        }
+        self.unsettled_rlm_child_runs
+            .lock()
+            .unwrap()
+            .retain(|candidate| candidate.lock().unwrap().id != run.id);
+        self.maybe_resume_goal_continuation_after_rlm_work();
     }
 
-    /// `_observeRlmRunDeletionCleanup(...)`.
-    pub(super) fn observe_rlm_run_deletion_cleanup(self: &Arc<Self>, run: RlmChildRun, session: Arc<AgentSession>) {
-        let session = self.clone();
-        let _ = session;
-        let _ = (run, self.clone());
-    }
-
-    /// `_continueFinishedRlmRunDeletion(...)`.
-    pub(super) fn continue_finished_rlm_run_deletion(self: &Arc<Self>, run: RlmChildRun) {
-        let session = self.clone();
+    /// `_observeRlmRunDeletionCleanup(run, subagent, session, cleanup)`.
+    pub(super) fn observe_rlm_run_deletion_cleanup(
+        self: &Arc<Self>,
+        run: RlmChildRun,
+        subagent: RlmSubagentRegistryEntry,
+        session: Arc<AgentSession>,
+        cleanup: Arc<AgentMessageDeferred>,
+    ) -> BoxFuture<bool> {
+        let existing = self
+            .active_rlm_child_runs
+            .lock()
+            .unwrap()
+            .get(&run.id)
+            .and_then(|entry| entry.lock().unwrap().deletion_cleanup_observer.clone());
+        if let Some(existing) = existing {
+            return Box::pin(async move { existing.wait().await.is_ok() });
+        }
+        let observer = Arc::new(create_agent_message_deferred());
+        if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
+            entry.lock().unwrap().deletion_cleanup_observer = Some(observer.clone());
+        }
+        let owner = self.clone();
+        let observer_for_task = observer.clone();
         tokio::spawn(async move {
-            session.finish_rlm_run_deletion(&run).await;
+            match cleanup.wait().await {
+                Ok(()) => observer_for_task.resolve(),
+                Err(error) => {
+                    owner
+                        .record_rlm_run_deletion_cleanup_failure(&run, &subagent, &session, &error)
+                        .await;
+                    observer_for_task.reject(error);
+                }
+            }
+        });
+        Box::pin(async move { observer.wait().await.is_ok() })
+    }
+
+    /// `_continueFinishedRlmRunDeletion(run, subagent, session)`.
+    pub(super) fn continue_finished_rlm_run_deletion(
+        self: &Arc<Self>,
+        run: RlmChildRun,
+        subagent: RlmSubagentRegistryEntry,
+        session: Arc<AgentSession>,
+    ) {
+        let owner = self.clone();
+        tokio::spawn(async move {
+            let cleanup = owner.ensure_rlm_run_deletion_cleanup(&run, &session).await;
+            let observer =
+                owner.observe_rlm_run_deletion_cleanup(run.clone(), subagent, session, cleanup);
+            let run_finished = owner
+                .active_rlm_child_runs
+                .lock()
+                .unwrap()
+                .get(&run.id)
+                .map(|entry| entry.lock().unwrap().deletion_run_finished == Some(true))
+                .unwrap_or(false);
+            if !run_finished {
+                return;
+            }
+            if observer.await {
+                owner.finish_rlm_run_deletion(&run).await;
+            }
         });
     }
 
     /// `_removeRlmSubagentTracking(childId, run?)`.
-    pub(super) fn remove_rlm_subagent_tracking(&self, child_id: &str, run: Option<&RlmChildRun>) {
-        let _ = run;
-        self.active_rlm_child_runs.lock().unwrap().remove(child_id);
-        self.unsettled_rlm_child_runs
+    pub(super) fn remove_rlm_subagent_tracking(self: &Arc<Self>, child_id: &str, run: Option<&RlmChildRun>) {
+        if let Some(run) = run {
+            if let Some(unsubscribe) = run.unsubscribe.clone() {
+                unsubscribe();
+            }
+        }
+        if let Some(unsubscribe) = self
+            .rlm_child_unsubscribes
             .lock()
             .unwrap()
-            .retain(|candidate| candidate.lock().unwrap().id != child_id);
-        self.rlm_child_unsubscribes.lock().unwrap().remove(child_id);
+            .remove(child_id)
+        {
+            unsubscribe();
+        }
+        self.rlm_child_sessions.lock().unwrap().remove(child_id);
+        self.rlm_child_cleanup_failures.lock().unwrap().remove(child_id);
+        self.abandoned_rlm_quiescence_child_ids
+            .lock()
+            .unwrap()
+            .remove(child_id);
+        let owns_entry = match run {
+            None => true,
+            Some(run) => self
+                .active_rlm_child_runs
+                .lock()
+                .unwrap()
+                .get(child_id)
+                .map(|entry| entry.lock().unwrap().id == run.id)
+                .unwrap_or(false),
+        };
+        if owns_entry {
+            self.active_rlm_child_runs.lock().unwrap().remove(child_id);
+        }
+        if let Some(run) = run {
+            if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(child_id) {
+                let mut entry = entry.lock().unwrap();
+                if entry.id == run.id {
+                    entry.abort = Arc::new(|| {});
+                    entry.unsubscribe = None;
+                    entry.session = None;
+                }
+            }
+        }
     }
 
     /// `_emitRlmSubagentRemoval(subagent)`.
     pub(super) fn emit_rlm_subagent_removal(&self, subagent: &RlmSubagentRegistryEntry) {
-        self.emit(AgentSessionEvent::RlmSubagentRemoved {
-            child_id: subagent.rlm_child_id.clone(),
-            session_name: subagent.session_name.clone(),
+        self.emit(AgentSessionEvent::RlmChildUpdate {
+            child: RlmChildAgentSnapshot {
+                id: subagent.rlm_child_id.clone(),
+                parent_id: self.rlm_parent_node_id.clone(),
+                active_session_id: subagent.active_session_id.clone(),
+                session_name: Some(subagent.session_name.clone()),
+                model: None,
+                label: subagent.session_name.clone(),
+                status: RLM_CHILD_AGENT_STATUS_CANCELLED.to_string(),
+                duration_ms: None,
+                answer_preview: None,
+                tool_use_count: None,
+                token_count: None,
+                recap: None,
+                session_dir: subagent.session_dir.clone(),
+                activity: None,
+                replied_since_task: None,
+                error: Some("Deleted by parent orchestrator".to_string()),
+            },
         });
     }
 
@@ -645,40 +1667,115 @@ impl AgentSession {
         self: &Arc<Self>,
         subagent: &RlmSubagentRegistryEntry,
     ) -> Result<RlmDeleteSubagentResult, String> {
-        let deferred = self.track_rlm_subagent_deletion(&subagent.rlm_child_id).await?;
         let child_id = subagent.rlm_child_id.clone();
         let run = self
             .active_rlm_child_runs
             .lock()
             .unwrap()
             .get(&child_id)
-            .map(|run| run.lock().unwrap().clone());
-        if let Some(run) = run.as_ref() {
-            let _ = self.cancel_rlm_child_run(run, "Subagent deleted");
+            .cloned();
+        if let Some(run) = run {
+            {
+                let mut entry = run.lock().unwrap();
+                if entry.deletion_cleanup_failed == Some(true) {
+                    // Reset retry coordination only after selector preflight reaches the
+                    // resolved child.
+                    entry.deletion_cleanup_failed = Some(false);
+                    entry.deletion_failure_notice = None;
+                    entry.deletion_reservation = create_agent_message_deferred();
+                }
+                // The detached task remains the sole lifecycle owner. Mark deletion
+                // before cancellation so its catch/finally path cannot race a normal
+                // release or terminal notice against the physical delete.
+                entry.detached_deletion = Some(subagent.clone());
+            }
+            let snapshot = run.lock().unwrap().clone();
+            if self.cancel_rlm_child_run(&snapshot, "Deleted by parent orchestrator") {
+                run.lock().unwrap().deletion_needs_completion_notice = Some(true);
+            } else {
+                self.emit_rlm_subagent_removal(subagent);
+            }
+            let live_session = run.lock().unwrap().session.clone();
+            let (status, settled) = {
+                let entry = run.lock().unwrap();
+                (entry.status.clone(), entry.settled)
+            };
+            if status == RLM_CHILD_AGENT_STATUS_ERROR && live_session.is_none() && settled {
+                self.deleted_rlm_child_ids
+                    .lock()
+                    .unwrap()
+                    .insert(child_id.clone());
+                let snapshot = run.lock().unwrap().clone();
+                self.remove_rlm_subagent_tracking(&child_id, Some(&snapshot));
+                return Ok(RlmDeleteSubagentResult {
+                    subagent: subagent.clone(),
+                    outcome: None,
+                });
+            }
+            if let Some(live_session) = live_session.clone() {
+                if settled {
+                    let mut entry = run.lock().unwrap();
+                    entry.deletion_run_finished = Some(true);
+                    entry.settlement = create_agent_message_deferred();
+                    entry.settled = false;
+                }
+                self.unsettled_rlm_child_runs
+                    .lock()
+                    .unwrap()
+                    .push(run.clone());
+            }
+            if let Some(live_session) = live_session {
+                self.continue_finished_rlm_run_deletion(
+                    run.lock().unwrap().clone(),
+                    subagent.clone(),
+                    live_session,
+                );
+            }
+
+            // Return once deletion is accepted. The run stays hidden but unsettled
+            // until abort-insensitive model/tool work unwinds and cleanup finishes.
+            self.deleted_rlm_child_ids
+                .lock()
+                .unwrap()
+                .insert(child_id.clone());
+            return Ok(RlmDeleteSubagentResult {
+                subagent: subagent.clone(),
+                outcome: None,
+            });
         }
-        let session = self
+
+        self.emit_rlm_subagent_removal(subagent);
+        let retained = self
             .rlm_child_sessions
             .lock()
             .unwrap()
             .get(&child_id)
             .map(|child| child.session.clone());
-        if let Err(error) = self.delete_rlm_subagent_session(&child_id, session.as_ref()) {
-            self.record_rlm_run_deletion_cleanup_failure(
-                run.as_ref().unwrap_or(&empty_rlm_child_run(&child_id)),
-                &error,
-            )
-            .await;
+        if let Err(error) = self
+            .delete_rlm_subagent_session(&child_id, retained.as_ref())
+            .await
+        {
+            if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+                self.remove_rlm_subagent_tracking(&child_id, None);
+                if let Some(retained) = &retained {
+                    retained.dispose_async(None).await;
+                }
+            } else {
+                self.rlm_child_cleanup_failures
+                    .lock()
+                    .unwrap()
+                    .insert(child_id.clone(), subagent.clone());
+            }
+            return Err(error);
         }
-        match run.as_ref() {
-            Some(run) => self.finish_rlm_run_deletion(run).await,
-            None => self.remove_rlm_subagent_tracking(&child_id, None),
-        }
-        self.emit_rlm_subagent_removal(subagent);
-        deferred.resolve();
+        self.deleted_rlm_child_ids
+            .lock()
+            .unwrap()
+            .insert(child_id.clone());
+        self.remove_rlm_subagent_tracking(&child_id, None);
         Ok(RlmDeleteSubagentResult {
-            deleted: true,
-            child_id: Some(child_id),
-            message: None,
+            subagent: subagent.clone(),
+            outcome: None,
         })
     }
 
@@ -699,31 +1796,135 @@ impl AgentSession {
         })
     }
 
-    /// `_rlmChildSnapshotForRun(run)`.
-    pub(super) fn rlm_child_snapshot_for_run(&self, run: &RlmChildRun) -> RlmChildAgentSnapshot {
+    /// `_rlmChildSnapshotForRun(run, child = run.session ?? retained session)`.
+    pub(super) fn rlm_child_snapshot_for_run(
+        &self,
+        run: &RlmChildRun,
+        child: Option<Arc<AgentSession>>,
+    ) -> RlmChildAgentSnapshot {
+        let child = child
+            .or_else(|| run.session.clone())
+            .or_else(|| {
+                self.rlm_child_sessions
+                    .lock()
+                    .unwrap()
+                    .get(&run.id)
+                    .map(|retained| retained.session.clone())
+            });
+        let model = child
+            .as_ref()
+            .and_then(|child| child.model())
+            .or_else(|| run.model.clone());
         RlmChildAgentSnapshot {
-            child_id: run.id.clone(),
-            session_name: run.session_name.clone(),
+            id: run.id.clone(),
+            parent_id: self.rlm_parent_node_id.clone(),
+            active_session_id: child.as_ref().map(|child| child.session_id()),
+            session_name: child
+                .as_ref()
+                .and_then(|child| child.session_name())
+                .or_else(|| Some(run.session_name.clone())),
+            model: model.map(|model| format!("{}/{}", model.provider, model.id)),
+            label: rlm_child_label(&run.prompt),
             status: run.status.clone(),
-            label: run.label.clone(),
-            model: run.model.clone(),
-            depth: run.depth,
+            duration_ms: run.duration_ms,
+            answer_preview: run.answer_preview.clone(),
+            tool_use_count: if run.tool_use_count > 0.0 {
+                Some(run.tool_use_count)
+            } else {
+                None
+            },
+            token_count: child
+                .as_ref()
+                .and_then(|child| child.context_tokens_for_current_messages()),
+            recap: child.as_ref().and_then(|child| child.get_current_recap()),
+            session_dir: run.session_dir.clone(),
             activity: run.activity.clone(),
+            replied_since_task: child
+                .as_ref()
+                .and_then(|child| child.replied_to_parent_since_task()),
+            error: run.error.clone(),
         }
     }
 
     /// `_rlmChildSnapshotForSession(childId, child)`.
-    pub(super) fn rlm_child_snapshot_for_session(&self, child_id: &str, child: &Arc<AgentSession>) -> RlmChildAgentSnapshot {
+    pub(super) fn rlm_child_snapshot_for_session(
+        &self,
+        child_id: &str,
+        child: &Arc<AgentSession>,
+    ) -> RlmChildAgentSnapshot {
+        let mut answer_preview: Option<String> = None;
+        let mut tool_use_count = 0.0;
+        let mut messages = child.messages();
+        if let Some(streaming) = child.agent.state().streaming_message {
+            if streaming.role() == pi_ai::types::ROLE_ASSISTANT {
+                messages.push(streaming);
+            }
+        }
+        for message in messages.iter() {
+            let AgentMessage::Message(pi_ai::types::Message::Assistant(message)) = message else {
+                continue;
+            };
+            let text = compact_rlm_text(&read_assistant_text(message), 160);
+            if !text.is_empty() {
+                answer_preview = Some(text);
+            }
+            tool_use_count += message
+                .content
+                .iter()
+                .filter(|block| matches!(block, pi_ai::types::ContentBlock::ToolCall(_)))
+                .count() as f64;
+        }
         RlmChildAgentSnapshot {
-            child_id: child_id.to_string(),
+            id: child_id.to_string(),
+            parent_id: self.rlm_parent_node_id.clone(),
+            active_session_id: Some(child.session_id()),
             session_name: child.session_name(),
-            status: RLM_CHILD_AGENT_STATUS_RUNNING.to_string(),
-            label: None,
-            model: Some(child.model().id.clone()),
-            depth: child.rlm_depth(),
-            activity: None,
+            model: child
+                .model()
+                .map(|model| format!("{}/{}", model.provider, model.id)),
+            label: child
+                .session_name()
+                .unwrap_or_else(|| "child agent".to_string()),
+            status: RLM_CHILD_AGENT_STATUS_DONE.to_string(),
+            duration_ms: None,
+            answer_preview,
+            tool_use_count: if tool_use_count > 0.0 {
+                Some(tool_use_count)
+            } else {
+                None
+            },
+            token_count: child.context_tokens_for_current_messages(),
+            recap: child.get_current_recap(),
+            session_dir: child
+                .rlm_session_dir
+                .clone()
+                .unwrap_or_else(|| {
+                    child
+                        .session_manager
+                        .lock()
+                        .unwrap()
+                        .get_session_dir()
+                }),
+            // No run exists (e.g. a child rehydrated after daemon recovery), so live
+            // session state is the only source for in-flight follow-up work.
+            activity: if child.is_session_active() {
+                Some(RlmChildAgentActivity {
+                    kind: if child.is_streaming() {
+                        "writing".to_string()
+                    } else {
+                        "waiting".to_string()
+                    },
+                    tool_name: None,
+                })
+            } else {
+                None
+            },
+            replied_since_task: child.replied_to_parent_since_task(),
+            error: None,
         }
     }
+
+
 
     /// `_isUnboundTerminalRlmChildRun(run)`.
     pub(super) fn is_unbound_terminal_rlm_child_run(&self, run: &RlmChildRun) -> bool {
@@ -779,7 +1980,7 @@ impl AgentSession {
                 .contains(name)
         };
         if pending {
-            return Err(format_agent_session_name_unavailable(name));
+            return Err(format_agent_session_name_unavailable(name, (self.rlm_depth + 1) as f64));
         }
         Ok(())
     }
@@ -794,266 +1995,562 @@ impl AgentSession {
         Ok(RlmFindModelsResult { models: crate::core::rlm_runtime::find_rlm_model_matches(query, &self.authenticated_rlm_models().await, limit as f64) })
     }
 
-    /// `_resolveRlmSubagentModel(...)`.
+    /// `_resolveRlmSubagentModel(reference, target)` (agent-session.ts:11418-11446).
     pub(super) async fn resolve_rlm_subagent_model(
         self: &Arc<Self>,
-        requested: Option<&str>,
-        thinking_level: Option<ThinkingLevel>,
+        reference: Option<&str>,
+        target: &str,
     ) -> Result<RlmSubagentModelSelection, String> {
-        let models = self.authenticated_rlm_models().await;
-        let model = match requested {
-            Some(requested) => models
-                .iter()
-                .find(|model| model.id == requested || model.name == requested)
-                .cloned(),
-            None => Some(self.model()),
+        let parent_model = self.model().ok_or_else(format_no_model_selected_message)?;
+        let Some(reference) = reference else {
+            return Ok(RlmSubagentModelSelection { model: parent_model });
         };
-        match model {
-            Some(model) => Ok(RlmSubagentModelSelection {
-                model,
-                thinking_level,
-            }),
-            None => Err(format!("No model matched {requested:?}")),
+        let normalized_reference = reference.to_lowercase();
+        let parent_selector = format!("{}/{}", parent_model.provider, parent_model.id).to_lowercase();
+        if parent_selector == normalized_reference {
+            return Ok(RlmSubagentModelSelection { model: parent_model });
         }
+        let model = self
+            .authenticated_rlm_models()
+            .await
+            .into_iter()
+            .find(|candidate| {
+                format!("{}/{}", candidate.provider, candidate.id).to_lowercase()
+                    == normalized_reference
+            });
+        let Some(model) = model else {
+            return Err(format!(
+                "Requested {target} model \"{reference}\" is unavailable, unauthenticated, or expired"
+            ));
+        };
+        let request_model = model.clone();
+        let registry = self.model_registry.clone();
+        let auth = crate::core::sdk::with_model_registry(registry, move |registry| {
+            Box::pin(async move { registry.get_api_key_and_headers(&request_model).await })
+        })
+        .await
+        .unwrap_or_else(|error| crate::core::model_registry::ResolvedRequestAuth {
+            ok: false,
+            api_key: None,
+            headers: None,
+            error: Some(error),
+        });
+        if !auth.ok {
+            return Err(format!(
+                "Requested {target} model \"{reference}\" failed authentication preflight"
+            ));
+        }
+        Ok(RlmSubagentModelSelection { model })
     }
 
-    /// `createRlmSession(prompt, kwargs)`.
+    /// `createRlmSession(prompt, kwargs)` (agent-session.ts:11934-11990).
     pub async fn create_rlm_session(
         self: &Arc<Self>,
         prompt: &str,
         kwargs: &Map<String, Value>,
     ) -> Result<RlmCreateSessionResult, String> {
-        let options = RlmSubagentRuntimeOptionsInput {
-            prompt: prompt.to_string(),
-            session_name: kwargs
-                .get("session_name")
-                .and_then(Value::as_str)
-                .map(|value| value.to_string()),
-            model: kwargs
-                .get("model")
-                .and_then(Value::as_str)
-                .map(|value| value.to_string()),
-            thinking_level: None,
-            session_dir: kwargs
-                .get("session_dir")
-                .and_then(Value::as_str)
-                .map(|value| value.to_string()),
+        let operation = "rlm.create_session";
+        let mut unsupported: Vec<&str> = kwargs
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !matches!(*key, "name" | "model" | "thinking" | "cwd"))
+            .collect();
+        if !unsupported.is_empty() {
+            unsupported.sort_unstable();
+            return Err(format!(
+                "Unsupported rlm.create_session kwargs: {}",
+                unsupported.join(", ")
+            ));
+        }
+        if prompt.trim().is_empty() {
+            return Err("rlm.create_session prompt must not be empty".to_string());
+        }
+        if self.rlm_depth != 0 {
+            return Err("rlm.create_session is available only from a depth-0 session".to_string());
+        }
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            return Err(
+                "Cannot create a top-level session after the current session was disposed"
+                    .to_string(),
+            );
+        }
+        let host = self.subagent_runtime_host.lock().unwrap().clone();
+        let Some(host) = host else {
+            return Err("rlm.create_session requires a daemon-backed depth-0 session".to_string());
         };
-        let runtime = self.create_rlm_subagent_runtime(options).await?;
-        Ok(RlmCreateSessionResult {
-            child_id: runtime.runtime_id.clone(),
-            session_dir: runtime.session_dir.clone(),
-            session_name: None,
+
+        let session_name = normalize_requested_rlm_subagent_session_name(
+            kwargs.get("name"),
+            Some(operation),
+        )?;
+        let requested_model =
+            normalize_requested_rlm_subagent_model(kwargs.get("model"), Some(operation))?;
+        let requested_thinking_level = normalize_requested_rlm_subagent_thinking_level(
+            kwargs.get("thinking"),
+            Some(operation),
+        )?;
+        if let Some(session_name) = session_name.as_deref() {
+            assert_direct_agent_message_target(session_name)?;
+        }
+        if let Some(raw_cwd) = kwargs.get("cwd") {
+            if raw_cwd.as_str().map(|value| value.trim().is_empty()).unwrap_or(true) {
+                return Err("rlm.create_session cwd must be a non-empty string".to_string());
+            }
+        }
+        let cwd = match kwargs.get("cwd").and_then(Value::as_str) {
+            Some(raw_cwd) => Path::new(&self.cwd)
+                .join(raw_cwd.trim())
+                .to_string_lossy()
+                .into_owned(),
+            None => self.cwd.clone(),
+        };
+        let model_selection = self
+            .resolve_rlm_subagent_model(requested_model.as_deref(), "top-level session")
+            .await?;
+        if let Some(requested_thinking_level) = requested_thinking_level {
+            let supported = get_supported_thinking_levels(&model_selection.model);
+            let requested = thinking_level_name(&requested_thinking_level);
+            if !supported.iter().any(|level| level == &requested) {
+                return Err(format!(
+                    "Requested thinking level \"{requested}\" is not supported by model \"{}/{}\"; supported levels: {}",
+                    model_selection.model.provider,
+                    model_selection.model.id,
+                    supported.join(", ")
+                ));
+            }
+        }
+        let thinking_level = requested_thinking_level.unwrap_or_else(|| {
+            clamp_thinking_level_for_model(&model_selection.model, self.thinking_level())
+        });
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            return Err(
+                "Cannot create a top-level session after the current session was disposed"
+                    .to_string(),
+            );
+        }
+        // REPAIR CURSOR: the TypeScript also asks the agent-message controller to
+        // reserve the name (`controller.assertSessionNameAvailable`, agent-session.ts:11961).
+        // The canonical `AgentSessionMessageController` trait
+        // (`core/agent_messages.rs:947`) exposes only roster/awaitPendingChildPublication/
+        // sendAgentMessage, so the reservation cannot be requested here. Add
+        // `assert_session_name_available` to that trait and call it with
+        // `{ name, depth: 0 }` before `create_rlm_root_session`.
+        host.create_rlm_root_session(CreateRlmRootSessionOptions {
+            prompt: prompt.to_string(),
+            session_name,
+            cwd,
+            model: model_selection.model,
+            thinking_level,
         })
+        .await
     }
 
-    /// `runRlmChild(...)`.
+    /// `runRlmChild(prompt, kwargs, spawnCode?)`.
+    ///
+    /// REPAIR CURSOR: `_startRlmChildRun` (agent-session.ts:11448-11600) has no
+    /// Rust owner yet, so this member cannot spawn. The port fails loudly instead
+    /// of returning a stand-in handle. Every dependency the body needs is already
+    /// available: `self.rlm_depth`/`self.rlm_max_depth` for the depth guard,
+    /// `create_child_rlm_session_dir`, `create_default_rlm_subagent_session_name`,
+    /// `assert_rlm_subagent_session_name_available`, `resolve_rlm_subagent_model`,
+    /// `get_supported_thinking_levels` + `clamp_thinking_level_for_model`,
+    /// `create_rlm_subagent_runtime_options` + `create_rlm_subagent_runtime`, and
+    /// `RlmSpawnHandle { rlm_child_id, name, session_dir, model }`.
     pub async fn run_rlm_child(
         self: &Arc<Self>,
         prompt: &str,
         kwargs: &Map<String, Value>,
     ) -> Result<RlmSpawnHandle, String> {
-        let created = self.create_rlm_session(prompt, kwargs).await?;
-        Ok(RlmSpawnHandle {
-            child_id: created.child_id,
-            session_dir: created.session_dir,
-            session_name: created.session_name,
-        })
+        let _ = (prompt, kwargs);
+        Err(
+            "runRlmChild is not implemented: _startRlmChildRun (agent-session.ts:11448-11600) is unported"
+                .to_string(),
+        )
     }
 
-    /// `_isRetryableError(message)`.
+    /// `_isRetryableError(message)` (agent-session.ts:12000-12019).
     pub(super) fn is_retryable_error(&self, message: &AssistantMessage) -> bool {
-        let kind = self.get_provider_stream_failure_kind(message);
-        if let Some(kind) = kind {
-            if !provider_stream_failure_kind_is_retryable(&kind) {
-                return false;
-            }
-        }
-        if message.stop_reason.as_deref() == Some(STOP_REASON_ERROR) {
-            return !self.is_structured_permanent_provider_retry_exhausted(message);
-        }
-        false
-    }
-
-    /// `_isFauxProviderQueueExhausted(message)`.
-    pub(super) fn is_faux_provider_queue_exhausted(&self, message: &AssistantMessage) -> bool {
-        message
-            .error_message
-            .as_deref()
-            .map(|value| value.contains("FAUX_QUEUE_EXHAUSTED"))
-            .unwrap_or(false)
-    }
-
-    /// `_isAgentLifecycleFailure(message)`.
-    pub(super) fn is_agent_lifecycle_failure(&self, message: &AssistantMessage) -> bool {
-        self.get_provider_stream_failure_kind(message).as_deref() == Some("agent_lifecycle")
-    }
-
-    /// `_getProviderStreamFailureKind(message)`.
-    pub(super) fn get_provider_stream_failure_kind(&self, message: &AssistantMessage) -> Option<String> {
-        message
-            .details
-            .as_ref()
-            .and_then(|details| details.get("providerStreamFailureKind"))
-            .and_then(Value::as_str)
-            .map(|value| value.to_string())
-    }
-
-    /// `_isStructuredPermanentProviderRetryExhausted(message)`.
-    pub(super) fn is_structured_permanent_provider_retry_exhausted(&self, message: &AssistantMessage) -> bool {
-        message
-            .details
-            .as_ref()
-            .and_then(|details| details.get("permanentProviderRetryExhausted"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    }
-
-    /// `_isConcreteProviderAuthFailure(message)`.
-    pub(super) fn is_concrete_provider_auth_failure(&self, message: &AssistantMessage) -> bool {
-        let text = message.error_message.clone().unwrap_or_default();
-        is_likely_authentication_error(&text)
-    }
-
-    /// `_captureRetryAuthFailureSource(message)`.
-    pub(super) fn capture_retry_auth_failure_source(&self, message: &AssistantMessage) -> Option<AuthSourceToken> {
-        if !self.is_concrete_provider_auth_failure(message) {
-            return None;
-        }
-        let source = message
-            .details
-            .as_ref()
-            .and_then(|details| details.get("authSourceToken"))
-            .cloned()
-            .and_then(|value| serde_json::from_value::<AuthSourceToken>(value).ok());
-        if let Some(source) = source.clone() {
-            self.retry_auth_failure_sources.lock().unwrap().push(source.clone());
-        }
-        source
-    }
-
-    /// `_markProviderAuthStale(message, authSourceTokens?)`.
-    pub(super) fn mark_provider_auth_stale(&self, message: &AssistantMessage, auth_source_tokens: Option<&[AuthSourceToken]>) {
-        let _ = message;
-        let tokens: Vec<AuthSourceToken> = match auth_source_tokens {
-            Some(tokens) => tokens.to_vec(),
-            None => self.retry_auth_failure_sources.lock().unwrap().clone(),
-        };
-        if tokens.is_empty() {
-            return;
-        }
-        let _ = tokens;
-    }
-
-    /// `_markProviderAuthStaleForRetryFailure(message)`.
-    pub(super) fn mark_provider_auth_stale_for_retry_failure(&self, message: &AssistantMessage) {
-        if !self.is_concrete_provider_auth_failure(message) {
-            return;
-        }
-        let tokens = self.retry_auth_failure_sources.lock().unwrap().clone();
-        if tokens.is_empty() {
-            let source = self.capture_retry_auth_failure_source(message);
-            self.mark_provider_auth_stale(message, source.as_ref().map(std::slice::from_ref));
-            return;
-        }
-        self.mark_provider_auth_stale(message, Some(&tokens));
-    }
-
-    /// `_finishActiveRetryWithFailure(message)`.
-    pub(super) fn finish_active_retry_with_failure(&self, message: &AssistantMessage) {
-        *self.retry_metric_message.lock().unwrap() = Some(message.clone());
-        self.resolve_retry();
-    }
-
-    /// `_handleRetryableError(settings, message)`.
-    pub(super) async fn handle_retryable_error(self: &Arc<Self>, message: &AssistantMessage) -> bool {
-        if !self.is_retryable_error(message) {
+        if message.stop_reason != STOP_REASON_ERROR || message.error_message.is_none() {
             return false;
         }
-        let settings = self.settings_manager.lock().unwrap().get_retry_settings();
-        let attempt = self.retry_attempt.fetch_add(1, Ordering::SeqCst) + 1;
-        if attempt > settings.max_attempts {
-            self.retry_attempt.store(0, Ordering::SeqCst);
-            self.finish_active_retry_with_failure(message);
+        let context_window = self.model().map(|model| model.context_window).unwrap_or(0.0);
+        if pi_ai::utils::overflow::is_context_overflow(message, Some(context_window)) {
             return false;
         }
-        let controller = CancellationToken::new();
-        *self.retry_abort_controller.lock().unwrap() = Some(controller.clone());
-        self.emit(AgentSessionEvent::RetryUpdate {
-            active: true,
-            attempt: attempt as i64,
-            max_attempts: settings.max_attempts as i64,
-            message: message.error_message.clone(),
-        });
-        let generation = self.retry_generation.load(Ordering::SeqCst);
-        let aborted = tokio::select! {
-            _ = tokio::time::sleep(std::time::Duration::from_millis(
-                (settings.delay_ms.unwrap_or(1000.0) * attempt as f64) as u64,
-            )) => false,
-            _ = controller.cancelled() => true,
-        };
-        if generation != self.retry_generation.load(Ordering::SeqCst) {
+        if self.is_faux_provider_queue_exhausted(message) {
             return false;
         }
-        *self.retry_abort_controller.lock().unwrap() = None;
-        if aborted {
-            self.emit(AgentSessionEvent::RetryUpdate {
-                active: false,
-                attempt: attempt as i64,
-                max_attempts: settings.max_attempts as i64,
-                message: None,
-            });
+        if self.is_agent_lifecycle_failure(message) {
+            return false;
+        }
+        if self.is_structured_permanent_provider_retry_exhausted(message) {
             return false;
         }
         true
     }
 
-    /// `abortRetry()`.
-    pub fn abort_retry(&self) {
-        self.retry_generation.fetch_add(1, Ordering::SeqCst);
+    /// `_isFauxProviderQueueExhausted(message)`.
+    pub(super) fn is_faux_provider_queue_exhausted(&self, message: &AssistantMessage) -> bool {
+        crate::core::provider_retry::is_faux_provider_queue_exhausted(message)
+    }
+
+    /// `_isAgentLifecycleFailure(message)`.
+    pub(super) fn is_agent_lifecycle_failure(&self, message: &AssistantMessage) -> bool {
+        crate::core::provider_retry::is_agent_lifecycle_failure(message)
+    }
+
+    /// `_getProviderStreamFailureKind(message)`.
+    pub(super) fn get_provider_stream_failure_kind(&self, message: &AssistantMessage) -> Option<String> {
+        provider_stream_failure_kind(message)
+    }
+
+    /// `_isStructuredPermanentProviderRetryExhausted(message)`.
+    pub(super) fn is_structured_permanent_provider_retry_exhausted(&self, message: &AssistantMessage) -> bool {
+        is_permanent_provider_failure_kind(
+            self.get_provider_stream_failure_kind(message).as_deref(),
+            self.retry_attempt.load(Ordering::SeqCst) as f64,
+        )
+    }
+
+    /// `_isConcreteProviderAuthFailure(message)`.
+    pub(super) fn is_concrete_provider_auth_failure(&self, message: &AssistantMessage) -> bool {
+        if message.stop_reason != STOP_REASON_ERROR || message.error_message.is_none() {
+            return false;
+        }
+        // Only the provider's structured classification counts as an auth failure.
+        self.get_provider_stream_failure_kind(message).as_deref() == Some("auth")
+    }
+
+    /// `_captureRetryAuthFailureSource(message)` (agent-session.ts:12043-12060).
+    pub(super) fn capture_retry_auth_failure_source(&self, message: &AssistantMessage) -> Option<AuthSourceToken> {
+        let token = self
+            .model_registry
+            .lock()
+            .unwrap()
+            .get_current_provider_auth_source_token(&message.provider)?;
+        let mut sources = self.retry_auth_failure_sources.lock().unwrap();
+        let known = sources.iter().any(|existing| {
+            existing.provider == token.provider
+                && existing.source == token.source
+                && existing.identity_fingerprint == token.identity_fingerprint
+                && existing.value_fingerprint == token.value_fingerprint
+        });
+        if !known {
+            sources.push(token.clone());
+        }
+        Some(token)
+    }
+
+    /// `_markProviderAuthStale(message, authSourceTokens?)` (agent-session.ts:12062-12082).
+    pub(super) fn mark_provider_auth_stale(
+        &self,
+        message: &AssistantMessage,
+        auth_source_tokens: Option<&[AuthSourceToken]>,
+    ) -> bool {
+        let mut marked = false;
+        match auth_source_tokens {
+            Some(tokens) if !tokens.is_empty() => {
+                let mut registry = self.model_registry.lock().unwrap();
+                for token in tokens {
+                    marked = registry.mark_provider_auth_source_stale(token) || marked;
+                }
+                drop(registry);
+                if marked {
+                    self.emit(AgentSessionEvent::AuthStale {
+                        provider: message.provider.clone(),
+                        source_tokens: Some(tokens.to_vec()),
+                    });
+                }
+            }
+            _ => {
+                let marked_by_provider = self
+                    .model_registry
+                    .lock()
+                    .unwrap()
+                    .mark_provider_auth_stale(&message.provider);
+                marked = marked_by_provider;
+                if marked {
+                    self.emit(AgentSessionEvent::AuthStale {
+                        provider: message.provider.clone(),
+                        source_tokens: None,
+                    });
+                }
+            }
+        }
+        marked
+    }
+
+    /// `_markProviderAuthStaleForRetryFailure(message, options?)` (agent-session.ts:12084-12101).
+    pub(super) fn mark_provider_auth_stale_for_retry_failure(&self, message: &AssistantMessage) -> bool {
+        let tokens = self.retry_auth_failure_sources.lock().unwrap().clone();
+        if tokens.is_empty() {
+            return false;
+        }
+        let marked = self.mark_provider_auth_stale(message, Some(&tokens));
+        let _ = marked;
+        marked
+    }
+
+    /// `_finishActiveRetryWithFailure(message)` (agent-session.ts:12103-12116).
+    pub(super) fn finish_active_retry_with_failure(&self, message: &AssistantMessage) {
+        let attempt = self.retry_attempt.load(Ordering::SeqCst);
+        if attempt == 0 {
+            return;
+        }
+        self.mark_provider_auth_stale_for_retry_failure(message);
+        self.emit(AgentSessionEvent::AutoRetryEnd {
+            success: false,
+            attempt: attempt as i64,
+            final_error: message.error_message.clone(),
+        });
         self.retry_attempt.store(0, Ordering::SeqCst);
+        self.retry_auth_failure_sources.lock().unwrap().clear();
+    }
+
+    /// `_handleRetryableError(message, options?)` (agent-session.ts:12118-12253).
+    pub(super) async fn handle_retryable_error(self: &Arc<Self>, message: &AssistantMessage) -> bool {
+        let policy = crate::core::provider_retry::provider_retry_policy(
+            &self.settings_manager.lock().unwrap(),
+        );
+        if !policy.enabled {
+            self.mark_provider_auth_stale_for_retry_failure(message);
+            self.retry_auth_failure_sources.lock().unwrap().clear();
+            self.resolve_retry();
+            return false;
+        }
+        // The TypeScript creates the promise here; the Rust owner already creates
+        // it at agent_end (`create_retry_promise_for_agent_end`), so only the
+        // resolve half is owned by this member.
+        let attempt = self.retry_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+        if attempt as f64 > policy.max_retries {
+            self.mark_provider_auth_stale_for_retry_failure(message);
+            self.emit(AgentSessionEvent::AutoRetryEnd {
+                success: false,
+                attempt: (attempt - 1) as i64,
+                final_error: message.error_message.clone(),
+            });
+            self.retry_attempt.store(0, Ordering::SeqCst);
+            self.retry_auth_failure_sources.lock().unwrap().clear();
+            self.resolve_retry();
+            return false;
+        }
+        let delay = provider_retry_delay(
+            attempt as f64,
+            provider_stream_failure_retry_after_ms(message),
+            &policy,
+            &ProviderRetryDelayOptions::default(),
+        );
+        let delay_ms = match delay {
+            ProviderRetryDelay::ExceedsCap { retry_after_ms } => {
+                self.mark_provider_auth_stale_for_retry_failure(message);
+                self.emit(AgentSessionEvent::AutoRetryEnd {
+                    success: false,
+                    attempt: (attempt - 1) as i64,
+                    final_error: Some(format!(
+                        "Provider requested a {}s wait before retrying (above retry.provider.maxRetryDelayMs={}ms): {}",
+                        (retry_after_ms / 1000.0).ceil(),
+                        policy.max_retry_delay_ms,
+                        message.error_message.clone().unwrap_or_else(|| "unknown error".to_string()),
+                    )),
+                });
+                self.retry_attempt.store(0, Ordering::SeqCst);
+                self.retry_auth_failure_sources.lock().unwrap().clear();
+                self.resolve_retry();
+                return false;
+            }
+            ProviderRetryDelay::Wait { delay_ms } => delay_ms,
+        };
+        if !self.has_extension_handlers("before_provider_request") {
+            self.semantic_edges.lock().unwrap().prepare_turn_retry();
+        }
+        self.emit(AgentSessionEvent::AutoRetryStart {
+            attempt: attempt as i64,
+            max_attempts: policy.max_retries as i64,
+            delay_ms,
+            error_message: message
+                .error_message
+                .clone()
+                .unwrap_or_else(|| "Unknown error".to_string()),
+        });
+        // The failed assistant message is dropped again so the retry re-issues it.
+        {
+            let mut state = self.agent.state();
+            if state
+                .messages
+                .last()
+                .map(|message| message.role() == "assistant")
+                .unwrap_or(false)
+            {
+                state.messages.pop();
+                self.agent.set_state(state);
+            }
+        }
+        *self.retry_metric_message.lock().unwrap() = Some(message.clone());
+        let controller = CancellationToken::new();
+        *self.retry_abort_controller.lock().unwrap() = Some(controller.clone());
+        let slept = crate::utils::sleep::sleep(delay_ms.max(0.0) as u64, Some(&controller)).await;
+        if slept.is_err() {
+            let attempt = self.retry_attempt.load(Ordering::SeqCst);
+            self.mark_provider_auth_stale_for_retry_failure(message);
+            self.retry_attempt.store(0, Ordering::SeqCst);
+            *self.retry_abort_controller.lock().unwrap() = None;
+            self.emit(AgentSessionEvent::AutoRetryEnd {
+                success: false,
+                attempt: attempt as i64,
+                final_error: Some("Retry cancelled".to_string()),
+            });
+            pi_agent_core::agent_loop::finalize_performance_metric_logical_request(
+                message,
+                Some(pi_agent_core::performance_metrics::PerformanceMetricOutcome::Cancelled),
+            );
+            self.resolve_retry();
+            self.retry_auth_failure_sources.lock().unwrap().clear();
+            return false;
+        }
+        *self.retry_abort_controller.lock().unwrap() = None;
+        let retry_generation = self.retry_generation.load(Ordering::SeqCst);
+        let correlation =
+            pi_agent_core::agent_loop::get_performance_metric_request_correlation(message);
+        let session = self.clone();
+        let message = message.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                if let Some(metrics) = session.agent.performance_metrics() {
+                    let next_attempt = correlation
+                        .as_ref()
+                        .map(|correlation| correlation.provider_attempt_number)
+                        .or(metrics.provider_attempt_number)
+                        .unwrap_or(1)
+                        + 1;
+                    session.agent.set_performance_metrics(Some(
+                        pi_agent_core::performance_metrics::AgentLoopPerformanceMetrics {
+                            recorder: metrics.recorder.clone(),
+                            logical_request_id: correlation
+                                .as_ref()
+                                .and_then(|correlation| correlation.logical_request_id.clone())
+                                .or(metrics.logical_request_id.clone()),
+                            logical_request_started_at: correlation
+                                .as_ref()
+                                .and_then(|correlation| correlation.logical_request_started_at)
+                                .or(metrics.logical_request_started_at),
+                            provider_attempt_number: Some(next_attempt),
+                            host_owns_logical_request_terminal: true,
+                            logical_request_settlement: correlation
+                                .as_ref()
+                                .map(|correlation| correlation.logical_request_settlement.clone())
+                                .or(metrics.logical_request_settlement.clone()),
+                        },
+                    ));
+                }
+                if let Err(error) = session.agent.continue_().await {
+                    // A continue that never starts must still resolve the retry (else
+                    // isRetrying sticks forever) unless a newer retry owns the state.
+                    if session.retry_generation.load(Ordering::SeqCst) != retry_generation
+                        || !session.is_retrying()
+                    {
+                        return;
+                    }
+                    session.mark_provider_auth_stale_for_retry_failure(&message);
+                    let attempt = session.retry_attempt.load(Ordering::SeqCst);
+                    session.retry_attempt.store(0, Ordering::SeqCst);
+                    session.retry_auth_failure_sources.lock().unwrap().clear();
+                    session.emit(AgentSessionEvent::AutoRetryEnd {
+                        success: false,
+                        attempt: attempt as i64,
+                        final_error: Some(error.clone()),
+                    });
+                    pi_agent_core::agent_loop::finalize_performance_metric_logical_request(
+                        &message,
+                        Some(pi_agent_core::performance_metrics::PerformanceMetricOutcome::Failure),
+                    );
+                    session.resolve_retry();
+                }
+            });
+        }
+        true
+    }
+
+    /// `abortRetry()` (agent-session.ts:12255-12276).
+    pub fn abort_retry(&self) {
         if let Some(controller) = self.retry_abort_controller.lock().unwrap().take() {
             controller.cancel();
+            return;
         }
+        let attempt = self.retry_attempt.load(Ordering::SeqCst);
+        if attempt > 0 {
+            if let Some(controller) = self.auto_compaction_abort_controller.lock().unwrap().take() {
+                controller.cancel();
+            }
+            self.cancel_post_compaction_continue();
+            self.emit(AgentSessionEvent::AutoRetryEnd {
+                success: false,
+                attempt: attempt as i64,
+                final_error: Some("Retry cancelled".to_string()),
+            });
+            self.retry_attempt.store(0, Ordering::SeqCst);
+            if let Some(message) = self.retry_metric_message.lock().unwrap().clone() {
+                pi_agent_core::agent_loop::finalize_performance_metric_logical_request(
+                    &message,
+                    Some(pi_agent_core::performance_metrics::PerformanceMetricOutcome::Cancelled),
+                );
+            }
+        }
+        self.retry_auth_failure_sources.lock().unwrap().clear();
         self.resolve_retry();
     }
 
-    /// `waitForRetry()`.
+    /// `waitForRetry()` (agent-session.ts:12278-12285).
+    ///
+    /// REPAIR CURSOR: the promise slot holds a `BoxFuture` that is not `Clone`, so
+    /// this member moves it out of the mutex instead of awaiting a copy. While the
+    /// await is in flight `is_retrying()` reports false for a second waiter; a
+    /// shared-handle promise (like `SharedReplyFuture`) in `agent_session.rs` would
+    /// remove that deviation.
     pub(super) async fn wait_for_retry(&self) {
-        let promise = self.retry_promise.lock().unwrap().clone();
-        if let Some(promise) = promise {
-            let _ = promise.await;
+        let promise = { self.retry_promise.lock().unwrap().take() };
+        let Some(promise) = promise else {
+            return;
+        };
+        let _ = promise.await;
+        let mut slot = self.retry_promise.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(Box::pin(async { Ok(()) }));
         }
+        drop(slot);
+        self.agent.wait_for_idle().await;
     }
 
     /// `get isRetrying()`.
     pub fn is_retrying(&self) -> bool {
-        self.retry_abort_controller.lock().unwrap().is_some()
+        self.retry_promise.lock().unwrap().is_some()
     }
 
-    /// `get hasAcceptedPromptInFlight()`.
+    /// `get hasAcceptedPromptInFlight()` (agent-session.ts:12291-12300).
     pub fn has_accepted_prompt_in_flight(&self) -> bool {
-        self.action_store.lock().unwrap().owned_actions().iter().any(|action| {
-            matches!(action.payload, QueuedActionPayload::Turn(_))
-                && (action.lifecycle.state() == "committing"
-                    || action.lifecycle.state() == "running")
-        })
+        self.action_store
+            .lock()
+            .unwrap()
+            .unfinished_actions(None)
+            .iter()
+            .any(|action| {
+                let QueuedActionPayload::Turn(turn) = &action.payload else {
+                    return false;
+                };
+                !turn.queue_visible && turn.accepted_before_completion
+            })
     }
 
     /// `get autoRetryEnabled()`.
     pub fn auto_retry_enabled(&self) -> bool {
-        self.settings_manager.lock().unwrap().get_retry_settings().enabled
+        self.settings_manager.lock().unwrap().get_retry_enabled()
     }
 
-    /// `setAutoRetryEnabled(enabled)`.
+    /// `setAutoRetryEnabled(enabled)` (agent-session.ts:12306-12308).
     pub fn set_auto_retry_enabled(&self, enabled: bool) {
         self.settings_manager
             .lock()
             .unwrap()
             .set_retry_enabled(enabled);
-        if !enabled {
-            self.abort_retry();
-        }
     }
 
     pub async fn execute_bash(
@@ -1180,7 +2677,7 @@ impl AgentSession {
     /// `getRlmMaxDepthStatus()`.
     pub fn get_rlm_max_depth_status(&self) -> RlmMaxDepthStatus {
         RlmMaxDepthStatus {
-            max_depth: self.rlm_max_depth(),
+            max_depth: self.rlm_max_depth() as f64,
             source: self.rlm_max_depth_source.lock().unwrap().clone(),
         }
     }
@@ -1204,16 +2701,54 @@ impl AgentSession {
             .session_manager
             .lock()
             .unwrap()
-            .append_custom_message_entry(
+            .append_custom_entry_with_rollback(
                 RLM_MAX_DEPTH_STATE_CUSTOM_TYPE,
-                CustomMessageContent::Text(max_depth.to_string()),
-                false,
-                Some(serde_json::json!({
-                    "maxDepth": max_depth,
-                    "source": self.rlm_max_depth_source.lock().unwrap().clone(),
-                })),
+                Some(serde_json::json!({ "maxDepth": max_depth as f64 })),
             );
-        Ok(SetRlmMaxDepthResult { max_depth, global })
+        *self.rlm_max_depth.lock().unwrap() = max_depth;
+        *self.rlm_max_depth_source.lock().unwrap() = RLM_MAX_DEPTH_SOURCE_CHAT.to_string();
+        // Rebuild the base prompt and re-apply it to the live extension prompt.
+        let old_base = self.base_system_prompt.lock().unwrap().clone();
+        let rebuilt = self.rebuild_system_prompt(&self.get_active_tool_names());
+        *self.base_system_prompt.lock().unwrap() = rebuilt;
+        {
+            let mut state = self.agent.state();
+            state.system_prompt = self.refresh_extension_system_prompt(&state.system_prompt, &old_base);
+            self.agent.set_state(state);
+        }
+
+        let mut global_error: Option<String> = None;
+        if global {
+            // The settings lock is synchronous, so the write queue is flushed in
+            // place instead of holding the guard across an await.
+            let (stale, errors) = {
+                let mut manager = self.settings_manager.lock().unwrap();
+                manager.flush_sync();
+                let stale = manager.drain_errors(Some("global"));
+                manager.set_rlm_max_depth(max_depth as f64);
+                manager.flush_sync();
+                (stale, manager.drain_errors(Some("global")))
+            };
+            for error in stale {
+                let _ = error;
+            }
+            let joined = errors
+                .iter()
+                .map(|error| error.error.message.clone())
+                .collect::<Vec<_>>()
+                .join("; ");
+            if !joined.is_empty() {
+                global_error = Some(joined);
+            }
+        }
+
+        let source = self.rlm_max_depth_source.lock().unwrap().clone();
+        Ok(SetRlmMaxDepthResult {
+            max_depth: max_depth as f64,
+            source,
+            global_saved: global && global_error.is_none(),
+            global_error,
+        })
     }
 
     /// `setSessionName(name)`.
@@ -1246,36 +2781,143 @@ impl AgentSession {
         editor_text: Option<&str>,
     ) -> Result<(), String> {
         self.abort_branch_summary();
-        if summarize.unwrap_or(true) {
-            let entries = self.session_manager.lock().unwrap().get_branch(None);
-            let prepared = prepare_branch_entries(&entries);
-            if !prepared.is_empty() {
-                let controller = CancellationToken::new();
-                *self.branch_summary_abort_controller.lock().unwrap() = Some(controller.clone());
-                let result = generate_branch_summary(GenerateBranchSummaryOptions {
-                    messages: prepared,
-                    signal: Some(controller.clone()),
-                })
-                .await;
-                *self.branch_summary_abort_controller.lock().unwrap() = None;
-                if let Ok(result) = result {
-                    let _ = self.session_manager.lock().unwrap().branch_with_summary(
-                        Some(target_id),
-                        &result.summary,
-                        None,
-                        None,
-                        None,
-                    );
-                }
-            }
-        }
-        self.session_manager
+        // REPAIR CURSOR: the TypeScript returns
+        // `{ editorText, cancelled, aborted, summaryEntry }` (agent-session.ts:12648-12653)
+        // and reads/writes it from `_navigateTreeUnderPause`; this member keeps
+        // `Result<(), String>` because every caller in the crate (the in-process
+        // adapter at `core/agent_session_runtime/in_process_adapter.rs:338`) already
+        // documents that shape as blocked. Add a Rust result struct to
+        // `core/agent_session.rs` and return it here to unblock that seam.
+        //
+        // REPAIR CURSOR: `session_before_tree` / `session_tree` extension handoff
+        // (agent-session.ts:12737-12762, 12851-12857) needs the `TreePreparation`
+        // projection of `collect_entries_for_branch_summary`; it is not wired yet.
+        let target_entry = self
+            .session_manager
             .lock()
             .unwrap()
-            .branch(target_id);
+            .get_entry(target_id)
+            .ok_or_else(|| format!("Entry {target_id} not found"))?;
+        let old_leaf_id = self.session_manager.lock().unwrap().get_leaf_id();
+        if old_leaf_id.as_deref() == Some(target_id) {
+            return Ok(());
+        }
+        let entries: Vec<CompactionSessionEntry> = self
+            .session_manager
+            .lock()
+            .unwrap()
+            .get_branch(None)
+            .iter()
+            .filter_map(compaction_session_entry_from)
+            .collect();
+        let prepared = prepare_branch_entries(&entries, f64::INFINITY);
+        if summarize.unwrap_or(false) && !prepared.messages.is_empty() {
+            let Some(model) = self.model() else {
+                return Err("No model available for summarization".to_string());
+            };
+            let auth = self.get_required_request_auth(&model).await?;
+            let settings = self
+                .settings_manager
+                .lock()
+                .unwrap()
+                .get_branch_summary_settings();
+            let controller = CancellationToken::new();
+            *self.branch_summary_abort_controller.lock().unwrap() = Some(controller.clone());
+            let result = generate_branch_summary(
+                &entries,
+                GenerateBranchSummaryOptions {
+                    model,
+                    api_key: auth.api_key.clone(),
+                    headers: Some(
+                        auth.headers
+                            .clone()
+                            .into_iter()
+                            .map(|(name, value)| (name, Value::String(value)))
+                            .collect(),
+                    ),
+                    signal: Some(controller.clone()),
+                    custom_instructions: editor_text.map(|value| value.to_string()),
+                    replace_instructions: None,
+                    // `generateBranchSummary` takes the compaction module's
+                    // `ProviderRetryPolicy`; the resolver reports the same fields.
+                    retry: Some({
+                        let policy = provider_retry_policy(&self.settings_manager.lock().unwrap());
+                        crate::core::compaction::compaction::ProviderRetryPolicy {
+                            enabled: policy.enabled,
+                            max_retries: policy.max_retries.max(0.0) as u32,
+                            base_delay_ms: policy.base_delay_ms,
+                            max_retry_delay_ms: policy.max_retry_delay_ms,
+                        }
+                    }),
+                    reserve_tokens: Some(settings.reserve_tokens),
+                },
+            )
+            .await;
+            *self.branch_summary_abort_controller.lock().unwrap() = None;
+            if result.aborted == Some(true) {
+                return Ok(());
+            }
+            if let Some(error) = result.error.clone() {
+                return Err(error);
+            }
+            if let Some(summary) = result.summary.clone() {
+                let details = Some(serde_json::json!({
+                    "readFiles": result.read_files.clone().unwrap_or_default(),
+                    "modifiedFiles": result.modified_files.clone().unwrap_or_default(),
+                }));
+                let new_leaf_id: Option<&str> = if target_entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    == Some("message")
+                    && target_entry
+                        .get("message")
+                        .and_then(|message| message.get("role"))
+                        .and_then(Value::as_str)
+                        == Some("user")
+                {
+                    target_entry.get("parentId").and_then(Value::as_str)
+                } else if target_entry.get("type").and_then(Value::as_str) == Some("custom_message") {
+                    target_entry.get("parentId").and_then(Value::as_str)
+                } else {
+                    Some(target_id)
+                };
+                let _ = self.session_manager.lock().unwrap().branch_with_summary(
+                    new_leaf_id,
+                    &summary,
+                    details,
+                    None,
+                    result.usage.as_ref(),
+                );
+            }
+        } else {
+            let new_leaf_id: Option<&str> = if target_entry
+                .get("type")
+                .and_then(Value::as_str)
+                == Some("message")
+                && target_entry
+                    .get("message")
+                    .and_then(|message| message.get("role"))
+                    .and_then(Value::as_str)
+                    == Some("user")
+            {
+                target_entry.get("parentId").and_then(Value::as_str)
+            } else if target_entry.get("type").and_then(Value::as_str) == Some("custom_message") {
+                target_entry.get("parentId").and_then(Value::as_str)
+            } else {
+                Some(target_id)
+            };
+            match new_leaf_id {
+                Some(leaf) => {
+                    let _ = self.session_manager.lock().unwrap().branch(leaf);
+                }
+                None => self.session_manager.lock().unwrap().reset_leaf(),
+            }
+        }
+        if let Some(editor_text) = editor_text {
+            let _ = editor_text;
+        }
         self.reload_goal_state_from_branch();
         self.reload_rlm_max_depth_from_branch();
-        let _ = editor_text;
         self.emit(AgentSessionEvent::TreeNavigated {
             target_id: target_id.to_string(),
         });
@@ -1290,7 +2932,13 @@ impl AgentSession {
         editor_text: Option<&str>,
     ) -> Result<(), String> {
         let pause = self.acquire_queued_work_pause();
-        let previous = self.branch_navigation_queue.lock().unwrap().clone();
+        // The queued future lives inside the mutex and is not `Clone`, so the
+        // previous tail is taken out and awaited while the new tail is installed.
+        let previous = {
+            let mut slot = self.branch_navigation_queue.lock().unwrap();
+            std::mem::replace(&mut *slot, Box::pin(async { Ok(()) }))
+        };
+        let previous = previous;
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let tail: BoxFuture<Result<(), String>> = Box::pin(async move {
             let _ = rx.await;
@@ -1345,52 +2993,113 @@ impl AgentSession {
         }
     }
 
-    /// `getSessionStats()`.
+    /// `getSessionStats()` (agent-session.ts:12898-12941).
     pub fn get_session_stats(&self) -> SessionStats {
         let entries = self.session_manager.lock().unwrap().get_branch(None);
         let messages = self.messages();
-        let own_usage = compute_own_and_total_usage(&entries).0;
-        let own_usage = self.subtract_unindexed_child_usage(own_usage, &entries);
-        let summary = session_usage_summary_from(Some(&own_usage));
+        let user_messages = messages.iter().filter(|m| m.role() == "user").count() as i64;
+        let assistant_messages = messages.iter().filter(|m| m.role() == "assistant").count() as i64;
+        let tool_results = messages
+            .iter()
+            .filter(|m| m.role() == "toolResult")
+            .count() as i64;
+        let mut tool_calls = 0i64;
+        let mut total_input = 0.0;
+        let mut total_output = 0.0;
+        let mut total_cache_read = 0.0;
+        let mut total_cache_write = 0.0;
+        let mut total_cost = 0.0;
+        for message in &messages {
+            if let AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) = message {
+                tool_calls += assistant
+                    .content
+                    .iter()
+                    .filter(|block| matches!(block, pi_ai::types::ContentBlock::ToolCall(_)))
+                    .count() as i64;
+                total_input += assistant.usage.input;
+                total_output += assistant.usage.output;
+                total_cache_read += assistant.usage.cache_read;
+                total_cache_write += assistant.usage.cache_write;
+                total_cost += assistant.usage.cost.total;
+            }
+        }
         SessionStats {
-            message_count: messages.len() as i64,
-            user_message_count: messages
-                .iter()
-                .filter(|message| matches!(message, AgentMessage::Message(pi_ai::types::Message::User(_))))
-                .count() as i64,
-            assistant_message_count: messages
-                .iter()
-                .filter(|message| matches!(message, AgentMessage::Message(pi_ai::types::Message::Assistant(_))))
-                .count() as i64,
-            tool_call_count: messages
-                .iter()
-                .filter(|message| matches!(message, AgentMessage::Message(pi_ai::types::Message::Tool(_))))
-                .count() as i64,
-            usage: summary.total.clone(),
-            tokens_before: None,
+            session_file: self.session_file(),
+            session_id: self.session_id(),
+            user_messages,
+            assistant_messages,
+            tool_calls,
+            tool_results,
+            total_messages: messages.len() as i64,
+            tokens: SessionStatsTokens {
+                input: total_input,
+                output: total_output,
+                cache_read: total_cache_read,
+                cache_write: total_cache_write,
+                total: total_input + total_output + total_cache_read + total_cache_write,
+            },
+            cost: total_cost,
+            context_usage: self.get_context_usage().map(|usage| {
+                crate::core::session_stats::ContextUsage {
+                    tokens: usage.tokens,
+                    context_window: usage.context_window,
+                    percent: usage.percent,
+                }
+            }),
         }
     }
 
-    /// `getContextUsage()`.
+    /// `getContextUsage()` (agent-session.ts:12943-12987).
     pub fn get_context_usage(&self) -> Option<ContextUsage> {
-        let messages = self.messages();
-        if messages.is_empty() {
+        let model = self.model()?;
+        let context_window = model.context_window;
+        if context_window <= 0.0 {
             return None;
         }
-        let tokens = estimate_context_tokens(&messages);
-        let model = self.model();
-        let limit = get_model_input_limit(&model);
-        if !limit.is_finite() || limit <= 0.0 {
-            return Some(ContextUsage {
-                tokens: Some(tokens),
-                context_window: limit,
-                percent: None,
-            });
+        // After compaction, the last assistant usage reflects pre-compaction context
+        // size. Only usage from an assistant that answered after the latest
+        // compaction can be trusted; otherwise the count stays unknown.
+        let branch_entries = self.session_manager.lock().unwrap().get_branch(None);
+        if let Some(latest_compaction) = get_latest_compaction_entry(&branch_entries) {
+            let compaction_index = branch_entries
+                .iter()
+                .rposition(|entry| entry == &latest_compaction);
+            let mut has_post_compaction_usage = false;
+            if let Some(compaction_index) = compaction_index {
+                for index in (compaction_index + 1..branch_entries.len()).rev() {
+                    let entry = &branch_entries[index];
+                    if entry.get("type").and_then(Value::as_str) == Some("message") {
+                        if let Some(message) = entry.get("message") {
+                            match agent_message_from_value(message) {
+                                AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) => {
+                                    if assistant.stop_reason != STOP_REASON_ABORTED
+                                        && assistant.stop_reason != STOP_REASON_ERROR
+                                    {
+                                        if calculate_context_tokens(&assistant.usage) > 0.0 {
+                                            has_post_compaction_usage = true;
+                                        }
+                                    }
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+            if !has_post_compaction_usage {
+                return Some(ContextUsage {
+                    tokens: None,
+                    context_window,
+                    percent: None,
+                });
+            }
         }
+        let estimate = estimate_context_tokens(&self.messages());
         Some(ContextUsage {
-            tokens: Some(tokens),
-            context_window: limit,
-            percent: Some((tokens / limit) * 100.0),
+            tokens: Some(estimate.tokens),
+            context_window,
+            percent: Some((estimate.tokens / context_window) * 100.0),
         })
     }
 
@@ -1409,7 +3118,7 @@ impl AgentSession {
                 .lock()
                 .unwrap()
                 .find(provider, model_id)
-                .and_then(|model| model.context_window)
+                .map(|model| model.context_window)
         })
     }
 
@@ -1428,7 +3137,7 @@ impl AgentSession {
             if indexed.contains(timestamp) {
                 continue;
             }
-            usage = subtract_assistant_usage(&usage, child_usage);
+            subtract_assistant_usage(&mut usage, child_usage);
         }
         usage
     }
@@ -1461,6 +3170,6 @@ impl AgentSession {
 
     /// `get extensionRunner()`.
     pub fn extension_runner(&self) -> Option<ExtensionRunner> {
-        self.extension_runner_ref.get()
+        self.extension_runner_ref.current()
     }
 }
