@@ -2357,11 +2357,24 @@ mod tests {
         assert_eq!(options.update_target, None);
 
         let options = parse_package_command(&args(&["install", "--local"])).expect("install");
-        assert_eq!(options.extension, None);
+        assert!(options.local);
+        assert_eq!(options.source, None);
 
+        // `--extension` is an update-only flag. On install it is recorded as an
+        // invalid option and "my-ext" is read as the positional source, so "src"
+        // becomes the extra positional argument - exactly the TypeScript loop.
         let options = parse_package_command(&args(&["install", "--extension", "my-ext", "src"])).expect("install");
-        assert_eq!(options.extension.as_deref(), Some("my-ext"));
-        assert_eq!(options.source.as_deref(), Some("src"));
+        assert_eq!(options.invalid_option.as_deref(), Some("--extension"));
+        assert_eq!(options.update_target, None);
+        assert_eq!(options.source.as_deref(), Some("my-ext"));
+        assert_eq!(options.invalid_argument.as_deref(), Some("src"));
+
+        // The update-only target the flag really builds.
+        let options = parse_package_command(&args(&["update", "--extension", "my-ext"])).expect("update");
+        assert_eq!(
+            options.update_target,
+            Some(UpdateTarget::Extensions { source: Some("my-ext".to_string()) })
+        );
     }
 
     #[test]
@@ -2428,8 +2441,9 @@ mod tests {
 
     #[test]
     fn usage_lists_every_package_command() {
-        let usage = get_package_command_usage();
+        // `getPackageCommandUsage(command)` renders one command at a time.
         for command in PACKAGE_COMMANDS {
+            let usage = get_package_command_usage(command);
             assert!(usage.contains(command), "{command}");
         }
     }

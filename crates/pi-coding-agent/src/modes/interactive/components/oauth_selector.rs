@@ -14,8 +14,10 @@ use super::menu_panel::{
 };
 use std::rc::Rc;
 
+use pi_tui::tui::Component as _;
+
 /// `type AuthSelectorCategory = "provider" | "service"`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AuthSelectorCategory {
     Provider,
     Service,
@@ -204,14 +206,14 @@ impl OAuthSelectorComponent {
             visible_range: (0, 0),
         };
 
-        component.list_layout = get_menu_list_layout(&MenuListLayoutOptions {
+        component.list_layout = get_menu_list_layout(MenuListLayoutOptions {
             preferred_visible_items: PREFERRED_VISIBLE_PROVIDERS,
             reserved_rows: PROVIDER_LIST_RESERVED_ROWS,
             comfortable_item_rows: 3,
             compact_item_rows: Some(2),
             ..Default::default()
         });
-        component.all_providers = component.sort_providers(&component.all_providers, providers);
+        component.all_providers = component.sort_providers(&component.all_providers, &providers);
         component.filtered_providers = component.all_providers.clone();
 
         let mut categories: Vec<AuthSelectorCategory> = Vec::new();
@@ -319,12 +321,13 @@ impl OAuthSelectorComponent {
         self.update_layout();
     }
 
+    /// `[...providers].sort(...)` - the input array is copied, never reordered in place.
     fn sort_providers(
         &self,
         _previous: &[AuthSelectorProvider],
-        providers: Vec<AuthSelectorProvider>,
+        providers: &[AuthSelectorProvider],
     ) -> Vec<AuthSelectorProvider> {
-        let mut sorted = providers;
+        let mut sorted = providers.to_vec();
         sorted.sort_by(|a, b| {
             let rank_delta =
                 self.get_provider_sort_rank(a) as i32 - self.get_provider_sort_rank(b) as i32;
@@ -348,7 +351,7 @@ impl OAuthSelectorComponent {
     pub fn refresh(&mut self) {
         let selected = self.filtered_providers.get(self.selected_index).cloned();
         let providers = std::mem::take(&mut self.all_providers);
-        self.all_providers = self.sort_providers(&[], providers);
+        self.all_providers = self.sort_providers(&[], &providers);
         let query = self.search_input.get_value().to_string();
         self.filter_providers(&query);
         if let Some(selected) = selected {
@@ -474,7 +477,7 @@ impl OAuthSelectorComponent {
 
     /// Port of `updateLayout`.
     pub fn update_layout(&mut self) {
-        self.list_layout = get_menu_list_layout(&MenuListLayoutOptions {
+        self.list_layout = get_menu_list_layout(MenuListLayoutOptions {
             get_rows: self.viewport.get_rows.clone(),
             preferred_visible_items: PREFERRED_VISIBLE_PROVIDERS,
             total_items: Some(self.filtered_providers.len()),

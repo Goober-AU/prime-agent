@@ -124,13 +124,15 @@ pub async fn run_rpc_mode_with_connection(
     }));
 
     for signal in signal_names(&host.platform()) {
-        let state = state.clone();
         let signal = signal.to_string();
+        let state = state.clone();
+        let handler_state = state.clone();
+        let handler_signal = signal.clone();
         let cleanup = host.on_signal(
             &signal,
             Arc::new(move || {
-                let state = state.clone();
-                let signal = signal.clone();
+                let state = handler_state.clone();
+                let signal = handler_signal.clone();
                 tokio::spawn(async move {
                     state.host.kill_tracked_detached_children();
                     let code = if signal == "SIGHUP" { 129 } else { 143 };
@@ -1036,6 +1038,9 @@ impl RpcModeState {
                         };
                         let closed = observed.get("type").and_then(Value::as_str)
                             == Some("observed_session_closed");
+                        // One lock for the whole decision, like the TypeScript block:
+                        // the ready branch re-emits after the guard is dropped.
+                        let buffered = observed.clone();
                         let ready = {
                             let mut observations = state.observations.lock().expect("observations poisoned");
                             match observations.get_mut(&active_session_id) {
@@ -1046,7 +1051,7 @@ impl RpcModeState {
                                     if observation.ready {
                                         true
                                     } else {
-                                        observation.pending_events.push(observed);
+                                        observation.pending_events.push(buffered);
                                         false
                                     }
                                 }

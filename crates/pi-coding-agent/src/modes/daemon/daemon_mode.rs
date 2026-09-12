@@ -6122,14 +6122,25 @@ impl AgentDaemon {
         runtime_open_guard: Option<RuntimeOpenGuard>,
     ) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
         let body = &command.body;
-        let config = &self.options.default_session_config;
-        let cwd = config
-            .cwd
-            .clone()
-            .ok_or_else(|| "Active session config is missing cwd".to_string())?;
-        if config.agent_dir.is_none() {
-            return Err("Active session config is missing agentDir".to_string());
-        }
+        let config_override = body
+            .get("config")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<AgentSessionRuntimeConfig>(value).ok());
+        let config = merge_agent_session_runtime_config(
+            &self.options.default_session_config,
+            config_override.as_ref(),
+        );
+        let cwd = resolve_path(
+            &config
+                .cwd
+                .clone()
+                .ok_or_else(|| "Active session config is missing cwd".to_string())?,
+        );
+        let agent_dir = match config.agent_dir.clone() {
+            Some(agent_dir) => agent_dir,
+            None => return Err("Active session config is missing agentDir".to_string()),
+        };
+        let cwd_override = config.cwd.clone().map(|cwd| resolve_path(&cwd));
         let desired_active_session_id = match (
             self.is_worker(),
             self.restore_active_session_id
@@ -6195,19 +6206,26 @@ impl AgentDaemon {
             }
         }
         let session_manager = if let Some(session_path) = &resolved_session_path {
-            SessionManager::open_async(session_path, config.session_dir.clone(), None).await?
-        } else if body.get("ephemeral").and_then(Value::as_bool) == Some(true) {
-            SessionManager::in_memory(&cwd)
+            SessionManager::open_async(
+                session_path,
+                config.session_dir.as_deref(),
+                cwd_override.as_deref(),
+            )
+            .await?
+        } else if body.get("noSession").and_then(Value::as_bool) == Some(true) {
+            SessionManager::in_memory(Some(&cwd), config.session_dir.as_deref())?
         } else if body.get("continueRecent").and_then(Value::as_bool) == Some(true) {
-            SessionManager::continue_recent(&cwd, config.session_dir.clone())
+            SessionManager::continue_recent(&cwd, config.session_dir.as_deref())?
         } else {
-            SessionManager::create(&cwd, config.session_dir.clone())
+            SessionManager::create(&cwd, config.session_dir.as_deref())?
         };
-        let session_lease = if let Some(session_path) = &resolved_session_path {
-            acquire_session_lease(session_path, None).await.ok()
-        } else {
-            None
-        };
+        let session_lease = acquire_session_lease(
+            resolved_session_path.as_deref(),
+            &agent_dir,
+            None,
+        )
+        .ok()
+        .flatten();
         let state = self
             .create_state_for_runtime(
                 command,
@@ -6256,7 +6274,7 @@ impl AgentDaemon {
         let runtime = match (self.options.create_runtime)(input).await {
             Ok(runtime) => runtime,
             Err(error) => {
-                if let Some(lease) = session_lease {
+                if let Some(mut lease) = session_lease {
                     lease.release();
                 }
                 return Err(error);
@@ -11778,6 +11796,58 @@ impl AgentDaemon {
 }
 
 impl AgentDaemon {
+    /// `newSession()` on the resident runtime (`state.runtime.newSession(options)`).
+    /// `switchSession()` on the resident runtime (`state.runtime.switchSession(...)`).
+    async fn runtime_switch_session(
+        self: &Arc<Self>,
+        state: &Arc<StdMutex<ActiveSessionState>>,
+        session_path: &str,
+        options: SessionPathOptions,
+    ) -> Result<Value, String> {
+        let entry = self.session_entry_for_state(state);
+        self.session_of(state)
+            .switch_session(session_path, options)
+            .await
+            .map(|result| {
+                entry.sync_view();
+                result
+            })
+    }
+
+    /// `fork()` on the resident runtime (`state.runtime.fork(...)`).
+    async fn runtime_fork(
+        self: &Arc<Self>,
+        state: &Arc<StdMutex<ActiveSessionState>>,
+        entry_id: &str,
+        options: ForkOptions,
+    ) -> Result<Value, String> {
+        let entry = self.session_entry_for_state(state);
+        self.session_of(state)
+            .fork(entry_id, options)
+            .await
+            .map(|result| {
+                entry.sync_view();
+                result
+            })
+    }
+
+    /// `importFromJsonl()` on the resident runtime.
+    async fn runtime_import_from_jsonl(
+        self: &Arc<Self>,
+        state: &Arc<StdMutex<ActiveSessionState>>,
+        input_path: &str,
+        cwd_override: Option<String>,
+    ) -> Result<Value, String> {
+        let entry = self.session_entry_for_state(state);
+        self.session_of(state)
+            .import_from_jsonl(input_path, cwd_override.as_deref())
+            .await
+            .map(|result| {
+                entry.sync_view();
+                result
+            })
+    }
+
     /// `newSession()` on the resident runtime (`state.runtime.newSession(options)`).
     async fn runtime_new_session(
         self: &Arc<Self>,

@@ -8,7 +8,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use pi_tui::components::editor::{Editor, EditorOptions};
+use pi_tui::components::editor::{Editor, EditorOptions, EditorTheme as TuiEditorTheme};
+use pi_tui::components::select_list::SelectListTheme as TuiSelectListTheme;
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
 use pi_tui::keybindings::get_keybindings;
@@ -18,6 +19,38 @@ use pi_tui::tui::{Component, Container, Focusable, TuiStopOptions, TUI};
 use super::super::theme::theme::{get_editor_theme, theme};
 use super::dynamic_border::{ColorFn, DynamicBorder};
 use super::keybinding_hints::{key_hint, KeyTextOptions};
+
+/// `theme.ts`'s `EditorTheme` carries `Box` closures with `Send + Sync`; the
+/// `pi-tui` editor takes `Rc` closures without those bounds. Private port of the
+/// conversion the other selectors apply to `SelectListTheme`.
+fn to_tui_editor_theme(source: super::super::theme::theme::EditorTheme) -> TuiEditorTheme {
+    TuiEditorTheme {
+        border_color: Rc::new(move |text: &str| (source.border_color)(text)),
+        background_color: source.background_color.map(|color| {
+            let color: Rc<dyn Fn(&str) -> String> = Rc::new(move |text: &str| (color)(text));
+            color
+        }),
+        autocomplete_background_color: Some({
+            let color: Rc<dyn Fn(&str) -> String> =
+                Rc::new(move |text: &str| (source.autocomplete_background_color)(text));
+            color
+        }),
+        select_list: TuiSelectListTheme {
+            selected_prefix: source.select_list.selected_prefix,
+            selected_text: source.select_list.selected_text,
+            description: source.select_list.description,
+            argument_hint: Some(source.select_list.argument_hint),
+            source_tag: Some(source.select_list.source_tag),
+            scroll_info: source.select_list.scroll_info,
+            no_match: source.select_list.no_match,
+        },
+        command_color: Some({
+            let color: Rc<dyn Fn(&str) -> String> =
+                Rc::new(move |text: &str| (source.command_color)(text));
+            color
+        }),
+    }
+}
 
 /// Port of `KeybindingsManager` from `core/keybindings.ts` (another slice).
 /// Only `matches` is observable here.
@@ -73,7 +106,7 @@ impl ExtensionEditorComponent {
         ))));
         container.add_child(Rc::new(RefCell::new(Spacer::new(1))));
 
-        let mut editor = Editor::new(Rc::clone(&tui), get_editor_theme(), options);
+        let mut editor = Editor::new(Rc::clone(&tui), to_tui_editor_theme(get_editor_theme()), options);
         if let Some(prefill) = prefill {
             editor.set_text(prefill);
         }
@@ -92,14 +125,14 @@ impl ExtensionEditorComponent {
         let has_external_editor = process_env_visual_editor().is_some();
         let hint = format!(
             "{}{}{}{}",
-            key_hint("tui.select.confirm", "submit", KeyTextOptions::default()),
+            key_hint("tui.select.confirm", "submit", &KeyTextOptions::default()),
             format!(
                 "  {}",
-                key_hint("tui.input.newLine", "newline", KeyTextOptions::default())
+                key_hint("tui.input.newLine", "newline", &KeyTextOptions::default())
             ),
             format!(
                 "  {}",
-                key_hint("tui.select.cancel", "cancel", KeyTextOptions::default())
+                key_hint("tui.select.cancel", "cancel", &KeyTextOptions::default())
             ),
             if has_external_editor {
                 format!(
@@ -107,7 +140,7 @@ impl ExtensionEditorComponent {
                     key_hint(
                         "app.editor.external",
                         "external editor",
-                        KeyTextOptions::default()
+                        &KeyTextOptions::default()
                     )
                 )
             } else {
@@ -145,7 +178,7 @@ impl ExtensionEditorComponent {
             return;
         }
 
-        Component::handle_input(&mut self.editor.borrow_mut(), key_data);
+        Component::handle_input(&mut *self.editor.borrow_mut(), key_data);
         let submitted = self.submitted.borrow_mut().take();
         if let Some(text) = submitted {
             (self.on_submit_callback)(text);

@@ -78,11 +78,25 @@ pub type BoxFuture<T> = pi_ai::types::BoxFuture<T>;
 use crate::migrations::{run_migrations, show_deprecation_warnings};
 use crate::modes::agent_connection::daemon_agent_connection::{
     collect_daemon_client_env, collect_daemon_launch_env, DaemonAgentConnection, DaemonAgentConnectionOptions,
+    DaemonEventCursor as ConnectionEventCursor, DaemonEventMeta as ConnectionEventMeta,
+    DaemonOutbound as ConnectionOutbound, DaemonResponse as ConnectionResponse,
+    DaemonSessionSnapshot as ConnectionSessionSnapshot, DaemonSessionSummary as ConnectionSessionSummary,
+    DaemonTransportClient as ConnectionTransport,
+};
+use crate::modes::agent_connection::types::{
+    AgentConnection as AgentConnectionTrait, AgentConnectionHistoryWindow, AgentConnectionSessionTree,
 };
 use crate::modes::daemon::daemon_client::{
-    DaemonCapabilityUnavailableError, DaemonClient, DaemonCommandBody,
+    DaemonCapabilityUnavailableError, DaemonClient, DaemonClientCloseListener, DaemonClientError,
+    DaemonClientMessageListener, DaemonClientRequestOptions, DaemonCommandBody,
 };
 use crate::modes::daemon::daemon_protocol::DaemonResponse;
+use crate::modes::daemon::daemon_protocol::{
+    DaemonEventCursor as ProtocolEventCursor, DaemonHistoryWindow as ProtocolHistoryWindow,
+    DaemonOutbound as ProtocolOutbound,
+    DaemonSessionSnapshot as ProtocolSessionSnapshot, DaemonSessionSnapshotHead as ProtocolSnapshotHead,
+    DaemonSessionTree as ProtocolSessionTree,
+};
 use crate::modes::daemon::daemon_errors::{
     deserialize_daemon_create_error, deserialize_daemon_error, DaemonError,
 };
@@ -251,6 +265,9 @@ pub fn parse_agents_view_command(args: &[String]) -> ParsedAgentsViewCommand {
     ParsedAgentsViewCommand { explicit_agents_view: false, args: args.to_vec() }
 }
 
+/// The TypeScript interface is a plain object literal, so the port derives
+/// `Clone` for the structural copies its own tests and callers make.
+#[derive(Clone)]
 pub struct DaemonClientStartupDecision {
     pub app_mode: AppMode,
     pub startup_benchmark: bool,
@@ -293,6 +310,7 @@ pub fn should_ensure_interactive_daemon_for_startup(use_daemon_interactive: bool
     use_daemon_interactive && attach_agent.is_none()
 }
 
+#[derive(Clone)]
 pub struct AgentsViewStartupDecision {
     pub use_daemon_interactive: bool,
     pub needs_onboarding: bool,
@@ -315,6 +333,7 @@ pub fn should_open_agents_view_for_daemon_interactive(options: &AgentsViewStartu
         && options.fork.is_none()
 }
 
+#[derive(Clone)]
 pub struct DaemonInteractiveSessionManagerDecision {
     pub resume: Option<ResumeValue>,
     pub continue_: Option<bool>,
@@ -1135,8 +1154,10 @@ pub fn create_default_runtime_factory(
                 input.session_config.as_ref(),
             );
             let runtime_session_options = input.session_options.clone();
+            // The TypeScript keeps reading `config` after this call (the CLI thinking
+            // override below), which an owned Rust struct cannot do.
             let prepared = prepare_runtime_services(PrepareRuntimeServicesOptions {
-                config,
+                config: config.clone(),
                 cwd: input.cwd.clone(),
                 agent_dir: input.agent_dir.clone(),
                 session_manager: Arc::clone(&input.session_manager),
@@ -1270,7 +1291,15 @@ pub async fn prepare_runtime_services(options: PrepareRuntimeServicesOptions) ->
         .or_else(|| services.settings_manager.lock().unwrap().get_enabled_models());
     let scoped_models = match model_patterns {
         Some(model_patterns) if !model_patterns.is_empty() => {
-            resolve_model_scope(&model_patterns, &mut services.model_registry.lock().unwrap()).await
+            // `resolveModelScope(patterns, modelRegistry)` awaits inside the
+            // registry lock; `with_model_registry` runs the operation on the
+            // blocking pool so the async factory stays `Send`.
+            let registry = Arc::clone(&services.model_registry);
+            crate::core::sdk::with_model_registry(registry, move |registry| {
+                Box::pin(async move { resolve_model_scope(&model_patterns, registry).await })
+            })
+            .await
+            .unwrap_or_default()
         }
         _ => Vec::new(),
     };
@@ -1491,6 +1520,396 @@ fn is_unknown_active_session_error(message: &str) -> bool {
     message.starts_with("Unknown active session:")
 }
 
+/// `mapDaemonSessionSnapshot` reads the wire `meta`; the connection slice only
+/// keeps `sequence` and `cursor`, so the adapter projects exactly those.
+fn main_entry_meta_from_wire(meta: Option<&Value>) -> Option<ConnectionEventMeta> {
+    let meta = meta?.as_object()?;
+    let sequence = meta.get("sequence").and_then(Value::as_i64);
+    let cursor = meta.get("cursor").and_then(Value::as_object).map(|cursor| {
+        ConnectionEventCursor {
+            generation: cursor
+                .get("generation")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            sequence: cursor.get("sequence").and_then(Value::as_i64).unwrap_or(0),
+        }
+    });
+    if sequence.is_none() && cursor.is_none() {
+        return None;
+    }
+    Some(ConnectionEventMeta { sequence, cursor })
+}
+
+fn main_entry_cursor(cursor: &ProtocolEventCursor) -> ConnectionEventCursor {
+    ConnectionEventCursor {
+        generation: cursor.generation.clone(),
+        sequence: cursor.sequence as i64,
+    }
+}
+
+fn main_entry_history_window(window: &ProtocolHistoryWindow) -> AgentConnectionHistoryWindow {
+    AgentConnectionHistoryWindow {
+        version: window.version,
+        generation: window.generation.clone(),
+        representation: window.representation.clone(),
+        tip_entry_id: window.tip_entry_id.clone(),
+        total_message_count: window.total_message_count,
+        start_index: window.start_index,
+        entry_ids: window.entry_ids.clone(),
+        has_older: window.has_older,
+        order: window.order.clone(),
+    }
+}
+
+fn main_entry_session_tree(tree: &ProtocolSessionTree) -> AgentConnectionSessionTree {
+    AgentConnectionSessionTree {
+        tree: tree.tree.clone(),
+        leaf_id: tree.leaf_id.clone(),
+    }
+}
+
+/// `summary` as `DaemonSessionSummary`; the wire row keeps fields this adapter
+/// does not model in `extra`, so `lastEventSequence` is read from there.
+fn main_entry_session_summary(summary: &SessionSummary) -> ConnectionSessionSummary {
+    ConnectionSessionSummary {
+        session_id: summary.session_id.clone(),
+        session_file: summary.session_file.clone(),
+        active_session_id: summary.active_session_id.clone(),
+        id: Some(summary.id.clone()),
+        streaming_message: summary
+            .streaming_message
+            .clone()
+            .and_then(|message| serde_json::from_value(message).ok()),
+        last_event_sequence: summary
+            .extra
+            .get("lastEventSequence")
+            .and_then(Value::as_i64),
+        last_event_cursor: None,
+    }
+}
+
+/// `Omit<DaemonSessionSnapshot, "messages">` -> the connection's snapshot shape.
+fn main_entry_snapshot_head(head: &ProtocolSnapshotHead) -> ConnectionSessionSnapshot {
+    ConnectionSessionSnapshot {
+        state: head.state.clone(),
+        messages: Vec::new(),
+        summary: main_entry_session_summary(&head.summary),
+        history: head.history.as_ref().map(main_entry_history_window),
+        session_context: head.session_context.clone(),
+        session_tree: head.session_tree.as_ref().map(main_entry_session_tree),
+        parent: head.parent.clone(),
+        children: head.children.clone(),
+        last_event_sequence: Some(head.last_event_sequence as i64),
+        last_event_cursor: head.last_event_cursor.as_ref().map(main_entry_cursor),
+    }
+}
+
+/// The wire `DaemonSessionSnapshot` -> the connection's snapshot shape.
+fn main_entry_session_snapshot(snapshot: &ProtocolSessionSnapshot) -> ConnectionSessionSnapshot {
+    ConnectionSessionSnapshot {
+        state: snapshot.state.clone(),
+        messages: snapshot.messages.clone(),
+        summary: main_entry_session_summary(&snapshot.summary),
+        history: snapshot.history.as_ref().map(main_entry_history_window),
+        session_context: snapshot.session_context.clone(),
+        session_tree: snapshot.session_tree.as_ref().map(main_entry_session_tree),
+        parent: snapshot.parent.clone(),
+        children: snapshot.children.clone(),
+        last_event_sequence: Some(snapshot.last_event_sequence as i64),
+        last_event_cursor: snapshot.last_event_cursor.as_ref().map(main_entry_cursor),
+    }
+}
+
+/// One wire frame as the connection slice's `DaemonOutbound`.
+///
+/// Frames with no connection-level meaning (`response`, `daemon_hello`,
+/// `daemon_closing`, `roster_update`, `session_attached`, `session_detached`,
+/// `session_list_progress`) read as `None`, exactly as the TypeScript connection
+/// ignores them.
+fn main_entry_outbound_from_wire(value: &Value) -> Option<ConnectionOutbound> {
+    let meta = main_entry_meta_from_wire(value.get("meta"));
+    // `meta` is reconstructed above; dropping it here keeps parsing independent of
+    // the daemon-side meta shape (which carries required fields this adapter and
+    // the connection do not read).
+    let mut frame = value.clone();
+    if let Some(object) = frame.as_object_mut() {
+        object.remove("meta");
+    }
+    let outbound = ProtocolOutbound::from_value(&frame)?;
+    let outbound = match outbound {
+        ProtocolOutbound::HeartbeatsChanged { active_session_id, .. } => ConnectionOutbound::HeartbeatsChanged {
+            active_session_id,
+            meta,
+        },
+        ProtocolOutbound::SessionEvent {
+            active_session_id,
+            event,
+            ..
+        } => ConnectionOutbound::SessionEvent {
+            active_session_id,
+            event,
+            meta,
+        },
+        ProtocolOutbound::SideQuestionEvent {
+            active_session_id,
+            event,
+        } => ConnectionOutbound::SideQuestionEvent {
+            active_session_id,
+            event,
+            meta: None,
+        },
+        ProtocolOutbound::SessionStatus {
+            active_session_id,
+            recap,
+            ..
+        } => ConnectionOutbound::SessionStatus {
+            active_session_id,
+            recap,
+            meta,
+        },
+        ProtocolOutbound::SessionResynced {
+            active_session_id,
+            snapshot,
+            ..
+        } => ConnectionOutbound::SessionResynced {
+            active_session_id,
+            snapshot: main_entry_session_snapshot(&snapshot),
+            meta,
+        },
+        ProtocolOutbound::SessionReplaced {
+            active_session_id,
+            state,
+            messages,
+            snapshot_follows,
+            ..
+        } => ConnectionOutbound::SessionReplaced {
+            active_session_id,
+            state,
+            messages,
+            snapshot_follows,
+            meta,
+        },
+        ProtocolOutbound::SessionSnapshotBegin {
+            active_session_id,
+            snapshot_id,
+            snapshot,
+            message_count,
+            purpose,
+            ..
+        } => ConnectionOutbound::SessionSnapshotBegin {
+            active_session_id,
+            snapshot_id,
+            snapshot: main_entry_snapshot_head(&snapshot),
+            message_count: message_count as usize,
+            purpose,
+        },
+        ProtocolOutbound::SessionSnapshotChunk {
+            active_session_id,
+            snapshot_id,
+            index,
+            messages,
+        } => ConnectionOutbound::SessionSnapshotChunk {
+            active_session_id,
+            snapshot_id,
+            index: index as usize,
+            messages,
+        },
+        ProtocolOutbound::SessionSnapshotEnd {
+            active_session_id,
+            snapshot_id,
+            chunk_count,
+            last_event_sequence,
+            last_event_cursor,
+        } => ConnectionOutbound::SessionSnapshotEnd {
+            active_session_id,
+            snapshot_id,
+            chunk_count: chunk_count as usize,
+            last_event_sequence: last_event_sequence as i64,
+            last_event_cursor: last_event_cursor.as_ref().map(main_entry_cursor),
+        },
+        ProtocolOutbound::SessionSnapshotFailed {
+            active_session_id,
+            snapshot_id,
+            error,
+        } => ConnectionOutbound::SessionSnapshotFailed {
+            active_session_id,
+            snapshot_id,
+            error,
+        },
+        ProtocolOutbound::SessionClosed {
+            active_session_id,
+            reason,
+            ..
+        } => ConnectionOutbound::SessionClosed {
+            active_session_id,
+            reason: reason.as_str().to_string(),
+            meta,
+        },
+        ProtocolOutbound::ExtensionUiRequest {
+            active_session_id,
+            id,
+            method,
+            payload,
+            ..
+        } => ConnectionOutbound::ExtensionUiRequest {
+            active_session_id,
+            id,
+            method,
+            payload: Value::Object(payload),
+            meta,
+        },
+        ProtocolOutbound::ExtensionError {
+            active_session_id,
+            extension_path,
+            event,
+            error,
+            ..
+        } => ConnectionOutbound::ExtensionError {
+            active_session_id,
+            extension_path,
+            event,
+            error,
+            meta,
+        },
+        _ => return None,
+    };
+    Some(outbound)
+}
+
+/// `DaemonClient` as the connection slice's `DaemonTransportClient`.
+///
+/// The two slices agree on one interface in the TypeScript; the port splits it
+/// (wire-typed on the daemon side, `Value`-typed on the connection side), so this
+/// adapter is the missing bridge and nothing else. `main.ts` hands one
+/// `DaemonClient` to `DaemonAgentConnection.attach` here, exactly like the
+/// telegram worker does, so this call site carries the same bridge.
+struct MainEntryDaemonTransport {
+    client: Arc<DaemonClient>,
+}
+
+impl MainEntryDaemonTransport {
+    fn new(client: Arc<DaemonClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl ConnectionTransport for MainEntryDaemonTransport {
+    fn request(&self, command: Value, timeout_ms: Option<u64>) -> pi_ai::types::BoxFuture<Result<ConnectionResponse, String>> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let body: DaemonCommandBody = command
+                .as_object()
+                .cloned()
+                .ok_or_else(|| "Daemon command must be a JSON object".to_string())?;
+            let response = client
+                .request(body, timeout_ms, DaemonClientRequestOptions::default())
+                .await
+                .map_err(|error| error.message())?;
+            Ok(ConnectionResponse {
+                success: response.success,
+                data: response.data.unwrap_or(Value::Null),
+                error: response.error,
+                error_code: response.error_info.map(|info| info.code().to_string()),
+            })
+        })
+    }
+
+    fn on_message(&self, listener: Arc<dyn Fn(ConnectionOutbound) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {
+        let wire_listener: DaemonClientMessageListener = Arc::new(move |value: &Value| {
+            if let Some(outbound) = main_entry_outbound_from_wire(value) {
+                listener(outbound);
+            }
+        });
+        self.client.on_message(wire_listener)
+    }
+
+    fn on_close(&self, listener: Arc<dyn Fn(String) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {
+        let wire_listener: DaemonClientCloseListener = Arc::new(move |error: &DaemonClientError| {
+            listener(error.message());
+        });
+        self.client.on_close(wire_listener)
+    }
+
+    fn supports_server_capability(&self, capability: &str) -> bool {
+        self.client.supports_server_capability(capability)
+    }
+
+    fn hello_socket_path(&self) -> Option<String> {
+        // `this.client.hello?.socketPath`.
+        self.client
+            .hello()
+            .and_then(|hello| hello.raw.get("socketPath").and_then(Value::as_str).map(str::to_string))
+    }
+
+    fn is_connected(&self) -> bool {
+        self.client.is_connected()
+    }
+
+    fn enable_request_recovery(&self) {
+        // `DaemonClient::enable_request_recovery` is async while the connection
+        // calls this synchronously; `connect_telegram_session` awaits the same
+        // flag before the first request so the ordering the TypeScript relies on
+        // is preserved.
+        let client = Arc::clone(&self.client);
+        tokio::spawn(async move {
+            client.enable_request_recovery().await;
+        });
+    }
+
+    fn close(&self) {
+        let client = Arc::clone(&self.client);
+        tokio::spawn(async move {
+            client.close().await;
+        });
+    }
+
+    fn connect(&self, timeout_ms: u64) -> pi_ai::types::BoxFuture<Result<(), String>> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move { client.connect(timeout_ms).await.map_err(|error| error.message()) })
+    }
+
+    fn wait_for_hello(&self, timeout_ms: u64) -> pi_ai::types::BoxFuture<Result<(), String>> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .wait_for_hello(timeout_ms)
+                .await
+                .map(|_| ())
+                .map_err(|error| error.message())
+        })
+    }
+
+    fn reconnect(&self, timeout_ms: u64) -> pi_ai::types::BoxFuture<Result<(), String>> {
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            client
+                .reconnect(timeout_ms)
+                .await
+                .map_err(|error| error.message())
+        })
+    }
+
+    fn disconnect_for_reconnect(&self, reason: &str) {
+        let client = Arc::clone(&self.client);
+        let reason = reason.to_string();
+        tokio::spawn(async move {
+            client.disconnect_for_reconnect(&reason).await;
+        });
+    }
+
+    fn reset_transport_for_reconnect(&self) {
+        let client = Arc::clone(&self.client);
+        tokio::spawn(async move {
+            client.reset_transport_for_reconnect().await;
+        });
+    }
+
+    fn control_plane_transport(self: Arc<Self>) -> Arc<dyn ConnectionTransport> {
+        self
+    }
+}
+
 /// `getDaemonSummaryActiveSessionId(summary)`.
 pub fn get_daemon_summary_active_session_id(summary: &SessionSummary) -> String {
     summary.active_session_id.clone().unwrap_or_else(|| summary.id.clone())
@@ -1568,8 +1987,12 @@ pub async fn create_daemon_client_connection(
     client.connect(DEFAULT_DAEMON_CONNECT_TIMEOUT_MS).await.map_err(|error| error.message())?;
 
     let socket_path_for_recover = options.socket_path.clone();
+    // `DaemonAgentConnection.attach(client, ...)` in the TypeScript; the port's
+    // connection slice consumes its own `DaemonTransportClient`, so the client is
+    // bridged by `MainEntryDaemonTransport` (this module).
+    let transport: Arc<dyn ConnectionTransport> = Arc::new(MainEntryDaemonTransport::new(Arc::clone(&client)));
     let attach = |summary: SessionSummary| {
-        let client = Arc::clone(&client);
+        let client = Arc::clone(&transport);
         let recover_socket_path = socket_path_for_recover.clone();
         let config = options.config.clone();
         let client_owned = options.client_owned.unwrap_or(false);
@@ -1688,6 +2111,64 @@ pub async fn create_daemon_client_connection(
         Err(error) => {
             client.close().await;
             Err(error)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Onboarding readers
+// ---------------------------------------------------------------------------
+
+/// `OnboardingSettingsReader` (modes/interactive/onboarding.ts) over the core
+/// `SettingsManager`.
+///
+/// `main.ts` passes the real settings manager; the port's onboarding module
+/// declares its own stand-in because that slice landed first, so this adapter
+/// closes the gap at the call site instead of changing either side.
+struct CoreOnboardingSettingsReader<'a> {
+    settings_manager: &'a SettingsManager,
+}
+
+impl crate::modes::interactive::onboarding::OnboardingSettingsReader
+    for CoreOnboardingSettingsReader<'_>
+{
+    fn get_onboarding_shown(&self) -> bool {
+        self.settings_manager.get_onboarding_shown()
+    }
+}
+
+/// `OnboardingModelRegistryReader` (modes/interactive/onboarding.ts) over the
+/// core `ModelRegistry`.
+///
+/// `refresh()` takes `&mut self` in the port while the trait member takes
+/// `&self`, so the reader carries the already-locked guard through a `RefCell`.
+/// `get_provider_auth_status` is projected the same way the interactive
+/// stand-in projects it (`AuthStatus { source }`).
+struct CoreOnboardingModelRegistryReader<'a> {
+    model_registry: std::cell::RefCell<&'a mut crate::core::model_registry::ModelRegistry>,
+}
+
+impl crate::modes::interactive::onboarding::OnboardingModelRegistryReader
+    for CoreOnboardingModelRegistryReader<'_>
+{
+    fn refresh(&self) {
+        self.model_registry.borrow_mut().refresh();
+    }
+
+    fn has_configured_auth(
+        &self,
+        model: &crate::modes::interactive::interactive_mode_services::AgentConnectionModel,
+    ) -> bool {
+        self.model_registry.borrow().has_configured_auth(model)
+    }
+
+    fn get_provider_auth_status(
+        &self,
+        provider: &str,
+    ) -> crate::modes::interactive::interactive_mode_services::AuthStatus {
+        let status = self.model_registry.borrow().get_provider_auth_status(provider);
+        crate::modes::interactive::interactive_mode_services::AuthStatus {
+            source: status.source.unwrap_or_default(),
         }
     }
 }
@@ -2362,11 +2843,15 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
         // the port passes only the seam-visible parts below.
         let needs_onboarding = {
             let settings_guard = settings_manager.lock().unwrap();
-            let registry_guard = services.model_registry.lock().unwrap();
+            let mut registry_guard = services.model_registry.lock().unwrap();
+            let settings_reader = CoreOnboardingSettingsReader { settings_manager: &settings_guard };
+            let registry_reader = CoreOnboardingModelRegistryReader {
+                model_registry: std::cell::RefCell::new(&mut *registry_guard),
+            };
             crate::modes::interactive::onboarding::should_run_onboarding(
                 &crate::modes::interactive::onboarding::OnboardingStartupState {
-                    settings_manager: &*settings_guard,
-                    model_registry: &*registry_guard,
+                    settings_manager: &settings_reader,
+                    model_registry: &registry_reader,
                     model: startup_model.model.as_ref(),
                 },
             )
@@ -2557,7 +3042,7 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
             .unwrap_or_default();
         report_diagnostics(&diagnostics);
         if diagnostics.iter().any(|diagnostic| diagnostic.type_.as_str() == "error") {
-            let _ = connection.dispose().await;
+            let _ = AgentConnectionTrait::dispose(connection.as_ref()).await;
             host.exit(1);
             return;
         }
@@ -2569,7 +3054,7 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
                     .clone()
                     .unwrap_or_else(format_no_models_available_message))
             );
-            let _ = connection.dispose().await;
+            let _ = AgentConnectionTrait::dispose(connection.as_ref()).await;
             host.exit(1);
             return;
         }
@@ -2870,17 +3355,17 @@ pub async fn create_agent_session_runtime_port(
             Err(error) => return Err(error.to_string()),
         },
     };
-    let lease_failed = |error: MissingSessionCwdError| {
+    let lease_failed = |error: String| {
         if let Some(lease) = &lease {
             lease.lock().unwrap().release();
         }
-        error.to_string()
+        error
     };
     crate::core::session_cwd::assert_session_cwd_exists(
         &SessionManagerCwdSource { session_manager: &*session_manager.lock().unwrap() },
         &cwd,
     )
-    .map_err(lease_failed)?;
+    .map_err(|error: MissingSessionCwdError| lease_failed(error.to_string()))?;
     let result = create_runtime(CreateAgentSessionRuntimeInput {
         cwd,
         agent_dir,
@@ -3351,11 +3836,25 @@ mod tests {
         assert!(find_active_daemon_session_summary_for_session_file(&vec![summary], session_file).is_none());
     }
 
+    /// The daemon slice's `DaemonResponseConstruction::failure` is private to
+    /// `daemon_mode.rs`; the test builds the same literal.
+    fn failed_response(command: &str, error: &str) -> DaemonResponse {
+        DaemonResponse {
+            id: None,
+            type_: "response".to_string(),
+            command: command.to_string(),
+            success: false,
+            data: None,
+            error: Some(error.to_string()),
+            error_info: None,
+        }
+    }
+
     #[test]
     fn an_unknown_active_session_lookup_falls_back_and_recovering_throws() {
-        let response = DaemonResponse::failure(None, "get_state", "Unknown active session: abc", None);
+        let response = failed_response("get_state", "Unknown active session: abc");
         assert!(resolve_active_session_lookup_failure(&response).is_none());
-        let response = DaemonResponse::failure(None, "get_state", "other failure", None);
+        let response = failed_response("get_state", "other failure");
         assert_eq!(
             resolve_active_session_lookup_failure(&response),
             Some("other failure".to_string())

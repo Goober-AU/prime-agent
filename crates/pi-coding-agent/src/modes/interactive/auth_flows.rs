@@ -317,7 +317,10 @@ pub fn built_in_model_providers() -> HashSet<String> {
 /// `ProviderAuthFlowsHost`
 pub trait ProviderAuthFlowsHost: Send + Sync {
     fn ui(&self) -> &dyn AuthUi;
-    fn model_registry(&self) -> Arc<ModelRegistry>;
+    /// `readonly modelRegistry: ModelRegistry` - the real registry is shared
+    /// mutable state in the port (`Arc<Mutex<ModelRegistry>>`), like every other
+    /// holder of it (`core/agent_session_services.rs`).
+    fn model_registry(&self) -> Arc<std::sync::Mutex<ModelRegistry>>;
     fn show_status(&self, message: &str);
     fn show_error(&self, message: &str);
     /// Models currently visible to the host; used to detect providers configured via external credentials.
@@ -355,6 +358,8 @@ impl<'a> ProviderAuthFlows<'a> {
         let provider = self
             .host
             .model_registry()
+            .lock()
+            .expect("model registry poisoned")
             .get_oauth_providers()
             .into_iter()
             .find(|provider| provider.id == provider_id);
@@ -419,7 +424,8 @@ impl<'a> ProviderAuthFlows<'a> {
 
     /// Port of `getLoginProviderOptions`.
     pub fn get_login_provider_options(&self, auth_type: Option<&str>) -> Vec<AuthSelectorProvider> {
-        let model_registry = self.host.model_registry();
+        let registry = self.host.model_registry();
+        let model_registry = registry.lock().expect("model registry poisoned");
         let oauth_providers = model_registry.get_oauth_providers();
         let oauth_provider_ids: HashSet<String> =
             oauth_providers.iter().map(|provider| provider.id.clone()).collect();
@@ -466,7 +472,8 @@ impl<'a> ProviderAuthFlows<'a> {
 
     /// Port of `getLogoutProviderOptions`.
     fn get_logout_provider_options(&self) -> Vec<AuthSelectorProvider> {
-        let model_registry = self.host.model_registry();
+        let registry = self.host.model_registry();
+        let model_registry = registry.lock().expect("model registry poisoned");
         let mut options: Vec<AuthSelectorProvider> = Vec::new();
 
         let oauth_providers_by_id: Vec<(String, String)> = model_registry
@@ -526,7 +533,7 @@ impl<'a> ProviderAuthFlows<'a> {
         credential_path: Option<String>,
     ) -> AuthenticationResult {
         let model_registry = self.host.model_registry();
-        model_registry.refresh();
+        model_registry.lock().expect("model registry poisoned").refresh();
 
         let action_label = if auth_type == "oauth" {
             format!("Logged in to {provider_name}")
@@ -556,7 +563,7 @@ impl<'a> ProviderAuthFlows<'a> {
         provider_name: &str,
     ) -> AuthenticationResult {
         let model_registry = self.host.model_registry();
-        model_registry.refresh();
+        model_registry.lock().expect("model registry poisoned").refresh();
         self.host.on_auth_changed();
         self.host
             .show_status(&format!("{provider_name} uses external credentials. Select a model after configuring them."));
@@ -616,7 +623,8 @@ impl<'a> ProviderAuthFlows<'a> {
 
     /// Port of `getPrimeInferenceDefaultTeamStatus`.
     fn get_prime_inference_default_team_status(&self) -> String {
-        let model_registry = self.host.model_registry();
+        let registry = self.host.model_registry();
+        let model_registry = registry.lock().expect("model registry poisoned");
         let config_path = model_registry.get_prime_cli_config_path();
         if config_path.is_some() {
             let Ok(config) = load_prime_cli_config(config_path.as_deref()) else {
@@ -642,13 +650,16 @@ impl<'a> ProviderAuthFlows<'a> {
     /// Port of `selectPrimeInferenceTeam`.
     async fn select_prime_inference_team(&self, api_key: &str, dialog: &mut LoginDialogComponent) -> Option<String> {
         let model_registry = self.host.model_registry();
-        let config_path = model_registry.get_prime_cli_config_path();
+        let config_path = model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .get_prime_cli_config_path();
         let Ok(config) = load_prime_cli_config(config_path.as_deref()) else {
-            model_registry.reload();
+            model_registry.lock().expect("model registry poisoned").reload();
             return Some(self.get_prime_inference_default_team_status());
         };
         if config.team_id_from_env {
-            model_registry.reload();
+            model_registry.lock().expect("model registry poisoned").reload();
             return Some("Using team from PRIME_TEAM_ID.".to_string());
         }
 
@@ -660,16 +671,22 @@ impl<'a> ProviderAuthFlows<'a> {
         let teams = match teams {
             Ok(teams) => teams,
             Err(_) => {
-                model_registry.reload();
+                model_registry.lock().expect("model registry poisoned").reload();
                 return Some(self.get_prime_inference_default_team_status());
             }
         };
         if teams.is_empty() {
-            model_registry.set_prime_inference_team_selection(None);
+            model_registry
+                .lock()
+                .expect("model registry poisoned")
+                .set_prime_inference_team_selection(None);
             return Some("Using personal account.".to_string());
         }
 
-        let stored_team = model_registry.get_prime_inference_team_selection();
+        let stored_team = model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .get_prime_inference_team_selection();
         let current_team_id = match stored_team {
             Some(None) => None,
             Some(Some(team)) => Some(team.team_id.clone()),
@@ -678,7 +695,10 @@ impl<'a> ProviderAuthFlows<'a> {
         let _ = current_team_id;
         let selected_team = self.show_prime_team_selector(&teams).await;
         if let Some(team) = &selected_team {
-            model_registry.set_prime_inference_team_selection(Some(team.clone()));
+            model_registry
+                .lock()
+                .expect("model registry poisoned")
+                .set_prime_inference_team_selection(Some(team.clone()));
         }
         match selected_team {
             Some(team) => Some(format!("Using team \"{}\".", team.name)),
@@ -700,11 +720,18 @@ impl<'a> ProviderAuthFlows<'a> {
         close_dialog: &mut dyn FnMut(),
     ) -> AuthenticationResult {
         let model_registry = self.host.model_registry();
-        model_registry.set_prime_inference_api_key(api_key);
+        model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .set_prime_inference_api_key(api_key);
         let team_status = self.select_prime_inference_team(api_key, dialog).await;
 
         close_dialog();
-        let credential_path = model_registry.get_prime_cli_config_path().unwrap_or_else(get_auth_path);
+        let credential_path = model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .get_prime_cli_config_path()
+            .unwrap_or_else(get_auth_path);
         self.complete_provider_authentication(
             PRIME_INFERENCE_PROVIDER_ID,
             PRIME_INFERENCE_PROVIDER_NAME,
@@ -723,7 +750,10 @@ impl<'a> ProviderAuthFlows<'a> {
         close_dialog: &mut dyn FnMut(),
     ) -> AuthenticationResult {
         let model_registry = self.host.model_registry();
-        model_registry.set_api_key(PRIME_AGENT_TRACES_PROVIDER_ID, api_key);
+        model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .set_api_key(PRIME_AGENT_TRACES_PROVIDER_ID, api_key);
 
         close_dialog();
         self.complete_provider_authentication(
@@ -821,7 +851,10 @@ impl<'a> ProviderAuthFlows<'a> {
         match prompt_result {
             Ok(api_key) => {
                 let model_registry = self.host.model_registry();
-                model_registry.set_api_key(provider_id, &api_key);
+                model_registry
+                    .lock()
+                    .expect("model registry poisoned")
+                    .set_api_key(provider_id, &api_key);
                 close_dialog(&mut handle);
                 self.complete_provider_authentication(provider_id, provider_name, "api_key", None, kind, None)
                     .await
@@ -841,10 +874,16 @@ impl<'a> ProviderAuthFlows<'a> {
     async fn show_login_dialog(&self, provider_id: &str, provider_name: &str, kind: &str) -> AuthenticationResult {
         let model_registry = self.host.model_registry();
         let provider_info = model_registry
+            .lock()
+            .expect("model registry poisoned")
             .get_oauth_providers()
             .into_iter()
             .find(|provider| provider.id == provider_id);
-        let uses_callback_server = provider_info.as_ref().map(|provider| provider.uses_callback_server).unwrap_or(false);
+        // `providerInfo?.usesCallbackServer ?? false` - `undefined` means false.
+        let uses_callback_server = provider_info
+            .as_ref()
+            .and_then(|provider| provider.uses_callback_server)
+            .unwrap_or(false);
 
         let mut dialog = LoginDialogComponent::new(provider_id, provider_name, None);
         let mut dialog_handle = show_full_pane_overlay_with(
@@ -858,6 +897,8 @@ impl<'a> ProviderAuthFlows<'a> {
         };
 
         let login_result = model_registry
+            .lock()
+            .expect("model registry poisoned")
             .login(
                 provider_id,
                 &mut dialog,
@@ -913,7 +954,7 @@ mod tests {
 
     struct Host {
         ui: TestUi,
-        registry: Arc<ModelRegistry>,
+        registry: Arc<std::sync::Mutex<ModelRegistry>>,
         statuses: std::sync::Mutex<Vec<String>>,
         errors: std::sync::Mutex<Vec<String>>,
     }
@@ -931,7 +972,7 @@ mod tests {
         fn ui(&self) -> &dyn AuthUi {
             &self.ui
         }
-        fn model_registry(&self) -> Arc<ModelRegistry> {
+        fn model_registry(&self) -> Arc<std::sync::Mutex<ModelRegistry>> {
             Arc::clone(&self.registry)
         }
         fn show_status(&self, message: &str) {
@@ -948,7 +989,7 @@ mod tests {
     fn host() -> Host {
         Host {
             ui: TestUi,
-            registry: Arc::new(ModelRegistry::default()),
+            registry: Arc::new(std::sync::Mutex::new(ModelRegistry::default())),
             statuses: std::sync::Mutex::new(Vec::new()),
             errors: std::sync::Mutex::new(Vec::new()),
         }

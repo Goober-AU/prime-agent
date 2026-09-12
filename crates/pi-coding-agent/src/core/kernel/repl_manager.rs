@@ -681,6 +681,8 @@ impl KernelState {
                 let this = self.clone();
                 let task_promise = promise.clone();
                 let on_progress = options.on_bootstrap_progress.clone();
+                // REPAIR CURSOR: this spawn needs `do_start` to be `Send`, which
+                // core/kernel/bootstrap.rs breaks (not owned here) - see final report.
                 tokio::spawn(async move {
                     let outcome = this
                         .do_start(KernelStartOptions {
@@ -834,7 +836,9 @@ impl KernelState {
                 // Ready and a corrupt frame can share one stdout chunk: ready resolved the
                 // deferred synchronously before the corruption was parsed, so the rejection
                 // in failProtocolFrame was a no-op. Never mark such a child running.
-                if let Some(error) = self.startup_protocol_error.lock().unwrap().clone() {
+                // The guard must be dropped before the await below, so clone first.
+                let startup_protocol_error = self.startup_protocol_error.lock().unwrap().clone();
+                if let Some(error) = startup_protocol_error {
                     return Err(self.fail_start(error, generation).await);
                 }
                 if protocol != REPL_PROTOCOL_VERSION {
@@ -3496,34 +3500,41 @@ impl KernelState {
         }
     }
 
-    async fn flush_snapshot_for_dispose(self: &Arc<Self>) {
-        // Concurrent teardowns (dispose vs a signal-handler shutdown) join one flush:
-        // a second flusher would clear the execution guard while the first is still
-        // snapshotting and enqueue a duplicate final snapshot behind it.
-        let existing = self.snapshot_flush_for_dispose.lock().unwrap().clone();
-        let flush = match existing {
-            Some(flush) => flush,
-            None => {
-                let flush = Arc::new(SharedPromise::<()>::new());
-                *self.snapshot_flush_for_dispose.lock().unwrap() = Some(flush.clone());
-                let this = self.clone();
-                let started = flush.clone();
-                tokio::spawn(async move {
-                    this.run_snapshot_flush_for_dispose().await;
-                    started.settle(Ok(()));
-                    let mut guard = this.snapshot_flush_for_dispose.lock().unwrap();
-                    let ours = guard
-                        .as_ref()
-                        .map(|current| Arc::ptr_eq(current, &started))
-                        .unwrap_or(false);
-                    if ours {
-                        *guard = None;
-                    }
-                });
-                flush
-            }
-        };
-        let _ = flush.wait().await;
+    /// Boxed: `shutdown -> flush -> captureSnapshot -> enqueueRequest -> start` is a
+    /// legal async recursion in the TypeScript, but rustc cannot compute the opaque
+    /// return types of that cycle; the trait object ends it.
+    fn flush_snapshot_for_dispose<'a>(
+        self: &'a Arc<Self>,
+    ) -> crate::core::kernel::shared::BoxFuture<'a, ()> {
+        Box::pin(async move {
+            // Concurrent teardowns (dispose vs a signal-handler shutdown) join one flush:
+            // a second flusher would clear the execution guard while the first is still
+            // snapshotting and enqueue a duplicate final snapshot behind it.
+            let existing = self.snapshot_flush_for_dispose.lock().unwrap().clone();
+            let flush = match existing {
+                Some(flush) => flush,
+                None => {
+                    let flush = Arc::new(SharedPromise::<()>::new());
+                    *self.snapshot_flush_for_dispose.lock().unwrap() = Some(flush.clone());
+                    let this = self.clone();
+                    let started = flush.clone();
+                    tokio::spawn(async move {
+                        this.run_snapshot_flush_for_dispose().await;
+                        started.settle(Ok(()));
+                        let mut guard = this.snapshot_flush_for_dispose.lock().unwrap();
+                        let ours = guard
+                            .as_ref()
+                            .map(|current| Arc::ptr_eq(current, &started))
+                            .unwrap_or(false);
+                        if ours {
+                            *guard = None;
+                        }
+                    });
+                    flush
+                }
+            };
+            let _ = flush.wait().await;
+        })
     }
 
     async fn run_snapshot_flush_for_dispose(self: &Arc<Self>) {

@@ -723,6 +723,11 @@ pub async fn create_agent_session_with_factories(
         allowed_tool_names,
         include_goals: Some(include_goals),
         include_compact_skill: options.creation.include_compact_skill,
+        // REPAIR CURSOR: blocked on duplicate controller/autonomous types in core/agent_session.rs
+        // (owned by another worker): its local `AgentRlmHeartbeatController` /
+        // `AgentSessionMessageController` / `AgentAutonomousConfig` duplicate the canonical
+        // core/cron_jobs.rs, core/agent_messages.rs and core/autonomous.rs ones the creation
+        // options use. agent_session.rs must re-export those instead of re-declaring them.
         rlm_heartbeat_controller: options.creation.rlm_heartbeat_controller.clone(),
         agent_message_controller: options.creation.agent_message_controller.clone(),
         agent_observe_controller: options.creation.agent_observe_controller.clone(),
@@ -737,6 +742,9 @@ pub async fn create_agent_session_with_factories(
         semantic_spawned_by_request_id: options.creation.semantic_spawned_by_request_id.clone(),
         subagent_runtime_host: options.creation.subagent_runtime_host.clone(),
         prewarm_ipython_kernel: options.creation.prewarm_ipython_kernel,
+        // REPAIR CURSOR: blocked on duplicate controller/autonomous types in core/agent_session.rs
+        // (owned by another worker) - see the note above; `agent_session::AgentAutonomousConfig`
+        // keeps only enabled/cwd, so converting here would silently drop gates and limits.
         autonomous: options
             .autonomous
             .clone()

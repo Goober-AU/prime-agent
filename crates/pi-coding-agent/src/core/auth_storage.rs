@@ -2323,12 +2323,13 @@ mod tests {
             id: "test-provider".to_string(),
             name: "Test".to_string(),
             login: Arc::new(|_callbacks: OAuthLoginCallbacks| {
-                Box::pin(async { OAuthCredentials::default() })
-                    as pi_ai::types::BoxFuture<OAuthCredentials>
+                Box::pin(async { Ok(OAuthCredentials::default()) })
+                    as pi_ai::types::BoxFuture<Result<OAuthCredentials, String>>
             }),
             uses_callback_server: None,
             refresh_token: Arc::new(|credentials: OAuthCredentials| {
-                Box::pin(async move { credentials }) as pi_ai::types::BoxFuture<OAuthCredentials>
+                Box::pin(async move { Ok(credentials) })
+                    as pi_ai::types::BoxFuture<Result<OAuthCredentials, String>>
             }),
             get_api_key: Arc::new(|credentials: &OAuthCredentials| credentials.access.clone()),
             modify_models: None,

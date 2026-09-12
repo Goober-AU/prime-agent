@@ -320,7 +320,7 @@ impl HeartbeatManagerComponent {
                 })
             }
         };
-        let job = heartbeat_job(heartbeat);
+        let job = heartbeat_job(&heartbeat);
         let label = job.label.as_deref().map(str::trim).unwrap_or("");
         let name = if !label.is_empty() {
             label.to_string()
@@ -577,18 +577,18 @@ impl HeartbeatManagerComponent {
         key_hint(
             "tui.select.cancel",
             "close",
-            KeyTextOptions { primary_only: true },
+            &KeyTextOptions { primary_only: true },
         )
     }
 
     fn detail_hint(&self) -> String {
         format!(
             "{}  {}",
-            key_hint("app.modal.back", "back", KeyTextOptions::default()),
+            key_hint("app.modal.back", "back", &KeyTextOptions::default()),
             key_hint(
                 "tui.select.cancel",
                 "close",
-                KeyTextOptions { primary_only: true }
+                &KeyTextOptions { primary_only: true }
             )
         )
     }

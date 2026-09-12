@@ -371,8 +371,11 @@ impl BrandSplashHeader {
                 lines.push(String::new());
             }
             lines.push(labelled("version", &format!("v{}", self.version)));
-            lines.push(labelled("model", &self.get_model_id().unwrap_or_else(|| "\u{2014}".to_string())));
-            lines.push(labelled("cwd", &format_splash_cwd(&self.get_cwd())));
+            lines.push(labelled(
+                "model",
+                &(self.get_model_id)().unwrap_or_else(|| "\u{2014}".to_string()),
+            ));
+            lines.push(labelled("cwd", &format_splash_cwd(&(self.get_cwd)())));
             lines.extend(extra_metadata.iter().map(|line| labelled(&line.label, &line.value)));
             if !hide_start_hint {
                 lines.push(String::new());
@@ -936,7 +939,9 @@ pub struct InteractiveModeOptions {
     /// Whether the unified daemon/catalog projection had any direct children.
     pub session_has_children: bool,
     /// Client-owned stash store shared across chat views in this TUI process.
-    pub prompt_stash_store: Option<Arc<ClientPromptStashStore>>,
+    /// The TypeScript store is a mutable reference shared by several chat views;
+    /// the port keeps one `Arc<Mutex<..>>` so each view can borrow it mutably.
+    pub prompt_stash_store: Option<Arc<std::sync::Mutex<ClientPromptStashStore>>>,
     /// Initial stable session id used to scope prompt stash state.
     pub prompt_stash_session_id: Option<String>,
 }
@@ -1139,6 +1144,23 @@ pub fn count_direct_subagent_statuses(
     counts
 }
 
+/// Projects a roster-bar row (the daemon wire `SessionSummary`) onto the
+/// agents-view row so the shared direct-child linkage check can run on it: only
+/// the parent-linkage fields `getParentKeys` reads are copied.
+fn roster_row_for_linkage(
+    row: &crate::modes::daemon::daemon_session_list::SessionSummary,
+) -> crate::modes::agents_view::agents_view_state::SessionSummary {
+    let mut view = crate::modes::agents_view::agents_view_state::SessionSummary::new(
+        row.id.clone(),
+        row.session_id.clone(),
+        row.cwd.clone(),
+    );
+    view.parent_active_session_id = row.parent_active_session_id.clone();
+    view.parent_session_id = row.parent_session_id.clone();
+    view.parent_session_path = row.parent_session_path.clone();
+    view
+}
+
 /// Port of `countRosterSubagentStatuses`.
 pub fn count_roster_subagent_statuses(
     summaries: &[SessionSummary],
@@ -1149,10 +1171,21 @@ pub fn count_roster_subagent_statuses(
         if child.runtime_kind.as_deref() != Some("subagent") || child.lifecycle != "live" {
             continue;
         }
-        if !crate::modes::agents_view::agents_view_state::is_direct_agent_child(child, parent.0, parent.1, parent.2) {
+        // `isDirectAgentChild` (agents-view-state.ts) is defined over the agents-view
+        // row type; the roster bar carries the daemon wire row, so project the
+        // parent-linkage fields instead of duplicating the parent-key formula.
+        let linkage_row = roster_row_for_linkage(child);
+        if !crate::modes::agents_view::agents_view_state::is_direct_agent_child(
+            &linkage_row,
+            parent.0,
+            parent.1,
+            parent.2,
+        ) {
             continue;
         }
         counts.total += 1;
+        // `child.rosterStatus ?? classifySessionRosterStatus(child)` - `queuedChild`
+        // keeps its TypeScript default (`false`).
         let status = child.roster_status.clone().unwrap_or_else(|| {
             crate::modes::daemon::agent_roster::classify_session_roster_status(
                 &crate::modes::daemon::agent_roster::RosterSummaryView {
@@ -1161,7 +1194,7 @@ pub fn count_roster_subagent_statuses(
                     is_session_active: Some(child.is_session_active),
                     ..Default::default()
                 },
-                child.has_running_rlm_children == Some(true),
+                false,
             )
         });
         match status {
@@ -1212,7 +1245,7 @@ pub struct InteractiveMode {
     local_session_host: Option<Arc<dyn InteractiveModeLocalSessionHost>>,
     bind_local_session_extensions: bool,
 
-    prompt_stash_store: Option<Arc<ClientPromptStashStore>>,
+    prompt_stash_store: Option<Arc<std::sync::Mutex<ClientPromptStashStore>>>,
     prompt_stash_session_id: Option<String>,
     prompt_stash_state: PromptStashState,
     prompt_stash_handle: Option<super::prompt_stash_state::PromptStashHandle>,
@@ -1305,14 +1338,21 @@ impl InteractiveMode {
         let prompt_stash_store = options.prompt_stash_store.clone();
         let prompt_stash_session_id = options.prompt_stash_session_id.clone();
         let prompt_stash_handle = match (&prompt_stash_store, &prompt_stash_session_id) {
-            (Some(store), Some(session_id)) => {
-                let mut store = store.clone();
-                Some(store.for_session(session_id))
-            }
+            (Some(store), Some(session_id)) => Some(
+                store
+                    .lock()
+                    .expect("prompt stash store poisoned")
+                    .for_session(session_id),
+            ),
             _ => None,
         };
         let prompt_stash_state = match (&prompt_stash_store, prompt_stash_handle) {
-            (Some(store), Some(handle)) => store.state(handle).cloned().unwrap_or_default(),
+            (Some(store), Some(handle)) => store
+                .lock()
+                .expect("prompt stash store poisoned")
+                .state(handle)
+                .cloned()
+                .unwrap_or_default(),
             _ => PromptStashState::default(),
         };
         let bind_local_session_extensions =
@@ -1416,6 +1456,14 @@ impl InteractiveMode {
     }
 
     /// `private get settingsManager()`
+    ///
+    /// REPAIR CURSOR: `interactive_mode_services::SettingsManager` (line 841 there)
+    /// is still an empty stand-in owned by pack p-g-tail, so the five settings
+    /// reads below cannot resolve. Owner fix: make that module's `SettingsManager`
+    /// the canonical `crate::core::settings_manager::SettingsManager` (held as
+    /// `Arc<Mutex<SettingsManager>>`, like `core/agent_session_services.rs:106`) and
+    /// re-point `InteractiveModeUiServices.settings_manager` (line 901 there) at it.
+    /// No change is then needed here.
     pub fn settings_manager(&self) -> &Arc<super::interactive_mode_services::SettingsManager> {
         &self.ui_services.settings_manager
     }
@@ -1464,10 +1512,14 @@ impl InteractiveMode {
         let Some(store) = self.prompt_stash_store.clone() else {
             return;
         };
-        let mut store = store;
-        let handle = store.for_session(session_id);
+        let (handle, state) = {
+            let mut store = store.lock().expect("prompt stash store poisoned");
+            let handle = store.for_session(session_id);
+            let state = store.state(handle).cloned().unwrap_or_default();
+            (handle, state)
+        };
         self.prompt_stash_handle = Some(handle);
-        self.prompt_stash_state = store.state(handle).cloned().unwrap_or_default();
+        self.prompt_stash_state = state;
         self.hydrate_prompt_stash();
     }
 
@@ -1493,7 +1545,7 @@ impl InteractiveMode {
         let Some(store) = self.prompt_stash_store.clone() else {
             return;
         };
-        let mut store = store;
+        let mut store = store.lock().expect("prompt stash store poisoned");
         for (session_id, handle) in pending {
             store.release(&session_id, handle);
         }
@@ -1511,7 +1563,7 @@ impl InteractiveMode {
         let Some(store) = self.prompt_stash_store.clone() else {
             return;
         };
-        let mut store = store;
+        let mut store = store.lock().expect("prompt stash store poisoned");
         for (session_id, handle) in pending {
             store.release(&session_id, handle);
         }
@@ -1545,7 +1597,7 @@ impl InteractiveMode {
         }
         if let Some(git_source) = crate::utils::git::parse_git_url(source) {
             let git_ref = git_source
-                .git_ref
+                .reference
                 .as_ref()
                 .map(|git_ref| format!("@{git_ref}"))
                 .unwrap_or_default();
@@ -2188,7 +2240,9 @@ impl InteractiveMode {
         if self
             .connection_state
             .as_ref()
-            .map(|state| state.service_tier == ServiceTier::Priority)
+            .map(|state| {
+                state.service_tier.as_ref().and_then(|tier| tier.as_deref()) == Some("priority")
+            })
             .unwrap_or(false)
         {
             parts.push("fast".to_string());
@@ -2414,6 +2468,15 @@ impl InteractiveMode {
     }
 
     /// Port of `formatGoalStatus`.
+    ///
+    /// REPAIR CURSOR: `GoalState` here is the stand-in in
+    /// `interactive_mode_services.rs:448` (p-g-tail), which has no `tokensUsed` /
+    /// `tokenBudget`, so the real `core::goals::format_goal_usage` cannot run.
+    /// Owner fix: delete that stand-in and re-export
+    /// `crate::core::goals::GoalState` (plus `empty_goal_state`), and re-point
+    /// `AgentConnectionState.goal` (line 469 there) at it. This function then needs
+    /// only `GoalState::empty()` -> `crate::core::goals::empty_goal_state()` and the
+    /// string status comparisons -> `GoalStatus` comparisons.
     pub fn format_goal_status(&self, goal: &GoalState, terminal_columns: f64) -> String {
         let usage = crate::core::goals::format_goal_usage(goal);
         let usage_text = usage.map(|usage| format!(" ({usage})")).unwrap_or_default();
@@ -2769,7 +2832,10 @@ impl InteractiveMode {
                     .map(|state| state.session_id.clone())
                     .unwrap_or_default();
                 let session_file = self.connection_state.as_ref().and_then(|state| state.session_file.clone());
-                count_roster_subagent_statuses(rows, (&active, &session_id, session_file.as_deref()))
+                count_roster_subagent_statuses(
+                    rows,
+                    (Some(&active), Some(&session_id), session_file.as_deref()),
+                )
             }
             _ => {
                 let children: Vec<AgentConnectionRlmChildAgentSnapshot> =
@@ -3023,7 +3089,10 @@ impl InteractiveMode {
     pub async fn run(&mut self) -> InteractiveModeRunResult {
         let state = self.connection_state.clone();
         InteractiveModeRunResult {
-            type_: self.agents_view_request.unwrap_or(InteractiveModeRunResultType::AgentsView),
+            type_: self
+                .agents_view_request
+                .clone()
+                .unwrap_or(InteractiveModeRunResultType::AgentsView),
             source: InteractiveModeRunResultSource {
                 active_session_id: state.as_ref().and_then(|state| state.active_session_id.clone()),
                 session_file: state.as_ref().and_then(|state| state.session_file.clone()),
@@ -3233,7 +3302,7 @@ fn format_key_text(keys: &[String], platform: &str) -> String {
 fn starts_agent_run(message: &AgentMessage) -> bool {
     match message {
         AgentMessage::Message(pi_ai::types::Message::User(_)) => true,
-        AgentMessage::Custom(custom) => custom.role != "assistant",
+        AgentMessage::Custom(custom) => custom.role() != "assistant",
         _ => false,
     }
 }
@@ -3450,7 +3519,7 @@ impl InteractiveMode {
                 self.patch_connection_state(|state| state.thinking_level = level.clone());
             }
             AgentConnectionSessionEvent::ServiceTierChanged { service_tier } => {
-                self.patch_connection_state(|state| state.service_tier = *service_tier);
+                self.patch_connection_state(|state| state.service_tier = service_tier.clone());
             }
             AgentConnectionSessionEvent::AutoRetryStart { attempt, .. } => {
                 self.patch_connection_state(|state| state.retry_attempt = *attempt);

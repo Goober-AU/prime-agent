@@ -8,6 +8,7 @@
 
 use pi_ai::types::Model;
 use pi_tui::fuzzy::fuzzy_match;
+use pi_tui::tui::Component as _;
 use pi_tui::keybindings::get_keybindings;
 use serde_json::Value;
 use std::rc::Rc;
@@ -19,7 +20,17 @@ use super::keybinding_hints::{key_hint, KeyTextOptions};
 use super::menu_panel::{
     get_menu_list_layout, MenuListLayout, MenuListLayoutOptions, MenuViewportProvider,
 };
-use super::modal_back::should_treat_as_back;
+use super::modal_back::{should_treat_as_back, BackGuardInput};
+
+/// Adapter that exposes the model filter's cursor column to `modalBack`'s
+/// `BackGuardInput` guard (components/modal-back.ts).
+struct SearchInputCursor<'a>(&'a pi_tui::components::input::Input);
+
+impl BackGuardInput for SearchInputCursor<'_> {
+    fn get_cursor(&self) -> usize {
+        self.0.get_cursor()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ModelSelector
@@ -368,7 +379,7 @@ impl ModelSelectorComponent {
             cancelled: false,
             selected_model: None,
         };
-        component.list_layout = get_menu_list_layout(&MenuListLayoutOptions {
+        component.list_layout = get_menu_list_layout(MenuListLayoutOptions {
             preferred_visible_items: PREFERRED_VISIBLE_MODELS,
             reserved_rows: MODEL_LIST_RESERVED_ROWS_BASE,
             comfortable_item_rows: 3,
@@ -730,7 +741,7 @@ impl ModelSelectorComponent {
         }
         // Escape / Ctrl+C, or left arrow when the search field is at its start
         else if kb.matches(key_data, "tui.select.cancel")
-            || should_treat_as_back(key_data, Some(self.get_cursor()))
+            || should_treat_as_back(key_data, Some(&SearchInputCursor(&self.search_input)))
         {
             self.cancelled = true;
         }
@@ -782,7 +793,7 @@ impl ModelSelectorComponent {
             } else {
                 0.0
             };
-        self.list_layout = get_menu_list_layout(&MenuListLayoutOptions {
+        self.list_layout = get_menu_list_layout(MenuListLayoutOptions {
             get_rows: self.viewport.get_rows.clone(),
             preferred_visible_items: PREFERRED_VISIBLE_MODELS,
             total_items: Some(self.filtered_models.len()),

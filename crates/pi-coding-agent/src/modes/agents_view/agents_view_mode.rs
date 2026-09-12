@@ -1515,6 +1515,8 @@ pub async fn run_agents_view_mode(
         editor: Some(editor),
         theme,
         transport,
+        #[cfg(test)]
+        scripted_transport: None,
         factory,
         interactive_factory,
         recover_daemon,
@@ -5174,6 +5176,10 @@ mod tests {
 
     struct FakeConnectionFactory;
 
+    /// Stateless, so the tests borrow one `'static` instance like the module-level
+    /// factory the reference passes into the mode.
+    static FAKE_CONNECTION_FACTORY: FakeConnectionFactory = FakeConnectionFactory;
+
     impl DaemonAgentConnectionFactory for FakeConnectionFactory {
         fn attach(
             &self,
@@ -5256,7 +5262,10 @@ mod tests {
                 .map(|entry| serde_json::to_value(entry).unwrap())
                 .collect::<Vec<Value>>()
         }))));
-        let mut interactive = interactive_factory();
+        // The mode stores the factory by reference for its whole run, so the
+        // helper leaks one stateless factory per test.
+        let interactive: &'static mut InteractiveModeFactory =
+            Box::leak(Box::new(interactive_factory()));
         let mut mode = AgentsViewMode::new(
             options,
             persistent_state,
@@ -5264,8 +5273,8 @@ mod tests {
             Box::new(TestEditor::default()),
             Arc::new(PlainAgentsViewTheme),
             transport.clone(),
-            Box::new(FakeConnectionFactory),
-            &mut interactive,
+            &FAKE_CONNECTION_FACTORY,
+            interactive,
             None,
         );
         mode.set_scripted_transport(transport);
@@ -5925,7 +5934,7 @@ mod tests {
             Box::new(TestEditor::default()),
             Arc::new(PlainAgentsViewTheme),
             transport,
-            Box::new(FakeConnectionFactory),
+            &FAKE_CONNECTION_FACTORY,
             &mut interactive,
             None,
         );

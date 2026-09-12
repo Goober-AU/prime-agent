@@ -50,6 +50,7 @@ use crate::core::extensions::types::{
 };
 use crate::core::agent_messages::{
     AGENT_MESSAGE_CUSTOM_TYPE,
+    AGENT_MESSAGE_SKILL_NAME,
     AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
     AgentFamilyCatalogEntry,
     AgentSessionMessageListResult,
@@ -159,7 +160,7 @@ use crate::core::refinement::refinement::{
     load_harness_state, merge_harness_states, merge_refinement_history,
     normalize_refinement_proposal, plan_refinement, review_auto_refine, save_harness_state,
     ApplyRefinementOptions, AutoRefineReason, AutoRefineReview, AutoRefineReviewContext,
-    AutoRefineReviewer, CompletionFn, HarnessScope, HarnessState, PlanRefinementRequest,
+    CompletionFn, HarnessScope, HarnessState, PlanRefinementRequest,
     ProviderRetryPolicy, RefineModel, RefinementCompletionRequest, RefinementFailureError,
     RefinementPlan, RefinementProposal, RefinementResult, RefineOptions, ReviewAutoRefineRequest,
     REFINE_SKILL_NAME, REFINEMENT_CUSTOM_TYPE, REFINEMENT_FAILURE_CUSTOM_TYPE,
@@ -193,12 +194,14 @@ use crate::core::session_action_store::{
     queued_message_lane_delivery_policy,
     transition_session_action,
 };
+use crate::core::skills::Skill;
 use crate::core::session_manager::{
     get_latest_compaction_entry, SessionContext, SessionEntry, SessionManager,
     CURRENT_SESSION_VERSION,
 };
 use crate::core::session_stats::SessionStats;
 use crate::core::slash_commands::{
+    RefineCommandOptions,
     parse_refine_command_options, parse_session_slash_command, parse_slash_command,
     SessionSlashCommand, SlashCommandInfo,
 };
@@ -338,44 +341,12 @@ impl ExtensionRunnerRef {
 
 pub use crate::core::mcp::mcp_manager::McpManager;
 
-/// `AgentRlmHeartbeatController` from `core/cron-jobs.ts` (another slice).
-pub trait AgentRlmHeartbeatController: Send + Sync {
-    fn list(&self) -> Vec<AgentCronJob>;
-    fn create(&self, payload: Value) -> Result<Value, String>;
-    fn update(&self, job_id: &str, payload: Value) -> Result<Value, String>;
-    fn delete(&self, job_id: &str) -> Result<Value, String>;
-}
-
-/// `AgentCronJob` from `core/cron-jobs.ts`.
-#[derive(Debug, Clone, Default)]
-pub struct AgentCronJob {
-    pub id: String,
-    pub schedule: String,
-    pub prompt: String,
-    pub status: String,
-    pub run_count: f64,
-    pub next_run_at: Option<String>,
-    pub last_run_at: Option<String>,
-    pub last_error: Option<String>,
-}
-
-/// `AgentRlmHeartbeatStatusUpdate` from `core/cron-jobs.ts`.
-#[derive(Debug, Clone, Default)]
-pub struct AgentRlmHeartbeatStatusUpdate {
-    pub job_id: String,
-    pub schedule: String,
-    pub status: String,
-    pub run_count: f64,
-    pub next_run_at: Option<String>,
-    pub last_run_at: Option<String>,
-    pub last_error: Option<String>,
-}
-
-/// `AgentSessionMessageController` from `core/agent-messages.ts` (another slice).
-pub trait AgentSessionMessageController: Send + Sync {
-    fn roster(&self) -> BoxFuture<Result<AgentSessionMessageListResult, String>>;
-    fn deliver(&self, payload: Value) -> BoxFuture<Result<Value, String>>;
-}
+// The heartbeat controller/job types and the agent-message controller are owned
+// by their own core modules; the session only re-exports the canonical shapes so
+// its config, the SDK and the host-request handlers never diverge.
+pub use crate::core::agent_messages::AgentSessionMessageController;
+pub use crate::core::autonomous::AgentAutonomousConfig;
+pub use crate::core::cron_jobs::{AgentCronJob, AgentRlmHeartbeatController};
 
 /// `RlmPendingContinuation` / `RlmPendingResult` / `RlmTerminalStatus` from
 /// `core/rlm-continuation.ts` (another slice).
@@ -1237,12 +1208,6 @@ pub struct AutonomousRuntimeSnapshot {
 
 /// `AgentAutonomousConfig` / `AgentAutonomousStatus` / `AutonomousRuntimeState`
 /// from `core/autonomous.ts` (another slice).
-#[derive(Debug, Clone, Default)]
-pub struct AgentAutonomousConfig {
-    pub enabled: Option<bool>,
-    pub cwd: Option<String>,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentAutonomousStatus {
@@ -1501,6 +1466,56 @@ pub fn normalize_message_content(
         })
         .collect::<Vec<_>>();
     (text, if images.is_empty() { None } else { Some(images) })
+}
+
+/// Adapter for `goals::CustomMessage`, which is a *minimal local shape* whose
+/// `content` is a raw `Value` and whose `timestamp` is `f64`. The canonical owner
+/// of this shape is `core::messages::CustomMessage` (the TypeScript
+/// `createGoalContextMessage` returns the `messages.ts` type), so the adapter
+/// converts the value form to `CustomMessageContent` here instead of changing
+/// another slice's struct.
+pub fn goal_context_custom_message(message: &crate::core::goals::CustomMessage) -> CustomMessage {
+    let content = match &message.content {
+        Value::String(text) => CustomMessageContent::Text(text.clone()),
+        Value::Array(blocks) => CustomMessageContent::Blocks(blocks.clone()),
+        _ => CustomMessageContent::Text(String::new()),
+    };
+    CustomMessage {
+        role: message.role.clone(),
+        custom_type: message.custom_type.clone(),
+        content,
+        display: message.display,
+        details: message.details.clone(),
+        timestamp: message.timestamp as i64,
+    }
+}
+
+/// `convertToLlm`-style content for a custom message, as `ImageOrTextContent` parts.
+pub fn custom_message_content_parts(content: &CustomMessageContent) -> Vec<pi_ai::types::ImageOrTextContent> {
+    match content {
+        CustomMessageContent::Text(text) => {
+            vec![pi_ai::types::ImageOrTextContent::Text(
+                pi_ai::types::TextContent::new(text.clone()),
+            )]
+        }
+        CustomMessageContent::Blocks(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(|text| {
+                            pi_ai::types::ImageOrTextContent::Text(
+                                pi_ai::types::TextContent::new(text.to_string()),
+                            )
+                        })
+                } else {
+                    serde_json::from_value::<pi_ai::types::ImageOrTextContent>(block.clone()).ok()
+                }
+            })
+            .collect(),
+    }
 }
 
 /// `queuedAgentMessagePreview`.
@@ -2028,7 +2043,7 @@ pub struct AgentSession {
     queued_work_pauses: Mutex<HashSet<String>>,
     session_input_admission_pauses: Mutex<HashSet<String>>,
     durable_rlm_terminal_notice_action_ids: Mutex<HashSet<String>>,
-    session_action_commit_tail: Mutex<BoxFuture<Result<(), String>>>,
+    session_action_commit_tail: Mutex<Option<BoxFuture<Result<(), String>>>>,
     session_action_commit_owner: Mutex<Option<String>>,
     pending_session_action_fence_waiters: AtomicU64,
     session_action_commit_dispose_abort: CancellationToken,
@@ -2069,7 +2084,7 @@ pub struct AgentSession {
     user_bash_abort_requested: AtomicBool,
     pending_bash_messages: Mutex<Vec<BashExecutionMessage>>,
     turn_index: AtomicU64,
-    model_select_emit_queue: Mutex<BoxFuture<Result<(), String>>>,
+    model_select_emit_queue: Mutex<Option<BoxFuture<Result<(), String>>>>,
     model_select_emit_queue_idle: AtomicBool,
     resource_loader: Arc<dyn ResourceLoader>,
     custom_tools: Vec<crate::core::extensions::types::ToolDefinition>,
@@ -2283,7 +2298,7 @@ impl AgentSession {
             queued_work_pauses: Mutex::new(HashSet::new()),
             session_input_admission_pauses: Mutex::new(HashSet::new()),
             durable_rlm_terminal_notice_action_ids: Mutex::new(HashSet::new()),
-            session_action_commit_tail: Mutex::new(Box::pin(async { Ok(()) })),
+            session_action_commit_tail: Mutex::new(None),
             session_action_commit_owner: Mutex::new(None),
             pending_session_action_fence_waiters: AtomicU64::new(0),
             session_action_commit_dispose_abort: CancellationToken::new(),
@@ -2329,7 +2344,7 @@ impl AgentSession {
             user_bash_abort_requested: AtomicBool::new(false),
             pending_bash_messages: Mutex::new(Vec::new()),
             turn_index: AtomicU64::new(0),
-            model_select_emit_queue: Mutex::new(Box::pin(async { Ok(()) })),
+            model_select_emit_queue: Mutex::new(None),
             model_select_emit_queue_idle: AtomicBool::new(true),
             resource_loader: config.resource_loader.clone(),
             custom_tools: config.custom_tools.unwrap_or_default(),
@@ -2557,7 +2572,7 @@ impl AgentSession {
         if !manager.lock().unwrap().can_release_acp_servers(owner_id) {
             return Ok(());
         }
-        if manager.lock().unwrap().replace_acp_servers(&[], owner_id) {
+        if manager.lock().unwrap().replace_acp_servers(&[], owner_id).unwrap_or(false) {
             let removed_tool_names: HashSet<String> = self
                 .acp_mcp_tools
                 .lock()
@@ -2576,7 +2591,7 @@ impl AgentSession {
                 }
             }
             *self.acp_mcp_tools.lock().unwrap() = Vec::new();
-            self.refresh_tool_registry(Some(active_tool_names), true);
+            self.refresh_tool_registry(true, Some(active_tool_names));
             *self.base_system_prompt.lock().unwrap() = self.rebuild_system_prompt(&self.get_active_tool_names());
             let mut state = self.agent.state();
             state.system_prompt = self.base_system_prompt.lock().unwrap().clone();
@@ -2596,7 +2611,7 @@ impl AgentSession {
         let result = async {
             // Do not rebuild or kill the notebook. Wait for the current turn, then ask
             // the kernel-owned MCP registry to close only these cached transports.
-            self.agent.wait_for_idle().await?;
+            self.agent.wait_for_idle().await;
             self.await_agent_event_queue().await;
             let provisioner = self.ipython_kernel_provisioner.lock().unwrap().clone();
             let manager = match provisioner.as_ref().and_then(|provisioner| provisioner.manager()) {
@@ -2624,8 +2639,11 @@ impl AgentSession {
                 "del _prime_mcp, _prime_importlib, _prime_mcp_names, _prime_mcp_errors, _prime_mcp_name".to_string(),
             ]
             .join("\n");
-            let result = manager.execute(&code, None, None).await?;
-            if result.status != "ok" {
+            let result = manager
+                .execute(&code, None, None)
+                .await
+                .map_err(|error| error.to_string())?;
+            if result.status != crate::core::kernel::shared::ExecuteStatus::Ok {
                 let stderr = if result.stderr.is_empty() {
                     "kernel error".to_string()
                 } else {
@@ -3560,21 +3578,45 @@ impl AgentSession {
         Ok(true)
     }
 
-    /// `_appendBeforeAgentStartMessages`.
-    fn append_before_agent_start_messages(&self, messages: &[AgentMessage]) {
-        if messages.is_empty() {
+    /// `_appendBeforeAgentStartMessages(messages, result)`.
+    fn append_before_agent_start_messages(
+        &self,
+        messages: &[AgentMessage],
+        result: Option<&BeforeAgentStartResult>,
+    ) {
+        let _ = messages;
+        let Some(result) = result else {
+            return;
+        };
+        if result.messages.is_empty() {
             return;
         }
-        for message in messages {
-            let _ = self.session_manager.lock().unwrap().append_message(message.clone());
+        for message in &result.messages {
+            let _ = self.session_manager.lock().unwrap().append_message(AgentMessage::Custom(
+                CustomAgentMessage::Custom {
+                    custom_type: message.custom_type.clone(),
+                    content: custom_message_content_from_value(&message.content),
+                    display: message.display,
+                    details: message.details.clone(),
+                    timestamp: now_ms_i64(),
+                },
+            ));
         }
         let mut state = self.agent.state();
-        state.messages.extend(messages.iter().cloned());
+        for message in &result.messages {
+            state.messages.push(AgentMessage::Custom(CustomAgentMessage::Custom {
+                custom_type: message.custom_type.clone(),
+                content: custom_message_content_from_value(&message.content),
+                display: message.display,
+                details: message.details.clone(),
+                timestamp: now_ms_i64(),
+            }));
+        }
         self.agent.set_state(state);
     }
 
     /// `_validateCanStartAgentRun`.
-    async fn validate_can_start_agent_run(&self) -> Result<(), String> {
+    async fn validate_can_start_agent_run(self: &Arc<Self>) -> Result<(), String> {
         let state = self.agent.state();
         let model = state.model.clone();
         if model.id.is_empty() {
@@ -3718,19 +3760,15 @@ impl AgentSession {
                 GoalContextKind::BudgetLimit,
                 None,
             ) {
-                let normalized = normalize_message_content(&CustomMessageContent::Text(
-                    message
-                        .content
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_default(),
-                ));
+                let canonical = goal_context_custom_message(&message);
+                let parts = custom_message_content_parts(&canonical.content);
+                let normalized = normalize_message_content(&parts);
                 self.queue_prepared_prompt(
                     "steer",
                     &normalized.0,
                     normalized.1,
                     Some(PreparedTurnActionOptions {
-                        custom_message: Some(message),
+                        custom_message: Some(canonical),
                         resume_if_idle: Some(true),
                         ..Default::default()
                     }),
@@ -3746,38 +3784,8 @@ impl AgentSession {
             return true;
         }
         // Steering stops continuation only after mandatory serialized checkpoints.
+        // Returning true here still prevents the agent loop from starting another turn.
         self.steering_stop_pending()
-        if self.should_stop_for_threshold_compaction(&context).await {
-            return true;
-        }
-        if self.goal_state.lock().unwrap().status != GoalStatus::Active {
-            return false;
-        }
-        if self.goal_continuation_awaits_rlm_work.load(Ordering::SeqCst) {
-            return true;
-        }
-        if self.has_running_rlm_children() {
-            self.goal_continuation_awaits_rlm_work.store(true, Ordering::SeqCst);
-            return true;
-        }
-        if self.goal_abort_in_progress.load(Ordering::SeqCst) {
-            return true;
-        }
-        let goal = self.goal_with_accounted_wall_clock();
-        if let Some(budget) = goal.token_budget {
-            if goal.tokens_used >= budget {
-                let next = GoalState {
-                    active: false,
-                    status: GoalStatus::BudgetLimited,
-                    last_reason: Some("Goal token budget reached".to_string()),
-                    ..goal
-                };
-                self.set_goal_state(&next, None);
-                return false;
-            }
-        }
-        self.run_or_queue_goal_context("continuation", None);
-        true
     }
 
     /// `_shouldStopForThresholdCompaction(context)`.
@@ -3797,8 +3805,8 @@ impl AgentSession {
             self.await_agent_event_queue().await;
             let continuation = self
                 .handle_rlm_child_turn_outcome(&context.message, true, Some("requested"))
-                .map(|outcome| outcome.continuation)
-                .unwrap_or(false);
+                .and_then(|outcome| outcome.continuation)
+                .is_some();
             if continuation {
                 self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
             }
@@ -3809,9 +3817,7 @@ impl AgentSession {
             .as_ref()
             .map(|message| message.role() == "assistant")
             .unwrap_or(false);
-        if !last_is_assistant
-            && self.continue_after_threshold_compaction.load(Ordering::SeqCst) == false
-        {
+        if !last_is_assistant && !self.continue_after_threshold_compaction.load(Ordering::SeqCst) {
             self.continue_after_threshold_compaction
                 .store(true, Ordering::SeqCst);
         }
@@ -3835,46 +3841,39 @@ impl AgentSession {
             }
         }
 
-        let messages = self.agent.state().messages;
-        let context_tokens =
-            self.get_threshold_context_tokens(&settings, &context.message, compaction_timestamp);
-        let model = self.model();
-        if context_tokens.is_none() || model.is_none() {
+        let Some(context_tokens) = self
+            .get_threshold_context_tokens(&context.message, compaction_timestamp)
+        else {
             return false;
-        }
-        let context_tokens = context_tokens.unwrap_or(0.0);
-        let model = model.unwrap_or_default();
+        };
+        let Some(model) = self.model() else {
+            return false;
+        };
         if !should_compact_for_model(context_tokens, &model, &settings) {
             return false;
         }
-        let _ = messages;
 
         self.await_agent_event_queue().await;
         let rlm_outcome = self.handle_rlm_child_turn_outcome(&context.message, true, Some("threshold"));
-        if rlm_outcome
+        let has_continuation = rlm_outcome
             .as_ref()
-            .map(|outcome| outcome.continuation)
-            .unwrap_or(false)
-        {
-            self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
-        } else if !rlm_outcome
+            .and_then(|outcome| outcome.continuation.clone())
+            .is_some();
+        let terminal = rlm_outcome
             .as_ref()
             .map(|outcome| outcome.terminal)
-            .unwrap_or(false)
-            && self.queue_goal_continuation_for_threshold_compaction(&context.message)
-        {
+            .unwrap_or(false);
+        if has_continuation {
             self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
-        } else if !rlm_outcome
-            .as_ref()
-            .map(|outcome| outcome.terminal)
-            .unwrap_or(false)
+        } else if !terminal && self.queue_goal_continuation_for_threshold_compaction(&context.message) {
+            self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+        } else if !terminal
             && self.queue_autonomous_continuation_for_threshold_compaction(&context.message)
         {
             self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
         }
         true
     }
-
     /// `_snapshotAutonomousRuntimeState`.
     fn snapshot_autonomous_runtime_state(&self) -> AutonomousRuntimeSnapshot {
         let state = self.autonomous_state.lock().unwrap();
@@ -4479,13 +4478,16 @@ impl AgentSession {
             crate::core::goals::GoalContextKind::Continuation,
             None,
         ) {
-            Ok(message) => vec![AgentMessage::Custom(CustomAgentMessage::Custom {
-                custom_type: message.custom_type.clone(),
-                content: message.content.clone(),
-                display: message.display,
-                details: message.details.clone(),
-                timestamp: message.timestamp,
-            })],
+            Ok(goal_message) => {
+                let message = goal_context_custom_message(&goal_message);
+                vec![AgentMessage::Custom(CustomAgentMessage::Custom {
+                    custom_type: message.custom_type.clone(),
+                    content: message.content.clone(),
+                    display: message.display,
+                    details: message.details.clone(),
+                    timestamp: message.timestamp,
+                })]
+            }
             Err(error) => {
                 // The continuation hook must not reject; listener failures should not crash the agent loop.
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -5147,7 +5149,7 @@ impl AgentSession {
                 }
             }
             AgentEvent::AgentEnd { messages } => {
-                let mut captured: HashSet<usize> = HashSet::new();
+                let mut captured: HashSet<String> = HashSet::new();
                 for action in self.action_store.lock().unwrap().owned_actions() {
                     if let QueuedActionPayload::Turn(turn) = &action.payload {
                         if let Some(run_messages) = &turn.capture_run_messages {
@@ -5377,7 +5379,7 @@ impl AgentSession {
                 .collect();
             if !cleared.is_empty() {
                 cleared_dispatch_ended = true;
-                let mut removed: HashSet<usize> = HashSet::new();
+                let mut removed: HashSet<String> = HashSet::new();
                 for action in &cleared {
                     if let QueuedActionPayload::Turn(turn) = &action.payload {
                         if let Some(captured) = &turn.capture_run_messages {
@@ -5529,22 +5531,9 @@ impl AgentSession {
                         crate::core::goals::GoalContextKind::BudgetLimit,
                         None,
                     ) {
-                        let (text, images) = match &message.content {
-                            CustomMessageContent::Text(text) => (text.clone(), None),
-                            CustomMessageContent::Blocks(blocks) => normalize_message_content(
-                                &blocks
-                                    .iter()
-                                    .map(|block| match block {
-                                        pi_agent_core::types::ContentBlock::Text(text) => {
-                                            pi_ai::types::ImageOrTextContent::Text(text.clone())
-                                        }
-                                        pi_agent_core::types::ContentBlock::Image(image) => {
-                                            pi_ai::types::ImageOrTextContent::Image(image.clone())
-                                        }
-                                    })
-                                    .collect::<Vec<_>>(),
-                            ),
-                        };
+                        let canonical = goal_context_custom_message(&message);
+                        let parts = custom_message_content_parts(&canonical.content);
+                        let (text, images) = normalize_message_content(&parts);
                         let _ = self
                             .queue_prepared_prompt(
                                 SESSION_INPUT_SCHEDULE_STEER,
@@ -5553,7 +5542,7 @@ impl AgentSession {
                                 Some(PreparedTurnActionOptions {
                                     message: None,
                                     resume_if_idle: Some(true),
-                                    custom_message: Some(message),
+                                    custom_message: Some(canonical),
                                     ..Default::default()
                                 }),
                             )
@@ -5604,14 +5593,17 @@ impl AgentSession {
                 };
                 let did_retry = self
                     .handle_retryable_error(&message, retry_concrete_auth_failure, auth_source_tokens)
-                    .await?;
+                    .await;
                 if did_retry {
                     // Retry was initiated, don't proceed to compaction
                     return;
                 }
             }
 
-            let compaction_will_retry = self.check_compaction(&message).await?;
+            let compaction_will_retry = self
+                .check_compaction(&self.compaction_settings())
+                .await
+                .unwrap_or(false);
             if compaction_will_retry && self.retry_attempt.load(Ordering::SeqCst) > 0 {
                 return;
             }
@@ -5948,7 +5940,7 @@ impl AgentSession {
                     // Best-effort drain; refinement errors must not block disposal.
                     let _ = self
                         .run_serialized_auto_refine_review(
-                            AutoRefineReason::Compact,
+                            "compact",
                             self.auto_refine_branch_version.load(Ordering::SeqCst),
                         )
                         .await;
@@ -5968,7 +5960,9 @@ impl AgentSession {
         if !settings.enabled {
             return;
         }
-        if self.assistant_turns_since_auto_refine.load(Ordering::SeqCst) < settings.turn_interval {
+        if (self.assistant_turns_since_auto_refine.load(Ordering::SeqCst) as f64)
+            < settings.turn_interval
+        {
             return;
         }
         let now = now_ms();
@@ -5980,7 +5974,7 @@ impl AgentSession {
         if self.serialized_refine {
             self.run_serialized_refine_checkpoint().await;
         } else {
-            self.maybe_auto_refine(AutoRefineReason::TurnInterval).await;
+            self.maybe_auto_refine(&AutoRefineReason::TurnInterval).await;
         }
     }
 
@@ -6541,13 +6535,15 @@ impl AgentSession {
     async fn run_pre_turn_compaction(self: &Arc<Self>) {
         let last_assistant = self.find_last_assistant_message();
         if let Some(last_assistant) = last_assistant {
-            let _ = self.check_compaction(&last_assistant).await;
+            let _ = self
+            .check_compaction(&self.compaction_settings())
+            .await;
         } else {
             let model = self.agent.state().model;
             let tokens = estimate_context_tokens(&self.agent.state().messages).tokens;
             let settings = self.compaction_settings();
             if should_compact_for_model(tokens, &model, &settings) {
-                let _ = self.run_auto_compaction(COMPACTION_REASON_THRESHOLD, false).await;
+                let _ = self.run_auto_compaction(COMPACTION_REASON_THRESHOLD).await;
             }
         }
     }
@@ -6579,9 +6575,8 @@ impl AgentSession {
             self.run_pre_turn_compaction().await;
         }
         if policy.await_pending_model_selection {
-            let pending = self.pending_model_select_emit();
-            if let Some(pending) = pending {
-                let _ = pending.await;
+            if !self.model_select_emit_queue_idle.load(Ordering::SeqCst) {
+                self.pending_model_select_emit().await;
             }
         }
         if policy.pre_turn_compaction == PRE_TURN_COMPACTION_AFTER_MODEL_SELECTION {
@@ -6659,16 +6654,14 @@ impl AgentSession {
         text: &str,
         options: Option<PromptOptions>,
     ) -> Result<(), String> {
-        let mut options = options.unwrap_or_default();
-        let mut internal = InternalPromptOptions {
-            base: options.clone(),
-            skip_pre_prompt_work: None,
-            return_after_accepted: Some(true),
-            agent_message_id: None,
-        };
-        options.return_after_accepted = Some(true);
-        internal.base = options;
-        self.prompt_internal(text, Some(internal.base)).await
+        let options = options.unwrap_or_default();
+        self.prompt_internal_with(
+            text,
+            options,
+            None,
+            Some(true),
+        )
+        .await
     }
 
     /// `promptAndWait`.
@@ -6819,21 +6812,22 @@ impl AgentSession {
                     ..Default::default()
                 }),
             )
-            .await?;
+            .await;
             return Ok(true);
         }
-        self.queue_prepared_prompt(
-            SESSION_INPUT_SCHEDULE_FOLLOW_UP,
-            text,
-            None,
-            Some(PreparedTurnActionOptions {
-                agent_message_id,
-                message: None,
-                custom_message,
-                ..Default::default()
-            }),
-        )
-        .await
+        Ok(self
+            .queue_prepared_prompt(
+                SESSION_INPUT_SCHEDULE_FOLLOW_UP,
+                text,
+                None,
+                Some(PreparedTurnActionOptions {
+                    agent_message_id,
+                    message: None,
+                    custom_message,
+                    ..Default::default()
+                }),
+            )
+            .await)
     }
 
     /// `promptHeartbeat`.
@@ -7038,7 +7032,7 @@ impl AgentSession {
         }
         let admission_epoch = self.session_input_pump_epoch.load(Ordering::SeqCst);
         let admission_fence = self
-            .acquire_direct_turn_admission_fence(options.signal.as_ref())
+            .acquire_direct_turn_admission_fence()
             .await
             .map_err(|error| {
                 if options.signal.as_ref().map(|signal| signal.is_cancelled()).unwrap_or(false) {
@@ -7147,7 +7141,7 @@ impl AgentSession {
             } else {
                 report_preflight(true, false);
             }
-            if options.return_after_accepted == Some(true) {
+            if return_after_accepted == Some(true) {
                 return Ok(());
             }
             if visible_queued {
@@ -7195,7 +7189,7 @@ impl AgentSession {
             None
         } else {
             Some(
-                self.acquire_direct_turn_admission_fence(options.signal.as_ref())
+                self.acquire_direct_turn_admission_fence()
                     .await?,
             )
         };
@@ -7633,18 +7627,19 @@ impl AgentSession {
             _ => return Err("Queued prompt normalization did not produce a prompt".to_string()),
         };
 
-        self.queue_prepared_prompt(
-            SESSION_INPUT_SCHEDULE_FOLLOW_UP,
-            &text,
-            images,
-            Some(PreparedTurnActionOptions {
-                queue_key,
-                agent_message_id,
-                resume_if_idle,
-                ..Default::default()
-            }),
-        )
-        .await
+        Ok(self
+            .queue_prepared_prompt(
+                SESSION_INPUT_SCHEDULE_FOLLOW_UP,
+                &text,
+                images,
+                Some(PreparedTurnActionOptions {
+                    queue_key,
+                    agent_message_id,
+                    resume_if_idle,
+                    ..Default::default()
+                }),
+            )
+            .await)
     }
 
     /// `restoreSessionActions`.
@@ -8231,7 +8226,7 @@ impl AgentSession {
                 Ok(()) => {
                     for action in actions.iter() {
                         let current = self.action_state_of(&action.id);
-                        if current == Some("committing".to_string()) {
+                        if current == Some(ActionLifecycleState::Committing) {
                             let durable = primary_delivery_record(action)
                                 .map(|record| self.messages().contains(&agent_message_from_delivery(&record.message)))
                                 .unwrap_or(false);
@@ -8248,7 +8243,7 @@ impl AgentSession {
                                 let _ = self.action_store.lock().unwrap().update_action(&next);
                             }
                         }
-                        if self.action_state_of(&action.id) == Some("running".to_string()) {
+                        if self.action_state_of(&action.id) == Some(ActionLifecycleState::Running) {
                             let mut next = action.clone();
                             let _ = transition_session_action(
                                 &mut next,
@@ -8495,7 +8490,7 @@ impl AgentSession {
     ) -> Result<(), String> {
         self.append_durable_session_command_message(&input.base.text, &input.base.command, false, false, true);
         if let Ok(ticket) = self.action_store.lock().unwrap().ticket_for(action) {
-            ticket.settle_delivered("not_applicable");
+            ticket.settle_delivered(DeliveryOutcome::NotApplicable);
         }
         self.settle_agent_message(action.agent_message_id.as_deref(), "delivery", None);
         self.execute_queued_session_command(action).await
@@ -8569,10 +8564,8 @@ impl AgentSession {
                 .iter()
                 .filter(|action| {
                     matches!(action.payload, QueuedActionPayload::Turn(_))
-                        && session
-                            .action_state_of(&action.id)
-                            .as_deref()
-                            == Some("preparing")
+                        && session.action_state_of(&action.id)
+                            == Some(ActionLifecycleState::Preparing)
                 })
                 .cloned()
                 .collect()
@@ -8618,7 +8611,7 @@ impl AgentSession {
                 }),
             )
             .await;
-        let prepared_ok = match prepared {
+        let prepared_turn = match prepared {
             Ok(value) => value,
             Err(error) => {
                 park_next_turn_messages(self, next_turn_messages.clone());
@@ -8628,7 +8621,7 @@ impl AgentSession {
                 return Err(error);
             }
         };
-        if !prepared_ok {
+        if prepared_turn.is_none() {
             park_next_turn_messages(self, next_turn_messages.clone());
             return Ok(());
         }
@@ -8787,8 +8780,15 @@ impl AgentSession {
             }
         }
         if execution_policy.run_before_agent_start {
-            self.append_before_agent_start_messages(&prepared_messages, None);
+            self.append_before_agent_start_messages(
+                &prepared_messages,
+                prepared_turn.as_ref().map(|state| &state.result),
+            );
+            let prepared_state = prepared_turn
+                .as_ref()
+                .and_then(|state| state.prepared.as_ref());
             self.apply_prepared_system_prompt(
+                prepared_state,
                 execution_policy.preserve_empty_extension_prompt,
             );
         } else if execution_policy.next_turn_context_timing != NEXT_TURN_CONTEXT_TIMING_SKIP {
@@ -8845,7 +8845,10 @@ impl AgentSession {
             }
             "refine" => {
                 let result = match parse_refine_command_options(&input.base.command.args) {
-                    Ok(options) => match self.refine_with_options(&options, true).await {
+                    Ok(options) => match self
+                        .refine_with_options(&refine_options_from_command(&options), true)
+                        .await
+                    {
                         Ok(result) => result,
                         Err(error) => {
                             // Only a failure of the refinement itself is a refine failure; a later
@@ -8868,7 +8871,7 @@ impl AgentSession {
                 display_result = false;
             }
             "goal" => {
-                self.handle_goal_slash_command(&input.base.text, input.images.as_deref())
+                self.handle_goal_slash_command(&input.base.text)
                     .await?;
                 let goal = self.goal_state();
                 result_text = Some(if !goal.objective.is_empty() {
@@ -9024,7 +9027,7 @@ impl AgentSession {
                 .unwrap()
                 .push(app_message);
         } else if self.is_streaming() {
-            let (text, images) = normalize_message_content(&message.content_as_parts());
+            let (text, images) = normalize_message_content(&custom_message_content_parts(&message.content));
             let schedule = if deliver_as.as_deref() == Some("followUp") {
                 SESSION_INPUT_SCHEDULE_FOLLOW_UP
             } else {
@@ -9046,7 +9049,7 @@ impl AgentSession {
                 self.resume_session_input_admission();
             }
             let admission_fence = self.acquire_direct_turn_admission_fence().await?;
-            let (text, images) = normalize_message_content(&message.content_as_parts());
+            let (text, images) = normalize_message_content(&custom_message_content_parts(&message.content));
             let immediately_eligible = self.can_start_session_action_immediately();
             let action = self.create_prepared_turn_action(
                 SESSION_INPUT_SCHEDULE_FOLLOW_UP,
@@ -9734,7 +9737,11 @@ impl AgentSession {
     async fn acquire_commit_fence(self: &Arc<Self>, owner_id: bool) -> Result<CommitFence, String> {
         self.pending_session_action_fence_waiters
             .fetch_add(1, Ordering::SeqCst);
-        let previous = self.session_action_commit_tail.lock().unwrap().clone();
+        let previous = self.session_action_commit_tail.lock().unwrap().take();
+        let previous: BoxFuture<Result<(), String>> = match previous {
+            Some(previous) => previous,
+            None => Box::pin(async { Ok(()) }),
+        };
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let tail: BoxFuture<Result<(), String>> = Box::pin(async move {
             let _ = rx.await;
@@ -9921,7 +9928,11 @@ impl AgentSession {
         self: &Arc<Self>,
         emit: Arc<dyn Fn() -> BoxFuture<Result<(), String>> + Send + Sync>,
     ) {
-        let previous = self.model_select_emit_queue.lock().unwrap().clone();
+        let previous = self.model_select_emit_queue.lock().unwrap().take();
+        let previous: BoxFuture<Result<(), String>> = match previous {
+            Some(previous) => previous,
+            None => Box::pin(async { Ok(()) }),
+        };
         self.model_select_emit_queue_idle.store(false, Ordering::SeqCst);
         let session = self.clone();
         let tail: BoxFuture<Result<(), String>> = Box::pin(async move {
@@ -9971,9 +9982,23 @@ impl AgentSession {
 
     /// `_trackModelSelectEmitError()`.
     fn track_model_select_emit_error(&self) {
-        let queue = self.model_select_emit_queue.lock().unwrap().clone();
+        let queue = self.model_select_emit_queue.lock().unwrap().take();
+        let Some(queue) = queue else {
+            return;
+        };
+        let session = self.clone();
         tokio::spawn(async move {
-            let _ = queue.await;
+            let result = queue.await;
+            if let Err(error) = result {
+                if let Some(runner) = session.extension_runner() {
+                    runner.emit_error(ExtensionError {
+                        extension_path: "<internal>".to_string(),
+                        event: "model_select".to_string(),
+                        error,
+                        stack: None,
+                    });
+                }
+            }
         });
     }
 
@@ -9984,7 +10009,10 @@ impl AgentSession {
 
     /// `_pendingModelSelectEmit()`.
     async fn pending_model_select_emit(&self) {
-        let queue = self.model_select_emit_queue.lock().unwrap().clone();
+        let queue = self.model_select_emit_queue.lock().unwrap().take();
+        let Some(queue) = queue else {
+            return;
+        };
         let _ = queue.await;
     }
 
@@ -10024,7 +10052,9 @@ impl AgentSession {
         }
         Ok(ModelCycleResult {
             model: next.model,
-            thinking_level: next.thinking_level,
+            thinking_level: self.thinking_level(),
+            service_tier: self.service_tier(),
+            is_scoped: true,
         })
     }
 
@@ -10048,7 +10078,9 @@ impl AgentSession {
         self.set_model(next.clone(), options).await?;
         Ok(ModelCycleResult {
             model: next,
-            thinking_level: None,
+            thinking_level: self.thinking_level(),
+            service_tier: self.service_tier(),
+            is_scoped: false,
         })
     }
 
@@ -11114,15 +11146,65 @@ impl AgentSession {
         entry.and_then(|entry| entry.get("timestamp").and_then(Value::as_f64))
     }
 
-    /// `_getThresholdContextTokens(settings)`.
-    fn get_threshold_context_tokens(&self, settings: &CompactionSettings) -> Option<f64> {
-        let model = self.model();
-        let limit = get_model_input_limit(&model);
-        if !limit.is_finite() || limit <= 0.0 {
+    /// `_modelVisibleSkills()` - loader skills minus the ones this session cannot use.
+    fn model_visible_skills(&self) -> Vec<Skill> {
+        let mut skills = self.resource_loader.get_skills().skills;
+        if !self.include_goals {
+            skills.retain(|skill| skill.name() != GOAL_SKILL_NAME);
+        }
+        if !self.include_compact_skill {
+            skills.retain(|skill| skill.name() != COMPACT_SKILL_NAME);
+        }
+        if !self.auto_refine_allowed_for_session() {
+            skills.retain(|skill| skill.name() != REFINE_SKILL_NAME);
+        }
+        if self.agent_message_controller.is_none() {
+            skills.retain(|skill| skill.name() != AGENT_MESSAGE_SKILL_NAME);
+        }
+        if self.agent_observe_controller.is_none() {
+            skills.retain(|skill| skill.name() != AGENT_OBSERVE_SKILL_NAME);
+        }
+        if self.agent_observe_controller.is_none() || self.rlm_heartbeat_controller.lock().unwrap().is_none() {
+            skills.retain(|skill| skill.name() != ORCHESTRATION_HEARTBEAT_SKILL_NAME);
+        }
+        skills
+    }
+
+    /// `_getThresholdContextTokens(assistantMessage, compactionTimestamp)`.
+    fn get_threshold_context_tokens(
+        &self,
+        assistant_message: &pi_ai::types::AssistantMessage,
+        compaction_timestamp: Option<f64>,
+    ) -> Option<f64> {
+        let messages = &self.agent.state().messages;
+        let estimate = estimate_context_tokens(messages);
+        if let Some(last_usage_index) = estimate.last_usage_index {
+            // Verify the usage source is post-compaction. Kept pre-compaction messages
+            // have stale usage reflecting the old (larger) context and would falsely
+            // trigger compaction right after one just finished.
+            let usage_message = messages.get(last_usage_index);
+            let model = self.model();
+            if let Some(AgentMessage::Message(Message::Assistant(usage_message))) = usage_message {
+                let rebuilt_at = *self.provider_context_rebuilt_at.lock().unwrap();
+                if (rebuilt_at.is_some() && usage_message.timestamp <= rebuilt_at.unwrap_or_default())
+                    || Some(usage_message.model.clone()) != model.as_ref().map(|model| model.id.clone())
+                    || Some(usage_message.provider.clone())
+                        != model.as_ref().map(|model| model.provider.clone())
+                {
+                    return Some(messages.iter().map(estimate_tokens).sum());
+                }
+                if let Some(compaction_timestamp) = compaction_timestamp {
+                    if usage_message.timestamp <= compaction_timestamp {
+                        return None;
+                    }
+                }
+            }
+            return Some(estimate.tokens);
+        }
+        if assistant_message.stop_reason == pi_ai::types::STOP_REASON_ERROR {
             return None;
         }
-        let reserve = settings.reserve_tokens.unwrap_or(0.0);
-        Some((limit - reserve).max(0.0))
+        Some(calculate_context_tokens(&assistant_message.usage))
     }
 
     /// `_checkCompaction(settings)`.
@@ -11130,13 +11212,14 @@ impl AgentSession {
         if !self.auto_compaction_enabled.load(Ordering::SeqCst) {
             return Ok(false);
         }
-        let threshold = self.get_threshold_context_tokens(settings);
-        let threshold = match threshold {
-            Some(threshold) => threshold,
-            None => return Ok(false),
-        };
         let context = self.build_session_context();
-        let tokens = estimate_context_tokens(&context.messages);
+        let tokens = estimate_context_tokens(&context.messages).tokens;
+        let Some(threshold) = self.get_threshold_context_tokens(
+            &pi_ai::types::AssistantMessage::default(),
+            None,
+        ) else {
+            return Ok(false);
+        };
         if tokens < threshold {
             return Ok(false);
         }
@@ -11438,6 +11521,16 @@ fn clamp_thinking_level_for_model(model: &Model, level: ThinkingLevel) -> Thinki
         return level;
     }
     available[0].clone()
+}
+
+/// `RefineOptions` from the `/refine` slash-command options.
+fn refine_options_from_command(options: &RefineCommandOptions) -> RefineOptions {
+    RefineOptions {
+        instructions: options.instructions.clone(),
+        rollback_id: options.rollback_id.clone(),
+        global: options.global,
+        ..Default::default()
+    }
 }
 
 /// `getModelInputLimit(model)`.
@@ -11764,7 +11857,9 @@ impl AgentSession {
         custom_instructions: Option<&str>,
         signal: CancellationToken,
     ) -> Result<crate::core::compaction::compaction::CompactionResult, String> {
-        let model = self.model();
+        let model = self
+            .model()
+            .ok_or_else(|| format_no_model_selected_message())?;
         if model.id.is_empty() {
             return Err(format_no_model_selected_message());
         }
@@ -11831,7 +11926,9 @@ impl AgentSession {
         signal: CancellationToken,
         auth: Option<RequestAuth>,
     ) -> Result<crate::core::compaction::compaction::CompactionResult, String> {
-        let model = self.model();
+        let model = self
+            .model()
+            .ok_or_else(|| format_no_model_selected_message())?;
         let auth = match auth {
             Some(auth) => auth,
             None => self.get_required_request_auth(&model).await?,
@@ -11854,9 +11951,6 @@ impl AgentSession {
             Some(preparation) => preparation,
             None => return Err(COMPACTION_SKIPPED_ERROR_MESSAGE.to_string()),
         };
-        if !should_compact_for_model(&model, &settings) {
-            return Err(COMPACTION_SKIPPED_ERROR_MESSAGE.to_string());
-        }
         let headers: Option<serde_json::Map<String, Value>> = if auth.headers.is_empty() {
             None
         } else {
@@ -11893,6 +11987,7 @@ impl AgentSession {
             None,
             custom_instructions.as_deref(),
             result.usage.as_ref(),
+            None,
         )?;
         self.sync_kernel_state_after_compaction().await?;
         self.restore_provider_context_for_model();
