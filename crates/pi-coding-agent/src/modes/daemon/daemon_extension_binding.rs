@@ -180,7 +180,8 @@ fn broadcast_state(active_session_id: &str) -> ActiveSessionState {
 
 /// `createExtensionUIContext`.
 pub struct ExtensionUiContext {
-    clients: Arc<StdMutex<Vec<Arc<super::active_session_state::DaemonSocketClient>>>>,
+    clients: Arc<StdMutex<Vec<Arc<StdMutex<super::active_session_state::DaemonSocketClient>>>>>,
+
     requests: Arc<StdMutex<std::collections::HashMap<String, oneshot::Sender<DaemonExtensionUIResponse>>>>,
     next_request_id: AtomicU64,
     emit: Arc<dyn Fn(&str, Value) -> String + Send + Sync>,
@@ -234,7 +235,9 @@ impl ExtensionUiContext {
         if !is_daemon_dialog_extension_ui_request(method) {
             return !clients.is_empty();
         }
-        clients.iter().any(|client| client.supports_extension_ui)
+        clients
+            .iter()
+            .any(|client| client.lock().expect("daemon client poisoned").supports_extension_ui)
     }
 
     /// `dialogRequest(method, payload, opts, fallback, resolveResponse)`.
@@ -601,8 +604,8 @@ mod tests {
         );
         state
             .clients
-            .push(Arc::new(super::super::active_session_state::DaemonSocketClient::new(
-                "client-1", true,
+            .push(Arc::new(StdMutex::new(
+                super::super::active_session_state::DaemonSocketClient::new("client-1", true),
             )));
         let emitted = Arc::new(StdMutex::new(Vec::new()));
         let captured = Arc::clone(&emitted);
@@ -641,8 +644,8 @@ mod tests {
         );
         state
             .clients
-            .push(Arc::new(super::super::active_session_state::DaemonSocketClient::new(
-                "client-1", false,
+            .push(Arc::new(StdMutex::new(
+                super::super::active_session_state::DaemonSocketClient::new("client-1", false),
             )));
         let context = ExtensionUiContext::new(&state, Arc::new(|_, _| {}));
         assert!(context.has_extension_ui_client_for_method("notify"));

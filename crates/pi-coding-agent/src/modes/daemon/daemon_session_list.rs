@@ -422,7 +422,14 @@ pub fn summary_for_active_session(
     let direct_attached_clients = state
         .clients
         .iter()
-        .filter(|client| client.authentication_role.as_deref() == Some("session_client"))
+        .filter(|client| {
+            client
+                .lock()
+                .expect("daemon client poisoned")
+                .authentication_role
+                .as_deref()
+                == Some("session_client")
+        })
         .count();
 
     let metadata = state.runtime.metadata.clone().unwrap_or_default();

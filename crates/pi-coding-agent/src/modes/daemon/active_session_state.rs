@@ -179,7 +179,8 @@ pub struct ActiveSessionExtensionUiRequest {
 pub struct ActiveSessionState {
     pub active_session_id: String,
     pub runtime: AgentSessionRuntime,
-    pub clients: Vec<Arc<DaemonSocketClient>>,
+    pub clients: Vec<Arc<StdMutex<DaemonSocketClient>>>,
+
     /// Attach snapshots in flight: reserved for passivation busyness, but not yet event recipients.
     pub pending_attaches: u64,
     pub extension_ui_requests: HashMap<String, ActiveSessionExtensionUiRequest>,
