@@ -2104,15 +2104,17 @@ fn in_flight() -> &'static Mutex<Option<(String, Arc<SharedPromise<String>>)>> {
 pub async fn ensure_kernel_python(options: EnsureKernelPythonOptions) -> Result<String, KernelError> {
     let python_skills = normalize_python_skills(options.python_skills.as_deref());
     let key = ensure_kernel_python_key(&python_skills);
-    {
+    // The lock is released BEFORE awaiting: `if let ... = guard.as_ref()` keeps a borrow of the
+    // guard alive to the end of its scope, so a `return ....await` inside that scope still counts as
+    // using a `MutexGuard` across an await and the enclosing future stops being `Send`.
+    let existing_promise = {
         let guard = in_flight().lock().unwrap();
-        if let Some((existing_key, promise)) = guard.as_ref() {
-            if *existing_key == key {
-                let promise = promise.clone();
-                drop(guard);
-                return promise.wait().await;
-            }
-        }
+        guard
+            .as_ref()
+            .and_then(|(existing_key, promise)| (*existing_key == key).then(|| promise.clone()))
+    };
+    if let Some(promise) = existing_promise {
+        return promise.wait().await;
     }
 
     let promise = Arc::new(SharedPromise::<String>::new());
