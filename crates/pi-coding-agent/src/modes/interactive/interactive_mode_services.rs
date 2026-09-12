@@ -443,23 +443,9 @@ pub struct AgentConnectionSideQuestionEvent {
     pub error_message: Option<String>,
 }
 
-/// Stand-in for `GoalState` (owned by the memory slice).
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct GoalState {
-    pub goal_id: Option<String>,
-    pub status: String,
-    pub objective: Option<String>,
-    pub last_reason: Option<String>,
-    pub last_error: Option<String>,
-    pub time_used_seconds: f64,
-}
-
-impl GoalState {
-    /// `emptyGoalState()`
-    pub fn empty() -> Self {
-        Self { status: "idle".to_string(), ..Default::default() }
-    }
-}
+/// `GoalState` - canonical owner is `core/goals.rs`; the connection layer imports it
+/// there in the TypeScript, so this is a re-export rather than a local stand-in.
+pub use crate::core::goals::{empty_goal_state, GoalState};
 
 /// Stand-in for `SessionActionSnapshot`.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -838,8 +824,9 @@ impl ModelRegistry {
     }
 }
 
-/// Stand-in for `SettingsManager`.
-pub struct SettingsManager;
+/// `SettingsManager` - canonical owner is `core/settings_manager.rs`; the TypeScript
+/// uses the real settings manager throughout, so this is a re-export.
+pub use crate::core::settings_manager::SettingsManager;
 
 /// Stand-in for `ExtensionRunner`.
 pub struct ExtensionRunner;

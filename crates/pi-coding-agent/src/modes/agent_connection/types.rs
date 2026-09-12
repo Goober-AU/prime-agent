@@ -1149,18 +1149,9 @@ pub struct RefinementAppliedEditSummary {
     pub applied: bool,
 }
 
-/// `GoalState` fields the connection layer reads.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GoalState {
-    pub status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub objective: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_budget: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokens_used: Option<f64>,
-}
+/// `goal: GoalState` - the TypeScript `modes/agent-connection/types.ts` imports the
+/// canonical `GoalState` from `core/goals.js`, so this is a re-export, not a local copy.
+pub use crate::core::goals::GoalState;
 
 /// `KernelSentAgentMessage` fields the connection layer reads.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
