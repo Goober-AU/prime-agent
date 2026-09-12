@@ -934,7 +934,7 @@ impl InteractiveModeLocalToolRendererDefinition {
 /// bindLocalSessionExtensions disabled and without this host.
 pub trait InteractiveModeLocalSessionHost: Send + Sync {
     fn create_ui_services(&self) -> InteractiveModeUiServices;
-    fn get_session_manager(&self) -> Arc<SessionManager>;
+    fn get_session_manager(&self) -> Arc<Mutex<SessionManager>>;
     fn get_extension_runner(&self) -> Arc<ExtensionRunner>;
     fn get_tool_renderer_definition(&self, tool_name: &str) -> Option<InteractiveModeLocalToolRendererDefinition>;
     fn get_system_prompt(&self) -> String;
@@ -1005,8 +1005,12 @@ pub fn create_interactive_mode_ui_services_from_services(
     InteractiveModeUiServices {
         settings_manager,
         model_registry,
-        get_initial_cwd: Box::new(move || session_manager_for_cwd.get_cwd()),
-        get_initial_session_name: Box::new(move || session_manager_for_name.get_session_name()),
+        get_initial_cwd: Box::new(move || {
+            session_manager_for_cwd.lock().unwrap().get_cwd()
+        }),
+        get_initial_session_name: Box::new(move || {
+            session_manager_for_name.lock().unwrap().get_session_name()
+        }),
         get_themes: Box::new(Vec::new),
         refresh_mcp_providers: None,
     }
@@ -1022,11 +1026,12 @@ pub fn create_interactive_mode_local_session_host(
 
     impl InteractiveModeLocalSessionHost for Host {
         fn create_ui_services(&self) -> InteractiveModeUiServices {
-            create_interactive_mode_ui_services(&self.runtime_host.session)
+            create_interactive_mode_ui_services(&self.runtime_host.session())
         }
 
-        fn get_session_manager(&self) -> Arc<SessionManager> {
-            Arc::new(SessionManager)
+        fn get_session_manager(&self) -> Arc<Mutex<SessionManager>> {
+            // TS: `getSessionManager: () => runtimeHost.session.sessionManager`.
+            Arc::clone(&self.runtime_host.session().session_manager)
         }
 
         fn get_extension_runner(&self) -> Arc<ExtensionRunner> {
@@ -1059,7 +1064,7 @@ pub fn create_interactive_mode_local_session_host(
         }
 
         fn get_system_prompt(&self) -> String {
-            self.runtime_host.session.system_prompt.clone()
+            self.runtime_host.session().system_prompt()
         }
 
         fn get_abort_signal(&self) -> Option<Arc<dyn Any + Send + Sync>> {

@@ -2195,7 +2195,12 @@ impl AgentSession {
             .lock()
             .unwrap()
             .get_header()
-            .and_then(|header| header.rlm_depth);
+            .and_then(|header| {
+                header
+                    .get("rlmDepth")
+                    .and_then(Value::as_i64)
+                    .or_else(|| header.get("rlmDepth").and_then(Value::as_f64).map(|d| d as i64))
+            });
         let rlm_depth = match config.rlm_depth {
             Some(depth) => depth,
             None => match header_rlm_depth {
@@ -2713,7 +2718,7 @@ impl AgentSession {
     fn install_agent_tool_hooks(self: &Arc<Self>) {
         let session = self.clone();
         self.agent
-            .set_before_tool_call(Arc::new(move |context: BeforeToolCallContext| {
+            .set_before_tool_call(Arc::new(move |context: BeforeToolCallContext, _signal: Option<CancellationToken>| {
                 let session = session.clone();
                 Box::pin(async move {
                     let runner = match session.extension_runner() {
@@ -2726,19 +2731,24 @@ impl AgentSession {
 
                     session.await_agent_event_queue().await;
 
-                    runner
-                        .emit_tool_call(
-                            &context.tool_call.name,
-                            &context.tool_call.id,
-                            context.args.clone(),
-                        )
-                        .await
+                    let result = runner
+                        .emit_tool_call(&ToolCallEvent::Custom {
+                            tool_name: context.tool_call.name.clone(),
+                            tool_call_id: context.tool_call.id.clone(),
+                            input: context
+                                .args
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default(),
+                        })
+                        .await;
+                    Ok(result)
                 })
             }));
 
         let session = self.clone();
         self.agent
-            .set_after_tool_call(Arc::new(move |context: AfterToolCallContext| {
+            .set_after_tool_call(Arc::new(move |context: AfterToolCallContext, _signal: Option<CancellationToken>| {
                 let session = session.clone();
                 Box::pin(async move {
                     let runner = match session.extension_runner() {
@@ -2750,39 +2760,45 @@ impl AgentSession {
                     }
 
                     let hook_result = runner
-                        .emit_tool_result(
-                            &context.tool_call.name,
-                            &context.tool_call.id,
-                            context.args.clone(),
-                            context.result.content.clone(),
-                            context.result.details.clone(),
-                            context.is_error,
-                        )
-                        .await?;
+                        .emit_tool_result(&ToolResultEvent::Custom {
+                            tool_name: context.tool_call.name.clone(),
+                            tool_call_id: context.tool_call.id.clone(),
+                            input: context
+                                .args
+                                .as_object()
+                                .cloned()
+                                .unwrap_or_default(),
+                            content: context
+                                .result
+                                .content
+                                .iter()
+                                .map(|block| serde_json::to_value(block).unwrap_or(Value::Null))
+                                .collect(),
+                            is_error: context.is_error,
+                            details: context.result.details.clone(),
+                        })
+                        .await;
 
                     let hook_result = match hook_result {
                         Some(hook_result) => hook_result,
                         None => return Ok(None),
                     };
 
-                    Ok(Some(pi_agent_core::types::AgentToolResult {
-                        content: hook_result.content,
+                    Ok(Some(AfterToolCallResult {
+                        content: hook_result
+                            .content
+                            .and_then(|content| {
+                                serde_json::from_value::<Vec<pi_agent_core::types::ContentBlock>>(
+                                    Value::Array(content),
+                                )
+                                .ok()
+                            }),
                         details: hook_result.details,
+                        is_error: Some(hook_result.is_error.unwrap_or(context.is_error)),
                         terminate: None,
                     }))
                 })
             }));
-    }
-
-    /// `_installAgentContinuationHook`.
-    fn install_agent_continuation_hook(self: &Arc<Self>) {
-        let session = self.clone();
-        self.agent.set_get_continuation_messages(Arc::new(
-            move |context: AgentContext, signal: Option<CancellationToken>| {
-                let session = session.clone();
-                Box::pin(async move { session.get_continuation_messages(context, signal).await })
-            },
-        ));
     }
 
     /// `_installAgentTurnHook`.
