@@ -1,0 +1,11 @@
+{
+ "ts_test_files_by_package": {
+  "agent": 4,
+  "ai": 82,
+  "coding-agent": 411,
+  "tui": 30,
+  "packages/*/*.test.ts (non-test-dir)": 0
+ },
+ "total_ts_test_files": 527,
+ "note": "Mirroring the TS test corpus is the strongest behavioural-faithfulness check for the port. Workers were asked to port the tests that sit beside their slice (see status reports, e.g. ca-daemon-a: 16 tests in daemon_protocol.rs mirroring daemon-protocol.test.ts). Full corpus parity is a follow-up stage after the workspace compiles."
+}
