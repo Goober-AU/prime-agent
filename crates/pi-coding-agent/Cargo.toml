@@ -28,6 +28,8 @@ rsa = { workspace = true }
 rand = { workspace = true }
 image = { workspace = true }
 tempfile = { workspace = true }
+once_cell = { workspace = true }
+globset = { workspace = true }
 zip = { workspace = true }
 pi-ai = { workspace = true }
 pi-agent-core = { workspace = true }
