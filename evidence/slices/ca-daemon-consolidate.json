@@ -1,0 +1,23 @@
+{
+ "slice": "ca-daemon-consolidate",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-client.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_client.rs",
+   "loc": 750
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/heartbeat-catalog.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/heartbeat_catalog.rs",
+   "loc": 25
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/saved-session-catalog.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/saved_session_catalog.rs",
+   "loc": 77
+  }
+ ],
+ "loc": 852,
+ "note": "CONSOLIDATION + REPAIR slice (three files, all currently written but wrong).\nBACKGROUND: these were written before daemon-protocol.ts was ported, so they carry local copies of types that now have a real home in crates/pi-coding-agent/src/modes/daemon/daemon_protocol.rs.\nFIX 1 (daemon_client.rs): DELETE the whole inner `pub(crate) mod protocol { ... }` block near the top of the file. In the TypeScript, daemon-client.ts imports those items FROM ./daemon-protocol.js and does NOT redeclare them (verified: zero export overlap between the two TS files). So replace every `protocol::X` / `self::protocol::X` reference with `super::daemon_protocol::X` (or `crate::modes::daemon::daemon_protocol::X`), keeping only what is genuinely client-only: DaemonClient, DaemonClientError, DaemonClientReconnectStatus, DaemonClientReconnectOptions, DaemonClientRequestOptions, DaemonTransportClient, DaemonHello (as the TS declares them), DaemonCapabilityUnavailableError, DaemonSocketClosedError, getDaemonSocketCloseReason, DaemonCommandBody, the listener type aliases, and the request/reconnect logic. daemon_protocol.rs owns everything else (DaemonCommand, DaemonResponse, DaemonProtocolInfo, DaemonEventCursor, daemonCommandCompatibility, createDaemonCommandEnvelope, isDaemonCommandEnvelope, salvageDaemonCommandId, createDaemonEventMeta, createDaemonEventEnvelope, createDaemonReplayInfo, the capability constants and the DAEMON_* constants).\nFIX 2 (heartbeat_catalog.rs and saved_session_catalog.rs): both have a stale private helper that constructs a DaemonErrorResponse - that type does NOT exist. The real function is `crate::modes::daemon::daemon_errors::deserialize_daemon_error(&DaemonResponse) -> DaemonError` (it already takes the whole response, exactly like the TS `deserializeDaemonError(response)`). So change the body of `daemon_error_from_response` in BOTH files to: `let error = deserialize_daemon_error(response); DaemonClientError::Message(error.message())` and drop the now-unused DaemonErrorResponse import. Keep the same behaviour: the TS throws the error for a non-success response (if !response.success -> throw deserializeDaemonError(response)).\nFIX 3: those two files also import from `super::daemon_client::protocol::{...}` - repoint those to `super::daemon_protocol::{...}`.\nGENERAL: do NOT delete the `#[cfg(test)]` modules and do NOT change any public function signature. Do NOT touch daemon_protocol.rs itself (owned by ca-daemon-a) - read it to get the exact names.\nBuild note: under MSYS bash pass the job count by exporting it (`export CARGO_BUILD_JOBS=4`), do not inline it.\nFINISH with ONE `cargo check -p pi-coding-agent` and ONE `cargo test -p pi-coding-agent`."
+}
