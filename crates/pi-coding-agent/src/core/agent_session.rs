@@ -1424,7 +1424,12 @@ pub fn normalize_message_content(
 pub fn goal_context_custom_message(message: &crate::core::goals::CustomMessage) -> CustomMessage {
     let content = match &message.content {
         Value::String(text) => CustomMessageContent::Text(text.clone()),
-        Value::Array(blocks) => CustomMessageContent::Blocks(blocks.clone()),
+        Value::Array(blocks) => CustomMessageContent::Blocks(
+            serde_json::from_value::<Vec<pi_agent_core::types::ContentBlock>>(Value::Array(
+                blocks.clone(),
+            ))
+            .unwrap_or_default(),
+        ),
         _ => CustomMessageContent::Text(String::new()),
     };
     CustomMessage {
@@ -1434,6 +1439,34 @@ pub fn goal_context_custom_message(message: &crate::core::goals::CustomMessage) 
         display: message.display,
         details: message.details.clone(),
         timestamp: message.timestamp as i64,
+    }
+}
+
+/// `CustomMessageEntryContent` for a custom message content, mirroring the
+/// `content.to_value()` conversion used by `SessionManager.appendCustomMessageEntry`.
+pub fn custom_message_entry_content(
+    content: &CustomMessageContent,
+) -> crate::core::session_manager::CustomMessageEntryContent {
+    use crate::core::session_manager::CustomMessageEntryContent;
+
+    match content {
+        CustomMessageContent::Text(text) => CustomMessageEntryContent::Text(text.clone()),
+        CustomMessageContent::Blocks(blocks) => CustomMessageEntryContent::Blocks(
+            blocks
+                .iter()
+                .map(|block| match block {
+                    pi_agent_core::types::ContentBlock::Text(text) => Value::Object({
+                        let mut object = Map::new();
+                        object.insert("type".to_string(), Value::String("text".to_string()));
+                        object.insert("text".to_string(), Value::String(text.text.clone()));
+                        object
+                    }),
+                    pi_agent_core::types::ContentBlock::Image(image) => {
+                        serde_json::to_value(image).unwrap_or(Value::Null)
+                    }
+                })
+                .collect(),
+        ),
     }
 }
 
@@ -1447,19 +1480,24 @@ pub fn custom_message_content_parts(content: &CustomMessageContent) -> Vec<pi_ai
         }
         CustomMessageContent::Blocks(blocks) => blocks
             .iter()
-            .filter_map(|block| {
-                if block.get("type").and_then(Value::as_str) == Some("text") {
-                    block
-                        .get("text")
-                        .and_then(Value::as_str)
-                        .map(|text| {
-                            pi_ai::types::ImageOrTextContent::Text(
-                                pi_ai::types::TextContent::new(text.to_string()),
-                            )
-                        })
-                } else {
-                    serde_json::from_value::<pi_ai::types::ImageOrTextContent>(block.clone()).ok()
+            .filter_map(|block| match block {
+                pi_agent_core::types::ContentBlock::Text(text) => {
+                    Some(pi_ai::types::ImageOrTextContent::Text(
+                        pi_ai::types::TextContent::new(text.text.clone()),
+                    ))
                 }
+                pi_agent_core::types::ContentBlock::Image(_) => Some(
+                    serde_json::to_value(block)
+                        .ok()
+                        .and_then(|value| {
+                            serde_json::from_value::<pi_ai::types::ImageOrTextContent>(value).ok()
+                        })
+                        .unwrap_or_else(|| {
+                            pi_ai::types::ImageOrTextContent::Text(pi_ai::types::TextContent::new(
+                                String::new(),
+                            ))
+                        }),
+                ),
             })
             .collect(),
     }
@@ -1999,7 +2037,7 @@ pub struct AgentSession {
     goal_state: Mutex<GoalState>,
     goal_accounting_started_at: Mutex<Option<f64>>,
     goal_continuation_awaits_rlm_work: AtomicBool,
-    goal_accounted_assistant_messages: Mutex<HashSet<i64>>,
+    goal_accounted_assistant_messages: Mutex<HashSet<String>>,
     goal_abort_in_progress: AtomicBool,
     autonomous_state: Mutex<crate::core::autonomous::AutonomousRuntimeState>,
     autonomous_continuation_suppression_depth: AtomicU64,
@@ -2084,8 +2122,8 @@ pub struct AgentSession {
     post_compaction_continuation_settlement: Mutex<Option<Arc<Mutex<PostCompactionContinuationSettlement>>>>,
     post_compaction_continuation_messages: Mutex<Vec<AgentMessage>>,
     scheduled_post_compaction_continuation_messages: Mutex<Vec<AgentMessage>>,
-    queued_autonomous_threshold_continuations: Mutex<HashMap<i64, AgentMessage>>,
-    queued_autonomous_continuation_snapshots: Mutex<HashMap<i64, AutonomousRuntimeSnapshot>>,
+    queued_autonomous_threshold_continuations: Mutex<HashMap<String, AgentMessage>>,
+    queued_autonomous_continuation_snapshots: Mutex<HashMap<String, AutonomousRuntimeSnapshot>>,
     pending_threshold_compaction_autonomous_messages: Mutex<Vec<AgentMessage>>,
     queued_goal_threshold_continuation: Mutex<Option<AgentMessage>>,
     pending_auto_refine_review: Mutex<Option<(AutoRefineReason, AutoRefineReview)>>,
@@ -3506,7 +3544,7 @@ impl AgentSession {
         self.agent.set_state(state);
         let _ = self.session_manager.lock().unwrap().append_custom_message_entry(
             &message.custom_type,
-            message.content.clone(),
+            &custom_message_entry_content(&message.content),
             message.display,
             message.details.clone(),
         );
@@ -3648,7 +3686,10 @@ impl AgentSession {
             Ok(message) => message,
             Err(_) => return,
         };
-        self.pending_next_turn_messages.lock().unwrap().push(message);
+        self.pending_next_turn_messages
+            .lock()
+            .unwrap()
+            .push(goal_context_custom_message(message));
     }
 
     /// `_handleGoalSlashCommand`.
@@ -11342,9 +11383,10 @@ fn delivery_message_key_of(message: &DeliveryMessage) -> String {
     }
 }
 
-/// `assistantMessageKey(message)`.
-fn assistant_message_key(message: &AgentMessage) -> String {
-    agent_message_key_of(message)
+/// Stable key for an `AssistantMessage`, mirroring the TypeScript `WeakSet`/
+/// `WeakMap` identity usage: equal messages map to equal keys.
+fn assistant_message_key(message: &AssistantMessage) -> String {
+    serde_json::to_string(&AgentMessage::from(message.clone())).unwrap_or_default()
 }
 
 /// `deliveryMessageOf(message)`.

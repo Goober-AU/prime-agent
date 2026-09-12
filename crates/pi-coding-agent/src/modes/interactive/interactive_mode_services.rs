@@ -7,7 +7,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 use pi_ai::types::{ImageContent, Model, ServiceTier};
@@ -663,28 +663,16 @@ pub struct AuthStatus {
     pub source: String,
 }
 
-/// Stand-in for `AgentSession`.
-pub struct AgentSession {
-    pub system_prompt: String,
-}
+/// `AgentSession` / `AgentSessionRuntime` - canonical owners are
+/// `core/agent_session.rs` and `core/agent_session_runtime.rs`. The TypeScript
+/// takes the real runtime host (`runtimeHost.session.sessionManager`), so these
+/// are re-exports rather than local stand-ins.
+pub use crate::core::agent_session::AgentSession;
+pub use crate::core::agent_session_runtime::AgentSessionRuntime;
 
-/// Stand-in for `AgentSessionRuntime`.
-pub struct AgentSessionRuntime {
-    pub session: AgentSession,
-}
-
-/// Stand-in for `SessionManager`.
-pub struct SessionManager;
-
-impl SessionManager {
-    pub fn get_cwd(&self) -> String {
-        String::new()
-    }
-
-    pub fn get_session_name(&self) -> Option<String> {
-        None
-    }
-}
+/// `SessionManager` - canonical owner is `core/session_manager.rs`; the TypeScript
+/// reaches the real one through `runtimeHost.session.sessionManager`.
+pub use crate::core::session_manager::SessionManager;
 
 /// Stand-in for `ModelRegistry`.
 ///
@@ -990,7 +978,10 @@ pub fn create_interactive_mode_ui_services(session: &AgentSession) -> Interactiv
     // `settingsManager: session.settingsManager`, `modelRegistry: session.modelRegistry`,
     // `() => session.sessionManager.getCwd()/getSessionName()`.
     let settings_manager = Arc::clone(&session.settings_manager);
-    let model_registry = Arc::clone(&session.model_registry);
+    // The UI-services registry is this module's local stand-in (its call shape is
+    // the auth-flow/onboarding contract, see the stand-in section below); the
+    // canonical `session.model_registry` has a different constructor contract.
+    let model_registry = Arc::new(Mutex::new(ModelRegistry::in_memory()));
     let session_manager = Arc::clone(&session.session_manager);
     let session_manager_for_name = Arc::clone(&session.session_manager);
     InteractiveModeUiServices {

@@ -1357,6 +1357,8 @@ impl InteractiveMode {
         };
         let bind_local_session_extensions =
             options.bind_local_session_extensions || options.local_session_host.is_some();
+        // `options` is moved into the mode below, so read the host out first.
+        let local_session_host = options.local_session_host.clone();
         if bind_local_session_extensions && options.local_session_host.is_none() {
             return Err("Local extension binding requires localSessionHost".to_string());
         }
@@ -1385,7 +1387,7 @@ impl InteractiveMode {
             editor_container: super::interactive_mode_services::Container::new(),
             ui_services,
             agent_connection: options_agent_connection(&options),
-            local_session_host: options.local_session_host.clone(),
+            local_session_host,
             bind_local_session_extensions,
             prompt_stash_store,
             prompt_stash_session_id,
