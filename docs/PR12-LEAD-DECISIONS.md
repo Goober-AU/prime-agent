@@ -99,3 +99,23 @@ Per-file diagnostics:
 Report: files changed; `cargo check -p pi-coding-agent` error delta measured by you; every symbol
 you could NOT resolve and why; anything you invented (should be nothing). If you cannot finish,
 leave a `// REPAIR CURSOR:` comment with the exact next step and report honestly.
+
+## MEASUREMENT GATE (both rules are mandatory; each cost a false reading)
+
+1. **The run must be COMPLETE, not just warnings>0.** A jsonl can be read while it is still being
+   appended. `w-run7-tests.jsonl` showed "pack E = 0" mid-write; the finished file showed 2 errors.
+   Always `await` the bash handle, then require the stderr tail to contain
+   `could not compile ... due to N previous errors` or `Finished`.
+2. **Measure with `--tests`.** Plain `cargo check` never type-checks `#[cfg(test)]` modules, so
+   test-module errors are invisible. 5 of pack E's 11 errors only appeared under `--tests`.
+3. **Zero warnings on the pi-coding-agent crate = ABORTED run.** rustc stops at the first parse
+   failure and reports nothing, so every file reads 0. Discard such a measurement.
+
+Reference command:
+
+    cargo check -p pi-coding-agent --tests --message-format=json > out.jsonl 2> out.log
+    # then: await completion, assert warnings>0 AND "could not compile"/"Finished" in out.log
+
+4. **Count UNIQUE (file, line, message) sites.** rustc emits the same error once per target
+   (lib and lib test), so raw message counts roughly double: gate run 1 was 950 messages =
+   527 unique.
