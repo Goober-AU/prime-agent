@@ -4,8 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pi_agent_core::types::{AgentEvent, AgentMessage, AgentState, StreamFn};
-use pi_ai::types::{AssistantMessage, Model, ServiceTier, Usage, UserMessage, STOP_REASON_STOP};
-use serde_json::Value;
+use pi_ai::types::{AssistantMessage, Usage, UserMessage, STOP_REASON_STOP};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::provider_retry::{
@@ -106,10 +105,10 @@ pub trait SideQuestionAgent: Send + Sync {
     fn set_state(&self, state: AgentState);
     fn subscribe(
         &self,
-        listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<'static, ()> + Send + Sync>,
+        listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>,
     ) -> Arc<dyn Fn() + Send + Sync>;
-    fn prompt(&self, messages: Vec<AgentMessage>) -> BoxFuture<'static, anyhow::Result<()>>;
-    fn continue_(&self) -> BoxFuture<'static, Result<(), String>>;
+    fn prompt(&self, messages: Vec<AgentMessage>) -> BoxFuture<anyhow::Result<()>>;
+    fn continue_(&self) -> BoxFuture<Result<(), String>>;
     fn abort(&self);
 }
 
@@ -183,7 +182,7 @@ pub fn start_side_question(
                 content: vec![pi_ai::types::ContentBlock::Text(pi_ai::types::TextContent::new(
                     turn.answer.clone(),
                 ))],
-                usage: usage_zero(),
+                usage: Usage::zero(),
                 stop_reason: STOP_REASON_STOP.to_string(),
                 timestamp: now_millis(),
                 ..Default::default()
@@ -250,19 +249,212 @@ pub fn start_side_question(
             let message = match &event {
                 AgentEvent::MessageUpdate { message, .. } => message.clone(),
                 AgentEvent::MessageEnd { message } => message.clone(),
-                _ => return Box::pin(async {}) as BoxFuture<'static, ()>,
+                _ => return Box::pin(async {}) as BoxFuture<()>,
             };
             let next_answer = read_assistant_text(&message);
             {
                 let mut current = answer.lock().expect("side question answer poisoned");
                 if *current == next_answer {
-                    return Box::pin(async {}) as BoxFuture<'static, ()>;
+                    return Box::pin(async {}) as BoxFuture<()>;
                 }
                 *current = next_answer;
             }
             let emit = Arc::clone(&emit);
             Box::pin(async move {
                 emit(SIDE_QUESTION_STATUS_RUNNING, None).await;
-            }) as BoxFuture<'static, ()>
+            }) as BoxFuture<()>
         })
     });
+
+
+    let prompt = side_question_prompt(&question, previous_turns.is_empty());
+    let done = {
+        let side_agent = Arc::clone(&side_agent);
+        let emit = Arc::clone(&emit);
+        let abort_requested = Arc::clone(&abort_requested);
+        let started = Arc::clone(&started);
+        let retry_abort_controller = retry_abort_controller.clone();
+        let retry = retry.unwrap_or_else(default_provider_retry_policy);
+        Box::pin(async move {
+            emit(SIDE_QUESTION_STATUS_RUNNING, None).await;
+            if abort_requested.load(Ordering::SeqCst) {
+                emit(SIDE_QUESTION_STATUS_CANCELLED, None).await;
+                return;
+            }
+            started.store(true, Ordering::SeqCst);
+            // Standalone side agents bypass the session auto-retry loop; retry here instead.
+            let prompted_once = Arc::new(AtomicBool::new(false));
+            let attempt_agent = Arc::clone(&side_agent);
+            let attempt_prompted = Arc::clone(&prompted_once);
+            let attempt_prompt = prompt.clone();
+            let message = complete_with_provider_retry(
+                move || {
+                    let side_agent = Arc::clone(&attempt_agent);
+                    let prompted_once = Arc::clone(&attempt_prompted);
+                    let prompt = attempt_prompt.clone();
+                    async move {
+                        if prompted_once.swap(true, Ordering::SeqCst) {
+                            // Session-loop recovery: drop the failed assistant turn and re-run.
+                            let mut state = side_agent.state();
+                            state.messages.pop();
+                            side_agent.set_state(state);
+                            let _ = side_agent.continue_().await;
+                        } else {
+                            let _ = side_agent
+                                .prompt(vec![UserMessage::new(
+                                    pi_ai::types::UserContent::Blocks(vec![
+                                        pi_ai::types::ImageOrTextContent::Text(
+                                            pi_ai::types::TextContent::new(prompt),
+                                        ),
+                                    ]),
+                                    now_millis(),
+                                )
+                                .into()])
+                                .await;
+                        }
+                        let state = side_agent.state();
+                        match state.messages.last() {
+                            Some(AgentMessage::Message(pi_ai::types::Message::Assistant(assistant))) => {
+                                assistant.clone()
+                            }
+                            _ => AssistantMessage {
+                                stop_reason: pi_ai::types::STOP_REASON_ERROR.to_string(),
+                                error_message: Some(state.error_message.clone().unwrap_or_else(|| {
+                                    "Side question produced no assistant message".to_string()
+                                })),
+                                ..Default::default()
+                            },
+                        }
+                    }
+                },
+                ProviderRetryExecutionOptions {
+                    policy: Some(retry),
+                    signal: Some(retry_abort_controller),
+                    ..Default::default()
+                },
+            )
+            .await;
+            if abort_requested.load(Ordering::SeqCst) {
+                emit(SIDE_QUESTION_STATUS_CANCELLED, None).await;
+                return;
+            }
+            if message.stop_reason == pi_ai::types::STOP_REASON_ERROR {
+                emit(
+                    SIDE_QUESTION_STATUS_ERROR,
+                    Some(message.error_message.clone().unwrap_or_default()),
+                )
+                .await;
+                return;
+            }
+            if let Some(error_message) = side_agent.state().error_message.clone() {
+                emit(SIDE_QUESTION_STATUS_ERROR, Some(error_message)).await;
+                return;
+            }
+            emit(SIDE_QUESTION_STATUS_COMPLETE, None).await;
+        })
+    };
+
+    let abort = {
+        let side_agent = Arc::clone(&side_agent);
+        let abort_requested = Arc::clone(&abort_requested);
+        let started = Arc::clone(&started);
+        let retry_abort_controller = retry_abort_controller.clone();
+        Arc::new(move || {
+            abort_requested.store(true, Ordering::SeqCst);
+            retry_abort_controller.cancel();
+            if started.load(Ordering::SeqCst) {
+                side_agent.abort();
+            }
+        })
+    };
+
+    // `.finally(unsubscribe)`: the listener stays attached for the run's lifetime.
+    let done = {
+        let unsubscribe = Arc::clone(&unsubscribe);
+        let done: BoxFuture<()> = done;
+        Box::pin(async move {
+            done.await;
+            unsubscribe();
+        })
+    };
+
+    Ok(SideQuestionRun { done, abort })
+}
+
+/// `Date.now()`.
+fn now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pi_ai::types::{ContentBlock, TextContent};
+    use serde_json::Value;
+
+    #[test]
+    fn first_turn_includes_the_instruction() {
+        assert_eq!(
+            side_question_prompt("why?", true),
+            format!(
+                "<side_question>\n{}\n\nwhy?\n</side_question>",
+                SIDE_QUESTION_INSTRUCTION
+            )
+        );
+    }
+
+    #[test]
+    fn follow_up_turn_is_the_question_only() {
+        assert_eq!(
+            side_question_prompt("again?", false),
+            "<side_question>\nagain?\n</side_question>"
+        );
+    }
+
+    #[test]
+    fn read_assistant_text_joins_text_blocks() {
+        let message: AgentMessage = AssistantMessage {
+            content: vec![
+                ContentBlock::Text(TextContent::new("a")),
+                ContentBlock::Thinking(pi_ai::types::ThinkingContent::default()),
+                ContentBlock::Text(TextContent::new("b")),
+            ],
+            ..Default::default()
+        }
+        .into();
+        assert_eq!(read_assistant_text(&message), "ab");
+    }
+
+    #[test]
+    fn read_assistant_text_ignores_non_assistant_messages() {
+        let message: AgentMessage =
+            UserMessage::new(pi_ai::types::UserContent::Text("hi".to_string()), 0).into();
+        assert_eq!(read_assistant_text(&message), "");
+    }
+
+    #[test]
+    fn statuses_match_the_typescript_literals() {
+        assert_eq!(SIDE_QUESTION_STATUS_RUNNING, "running");
+        assert_eq!(SIDE_QUESTION_STATUS_COMPLETE, "complete");
+        assert_eq!(SIDE_QUESTION_STATUS_CANCELLED, "cancelled");
+        assert_eq!(SIDE_QUESTION_STATUS_ERROR, "error");
+    }
+
+    #[test]
+    fn error_message_is_omitted_when_absent() {
+        let event = SideQuestionEvent {
+            id: "1".to_string(),
+            question: "q".to_string(),
+            answer: "a".to_string(),
+            status: SIDE_QUESTION_STATUS_RUNNING.to_string(),
+            error_message: None,
+        };
+        let value = serde_json::to_value(&event).expect("event serializes");
+        assert!(value.get("errorMessage").is_none());
+        assert_eq!(value.get("id").and_then(Value::as_str), Some("1"));
+    }
+}

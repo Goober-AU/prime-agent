@@ -13,8 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::sync::Arc;
 
-use crate::modes::daemon::daemon_protocol::{DaemonCommand, DaemonResponse};
+use crate::core::session_id::matches_session_id_suffix;
 use crate::modes::daemon::daemon_client::{DaemonClient, DaemonClientError, DaemonClientRequestOptions};
+use crate::modes::daemon::daemon_protocol::{DaemonCommand, DaemonResponse};
 
 use super::args::is_valid_thinking_level;
 use super::daemon_list_format::format_session_list_table;
@@ -1581,6 +1582,11 @@ fn require_success(response: &serde_json::Value) -> Result<&serde_json::Value, S
 
 fn print_json(io: &DaemonCommandIo<'_>, value: &serde_json::Value) {
     (io.log)(&serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string()));
+}
+
+/// `const printJsonLine: DaemonClientMessageListener = (value) => { console.log(JSON.stringify(value)); }`.
+fn print_json_line(log: &dyn Fn(&str), value: &serde_json::Value) {
+    log(&serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()));
 }
 
 // ---------------------------------------------------------------------------

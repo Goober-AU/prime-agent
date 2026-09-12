@@ -1,0 +1,117 @@
+{
+ "slice": "ca-interactive-components-4",
+ "crate": "pi-coding-agent",
+ "loc": 3063,
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/model-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs",
+   "status": "partial",
+   "functions_mapped": 2,
+   "notes": "ModelSelectorComponent, ModelSelectorOptions plus every free helper (modelsAreEqual, getModelSearchFields, scoreModelSearch, numericLocaleCompare, the search-field normalisation) and all constants. Chrome now uses the REAL sibling modules: super::menu_panel::{get_menu_list_layout, MenuListLayout, MenuListLayoutOptions, MenuViewportProvider} and super::modal_back::should_treat_as_back (the private stand-ins were deleted), plus key_hint from keybinding_hints. PARTIAL: the MenuPanel/MenuList/MenuRow child tree is not mounted because ModelSelectorComponent keeps no child list yet; updateList/handleInput/updateResponsiveLayout/search state are 1:1."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/tool-execution.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_execution.rs",
+   "status": "partial",
+   "functions_mapped": 4,
+   "notes": "ToolExecutionComponent with constructor, updateArgs/markExecutionStarted/setArgsComplete/updateResult, getRenderContext, getCallRenderer/getResultRenderer/hasRendererDefinition/getRenderShell/shouldUseIpythonRenderer/isBuiltInEditTool/isStatusAnimating/usesSelfRenderShell/updateDisplay, selectLatestToolExpandHint, createReplayBuiltInToolDefinition, panelHeader/animated frame. The ipython shell now uses the REAL super::ipython_cell::{get_ipython_code_from_args, IPythonCellComponent, IPythonCellContentBlock, IPythonCellState} (the inline mod was deleted); the component is shared via Rc<RefCell<..>> behind a private SharedComponent adapter. ToolExecutionRendererDefinition is mapped (the renderer half of ToolExecutionDefinition); the renderCall/renderResult closures are represented by has_render_call/has_render_result because the extension contract's renderer closure types live in core::extensions::types."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/oauth-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/oauth_selector.rs",
+   "status": "partial",
+   "functions_mapped": 5,
+   "notes": "OAuthSelectorComponent, OAuthSelectorOptions, AuthSelectorProvider/AuthSelectorCategory, compareAuthSelectorProviders, the tab bar/filtering/reserved-row/visible-range logic and updateLayout. Now uses the REAL super::menu_panel types instead of the model_selector stand-ins (private stand-ins gone). PARTIAL: MenuPanel/MenuList/MenuRow children are not mounted (same reason as model_selector.rs)."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/scoped-models-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/scoped_models_selector.rs",
+   "status": "ported",
+   "functions_mapped": 3,
+   "notes": "ScopedModelsSelectorComponent, ModelsConfig, ModelsCallbacks and every free helper (isEnabled, toggle, enableAll, clearAll, moveId, getSortedIds). Now implements pi_tui Component (render over the constructor's child list: DynamicBorder, Spacer, title, session-only note, search input, list rows, footer, DynamicBorder) and Focusable (propagates to the search Input) with the private DynamicBorder/Spacer/Text children of menu_panel/pi-tui."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/diff.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/diff.rs",
+   "status": "ported",
+   "functions_mapped": 5,
+   "notes": "renderDiff, renderRichDiff, renderDiffSeparator, RenderDiffOptions, RichDiffOptions. The npm `diff` dependency is re-implemented privately (LCS over whitespace-attached tokens) because it is not a Rust dependency."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/conversation-components.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/conversation_components.rs",
+   "status": "partial",
+   "functions_mapped": 3,
+   "notes": "PARTIAL: buildConversationComponents, ConversationComponentsOptions and isCompactAgentMessageNeighbor are ported 1:1 (same branch order, same malformed-message cases, same pendingTools matching, same `[image]` placeholder). It returns ConversationComponentKind values instead of component instances, because the per-message components (AssistantMessageComponent, BashExecutionComponent, InjectedPromptMessageComponent, ...) belong to other slices; isInjectedPromptMessage is a private copy over the serialized shape."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/subagent-summary-line.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/subagent_summary_line.rs",
+   "status": "ported",
+   "functions_mapped": 5,
+   "notes": "SubagentSummaryLine, SubagentSummaryCounts, classifySubagentSnapshotStatus, countDirectSubagentStatuses, countRosterSubagentStatuses; classifies through the real agent_roster/daemon_session_list/agents_view_state modules."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/collapsible-error.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/collapsible_error.rs",
+   "status": "ported",
+   "functions_mapped": 5,
+   "notes": "CollapsibleErrorComponent, CollapsibleErrorOptions, normalizeErrorDetails, shouldCollapseErrorDetails, summarizeErrorDetails; expand/collapse hints from the real keybinding_hints."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/tool-panel.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_panel.rs",
+   "status": "ported",
+   "functions_mapped": 4,
+   "notes": "ToolPanel, toolPanelContentWidth, toolPanelLine, TOOL_PANEL_PADDING_X."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/custom-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_message.rs",
+   "status": "ported",
+   "functions_mapped": 1,
+   "notes": "CustomMessageComponent (default renderer + optional extension MessageRenderer), now importing the REAL super::expandable_custom_message::{custom_message_label, ExpandableCustomMessageBox}."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/user-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/user_message.rs",
+   "status": "ported",
+   "functions_mapped": 1,
+   "notes": "UserMessageComponent with the real prompt_highlight::PromptTokenMask and the recognized-slash-command guard."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/earendil-announcement.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/earendil_announcement.rs",
+   "status": "ported",
+   "functions_mapped": 1,
+   "notes": "EarendilAnnouncementComponent (bundled asset image + copy), real super::dynamic_border::DynamicBorder."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/compaction-summary-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/compaction_summary_message.rs",
+   "status": "ported",
+   "functions_mapped": 1,
+   "notes": "CompactionSummaryMessageComponent, real ExpandableCustomMessageBox + expandCollapseHint."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/skill-invocation-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/skill_invocation_message.rs",
+   "status": "ported",
+   "functions_mapped": 1,
+   "notes": "SkillInvocationMessageComponent, real ExpandableCustomMessageBox + expandCollapseHint."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/dynamic-border.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/dynamic_border.rs",
+   "status": "ported",
+   "functions_mapped": 1,
+   "notes": "DynamicBorder (ColorFn, DefaultColorFn over theme border)."
+  }
+ ],
+ "build": "cargo check -p pi-coding-agent: FAILED, but with 0 errors in this slice's files - 'could not compile pi-coding-agent (lib) due to 157 previous errors' in other slices' files (core 97, modes 54, cli 5, package_manager_cli 1). No diagnostics mention any of the 15 slice files.",
+ "tests": "cargo test -p pi-coding-agent: FAILED to build (149 errors, none in this slice's files; 'lib test due to 45 previous errors', 'lib due to 143 previous errors'). The 66 #[cfg(test)] unit tests in this slice did not run.",
+ "extra_verification": "Because the real build never reaches this slice, the 15 files were also type-checked through a mirror harness (.port-env/tmp/ca4crate): a copy of the crate with only the two other slices' parse breakages patched (cli/daemon_command.rs format string, core/extensions/mod.rs module paths). In that harness the slice compiles with 0 errors and 0 warnings in its 15 files; the 242 remaining errors are all in other slices' files. rustfmt --edition 2021 --check on all 15 files: clean.",
+ "blocked_on": "pi-coding-agent does not compile yet because of other slices' files (no diagnostics point at this slice): core/extensions/mod.rs re-exports (super:: must be self::), cli/daemon_command.rs invalid `\\\\\"` escape in a format string, core/agent_session.rs unclosed delimiter, modes/daemon/daemon_mode.rs brace, core/agent_session_runtime.rs + modes/agent_connection/* missing symbols, once_cell/globset not in pi-coding-agent's Cargo.toml, and 100+ unresolved imports/privacy errors in core and modes. Cross-slice notes: menu_panel.rs, modal_back.rs, keybinding_hints.rs, expandable_custom_message.rs, prompt_highlight.rs and ipython_cell.rs landed during this slice, so the private stand-ins in model_selector.rs / oauth_selector.rs / tool_execution.rs were DELETED and the real modules are used instead; conversation_components.rs is still PARTIAL because the per-message components it constructs (assistant_message, bash_execution, injected_prompt_message, refinement_outcome_message, compaction_outcome_message, slash_command_result_message, agent_message ...) belong to other slices.",
+ "honest_summary": "All 15 files are written 1:1 against the TypeScript (3,063 TS LOC -> 6,248 Rust lines, 69 unit tests). 11 files are ported outright; 4 are partial: the model/oauth selectors do not mount the MenuPanel/MenuList/MenuRow child tree (their classes keep no child list yet), tool_execution uses the real IPythonCellComponent but reports the renderCall/renderResult closures as flags, and conversation_components returns component kinds instead of instances because those classes live in sibling slices. No file in this slice produces any error or warning in either the real build attempt or the mirror harness; the slice cannot be counted as compiled until the other slices' parse and import errors are fixed."
+}

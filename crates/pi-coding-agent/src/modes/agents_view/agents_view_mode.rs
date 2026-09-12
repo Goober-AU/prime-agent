@@ -431,7 +431,7 @@ pub fn resolve_agents_view_active_summary_for_path(
     session_path: &str,
     summaries: &[SessionSummary],
 ) -> Option<SessionSummary> {
-    let selected_path = resolve_absolute(&crate::utils::paths::canonicalize_path(session_path));
+    let selected_path = crate::utils::paths::resolve_path(&crate::utils::paths::canonicalize_path(session_path));
     summaries
         .iter()
         .find(|summary| {
@@ -440,7 +440,7 @@ pub fn resolve_agents_view_active_summary_for_path(
                     .session_file
                     .as_deref()
                     .map(|file| {
-                        resolve_absolute(&crate::utils::paths::canonicalize_path(file))
+                        crate::utils::paths::resolve_path(&crate::utils::paths::canonicalize_path(file))
                             == selected_path
                     })
                     .unwrap_or(false)

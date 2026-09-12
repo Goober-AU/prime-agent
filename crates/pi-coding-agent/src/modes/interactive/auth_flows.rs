@@ -12,7 +12,7 @@ use std::sync::Arc;
 use pi_ai::models::get_providers;
 
 use crate::config::{get_auth_path, get_docs_path};
-use crate::core::provider_display_names::BUILT_IN_PROVIDER_DISPLAY_NAMES;
+use crate::core::provider_display_names::built_in_provider_display_names;
 use crate::core::websearch_credential::{SERPER_CREDENTIAL_ID, SERPER_CREDENTIAL_NAME};
 
 use super::interactive_mode_services::{AgentConnectionModel, ModelRegistry};
@@ -160,12 +160,9 @@ pub struct ExtensionSelectorComponent;
 /// Stand-in for `PrimeTeamSelectorComponent`.
 pub struct PrimeTeamSelectorComponent;
 
-/// `PrimeTeam`
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct PrimeTeam {
-    pub team_id: String,
-    pub name: String,
-}
+/// `PrimeTeam` (core/prime-inference-auth.ts) - the real owner of the type is
+/// `core::prime_inference_auth`, so this re-export replaces the local copy.
+pub use crate::core::prime_inference_auth::PrimeTeam;
 
 /// `PrimeCliConfig`
 #[derive(Debug, Clone, Default)]
@@ -303,7 +300,7 @@ pub fn is_api_key_login_provider(
             &default_builtins
         }
     };
-    if BUILT_IN_PROVIDER_DISPLAY_NAMES.iter().any(|(key, _)| *key == provider_id) {
+    if built_in_provider_display_names().iter().any(|(key, _)| *key == provider_id) {
         return true;
     }
     if built_in_provider_ids.contains(provider_id) {

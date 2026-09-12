@@ -1,0 +1,87 @@
+{
+  "slice": "ca-root",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/cli.ts",
+      "rust": "crates/pi-coding-agent/src/cli_entry.rs",
+      "status": "complete",
+      "functions_mapped": 3,
+      "notes": "assertNodeVersion guard (PI_NODE_VERSION env stands in for process.versions.node) then runCli; run_cli_with_host delegates to cli_main_entry::run_cli. 2 tests."
+    },
+    {
+      "src": "packages/coding-agent/src/cli-main.ts",
+      "rust": "crates/pi-coding-agent/src/cli_main_entry.rs",
+      "status": "complete-with-seam",
+      "functions_mapped": 1,
+      "notes": "run_cli(host: &dyn CliMainHost) keeps the full order: enableCompileCache, process.title=APP_NAME, PI_CODING_AGENT=true, installOwnedSessionWorkerOwnerWatch, maybeRunOwnedSessionWorkerFrontend, maybeStartDaemonEarly, undici EnvHttpProxyAgent (bodyTimeout/headersTimeout 0), main(argv.slice(2)), finally closeOwnedSessionWorkerOwnerWatch. 1 test."
+    },
+    {
+      "src": "packages/coding-agent/src/config.ts",
+      "rust": "crates/pi-coding-agent/src/config.rs",
+      "status": "complete",
+      "functions_mapped": 47,
+      "notes": "install-method detection, self-update command steps, package/agent/log paths, env prefixes, tilde expansion, libc::access writability, path helpers, daemon update-restart manifest paths. 18 tests."
+    },
+    {
+      "src": "packages/coding-agent/src/index.ts",
+      "rust": "crates/pi-coding-agent/src/mod.rs",
+      "status": "complete-with-gaps",
+      "functions_mapped": 0,
+      "notes": "Barrel from the 38 `export ... from` specifiers: 141 re-exports that resolve today; every unresolved name is kept in a per-module 'not yet ported' comment because a speculative re-export cannot compile. Added `#[path = \"mod.rs\"] pub mod index;` to the unmapped crates/pi-coding-agent/src/lib.rs (pi-ai precedent)."
+    },
+    {
+      "src": "packages/coding-agent/src/main.ts",
+      "rust": "crates/pi-coding-agent/src/main_entry.rs",
+      "status": "complete-with-seam",
+      "functions_mapped": 51,
+      "notes": "Every pure decision helper, session-manager selection (no-session/fork/resume/continue/read-only), runtime-config assembly, buildSessionOptions, resolveRuntimeSessionOptions, createDefaultRuntimeFactory, prepareRuntimeServices, resolvePreparedStartupModel, active-daemon-session lookup and matching, createDaemonClientConnection, and main()'s full startup order incl. daemon-ready shared promise, stale-daemon takeover, missing-cwd prompt and exit codes. Run modes go through MainHost. 25 tests."
+    },
+    {
+      "src": "packages/coding-agent/src/migrations.ts",
+      "rust": "crates/pi-coding-agent/src/migrations.rs",
+      "status": "complete",
+      "functions_mapped": 5,
+      "notes": "auth-to-auth.json migration, session-dir migrations, keybindings migration (private 59-entry rename table + 56 app keybinding order copied from core/keybindings.ts while that file was empty), tools-to-bin, deprecation warnings, run_migrations. 9 tests."
+    },
+    {
+      "src": "packages/coding-agent/src/package-manager-cli.ts",
+      "rust": "crates/pi-coding-agent/src/package_manager_cli.rs",
+      "status": "complete",
+      "functions_mapped": 8,
+      "notes": "parse/help/usage, self-update plan+spawn, daemon update-restart coordinator (acquire/launch/status writer/predecessor fence), update-restart manifest parse+restore+probe, handleConfigCommand, handlePackageCommand and the ANSI/error reporting helpers. 9 tests."
+    },
+    {
+      "src": "packages/coding-agent/src/postinstall.ts",
+      "rust": "crates/pi-coding-agent/src/postinstall.rs",
+      "status": "complete",
+      "functions_mapped": 3,
+      "notes": "env flags PRIME_AGENT_BOOTSTRAP_{KERNEL,TOOLS}_ON_INSTALL, the PRIME_AGENT_INSTALL_UV write, Promise.all(ensureTool(fd), ensureTool(rg)) + ensureKernelPython, oneLine+best-effort catch. Returns the exit code instead of calling process.exit(0) because a library cannot exit the process. 3 tests."
+    }
+  ],
+  "build": {
+    "command": "MSYS_NO_PATHCONV=1 cmd /c \"call scripts\\rust-env.cmd && set CARGO_BUILD_JOBS=4&& cargo check -p pi-coding-agent\"",
+    "exit_code": 101,
+    "status": "blocked-by-other-slices",
+    "slice_errors": 0,
+    "total_crate_errors": 143,
+    "evidence": "The crate fails to compile with 143 errors; ZERO are raised in this slice's eight files (grepped per file: main_entry.rs, mod.rs, config.rs, migrations.rs, cli_entry.rs, cli_main_entry.rs, package_manager_cli.rs, postinstall.rs). No warning remains in any of the eight files after cleanup. Remaining errors are outside this slice, e.g. core/agent_session.rs (60+ unresolved items such as PreparedTurnActionOptions, TurnExecutionPolicyOptions, COMPACTION_SKIPPED_ERROR_MESSAGE), core/extensions/*, modes/daemon/daemon_mode.rs, modes/telegram/*, cli/daemon_command.rs, core/package_manager.rs (unlinked `ignore` crate), core/tools/bash.rs (libc not linked), core/performance_metrics.rs. `modes/daemon/daemon_client.rs` was rewritten by another slice during this session (it no longer contains a `protocol` submodule), and this slice's imports were updated to the new paths (daemon_client::DaemonClient/DaemonHello/DaemonClientRequestOptions/DaemonCapabilityUnavailableError, daemon_protocol::DaemonCommand/DaemonResponse/is_unknown_daemon_command_error/DAEMON_UPDATE_RESTART_FORMAT_VERSION).",
+    "sibling_run_confirmation": "A second lead-run check (same command, exit 101) reports the same picture: 143 lib errors, 0 in the eight slice files, plus 133 warnings of which the slice contributes none."
+  },
+  "tests": {
+    "command": "MSYS_NO_PATHCONV=1 cmd /c \"call scripts\\rust-env.cmd && set CARGO_BUILD_JOBS=4&& cargo test -p pi-coding-agent\"",
+    "exit_code": 101,
+    "status": "cannot-link-while-crate-has-errors",
+    "planned_tests": 67,
+    "evidence": "Ran `cargo test -p pi-coding-agent` once (exit 101). The lib target fails first with 143 errors, none of them in this slice's eight files, so cargo never links or runs a test binary: the output contains no \"running N tests\"/\"test result\" lines at all. 67 #[test]/#[tokio::test] functions are written across the slice (config 18, main_entry 25, migrations 9, package_manager_cli 9, postinstall 3, cli_entry 2, cli_main_entry 1) and remain unexecuted until the out-of-slice errors are fixed."
+  },
+  "blocked_on": [
+    "crates/pi-coding-agent has 143 compile errors outside this slice (core/agent_session.rs is the largest source). Until they are fixed, `cargo check`/`cargo test` for the crate cannot pass and the slice's 67 tests cannot run.",
+    "cli/public_command.rs and cli/owned_session_worker.rs are still 0 bytes (other slices). main() therefore reaches handlePublicCommand/isOwnedSessionWorkerProcess through the MainHost seam instead of importing them.",
+    "modes/daemon/daemon_supervisor.rs still has no runDaemonSupervisorMode (ca-daemon-a): main() reaches supervisor mode through MainHost::run_daemon_supervisor_mode.",
+    "core/agent_session_runtime.rs exports the AgentSessionRuntime class but not createAgentSessionRuntime (ca-session-runtime): main_entry.rs carries an exact port of that function as create_agent_session_runtime_port and records the duplication.",
+    "core/sdk.rs re-exports the runtime symbols only in part, so index.ts's sdk.js export list is re-exported except AgentSessionRuntime/AgentSessionRuntimeMetadata/CreateAgentSessionRuntimeFactory/CreateAgentSessionRuntimeResult/createAgentSessionFromServices/createAgentSessionRuntime/createAgentSessionServices (documented in mod.rs).",
+    "core/session_cwd.rs's SessionCwdSource is not implemented for SessionManager, and cli/list_models.rs's ModelRegistry trait is synchronous while the TypeScript awaits it; main_entry.rs bridges both with small private adapters rather than editing other slices' files.",
+    "crates/pi-coding-agent/src/lib.rs (no slice owner) needed `#[path = \"mod.rs\"] pub mod index;` for index.ts to be compiled at all; that one-line edit is noted here because lib.rs is unmapped."
+  ],
+  "honest_summary": "All eight ca-root files are ported and written: config.ts, migrations.ts, cli.ts, cli-main.ts, index.ts, main.ts, package-manager-cli.ts and postinstall.ts, about 8,600 lines of Rust including 67 tests, with every module-level helper, constant and string kept as in the TypeScript. `cargo check -p pi-coding-agent` still fails, but with ZERO errors in these eight files: the 143 remaining errors all come from other slices, mostly core/agent_session.rs and the extensions/daemon/telegram modules, so the slice's own correctness is verified only as far as the compiler can reach. Because the crate does not compile, `cargo test -p pi-coding-agent` cannot link a test binary and none of the 67 tests can execute; the earlier pi-agent-core blocker is gone (that crate is clean), and the current blocker is entirely inside pi-coding-agent itself. Where another slice's module is missing or incomplete, this slice uses the documented host-trait seams (CliMainHost, MainHost, MissingSessionCwdHost) or small private local adapters, never imports an empty module, and never edits another slice's file."
+}

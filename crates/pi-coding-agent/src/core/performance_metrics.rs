@@ -2,14 +2,15 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pi_agent_core::performance_metrics::{
     PerformanceMetricComponent, PerformanceMetricCorrelation, PerformanceMetricEvent,
     PerformanceMetricIdScope, PerformanceMetricIdentity, PerformanceMetricMeasurement,
-    PerformanceMetricOutcome, PerformanceMetricRecorder, PerformanceMetricRecordCorrelation,
-    PerformanceMetricRecordV1, PerformanceMetricUsageV1, PERFORMANCE_METRICS_SCHEMA_VERSION,
+    PerformanceMetricOperation, PerformanceMetricOutcome, PerformanceMetricRecorder,
+    PerformanceMetricRecordCorrelation, PerformanceMetricRecordV1, PerformanceMetricUsageV1,
+    PERFORMANCE_METRICS_SCHEMA_VERSION,
 };
 use serde_json::Value;
 
@@ -475,7 +476,10 @@ pub struct LocalPerformanceMetricRecorderInner {
     file_io: Arc<dyn PerformanceMetricFileIo>,
     state: Mutex<LocalRecorderState>,
     closed: AtomicBool,
-    /// `flushInFlight` - one drain, so stalled file I/O cannot grow a waiter list.
+    /// `flushRequested` - at most one follow-up drain is represented by a flag,
+    /// so stalled file I/O cannot grow a waiter queue.
+    flush_requested: AtomicBool,
+    /// `flushInFlight` - only one drain runs at a time.
     flush_lock: tokio::sync::Mutex<()>,
 }
 
@@ -554,27 +558,50 @@ impl LocalPerformanceMetricRecorder {
             100,
             60_000,
         ) as u64;
-        Self {
-            inner: Arc::new(LocalPerformanceMetricRecorderInner {
-                session_id,
-                log_path,
-                directory,
-                max_buffered_records,
-                max_buffered_bytes,
-                max_record_bytes,
-                max_file_bytes,
-                max_files,
-                close_timeout_ms,
-                flush_interval_ms,
-                now,
-                wall_now,
-                random_id,
-                file_io,
-                state: Mutex::new(LocalRecorderState::default()),
-                closed: AtomicBool::new(false),
-                flush_lock: tokio::sync::Mutex::new(()),
-            }),
+        let inner = Arc::new(LocalPerformanceMetricRecorderInner {
+            session_id,
+            log_path,
+            directory,
+            max_buffered_records,
+            max_buffered_bytes,
+            max_record_bytes,
+            max_file_bytes,
+            max_files,
+            close_timeout_ms,
+            flush_interval_ms,
+            now,
+            wall_now,
+            random_id,
+            file_io,
+            state: Mutex::new(LocalRecorderState::default()),
+            closed: AtomicBool::new(false),
+            flush_requested: AtomicBool::new(false),
+            flush_lock: tokio::sync::Mutex::new(()),
+        });
+
+        // `setInterval(() => void this.flush(), flushIntervalMs).unref()`: the
+        // first tick lands one interval from now and the timer never keeps the
+        // process alive. Without a runtime the queue is drained by `flush()`.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&inner);
+            let period = std::time::Duration::from_millis(flush_interval_ms);
+            handle.spawn(async move {
+                let mut ticker =
+                    tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                loop {
+                    ticker.tick().await;
+                    let Some(inner) = weak.upgrade() else {
+                        return;
+                    };
+                    if inner.closed.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    inner.flush().await;
+                }
+            });
         }
+
+        Self { inner }
     }
 
     /// `readonly sessionId`.
@@ -776,16 +803,22 @@ impl LocalPerformanceMetricRecorderInner {
         }
     }
 
-    /// `flush()`: coalesce callers onto one drain, then drain until empty.
+    /// `flush()`.
+    ///
+    /// The TypeScript coalesces all callers onto one flight plus at most one
+    /// follow-up drain, represented by `flushRequested`. Rust callers cannot
+    /// observe promise identity, so the port keeps the same two facts: a mutex
+    /// serializes the drains and the flag decides the follow-up. A failing sink
+    /// therefore cannot spin this loop.
     async fn flush(&self) {
-        let _guard = self.flush_lock.lock().await;
+        self.flush_requested.store(true, Ordering::SeqCst);
+        let _flight = self.flush_lock.lock().await;
         loop {
+            self.flush_requested.store(false, Ordering::SeqCst);
+            // `flushOnce` normally accounts for lost records, but no unexpected
+            // sink error may escape to agent work.
             self.flush_once().await;
-            let empty = {
-                let state = self.state.lock().unwrap();
-                state.buffered_lines.is_empty() && state.pending_dropped_records == 0.0
-            };
-            if empty {
+            if !self.flush_requested.load(Ordering::SeqCst) {
                 return;
             }
         }
@@ -1009,16 +1042,21 @@ mod tests {
     use pi_agent_core::performance_metrics::PerformanceMetricMeasurements;
 
     /// `MemoryFileIO` from the reference test file.
+    ///
+    /// The shared state sits behind `Arc` so each returned future owns its data
+    /// and stays `'static`, the requirement the `PerformanceMetricFileIO` trait
+    /// signature imposes.
+    #[derive(Clone)]
     struct MemoryFileIo {
-        files: Mutex<HashMap<String, String>>,
-        fail_append: AtomicBool,
+        files: Arc<Mutex<HashMap<String, String>>>,
+        fail_append: Arc<AtomicBool>,
     }
 
     impl MemoryFileIo {
         fn new() -> Self {
             Self {
-                files: Mutex::new(HashMap::new()),
-                fail_append: AtomicBool::new(false),
+                files: Arc::new(Mutex::new(HashMap::new())),
+                fail_append: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -1039,11 +1077,13 @@ mod tests {
         ) -> pi_ai::types::BoxFuture<Result<(), PerformanceMetricIoError>> {
             let path = path.to_string();
             let data = data.to_string();
+            let files = Arc::clone(&self.files);
+            let fail_append = Arc::clone(&self.fail_append);
             Box::pin(async move {
-                if self.fail_append.load(Ordering::SeqCst) {
+                if fail_append.load(Ordering::SeqCst) {
                     return Err(PerformanceMetricIoError::with_code("ENOSPC", "synthetic disk full"));
                 }
-                let mut files = self.files.lock().unwrap();
+                let mut files = files.lock().unwrap();
                 let entry = files.entry(path).or_default();
                 entry.push_str(&data);
                 Ok(())
@@ -1055,8 +1095,9 @@ mod tests {
             path: &str,
         ) -> pi_ai::types::BoxFuture<Result<Option<u64>, PerformanceMetricIoError>> {
             let path = path.to_string();
+            let files = Arc::clone(&self.files);
             Box::pin(async move {
-                let files = self.files.lock().unwrap();
+                let files = files.lock().unwrap();
                 Ok(files.get(&path).map(|data| data.len() as u64))
             })
         }
@@ -1068,8 +1109,9 @@ mod tests {
         ) -> pi_ai::types::BoxFuture<Result<(), PerformanceMetricIoError>> {
             let source = source.to_string();
             let destination = destination.to_string();
+            let files = Arc::clone(&self.files);
             Box::pin(async move {
-                let mut files = self.files.lock().unwrap();
+                let mut files = files.lock().unwrap();
                 let Some(data) = files.remove(&source) else {
                     return Err(PerformanceMetricIoError::with_code("ENOENT", "synthetic missing file"));
                 };
@@ -1080,8 +1122,9 @@ mod tests {
 
         fn remove(&self, path: &str) -> pi_ai::types::BoxFuture<Result<(), PerformanceMetricIoError>> {
             let path = path.to_string();
+            let files = Arc::clone(&self.files);
             Box::pin(async move {
-                self.files.lock().unwrap().remove(&path);
+                files.lock().unwrap().remove(&path);
                 Ok(())
             })
         }
@@ -1372,7 +1415,10 @@ mod tests {
         assert_eq!(sanitize_token_count(Some(&serde_json::json!(7.9))), Some(7.0));
 
         assert_eq!(safe_file_segment("a b/c", "fallback"), "a-b-c");
-        assert_eq!(safe_file_segment("///", "fallback"), "fallback");
+        // `value.replace(/[^A-Za-z0-9_-]/g, "-")` keeps a lone dash, so only an
+        // empty segment falls back.
+        assert_eq!(safe_file_segment("", "fallback"), "fallback");
+        assert_eq!(safe_file_segment("///", "fallback"), "-");
         assert!(opt_in_enabled(Some(" ON ")));
         assert!(!opt_in_enabled(Some("2")));
         assert!(!opt_in_enabled(None));

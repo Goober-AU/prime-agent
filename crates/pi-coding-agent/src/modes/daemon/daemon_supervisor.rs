@@ -58,9 +58,9 @@ use super::daemon_protocol::{collect_daemon_client_env, create_daemon_event_meta
 use super::daemon_client::{DaemonHello};
 use super::daemon_errors::{deserialize_daemon_error, serialize_daemon_error, DaemonSessionRecoveringError};
 use super::daemon_session_id::matches_session_id_suffix;
+use super::agent_roster::{classify_session_roster_status, is_session_summary_busy};
 use super::daemon_session_list::{
-    classify_session_roster_status, is_evictable_empty_session_summary, is_session_summary_busy,
-    summary_for_inactive_session, SessionSummary,
+    is_evictable_empty_session_summary, summary_for_inactive_session, SessionSummary,
 };
 use super::daemon_socket::{
     acquire_daemon_socket_path_lease, cleanup_daemon_socket_path, default_daemon_socket_dir,

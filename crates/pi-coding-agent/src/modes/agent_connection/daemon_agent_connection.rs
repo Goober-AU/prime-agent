@@ -427,13 +427,6 @@ pub struct DaemonAgentConnectionOptions {
     pub telemetry_disabled: bool,
 }
 
-struct DaemonSnapshotAssembly {
-    begin: Option<DaemonOutbound>,
-    chunks: HashMap<usize, Vec<AgentMessage>>,
-    timeout_handle: Option<tokio::task::JoinHandle<()>>,
-    resolved: bool,
-}
-
 /// `buildSessionTreeFromFlatNodes(flatNodes)`.
 pub fn build_session_tree_from_flat_nodes(
     flat_nodes: &[AgentConnectionSessionTreeFlatNode],
@@ -2279,6 +2272,43 @@ impl DaemonAgentConnection {
     }
 }
 
+impl DaemonAgentConnection {
+    /// `promptWithAdmissionCancellation` shared by `prompt` and `prompt_and_wait`.
+    fn prompt_with_admission_cancellation(
+        &self,
+        type_: &'static str,
+        message: &str,
+        options: Option<AgentConnectionPromptOptions>,
+    ) -> BoxFuture<Result<(), String>> {
+        let active_session_id = self.active_session_id();
+        let message = message.to_string();
+        Box::pin(async move {
+            let mut fields: Vec<(&str, Value)> = vec![
+                ("activeSessionId", Value::String(active_session_id)),
+                ("message", Value::String(message)),
+            ];
+            if let Some(options) = &options {
+                if let Some(images) = &options.images {
+                    fields.push(("images", serde_json::to_value(images).unwrap_or(Value::Null)));
+                }
+                if let Some(streaming_behavior) = &options.streaming_behavior {
+                    fields.push(("streamingBehavior", Value::String(streaming_behavior.clone())));
+                }
+                if let Some(queue_if_busy) = options.queue_if_busy {
+                    fields.push(("queueIfBusy", Value::Bool(queue_if_busy)));
+                }
+                if let Some(source) = &options.source {
+                    fields.push(("source", Value::String(source.clone())));
+                }
+            }
+            let command = command_body(type_, fields);
+            self.request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
+                .await
+                .map(|_| ())
+        })
+    }
+}
+
 impl AgentConnection for DaemonAgentConnection {
     fn subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync> {
         self.listeners.lock().unwrap().push(listener.clone());
@@ -3133,45 +3163,6 @@ impl AgentConnection for DaemonAgentConnection {
             Ok(())
         })
     }
-}
-
-impl DaemonAgentConnection {
-    fn prompt_with_admission_cancellation(
-        &self,
-        type_: &'static str,
-        message: &str,
-        options: Option<AgentConnectionPromptOptions>,
-    ) -> BoxFuture<Result<(), String>> {
-        let active_session_id = self.active_session_id();
-        let message = message.to_string();
-        Box::pin(async move {
-            let mut fields: Vec<(&str, Value)> = vec![
-                ("activeSessionId", Value::String(active_session_id)),
-                ("message", Value::String(message)),
-            ];
-            if let Some(options) = &options {
-                if let Some(images) = &options.images {
-                    fields.push(("images", serde_json::to_value(images).unwrap_or(Value::Null)));
-                }
-                if let Some(streaming_behavior) = &options.streaming_behavior {
-                    fields.push(("streamingBehavior", Value::String(streaming_behavior.clone())));
-                }
-                if let Some(queue_if_busy) = options.queue_if_busy {
-                    fields.push(("queueIfBusy", Value::Bool(queue_if_busy)));
-                }
-                if let Some(source) = &options.source {
-                    fields.push(("source", Value::String(source.clone())));
-                }
-            }
-            let command = command_body(type_, fields);
-            self.request_data(command, Some(DAEMON_LONG_RUNNING_REQUEST_TIMEOUT_MS))
-                .await
-                .map(|_| ())
-        })
-    }
-}
-
-impl AgentConnection for DaemonAgentConnection {
     fn prompt(&self, message: &str, options: Option<AgentConnectionPromptOptions>) -> BoxFuture<Result<(), String>> {
         self.prompt_with_admission_cancellation("prompt", message, options)
     }

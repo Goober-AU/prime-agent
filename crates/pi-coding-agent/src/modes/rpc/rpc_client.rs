@@ -22,8 +22,8 @@ use crate::modes::agent_connection::types::AgentConnectionHeartbeat;
 use crate::modes::rpc::jsonl::{serialize_json_line, JsonlLineReader, JsonlLineReaderOptions, StringDecoder};
 use crate::modes::rpc::rpc_types::{
     RpcCancelledPayload, RpcCommand, RpcExtensionUiRequest, RpcForkMessage, RpcForkMessagesPayload,
-    RpcForkPayload, RpcHeartbeatPayload, RpcHeartbeatsPayload, RpcObservedSessionEvent, RpcPathPayload,
-    RpcResponse, RpcSessionState, RpcSlashCommand, RpcTextPayload, RpcThinkingLevelPayload,
+    RpcForkPayload, RpcHeartbeatPayload, RpcHeartbeatsPayload, RpcModelsPayload, RpcObservedSessionEvent,
+    RpcPathPayload, RpcResponse, RpcSessionState, RpcSlashCommand, RpcTextPayload, RpcThinkingLevelPayload,
 };
 use crate::utils::child_process::{signal_process_group_or_process, spawn_hidden, Signal, SpawnOptions};
 

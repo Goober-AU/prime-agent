@@ -139,9 +139,20 @@ pub struct ToolRenderContext<TState, TArgs> {
     pub is_error: bool,
 }
 
-/// TypeScript `ToolDefinition.execute` signature.
-pub type ToolExecuteFn<TDetails> = Arc<
-    dyn Fn(
+/// Plumbing carrier for [`ToolExecuteFn`]: Rust rejects a type alias whose
+/// parameter is unused (E0091), so the details parameter is projected through
+/// this trait instead of being written directly in the alias body.
+///
+/// The associated type is the same `dyn Fn` for every details type, which
+/// matches the TypeScript signature: `execute` always returns an
+/// `AgentToolResult`, and `AgentToolResult` carries details as JSON, so the
+/// details type never reaches the callback.
+pub trait ToolExecuteFnDetails {
+    type Execute: ?Sized;
+}
+
+impl<TDetails> ToolExecuteFnDetails for TDetails {
+    type Execute = dyn Fn(
             String,
             Value,
             Option<CancellationToken>,
@@ -149,8 +160,11 @@ pub type ToolExecuteFn<TDetails> = Arc<
             ExtensionContext,
         ) -> BoxFuture<'static, Result<AgentToolResult, anyhow::Error>>
         + Send
-        + Sync,
->;
+        + Sync;
+}
+
+/// TypeScript `ToolDefinition.execute` signature.
+pub type ToolExecuteFn<TDetails> = Arc<<TDetails as ToolExecuteFnDetails>::Execute>;
 
 /// TypeScript `interface ToolDefinition<TParams, TDetails, TState>`.
 ///

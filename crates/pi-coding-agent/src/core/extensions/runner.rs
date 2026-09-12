@@ -14,7 +14,7 @@ use super::types::{
     AbortSignal, BeforeAgentStartEventResult, CancelledResult, CompactOptions, ContextEventResult, ContextUsage,
     CustomMessagePayload, Extension, ExtensionActions, ExtensionCommandContext, ExtensionCommandContextActions,
     ExtensionContext, ExtensionContextActions, ExtensionError, ExtensionEvent, ExtensionFlag, ExtensionHandler,
-    ExtensionRuntime, ExtensionShortcut, ExtensionUIContext, ExtensionUIDialogOptions, ForkOptions,
+    ExtensionRuntime, ExtensionShortcut, ExtensionUiContext, ExtensionUIDialogOptions, ForkOptions,
     InputEventResult, MessageEndEventResult, MessageRenderer, NavigateTreeOptions, NewSessionOptions,
     ProviderActions, ProviderConfig, RegisteredCommand, RegisteredTool, ReplacedSessionContext, ResolvedCommand,
     SendMessageOptions, SendUserMessageOptions, SessionBeforeCompactResult, SessionBeforeForkResult,
@@ -170,7 +170,7 @@ pub async fn emit_session_shutdown_event(
 /// `noOpUIContext` - every method is a no-op, exactly like the TypeScript object.
 pub struct NoOpUiContext;
 
-impl ExtensionUIContext for NoOpUiContext {
+impl ExtensionUiContext for NoOpUiContext {
     fn select(
         &self,
         _title: String,
@@ -380,7 +380,7 @@ impl std::fmt::Debug for RunnerCallbacks {
 pub struct ExtensionRunner {
     extensions: Vec<SharedExtension>,
     runtime: ExtensionRuntime,
-    ui_context: Arc<dyn ExtensionUIContext>,
+    ui_context: Arc<dyn ExtensionUiContext>,
     cwd: String,
     session_manager: Arc<dyn SessionManager>,
     model_registry: Arc<dyn ModelRegistry>,
@@ -516,11 +516,11 @@ impl ExtensionRunner {
         }
     }
 
-    pub fn set_ui_context(&mut self, ui_context: Option<Arc<dyn ExtensionUIContext>>) {
+    pub fn set_ui_context(&mut self, ui_context: Option<Arc<dyn ExtensionUiContext>>) {
         self.ui_context = ui_context.unwrap_or_else(|| Arc::new(NoOpUiContext));
     }
 
-    pub fn get_ui_context(&self) -> Arc<dyn ExtensionUIContext> {
+    pub fn get_ui_context(&self) -> Arc<dyn ExtensionUiContext> {
         self.ui_context.clone()
     }
 
@@ -1506,7 +1506,7 @@ impl RunnerContext {
 }
 
 impl ExtensionContext for RunnerContext {
-    fn ui(&self) -> Arc<dyn ExtensionUIContext> {
+    fn ui(&self) -> Arc<dyn ExtensionUiContext> {
         self.runner.get_ui_context()
     }
 
@@ -1625,7 +1625,7 @@ pub struct RunnerCommandContext {
 }
 
 impl ExtensionContext for RunnerCommandContext {
-    fn ui(&self) -> Arc<dyn ExtensionUIContext> {
+    fn ui(&self) -> Arc<dyn ExtensionUiContext> {
         self.runner.get_ui_context()
     }
     fn has_ui(&self) -> bool {

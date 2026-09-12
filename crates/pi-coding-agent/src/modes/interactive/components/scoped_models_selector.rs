@@ -7,10 +7,11 @@ use pi_tui::components::input::Input;
 use pi_tui::components::spacer::Spacer;
 use pi_tui::components::text::Text;
 use pi_tui::keys::{key, key_ctrl, matches_key};
-use pi_tui::tui::{Component, Container, Focusable};
+use pi_tui::tui::{Component, Focusable};
 
 use crate::modes::interactive::theme::theme::theme;
 
+use super::dynamic_border::DynamicBorder;
 use super::keybinding_hints::{key_text, KeyTextOptions};
 
 /// `type EnabledIds = string[] | null`
@@ -161,12 +162,6 @@ pub struct ScopedModelsSelectorComponent {
     /// lines, which keeps the same visible window the TypeScript computes.
     pub visible_range: (usize, usize),
     pub footer_text: String,
-    /// `extends Container`: the children the constructor adds, in order.
-    children: Container,
-    /// `listContainer` - the rows rebuilt by `updateList`.
-    list_container: Container,
-    /// `footerText` - the `Text` child updated by `refresh`.
-    footer_text_component: Rc<RefCell<Text>>,
     callbacks: ModelsCallbacks,
     max_visible: usize,
     is_dirty: bool,
@@ -199,47 +194,6 @@ impl ScopedModelsSelectorComponent {
             is_dirty: false,
         };
         component.filtered_items = component.build_items();
-
-        // `addChild(new DynamicBorder()); addChild(new Spacer(1)); addChild(new Text(...)); ...`
-        let mut children = Container::new();
-        children.add_child(Rc::new(RefCell::new(DynamicBorder::default())) as Rc<RefCell<dyn Component>>);
-        children.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
-        children.add_child(Rc::new(RefCell::new(Text::new(
-            theme().fg("accent", &theme().bold("Model Configuration")),
-            0,
-            0,
-            None,
-        ))) as Rc<RefCell<dyn Component>>);
-        children.add_child(Rc::new(RefCell::new(Text::new(
-            theme().fg(
-                "muted",
-                &format!(
-                    "Session-only. {} to save to settings.",
-                    key_text("app.models.save", &KeyTextOptions::default())
-                ),
-            ),
-            0,
-            0,
-            None,
-        ))) as Rc<RefCell<dyn Component>>);
-        children.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
-        children.add_child(Rc::new(RefCell::new(component.search_input.clone()))
-            as Rc<RefCell<dyn Component>>);
-        children.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
-        let list_container = Container::new();
-        children.add_child(Rc::new(RefCell::new(Placeholder)) as Rc<RefCell<dyn Component>>);
-        children.add_child(Rc::new(RefCell::new(Spacer::new(1))) as Rc<RefCell<dyn Component>>);
-        let footer_text_component = Rc::new(RefCell::new(Text::new(
-            component.get_footer_text(),
-            0,
-            0,
-            None,
-        )));
-        children.add_child(Rc::clone(&footer_text_component) as Rc<RefCell<dyn Component>>);
-        children.add_child(Rc::new(RefCell::new(DynamicBorder::default())) as Rc<RefCell<dyn Component>>);
-        component.children = children;
-        component.list_container = list_container;
-        component.footer_text_component = footer_text_component;
         component.footer_text = component.get_footer_text();
         component.update_list();
         component
@@ -402,6 +356,57 @@ impl ScopedModelsSelectorComponent {
             lines.push(String::new());
             lines.push(theme().fg("muted", &format!("  Model Name: {}", selected.model.name)));
         }
+        lines
+    }
+
+    /// The constructor's child list (`extends Container`), in order:
+    /// `DynamicBorder`, `Spacer(1)`, the title, the session-only note,
+    /// `Spacer(1)`, the search input, `Spacer(1)`, the list rows, `Spacer(1)`,
+    /// the footer and the closing `DynamicBorder`.
+    pub fn render_lines(&mut self, width: f64) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+
+        let mut border = DynamicBorder::default();
+        lines.extend(border.render(width));
+        let mut spacer = Spacer::new(1);
+        lines.extend(spacer.render(width));
+
+        let mut title = Text::new(
+            theme().fg("accent", &theme().bold("Model Configuration")),
+            0,
+            0,
+            None,
+        );
+        lines.extend(title.render(width));
+
+        let mut note = Text::new(
+            theme().fg(
+                "muted",
+                &format!(
+                    "Session-only. {} to save to settings.",
+                    key_text("app.models.save", &KeyTextOptions::default())
+                ),
+            ),
+            0,
+            0,
+            None,
+        );
+        lines.extend(note.render(width));
+
+        lines.extend(spacer.render(width));
+        lines.extend(self.search_input.render(width));
+        lines.extend(spacer.render(width));
+
+        for line in self.list_lines() {
+            let mut row = Text::new(line, 0, 0, None);
+            lines.extend(row.render(width));
+        }
+
+        lines.extend(spacer.render(width));
+        let mut footer = Text::new(self.footer_text.clone(), 0, 0, None);
+        lines.extend(footer.render(width));
+
+        lines.extend(border.render(width));
         lines
     }
 
@@ -584,6 +589,31 @@ impl ScopedModelsSelectorComponent {
 
     pub fn enabled_ids(&self) -> &EnabledIds {
         &self.enabled_ids
+    }
+}
+
+impl Component for ScopedModelsSelectorComponent {
+    /// Port of `Container.render` over the constructor's children.
+    fn render(&mut self, width: f64) -> Vec<String> {
+        self.render_lines(width)
+    }
+
+    fn invalidate(&mut self) {
+        // Render output is derived from the current state.
+    }
+
+    fn as_focusable(&mut self) -> Option<&mut dyn Focusable> {
+        Some(self)
+    }
+}
+
+impl Focusable for ScopedModelsSelectorComponent {
+    fn focused(&self) -> bool {
+        self.focused
+    }
+
+    fn set_focused(&mut self, focused: bool) {
+        ScopedModelsSelectorComponent::set_focused(self, focused);
     }
 }
 

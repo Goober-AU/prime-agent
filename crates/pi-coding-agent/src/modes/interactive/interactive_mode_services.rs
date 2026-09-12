@@ -752,7 +752,10 @@ impl ModelRegistry {
     }
 
     pub fn get_provider_display_name(&self, provider: &str) -> String {
-        crate::core::provider_display_names::get_provider_display_name(provider)
+        crate::core::provider_display_names::built_in_provider_display_names()
+            .get(provider)
+            .cloned()
+            .unwrap_or_else(|| provider.to_string())
     }
 
     pub fn get_stored_credential(&self, provider: &str) -> Option<String> {
@@ -768,7 +771,7 @@ impl ModelRegistry {
         self.auth_storage.list()
     }
 
-    pub fn get_oauth_providers(&self) -> Vec<crate::core::auth_storage::OAuthProviderInterface> {
+    pub fn get_oauth_providers(&self) -> Vec<pi_ai::utils::oauth::types::OAuthProviderInterface> {
         self.auth_storage.get_oauth_providers()
     }
 
@@ -794,11 +797,16 @@ impl ModelRegistry {
         self.auth_storage.get_prime_cli_config_path()
     }
 
-    pub fn get_prime_inference_team_selection(&self) -> Option<Option<crate::core::auth_storage::PrimeTeam>> {
+    pub fn get_prime_inference_team_selection(
+        &self,
+    ) -> Option<Option<crate::core::auth_storage::PrimeTeamCredential>> {
         self.auth_storage.get_prime_inference_team_selection()
     }
 
-    pub fn set_prime_inference_team_selection(&mut self, team: Option<crate::core::auth_storage::PrimeTeam>) {
+    pub fn set_prime_inference_team_selection(
+        &mut self,
+        team: Option<crate::core::prime_inference_auth::PrimeTeam>,
+    ) {
         let _ = self.auth_storage.set_prime_inference_team_selection(team);
     }
 

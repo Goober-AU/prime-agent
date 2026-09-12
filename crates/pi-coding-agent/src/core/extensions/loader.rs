@@ -18,7 +18,7 @@ use crate::core::source_info::{create_synthetic_source_info, SyntheticSourceInfo
 use super::types::{
     AutocompleteItem, CancelledResult, Extension, ExtensionApi, ExtensionCommandContext, ExtensionContext,
     ExtensionContextActions, ExtensionEvent, ExtensionFactory, ExtensionFlag, ExtensionHandler, ExtensionRuntime,
-    ExtensionRuntimeState, ExtensionShortcut, ExtensionUIContext, LoadExtensionError, LoadExtensionsResult,
+    ExtensionRuntimeState, ExtensionShortcut, ExtensionUiContext, LoadExtensionError, LoadExtensionsResult,
     MessageRenderer, ProviderActions, ProviderConfig, RegisteredCommand, RegisteredTool, SharedExtension,
     ToolDefinition, EXTENSION_RUNTIME_STALE_MESSAGE,
 };
@@ -69,7 +69,7 @@ pub fn resolve_path(ext_path: &str, cwd: &str) -> String {
     if Path::new(&expanded).is_absolute() {
         return expanded;
     }
-    crate::utils::paths::resolve_absolute(&join_path(cwd, &expanded))
+    crate::utils::paths::resolve_path(&join_path(cwd, &expanded))
 }
 
 /// In-process extension factory registry.
@@ -644,7 +644,7 @@ pub fn resolve_extension_entries(dir: &str) -> Option<Vec<String>> {
             if let Some(declared) = manifest.extensions.as_ref().filter(|list| !list.is_empty()) {
                 let mut entries: Vec<String> = Vec::new();
                 for ext_path in declared {
-                    let resolved_ext_path = crate::utils::paths::resolve_absolute(&join_path(dir, ext_path));
+                    let resolved_ext_path = crate::utils::paths::resolve_path(&join_path(dir, ext_path));
                     if Path::new(&resolved_ext_path).exists() {
                         entries.push(resolved_ext_path);
                     }
@@ -736,13 +736,13 @@ pub async fn discover_and_load_extensions(
 ) -> LoadExtensionsResult {
     let agent_dir = agent_dir
         .map(str::to_string)
-        .unwrap_or_else(crate::core::settings_manager::get_agent_dir);
+        .unwrap_or_else(crate::config::get_agent_dir);
     let mut all_paths: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
     let mut add_paths = |paths: Vec<String>, all_paths: &mut Vec<String>, seen: &mut HashSet<String>| {
         for p in paths {
-            let resolved = crate::utils::paths::resolve_absolute(&p);
+            let resolved = crate::utils::paths::resolve_path(&p);
             if seen.insert(resolved) {
                 all_paths.push(p);
             }
@@ -814,7 +814,7 @@ fn _surface(
     _: Option<ExtensionCommandContextActionsMarker>,
     _: Option<ExtensionContextActions>,
     _: Option<ExtensionEvent>,
-    _: Option<ExtensionUIContextMarker>,
+    _: Option<std::sync::Arc<ExtensionUIContextMarker>>,
     _: Option<PathBuf>,
     _: Option<Value>,
 ) {
@@ -823,7 +823,7 @@ fn _surface(
 #[allow(dead_code)]
 type ExtensionCommandContextActionsMarker = super::types::ExtensionCommandContextActions;
 #[allow(dead_code)]
-type ExtensionUIContextMarker = dyn ExtensionUIContext;
+type ExtensionUIContextMarker = dyn ExtensionUiContext;
 #[allow(dead_code)]
 type ExtensionContextMarker = dyn ExtensionContext;
 #[allow(dead_code)]

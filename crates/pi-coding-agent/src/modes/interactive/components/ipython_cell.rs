@@ -768,6 +768,7 @@ impl IPythonCellComponent {
     }
 
     /// Only runs when expanded - shows full output below the code, no previews.
+    #[allow(unused_assignments)]
     fn render_output(
         &self,
         lines: &mut Vec<String>,
@@ -1453,7 +1454,7 @@ mod tests {
         init();
         let mut cell = state("a = 1\nb = 2\n");
         cell.details = Some(json!({ "status": "ok", "stdout": "out\n", "durationMs": 1200.0 }));
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(120.0));
         assert!(text.contains("\u{2713}"));
         assert!(text.contains("\u{2191} 2"));
@@ -1466,7 +1467,7 @@ mod tests {
         init();
         let mut cell = state("%%bash\necho hi\n");
         cell.details = Some(json!({ "status": "ok" }));
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(120.0));
         assert!(text.contains("bash"));
         assert!(text.contains("echo hi"));
@@ -1478,7 +1479,7 @@ mod tests {
         let mut cell = state("print(1)\nprint(2)");
         cell.expanded = Some(true);
         cell.execution_started = Some(true);
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(80.0));
         assert!(text.contains("\u{203a} print(1)"));
         assert!(text.contains("print(2)"));
@@ -1499,7 +1500,7 @@ mod tests {
                 "traceback": ["Traceback (most recent call last):", "ZeroDivisionError: division by zero"]
             }
         }));
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(100.0));
         assert!(text.contains("ZeroDivisionError"));
         assert!(text.contains("division by zero"));
@@ -1512,7 +1513,7 @@ mod tests {
         cell.expanded = Some(true);
         cell.execution_started = Some(true);
         cell.args_complete = Some(true);
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(80.0));
         assert!(text.contains("no output"));
     }
@@ -1524,7 +1525,7 @@ mod tests {
         cell.expanded = Some(true);
         cell.is_partial = Some(true);
         cell.execution_started = Some(true);
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(80.0));
         assert!(text.contains("waiting for output..."));
     }
@@ -1542,7 +1543,7 @@ mod tests {
             mime_type: Some("image/png".to_string()),
             text: None,
         }]);
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(80.0));
         assert!(text.contains("1 image hidden"));
     }
@@ -1556,7 +1557,7 @@ mod tests {
             "status": "ok",
             "diffs": [{ "path": "src/a.py", "oldStr": "a\n", "newStr": "b\n", "startLine": 1 }]
         }));
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(80.0));
         assert!(text.contains("src/a.py"));
         assert!(text.contains("+1 -1"));
@@ -1574,7 +1575,7 @@ mod tests {
             "status": "ok",
             "diffs": [{ "path": "src/a.py", "oldStr": "a\n", "newStr": "b\n", "startLine": 1 }]
         }));
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(80.0));
         assert!(text.contains("src/a.py"));
         assert!(text.contains("+1 b") || text.contains("-1 a"));
@@ -1595,7 +1596,7 @@ mod tests {
                 "target": { "activeSessionId": "a1", "sessionId": "s1", "sessionName": "root" }
             }]
         }));
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(100.0));
         assert!(text.contains("Agent message sent"));
         assert!(text.contains("root"));
@@ -1664,7 +1665,7 @@ mod tests {
         init();
         let mut cell = state("print(1)");
         cell.details = Some(json!({ "status": "ok", "stdout": "hi\n" }));
-        let component = IPythonCellComponent::new(cell);
+        let mut component = IPythonCellComponent::new(cell);
         assert_eq!(
             component.status_kind(&read_details(component.state.details.as_ref())),
             StatusKind::Done

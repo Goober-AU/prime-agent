@@ -10,10 +10,10 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
-use pi_agent_core::types::{AgentMessage, CustomMessageContent, ImageOrTextContent, Message, UserContent};
+use pi_agent_core::types::{AgentMessage, CustomMessageContent};
 use pi_ai::types::{
-    AssistantMessage, Context, Model, SimpleStreamOptions, StreamOptions, TextContent, UserMessage,
-    STOP_REASON_ERROR,
+    AssistantMessage, Context, ImageOrTextContent, Message, Model, SimpleStreamOptions, StreamOptions,
+    TextContent, UserContent, UserMessage, STOP_REASON_ERROR,
 };
 use regex::Regex;
 use serde_json::Value;

@@ -15,6 +15,7 @@ crates\pi-tui\src\components\markdown.rs:26:7: warning: constant `STRICT_STRIKET
 crates\pi-tui\src\components\markdown.rs:369:26: warning: field `text` is never read
 warning: `pi-tui` (lib) generated 4 warnings
     Checking pi-coding-agent v0.9.3 (C:\Users\openclawuser\optimus-rust-port\crates\pi-coding-agent)
-crates\pi-coding-agent\src\cli\daemon_command.rs:1511:59: error: unknown start of token: \
-crates\pi-coding-agent\src\core\agent_session.rs:8022:7: error: this file contains an unclosed delimiter
-error: could not compile `pi-coding-agent` (lib) due to 2 previous errors
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:7356:72: error: mismatched closing delimiter: `}`: unclosed delimiter, mismatched closing delimiter
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:8011:37: error: mismatched closing delimiter: `}`: unclosed delimiter, mismatched closing delimiter
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:14811:3: error: this file contains an unclosed delimiter
+error: could not compile `pi-coding-agent` (lib) due to 3 previous errors

@@ -270,7 +270,7 @@ pub trait ExtensionRunner: Send + Sync {
     fn emit_context(&self, messages: Vec<Value>);
     fn emit_before_provider_request(&self, payload: Value);
     fn get_all_registered_tools(&self) -> Vec<RegisteredExtensionTool>;
-    fn get_tool_definition(&self, name: &str) -> Option<crate::core::extensions::types::ToolDefinition<Value>>;
+    fn get_tool_definition(&self, name: &str) -> Option<crate::core::extensions::types::ToolDefinition>;
     fn get_command(&self, name: &str) -> Option<ExtensionCommand>;
     fn resolve_registered_commands(&self) -> Vec<ExtensionCommand>;
     fn get_shortcuts(&self, resolved_keybindings: &Map<String, Value>) -> Vec<Value>;
@@ -301,7 +301,7 @@ pub struct BeforeAgentStartResult {
 /// `getAllRegisteredTools()` entry.
 #[derive(Debug, Clone)]
 pub struct RegisteredExtensionTool {
-    pub definition: crate::core::extensions::types::ToolDefinition<Value>,
+    pub definition: crate::core::extensions::types::ToolDefinition,
 }
 
 /// `RegisteredCommand` shape used by the session.
@@ -1218,7 +1218,7 @@ pub struct ModelSelectOptions {
 /// `ToolDefinitionEntry`.
 #[derive(Clone)]
 pub struct ToolDefinitionEntry {
-    pub definition: crate::core::extensions::types::ToolDefinition<Value>,
+    pub definition: crate::core::extensions::types::ToolDefinition,
     pub source_info: SourceInfo,
 }
 
@@ -1377,7 +1377,7 @@ pub struct AgentSessionConfig {
     pub agent_dir: Option<String>,
     pub scoped_models: Option<Vec<ScopedModel>>,
     pub resource_loader: Arc<dyn ResourceLoader>,
-    pub custom_tools: Option<Vec<crate::core::extensions::types::ToolDefinition<Value>>>,
+    pub custom_tools: Option<Vec<crate::core::extensions::types::ToolDefinition>>,
     pub model_registry: Arc<Mutex<crate::core::model_registry::ModelRegistry>>,
     pub initial_active_tool_names: Option<Vec<String>>,
     pub allowed_tool_names: Option<Vec<String>>,
@@ -2135,9 +2135,9 @@ pub struct AgentSession {
     model_select_emit_queue: Mutex<BoxFuture<Result<(), String>>>,
     model_select_emit_queue_idle: AtomicBool,
     resource_loader: Arc<dyn ResourceLoader>,
-    custom_tools: Vec<crate::core::extensions::types::ToolDefinition<Value>>,
-    acp_mcp_tools: Mutex<Vec<crate::core::extensions::types::ToolDefinition<Value>>>,
-    base_tool_definitions: Mutex<BTreeMap<String, crate::core::extensions::types::ToolDefinition<Value>>>,
+    custom_tools: Vec<crate::core::extensions::types::ToolDefinition>,
+    acp_mcp_tools: Mutex<Vec<crate::core::extensions::types::ToolDefinition>>,
+    base_tool_definitions: Mutex<BTreeMap<String, crate::core::extensions::types::ToolDefinition>>,
     cwd: String,
     agent_dir: Option<String>,
     include_goals: bool,
@@ -6189,7 +6189,7 @@ impl AgentSession {
     pub fn get_tool_definition(
         &self,
         name: &str,
-    ) -> Option<crate::core::extensions::types::ToolDefinition<Value>> {
+    ) -> Option<crate::core::extensions::types::ToolDefinition> {
         self.tool_definitions
             .lock()
             .unwrap()
@@ -12635,6 +12635,7 @@ fn current_messages_of(session: &Arc<AgentSession>) -> Vec<AgentMessage> {
     session.agent.state().messages
 }
 
+impl AgentSession {
     /// `compact(customInstructions, options)`.
     async fn compact(self: &Arc<Self>, custom_instructions: Option<&str>, skip_abort: bool) -> Result<crate::core::compaction::compaction::CompactionResult, String> {
         if skip_abort && self.is_streaming() {
@@ -12951,6 +12952,7 @@ fn current_messages_of(session: &Arc<AgentSession>) -> Vec<AgentMessage> {
             }
         }
     }
+}
 
 /// `_performCompaction` request auth.
 #[derive(Debug, Clone, Default)]
@@ -13082,3 +13084,62 @@ fn compaction_session_entry_from(entry: &SessionEntry) -> Option<CompactionSessi
         }),
     }
 }
+
+impl AgentSession {
+
+    /// `_runSerializedRefineCheckpointAfterBackground(branchVersion)`.
+    async fn run_serialized_refine_checkpoint_after_background(self: &Arc<Self>, branch_version: u64) {
+        if self.auto_refine_branch_version.load(Ordering::SeqCst) != branch_version {
+            return;
+        }
+        let _ = self.maybe_auto_refine("turn_interval").await;
+    }
+
+    /// `_runSerializedAutoRefineReview(reason, branchVersion)`.
+    async fn run_serialized_auto_refine_review(self: &Arc<Self>, reason: &str, branch_version: u64) {
+        if self.auto_refine_branch_version.load(Ordering::SeqCst) != branch_version {
+            return;
+        }
+        let _ = self.maybe_auto_refine(reason).await;
+    }
+
+    /// `_acquireRlmTerminalNoticeRetentionFence()`.
+    async fn acquire_rlm_terminal_notice_retention_fence(self: &Arc<Self>) -> Option<CommitFence> {
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.acquire_session_action_commit_fence().await.ok()
+    }
+
+    /// `_coalescedFollowUpOwner(action)`.
+    fn coalesced_follow_up_owner(&self, action: &QueuedSessionAction) -> Option<QueuedSessionAction> {
+        let queue_key = action.queue_key.clone()?;
+        self.action_store
+            .lock()
+            .unwrap()
+            .queued_actions(Some(DeliveryPolicy::WhenRunIdle))
+            .into_iter()
+            .find(|candidate| {
+                candidate.id != action.id && candidate.queue_key.as_deref() == Some(queue_key.as_str())
+            })
+    }
+
+    /// `_queuePreparedPrompt(schedule, text, images, options)`.
+    async fn queue_prepared_prompt(
+        self: &Arc<Self>,
+        schedule: &str,
+        text: &str,
+        images: Option<Vec<ImageContent>>,
+        options: Option<PreparedTurnActionOptions>,
+    ) -> bool {
+        let action = self.create_prepared_turn_action(schedule, text, images, options);
+        if action.suppress_autonomous_continuation.unwrap_or(false) {
+            if let Ok(record) = primary_delivery_record(&action) {
+                self.mark_autonomous_continuation_suppressed(&agent_message_from_delivery(&record.message));
+            }
+        }
+        self.admit_session_input(action, false).is_ok()
+    }
+}
+
+// PORT CURSOR: TS line 13194 (end of agent-session.ts; last member ported: extensionRunner). FILE COMPLETE.

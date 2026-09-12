@@ -254,14 +254,20 @@ pub fn kill_process_tree(pid: Option<u32>) {
     let Some(pid) = pid else {
         return;
     };
-    if cfg!(windows) {
-        let _ = std::process::Command::new("taskkill")
-            .args(["/T", "/F", "/PID", &pid.to_string()])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        return;
-    }
+    kill_process_tree_raw(pid);
+}
+
+#[cfg(windows)]
+fn kill_process_tree_raw(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+#[cfg(unix)]
+fn kill_process_tree_raw(pid: u32) {
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
         libc::kill(pid as i32, libc::SIGKILL);

@@ -1,0 +1,30 @@
+{
+ "slice": "ca-settings-b",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/keybindings.ts",
+   "rust": "crates/pi-coding-agent/src/core/keybindings.rs",
+   "status": "ported",
+   "functions_mapped": 7,
+   "notes": "KEYBINDINGS = {...TUI_KEYBINDINGS, ...app entries} (56 app ids) with insertion order kept; migrateKeybindingsConfig + orderKeybindingsConfig + loadRawConfig; KeybindingsManager wraps the pi-tui manager by composition (TS extends it) and keeps the string-vs-array shape of a user setting via KeybindingSetting{Single,List}; create(agentDir=getAgentDir()), reload, getEffectiveConfig, matches/getKeys/getDefinition/getConflicts, setUserBindings/getUserBindings/getResolvedBindings. 7 mapped TS declarations (1 export fn, 1 class, 2 class methods, 1 interface, 1 type, 1 const). 9 #[test]s ported from keybindings-migration.test.ts."
+  },
+  {
+   "src": "packages/coding-agent/src/core/performance-metrics.ts",
+   "rust": "crates/pi-coding-agent/src/core/performance_metrics.rs",
+   "status": "ported",
+   "functions_mapped": 22,
+   "notes": "LocalPerformanceMetricRecorder (buffering, strict memory bound, dropped-record accounting, rotation, bounded close) implements pi-agent-core's PerformanceMetricRecorder; createLocalPerformanceMetricRecorder + ...FromEnvironment with the PRIME_AGENT_PERFORMANCE_METRICS opt-in; sanitizers (string/nullable/measurement/tokenCount/correlation/identity/measurements/usage), boundedInteger, optInEnabled, safeFileSegment, defaultFileIO, resolve/join. 22 mapped TS declarations (2 export fns, 1 class, 16 class methods, 3 interfaces). 8 #[test]s ported from performance-metrics.test.ts. Deviation: TS setInterval is a tokio interval task on the shared inner state, and promise identity is not observable in Rust so flush() uses a drain mutex + flushRequested flag with the same 'one flight, one follow-up' shape."
+  },
+  {
+   "src": "packages/coding-agent/src/core/telemetry.ts",
+   "rust": "crates/pi-coding-agent/src/core/telemetry.rs",
+   "status": "ported",
+   "functions_mapped": 22,
+   "notes": "TelemetryEventName (5 literals, serde renames), TelemetryEvent/Batch/State, TelemetrySink, TelemetryClient (queue, batch drain, timer, best-effort send, injectable fetch, no real network in tests), isTelemetryEnabled, getOrCreateTelemetryInstallationId (lstat regular-file check, mode 0600, wx then EEXIST re-read, atomic rewrite for invalid state), telemetryProviderCategory, telemetryAuthCategory, captureOnboardingCompleted, captureAgentCommandUsed, installAgentTelemetry (subscribe + registerDisposeCallback, run/session totals, errorCategory, runOutcome, modelCategory). 22 mapped TS declarations (7 export fns, 1 class, 5 class methods, 5 interfaces, 4 types). 14 #[test]s. Deviation: TS flush() promise identity is not observable, so a tokio mutex serializes drains; AuthStatus/AuthCredential::type are strings at this seam (auth_credential_type maps AuthCredential)."
+  }
+ ],
+ "build": "cargo check -p pi-coding-agent: failed",
+ "tests": "cargo test -p pi-coding-agent: 0 passed / 0 failed (crate does not compile)",
+ "blocked_on": "Outside this slice: crates/pi-coding-agent does not compile - 143 errors in `cargo check` (151 in `cargo test`), all in other slices' files. Top offenders: core/agent_session.rs (82), modes/daemon/daemon_supervisor.rs (38), modes/daemon/daemon_mode.rs (21), core/agent_session_runtime.rs (12), modes/telegram/worker.rs (11). Error mix: E0425 55, E0422 25, E0432 24, E0433 21, E0603 9. Zero errors and zero warnings originate in this slice's three files.",
+ "honest_summary": "All three mapped files are written and ported 1:1: keybindings.rs (1093 lines), performance_metrics.rs (1446), telemetry.rs (1741), each ending with TS-derived tests (9/8/14). The one in-slice compile defect found by the first check (missing PerformanceMetricOperation import) is fixed, and the second full `cargo check` reports zero errors or warnings from these three files. The crate still does not compile because 143 errors sit in other slices' files (mostly core/agent_session.rs and modes/daemon/*), so `cargo test -p pi-coding-agent` cannot run and no test count is provable yet. I did not fix other slices' files."
+}

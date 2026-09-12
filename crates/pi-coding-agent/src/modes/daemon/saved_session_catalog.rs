@@ -4,9 +4,8 @@ use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
-use super::daemon_client::{DaemonClientError, DaemonClientResult};
+use super::daemon_client::{DaemonClientError, DaemonClientResult, DaemonCommandBody};
 use super::daemon_errors::deserialize_daemon_error;
-use super::daemon_client::DaemonCommandBody;
 use super::daemon_protocol::{DaemonResponse, DaemonSavedSessionInfo};
 use super::saved_session_info::{deserialize_saved_session_info, AgentConnectionSavedSessionInfo};
 

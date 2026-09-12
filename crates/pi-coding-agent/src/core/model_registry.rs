@@ -16,9 +16,9 @@ use serde_json::{Map, Value};
 
 use crate::core::auth_storage::{
     register_oauth_provider, resolve_config_value_or_throw, resolve_config_value_uncached,
-    resolve_headers_or_throw, AuthSourceToken, AuthStatus, AuthStorage,
+    resolve_headers_or_throw, AuthCredential, AuthSourceToken, AuthStatus, AuthStorage,
 };
-use crate::core::prime_inference_auth::{FetchFn, HttpRequest, PRIME_INFERENCE_PROVIDER_ID};
+use crate::core::prime_inference_auth::{default_fetch, FetchFn, HttpRequest, PRIME_INFERENCE_PROVIDER_ID};
 use crate::core::prime_inference_model_catalog::{
     build_prime_inference_models, merge_prime_inference_models, parse_prime_inference_model_catalog,
     read_cached_prime_inference_models, refresh_prime_inference_models,

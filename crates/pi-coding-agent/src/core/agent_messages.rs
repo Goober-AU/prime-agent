@@ -10,6 +10,7 @@
 //! - `AbortSignal` -> `tokio_util::sync::CancellationToken`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use pi_agent_core::types::{AgentMessage, CustomAgentMessage, CustomMessageContent};
 use serde_json::{Map, Value};
@@ -958,7 +959,6 @@ pub fn create_agent_message_host_handlers(
 ) -> crate::core::kernel::shared::HostRequestHandlers {
     use crate::core::kernel::shared::{HostRequestHandler, HostRequestHandlers, KernelError};
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     let mut handlers: crate::core::kernel::shared::HostRequestHandlers = HashMap::new();
 

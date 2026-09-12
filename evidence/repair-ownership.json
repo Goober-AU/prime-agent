@@ -1,0 +1,13 @@
+{
+ "exclusive_owners": {
+  "crates/pi-coding-agent/src/core/agent_session.rs": "repair-agent-session-types",
+  "crates/pi-coding-agent/src/package_manager_cli.rs": "repair-daemon-builder",
+  "crates/pi-coding-agent/src/main_entry.rs": "repair-daemon-builder",
+  "crates/pi-coding-agent/src/modes/daemon/daemon_worker_client.rs": "repair-daemon-builder",
+  "crates/pi-coding-agent/src/modes/daemon/daemon_routed_client.rs": "repair-daemon-builder",
+  "crates/pi-coding-agent/src/modes/daemon/daemon_worker_protocol.rs": "repair-daemon-builder",
+  "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs": "repair-daemon-builder"
+ },
+ "rule": "exactly one live writer per file; overlapping repair packs must be re-scoped before spawn",
+ "note": "pack1 and pack2 originally also covered these files; they were told to drop them and continue with their remaining files."
+}

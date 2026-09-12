@@ -1,241 +1,25 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/model-selector.ts
 //!
 //! PARTIAL: the component's chrome (`MenuPanel`, `MenuList`, `MenuRow`,
-//! `MenuSearchInput`, `shouldTreatAsBack`) is owned by other slices
-//! (components/menu-panel.ts, components/modal-back.ts) whose Rust files are
-//! still empty. Every free function and every scoring/sorting/layout decision of
-//! this file is ported 1:1; the class body below is written against private
-//! stand-ins that mirror those two modules' APIs, so replacing them with the real
-//! components is a pure import change.
+//! `MenuSearchInput`) is owned by components/menu-panel.ts ->
+//! `super::menu_panel` and `shouldTreatAsBack` by components/modal-back.ts ->
+//! `super::modal_back`. Every free function and every scoring/sorting/layout
+//! decision of this file is ported 1:1 against those real modules.
 
 use pi_ai::types::Model;
 use pi_tui::fuzzy::fuzzy_match;
 use pi_tui::keybindings::get_keybindings;
 use serde_json::Value;
+use std::rc::Rc;
 
 use crate::core::model_registry::ModelRegistry;
 use crate::modes::interactive::theme::theme::theme;
 
-// ---------------------------------------------------------------------------
-// Private stand-ins for components/menu-panel.ts (another slice's file).
-// ---------------------------------------------------------------------------
-
-/// `MenuViewportProvider`
-#[derive(Clone, Default)]
-pub struct MenuViewportProvider {
-    pub get_rows: Option<std::rc::Rc<dyn Fn() -> Option<f64>>>,
-}
-
-/// `MenuListLayout`
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MenuListLayout {
-    pub compact: bool,
-    pub visible_items: usize,
-}
-
-/// `MenuListLayoutOptions`
-#[derive(Debug, Clone, Default)]
-pub struct MenuListLayoutOptions {
-    pub get_rows: Option<std::rc::Rc<dyn Fn() -> Option<f64>>>,
-    pub preferred_visible_items: f64,
-    pub min_visible_items: Option<f64>,
-    pub total_items: Option<f64>,
-    pub reserved_rows: f64,
-    pub comfortable_item_rows: f64,
-    pub compact_item_rows: Option<f64>,
-    pub scroll_indicator_rows: Option<f64>,
-    pub comfortable_list_padding_rows: Option<f64>,
-    pub compact_list_padding_rows: Option<f64>,
-}
-
-fn get_viewport_rows(get_rows: &Option<std::rc::Rc<dyn Fn() -> Option<f64>>>) -> Option<f64> {
-    let rows = get_rows.as_ref()?();
-    let rows = rows?;
-    if !rows.is_finite() || rows <= 0.0 {
-        return None;
-    }
-    Some(rows.floor())
-}
-
-fn visible_item_count(
-    rows: f64,
-    options: &MenuListLayoutOptions,
-    item_rows: f64,
-    list_padding_rows: f64,
-    extra_rows: f64,
-) -> f64 {
-    let capacity_rows = (rows - options.reserved_rows - list_padding_rows - extra_rows).max(0.0);
-    let item_capacity = (capacity_rows / item_rows).floor();
-    let min_visible = options.min_visible_items.unwrap_or(1.0);
-    let preferred = options.preferred_visible_items.max(min_visible);
-    min_visible.max(preferred.min(item_capacity))
-}
-
-fn list_rows_used(
-    options: &MenuListLayoutOptions,
-    list_padding_rows: f64,
-    visible_items: f64,
-    item_rows: f64,
-    extra_rows: f64,
-) -> f64 {
-    options.reserved_rows + list_padding_rows + extra_rows + visible_items * item_rows
-}
-
-fn scroll_indicator_rows(
-    total_items: Option<f64>,
-    visible_items: f64,
-    scroll_indicator_rows: f64,
-) -> f64 {
-    match total_items {
-        None => 0.0,
-        Some(_) if scroll_indicator_rows <= 0.0 => 0.0,
-        Some(total) => {
-            if total > visible_items {
-                scroll_indicator_rows
-            } else {
-                0.0
-            }
-        }
-    }
-}
-
-struct LayoutCandidate {
-    compact: bool,
-    visible_items: f64,
-    rows_used: f64,
-    fits: bool,
-}
-
-fn get_layout_candidate(
-    rows: f64,
-    options: &MenuListLayoutOptions,
-    item_rows: f64,
-    list_padding_rows: f64,
-    compact: bool,
-) -> LayoutCandidate {
-    let min_visible_items = options.min_visible_items.unwrap_or(1.0);
-    let preferred_visible_items = min_visible_items.max(options.preferred_visible_items);
-    let visible_without_scroll = visible_item_count(
-        rows,
-        &MenuListLayoutOptions {
-            preferred_visible_items,
-            min_visible_items: Some(min_visible_items),
-            ..options.clone()
-        },
-        item_rows,
-        list_padding_rows,
-        0.0,
-    );
-    let extra_rows = scroll_indicator_rows(
-        options.total_items,
-        visible_without_scroll,
-        options.scroll_indicator_rows.unwrap_or(0.0),
-    );
-    let visible_items = if extra_rows > 0.0 {
-        visible_item_count(
-            rows,
-            &MenuListLayoutOptions {
-                preferred_visible_items,
-                min_visible_items: Some(min_visible_items),
-                ..options.clone()
-            },
-            item_rows,
-            list_padding_rows,
-            extra_rows,
-        )
-    } else {
-        visible_without_scroll
-    };
-    let rows_used = list_rows_used(
-        options,
-        list_padding_rows,
-        visible_items,
-        item_rows,
-        extra_rows,
-    );
-    LayoutCandidate {
-        compact,
-        visible_items,
-        rows_used,
-        fits: rows_used <= rows,
-    }
-}
-
-/// Port of `getMenuListLayout` (menu-panel.ts).
-pub fn get_menu_list_layout(options: &MenuListLayoutOptions) -> MenuListLayout {
-    let min_visible_items = options.min_visible_items.unwrap_or(1.0);
-    let preferred_visible_items = min_visible_items.max(options.preferred_visible_items);
-    let Some(rows) = get_viewport_rows(&options.get_rows) else {
-        return MenuListLayout {
-            compact: false,
-            visible_items: preferred_visible_items as usize,
-        };
-    };
-
-    let comfortable_layout = get_layout_candidate(
-        rows,
-        options,
-        options.comfortable_item_rows.max(1.0),
-        options.comfortable_list_padding_rows.unwrap_or(1.0),
-        false,
-    );
-    if options.compact_item_rows.is_none() {
-        return MenuListLayout {
-            compact: false,
-            visible_items: comfortable_layout.visible_items as usize,
-        };
-    }
-
-    let compact_layout = get_layout_candidate(
-        rows,
-        options,
-        options.compact_item_rows.unwrap_or(1.0).max(1.0),
-        options.compact_list_padding_rows.unwrap_or(0.0),
-        true,
-    );
-    if compact_layout.fits
-        && (!comfortable_layout.fits
-            || compact_layout.visible_items > comfortable_layout.visible_items)
-    {
-        return MenuListLayout {
-            compact: true,
-            visible_items: compact_layout.visible_items as usize,
-        };
-    }
-    if comfortable_layout.fits {
-        return MenuListLayout {
-            compact: false,
-            visible_items: comfortable_layout.visible_items as usize,
-        };
-    }
-    if compact_layout.rows_used <= comfortable_layout.rows_used {
-        MenuListLayout {
-            compact: true,
-            visible_items: compact_layout.visible_items as usize,
-        }
-    } else {
-        MenuListLayout {
-            compact: false,
-            visible_items: comfortable_layout.visible_items as usize,
-        }
-    }
-}
-
-/// Port of `shouldTreatAsBack` (components/modal-back.ts).
-pub fn should_treat_as_back(data: &str, cursor: Option<usize>) -> bool {
-    if !get_keybindings().matches(data, "app.modal.back") {
-        return false;
-    }
-    match cursor {
-        None => true,
-        Some(cursor) => cursor == 0,
-    }
-}
-
-/// Private stand-in for `MenuSearchInput`'s cursor accessor.
-pub trait BackGuardInput {
-    fn get_cursor(&self) -> usize;
-}
+use super::keybinding_hints::{key_hint, KeyTextOptions};
+use super::menu_panel::{
+    get_menu_list_layout, MenuListLayout, MenuListLayoutOptions, MenuViewportProvider,
+};
+use super::modal_back::should_treat_as_back;
 
 // ---------------------------------------------------------------------------
 // ModelSelector
@@ -410,7 +194,7 @@ pub struct ModelSelectorOptions {
     pub configured_providers: Option<Vec<String>>,
     pub header_rows: Option<f64>,
     pub subtitle: Option<String>,
-    pub get_rows: Option<std::rc::Rc<dyn Fn() -> Option<f64>>>,
+    pub get_rows: Option<Rc<dyn Fn() -> f64>>,
     pub recent_models: Option<Vec<String>>,
 }
 
@@ -422,13 +206,13 @@ pub enum ModelScope {
 }
 
 /// `PREFERRED_VISIBLE_MODELS`
-pub const PREFERRED_VISIBLE_MODELS: f64 = 10.0;
+pub const PREFERRED_VISIBLE_MODELS: usize = 10;
 /// `MODEL_LIST_RESERVED_ROWS`
-pub const MODEL_LIST_RESERVED_ROWS_BASE: f64 = 7.0;
+pub const MODEL_LIST_RESERVED_ROWS_BASE: usize = 7;
 /// `MODEL_LIST_RESERVED_ROWS.detail`
-pub const MODEL_LIST_RESERVED_ROWS_DETAIL: f64 = 2.0;
+pub const MODEL_LIST_RESERVED_ROWS_DETAIL: usize = 2;
 /// `MODEL_SCROLL_INDICATOR_ROWS`
-pub const MODEL_SCROLL_INDICATOR_ROWS: f64 = 1.0;
+pub const MODEL_SCROLL_INDICATOR_ROWS: usize = 1;
 /// `MODEL_HELP_MIN_ROWS`
 pub const MODEL_HELP_MIN_ROWS: f64 = 12.0;
 /// `MODEL_DETAIL_MIN_ROWS`
@@ -587,8 +371,8 @@ impl ModelSelectorComponent {
         component.list_layout = get_menu_list_layout(&MenuListLayoutOptions {
             preferred_visible_items: PREFERRED_VISIBLE_MODELS,
             reserved_rows: MODEL_LIST_RESERVED_ROWS_BASE,
-            comfortable_item_rows: 3.0,
-            compact_item_rows: Some(2.0),
+            comfortable_item_rows: 3,
+            compact_item_rows: Some(2),
             ..Default::default()
         });
         component.load_models();
@@ -802,16 +586,10 @@ impl ModelSelectorComponent {
     }
 
     fn get_scope_hint_text(&self) -> String {
-        let keys = get_keybindings().get_keys("app.model.toggleScope");
-        let key_text = keys
-            .iter()
-            .map(|key| key.to_string())
-            .collect::<Vec<String>>()
-            .join("/");
         format!(
             "{}{}",
-            theme().fg("dim", &key_text),
-            theme().fg("muted", " scope (all/scoped)")
+            key_hint("app.model.toggleScope", "scope", &KeyTextOptions::default()),
+            theme().fg("muted", " (all/scoped)")
         )
     }
 
@@ -996,21 +774,21 @@ impl ModelSelectorComponent {
         } else {
             0.0
         };
-        let reserved_rows = MODEL_LIST_RESERVED_ROWS_BASE
+        let reserved_rows = MODEL_LIST_RESERVED_ROWS_BASE as f64
             + header_rows
             + header_help_rows
             + if self.should_show_selected_details() {
-                MODEL_LIST_RESERVED_ROWS_DETAIL
+                MODEL_LIST_RESERVED_ROWS_DETAIL as f64
             } else {
                 0.0
             };
         self.list_layout = get_menu_list_layout(&MenuListLayoutOptions {
             get_rows: self.viewport.get_rows.clone(),
             preferred_visible_items: PREFERRED_VISIBLE_MODELS,
-            total_items: Some(self.filtered_models.len() as f64),
-            reserved_rows,
-            comfortable_item_rows: 3.0,
-            compact_item_rows: Some(2.0),
+            total_items: Some(self.filtered_models.len()),
+            reserved_rows: reserved_rows as usize,
+            comfortable_item_rows: 3,
+            compact_item_rows: Some(2),
             scroll_indicator_rows: Some(MODEL_SCROLL_INDICATOR_ROWS),
             ..Default::default()
         });
@@ -1046,11 +824,7 @@ impl ModelSelectorComponent {
     }
 
     fn has_rows(&self, min_rows: f64) -> bool {
-        let rows = self
-            .viewport
-            .get_rows
-            .as_ref()
-            .and_then(|get_rows| get_rows());
+        let rows = self.viewport.get_rows.as_ref().map(|get_rows| get_rows());
         match rows {
             None => true,
             Some(rows) => !rows.is_finite() || rows >= min_rows,
@@ -1197,13 +971,13 @@ mod tests {
     #[test]
     fn layout_prefers_compact_only_when_it_shows_more_or_the_comfortable_one_does_not_fit() {
         let layout = get_menu_list_layout(&MenuListLayoutOptions {
-            get_rows: Some(std::rc::Rc::new(|| Some(20.0))),
-            preferred_visible_items: 10.0,
-            reserved_rows: 7.0,
-            comfortable_item_rows: 3.0,
-            compact_item_rows: Some(2.0),
-            total_items: Some(30.0),
-            scroll_indicator_rows: Some(1.0),
+            get_rows: Some(Rc::new(|| 20.0)),
+            preferred_visible_items: 10,
+            reserved_rows: 7,
+            comfortable_item_rows: 3,
+            compact_item_rows: Some(2),
+            total_items: Some(30),
+            scroll_indicator_rows: Some(1),
             ..Default::default()
         });
         assert!(layout.visible_items <= 10);

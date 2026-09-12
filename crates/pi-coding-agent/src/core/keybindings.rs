@@ -1,7 +1,5 @@
 //! Port of packages/coding-agent/src/core/keybindings.ts
 
-use std::sync::OnceLock;
-
 use indexmap::IndexMap;
 use pi_tui::keybindings::{
     KeybindingDefinition, KeybindingsConfig as TuiKeybindingsConfig,
@@ -625,12 +623,6 @@ pub fn keybindings() -> IndexMap<String, KeybindingDefinition> {
     map
 }
 
-/// `KEYBINDINGS` as a process-wide shared map.
-pub fn keybindings_static() -> &'static IndexMap<String, KeybindingDefinition> {
-    static KEYBINDINGS: OnceLock<IndexMap<String, KeybindingDefinition>> = OnceLock::new();
-    KEYBINDINGS.get_or_init(keybindings)
-}
-
 /// `KeybindingDefinitions`.
 pub type KeybindingDefinitions = IndexMap<String, KeybindingDefinition>;
 
@@ -912,11 +904,6 @@ impl KeybindingsManager {
             resolved.insert(id.clone(), setting);
         }
         resolved
-    }
-
-    /// `configPath` (read-only view used by `reload`).
-    pub fn config_path(&self) -> Option<&str> {
-        self.config_path.as_deref()
     }
 }
 

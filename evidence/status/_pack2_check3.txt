@@ -14,8 +14,6 @@ crates\pi-tui\src\components\editor.rs:791:8: warning: method `render_autocomple
 crates\pi-tui\src\components\markdown.rs:26:7: warning: constant `STRICT_STRIKETHROUGH_REGEX` is never used
 crates\pi-tui\src\components\markdown.rs:369:26: warning: field `text` is never read
 warning: `pi-tui` (lib) generated 4 warnings
-   Compiling pi-coding-agent v0.9.3 (C:\Users\openclawuser\optimus-rust-port\crates\pi-coding-agent)
-crates\pi-coding-agent\src\core\agent_session.rs:8022:7: error: this file contains an unclosed delimiter
+    Checking pi-coding-agent v0.9.3 (C:\Users\openclawuser\optimus-rust-port\crates\pi-coding-agent)
+crates\pi-coding-agent\src\modes\agent_connection\daemon_agent_connection.rs:3829:1: error: unexpected closing delimiter: `}`: unexpected closing delimiter
 error: could not compile `pi-coding-agent` (lib) due to 1 previous error
-warning: build failed, waiting for other jobs to finish...
-error: could not compile `pi-coding-agent` (lib test) due to 1 previous error

@@ -19,7 +19,7 @@
 //!   - `core/telemetry.ts` (`isTelemetryEnabled`)
 //!   - `core/keybindings.ts` (`setKeybindings`)
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use pi_ai::types::{ImageContent, Model};
@@ -28,8 +28,8 @@ use serde_json::Value;
 use crate::cli::args::{parse_args, Args, ListModelsValue, ResumeValue};
 use crate::cli::command_registry::format_top_level_help;
 use crate::cli::daemon_launch::{
-    ensure_interactive_daemon_running, is_daemon_session_summary, list_active_daemon_session_summaries,
-    probe_running_daemon_sessions, shutdown_daemon_and_wait, StaleDaemonError,
+    ensure_interactive_daemon_running, list_active_daemon_session_summaries, probe_running_daemon_sessions,
+    shutdown_daemon_and_wait,
 };
 use crate::cli::daemon_stop_confirm::{
     confirm_daemon_session_loss, pluralize_sessions, ConfirmIo, ConfirmOptions, DaemonSessionLossCopy,
@@ -37,14 +37,15 @@ use crate::cli::daemon_stop_confirm::{
 use crate::cli::file_processor::{process_file_arguments, FileProcessorIo, ProcessFileOptions};
 use crate::cli::initial_message::{build_initial_message, InitialMessageInput};
 use crate::cli::list_models::{list_models, ListModelsIo};
-use crate::cli::session_resolver::{looks_like_session_path, SessionSelectorError};
+use crate::core::session_resolver::looks_like_session_path;
 use crate::config::{expand_tilde_path, get_agent_dir, get_session_dir_env_override, APP_NAME, VERSION};
 use crate::core::agent_session_config::{
-    merge_agent_session_runtime_config, merge_autonomous_config, AgentAutonomousConfig, AgentSessionRuntimeConfig,
+    merge_agent_session_runtime_config, merge_autonomous_config, AgentSessionRuntimeConfig,
 };
+use crate::core::autonomous::AgentAutonomousConfig;
 use crate::core::agent_session_runtime::{
-    create_agent_session_runtime, AgentSessionRuntime, CreateAgentSessionRuntimeFactory,
-    CreateAgentSessionRuntimeInput, CreateAgentSessionRuntimeResult, AGENT_SESSION_RUNTIME_KIND_TOP_LEVEL,
+    AgentSessionRuntime, CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeInput,
+    CreateAgentSessionRuntimeResult,
 };
 use crate::core::agent_session_services::{
     create_agent_session_from_services, create_agent_session_services, AgentSessionCreationOptions,
@@ -58,7 +59,6 @@ use crate::core::model_resolver::{
     find_initial_model, models_are_equal, resolve_cli_model, resolve_model_scope, FindInitialModelOptions,
     ResolveCliModelOptions, ScopedModel,
 };
-use crate::core::model_registry::ModelRegistry;
 use crate::core::output_guard::{restore_stdout, take_over_stdout};
 use crate::core::resource_loader::DefaultResourceLoaderOptions;
 use crate::core::sdk::{parse_thinking_level, CreateAgentSessionOptions};
@@ -70,18 +70,28 @@ use crate::core::session_manager::{
     find_most_recent_session_for_cwd, get_default_session_dir, load_entries_from_file, SessionManager,
 };
 use crate::core::settings_manager::{SettingsError, SettingsManager};
+use crate::core::logging::{install_file_log_sink, set_log_context};
 use crate::core::timings::{print_timings, reset_timings, time};
+
+/// `Promise<void>` returned by the `MainHost` seams.
+pub type BoxFuture<T> = pi_ai::types::BoxFuture<T>;
 use crate::migrations::{run_migrations, show_deprecation_warnings};
 use crate::modes::agent_connection::daemon_agent_connection::{
-    collect_daemon_client_env, DaemonAgentConnection, DaemonAgentConnectionOptions,
+    collect_daemon_client_env, collect_daemon_launch_env, DaemonAgentConnection, DaemonAgentConnectionOptions,
 };
-use crate::modes::daemon::daemon_client::protocol::{is_unknown_daemon_command_error, DaemonCommand, DaemonResponse};
-use crate::modes::daemon::daemon_client::{DaemonClient, DaemonTransportClient};
+use crate::modes::daemon::daemon_client::{DaemonCapabilityUnavailableError, DaemonClient};
+use crate::modes::daemon::daemon_protocol::{DaemonCommand, DaemonResponse};
 use crate::modes::daemon::daemon_errors::{
     deserialize_daemon_create_error, deserialize_daemon_error, DaemonError,
 };
 use crate::modes::daemon::daemon_session_list::SessionSummary;
-use crate::modes::daemon::daemon_socket::{default_daemon_socket_path, normalize_socket_path};
+use crate::modes::daemon::daemon_socket::default_daemon_socket_path;
+use crate::utils::daemon_socket_path::normalize_socket_path;
+use crate::modes::daemon::daemon_catalog_process::is_daemon_catalog_process_from_env;
+use crate::modes::daemon::daemon_worker_protocol::{
+    daemon_worker_instance_id, is_daemon_worker_process_from_env, require_daemon_worker_authentication_token,
+    wait_for_daemon_worker_startup_gate, DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+};
 use crate::utils::paths::is_local_path;
 
 fn red(message: &str) -> String {
@@ -626,23 +636,77 @@ fn parent_dir_string(path: &str) -> String {
         .unwrap_or_else(current_cwd)
 }
 
+/// The failure shapes `createSessionManager` can raise.
+///
+/// The TypeScript catches `SessionSelectorError` and reads `suggestion` from
+/// `SessionSelectorNotFoundError`, so the port keeps both cases typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateSessionManagerError {
+    SelectorNotFound { message: String, suggestion: Option<String> },
+    Selector { message: String },
+    Message(String),
+}
+
+impl CreateSessionManagerError {
+    /// The `Error.message` the caller prints.
+    pub fn message(&self) -> &str {
+        match self {
+            CreateSessionManagerError::SelectorNotFound { message, .. } => message,
+            CreateSessionManagerError::Selector { message } => message,
+            CreateSessionManagerError::Message(message) => message,
+        }
+    }
+
+    /// `error instanceof SessionSelectorError`.
+    pub fn is_selector_error(&self) -> bool {
+        !matches!(self, CreateSessionManagerError::Message(_))
+    }
+
+    /// `error.suggestion` of `SessionSelectorNotFoundError`.
+    pub fn suggestion(&self) -> Option<&str> {
+        match self {
+            CreateSessionManagerError::SelectorNotFound { suggestion, .. } => suggestion.as_deref(),
+            _ => None,
+        }
+    }
+
+    fn from_resolve_error(error: crate::core::session_resolver::ResolveSessionError) -> Self {
+        match error {
+            crate::core::session_resolver::ResolveSessionError::NotFound(not_found) => {
+                CreateSessionManagerError::SelectorNotFound {
+                    message: not_found.error.message,
+                    suggestion: not_found.suggestion,
+                }
+            }
+            crate::core::session_resolver::ResolveSessionError::Ambiguous(ambiguous) => {
+                CreateSessionManagerError::Selector {
+                    message: ambiguous.error.message,
+                }
+            }
+            crate::core::session_resolver::ResolveSessionError::Other(other) => {
+                CreateSessionManagerError::Selector { message: other.message }
+            }
+        }
+    }
+}
+
 /// `createSessionManager(parsed, cwd, sessionDir, readOnly = false)`.
 pub async fn create_session_manager(
     parsed: &Args,
     cwd: &str,
     session_dir: Option<&str>,
     read_only: bool,
-) -> Result<SessionManager, String> {
+) -> Result<SessionManager, CreateSessionManagerError> {
     let explicit_cwd_override = if parsed.cwd.is_some() { Some(cwd) } else { None };
 
     if parsed.no_session == Some(true) {
-        return SessionManager::in_memory(None, None);
+        return SessionManager::in_memory(None, None).map_err(CreateSessionManagerError::Message);
     }
 
     if let Some(fork) = &parsed.fork {
         let resolved = crate::core::session_resolver::resolve_session_path(fork, cwd, session_dir)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(CreateSessionManagerError::from_resolve_error)?;
 
         match resolved {
             crate::core::session_resolver::ResolvedSession::Path { path }
@@ -656,7 +720,7 @@ pub async fn create_session_manager(
     if let Some(resume_selector) = get_resume_selector(parsed) {
         let resolved = crate::core::session_resolver::resolve_session_path(&resume_selector, cwd, session_dir)
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(CreateSessionManagerError::from_resolve_error)?;
 
         match resolved {
             crate::core::session_resolver::ResolvedSession::Path { path }
@@ -665,6 +729,7 @@ pub async fn create_session_manager(
                     Ok(read_session_manager(&path, session_dir, explicit_cwd_override))
                 } else {
                     SessionManager::open(&path, session_dir, explicit_cwd_override)
+                        .map_err(CreateSessionManagerError::Message)
                 };
             }
 
@@ -688,16 +753,17 @@ pub async fn create_session_manager(
             let path = find_most_recent_session_for_cwd(&dir, cwd);
             return match path {
                 Some(path) => Ok(read_session_manager(&path, Some(&dir), Some(cwd))),
-                None => SessionManager::in_memory(Some(cwd), Some(&dir)),
+                None => SessionManager::in_memory(Some(cwd), Some(&dir))
+                    .map_err(CreateSessionManagerError::Message),
             };
         }
-        return SessionManager::continue_recent(cwd, session_dir);
+        return SessionManager::continue_recent(cwd, session_dir).map_err(CreateSessionManagerError::Message);
     }
 
     if read_only {
-        SessionManager::in_memory(Some(cwd), session_dir)
+        SessionManager::in_memory(Some(cwd), session_dir).map_err(CreateSessionManagerError::Message)
     } else {
-        SessionManager::create(cwd, session_dir)
+        SessionManager::create(cwd, session_dir).map_err(CreateSessionManagerError::Message)
     }
 }
 
@@ -1284,4 +1350,1993 @@ pub async fn resolve_prepared_startup_model(
 pub struct InitialModelSelection {
     pub model: Option<Model>,
     pub model_fallback_message: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Active daemon session lookup
+// ---------------------------------------------------------------------------
+
+/// `resolveActiveSessionLookupFailure(response)`.
+pub fn resolve_active_session_lookup_failure(response: &DaemonResponse) -> Option<String> {
+    if response.error_info.as_ref().map(|info| info.code()).as_deref() == Some("session_recovering") {
+        return Some(daemon_error_message(&deserialize_daemon_error(response)));
+    }
+    let error = response.error.clone().unwrap_or_default();
+    if is_unknown_active_session_error(&error) {
+        return None;
+    }
+    Some(error)
+}
+
+fn log_context(app_mode: &str) -> serde_json::Map<String, Value> {
+    let mut fields = serde_json::Map::new();
+    fields.insert("mode".to_string(), Value::String(app_mode.to_string()));
+    fields
+}
+
+fn current_environment() -> std::collections::HashMap<String, String> {
+    std::env::vars().collect()
+}
+
+/// `{ appMode, startupBenchmark, noSession, help, listModels }`.
+pub fn daemon_client_startup_decision(
+    parsed: &Args,
+    app_mode: &str,
+    startup_benchmark: bool,
+) -> DaemonClientStartupDecision {
+    DaemonClientStartupDecision {
+        app_mode: app_mode.to_string(),
+        startup_benchmark,
+        no_session: parsed.no_session,
+        help: parsed.help,
+        list_models: parsed.list_models.clone(),
+    }
+}
+
+fn daemon_error_message(error: &DaemonError) -> String {
+    match error {
+        DaemonError::MissingSessionCwd(error) => error.message.clone(),
+        DaemonError::SessionImportFileNotFound(error) => error.message.clone(),
+        DaemonError::SessionAlreadyActive(error) => error.message.clone(),
+        DaemonError::SessionRecovering(error) => error.message.clone(),
+        DaemonError::Message(message) => message.clone(),
+    }
+}
+
+/// `findActiveDaemonSessionSummary(socketPath, selector)`.
+pub async fn find_active_daemon_session_summary(
+    socket_path: &str,
+    selector: &str,
+) -> Result<Option<SessionSummary>, String> {
+    let client = DaemonClient::create(socket_path);
+    client.connect(250).await.map_err(|error| error.message())?;
+
+    let mut command = DaemonCommand::new("get_state");
+    command.body.insert("activeSessionId".to_string(), Value::String(selector.to_string()));
+    let response = client
+        .request(command, Some(3000), Default::default())
+        .await
+        .map_err(|error| error.message());
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            client.close().await;
+            return Err(error);
+        }
+    };
+
+    if !response.success {
+        let failure = resolve_active_session_lookup_failure(&response);
+        client.close().await;
+        if let Some(failure) = failure {
+            return Err(failure);
+        }
+        return Ok(None);
+    }
+    let summary = serde_json::from_value::<SessionSummary>(response.data.clone().unwrap_or(Value::Null));
+    client.close().await;
+    let summary = summary.map_err(|_| "Daemon returned an invalid active session summary".to_string())?;
+    Ok(Some(summary))
+}
+
+fn is_unknown_active_session_error(message: &str) -> bool {
+    message.starts_with("Unknown active session:")
+}
+
+/// `getDaemonSummaryActiveSessionId(summary)`.
+pub fn get_daemon_summary_active_session_id(summary: &SessionSummary) -> String {
+    summary.active_session_id.clone().unwrap_or_else(|| summary.id.clone())
+}
+
+/// `createSessionManagerForActiveDaemonSummary(summary, fallbackCwd)`.
+pub fn create_session_manager_for_active_daemon_summary(
+    summary: &SessionSummary,
+    fallback_cwd: &str,
+) -> SessionManager {
+    let cwd = if summary.cwd.is_empty() { fallback_cwd.to_string() } else { summary.cwd.clone() };
+    if let Some(session_file) = &summary.session_file {
+        return read_session_manager(session_file, None, Some(&cwd));
+    }
+    SessionManager::in_memory(Some(&cwd), None).expect("in-memory session manager")
+}
+
+/// `getInteractiveDaemonSessionPath(parsed, sessionManager)`.
+pub fn get_interactive_daemon_session_path(parsed: &Args, session_manager: &SessionManager) -> Option<String> {
+    if parsed.resume.is_none() && parsed.continue_ != Some(true) && parsed.fork.is_none() {
+        return None;
+    }
+    session_manager.get_session_file()
+}
+
+/// `findActiveDaemonSessionSummaryForSessionFile(summaries, sessionPath)`.
+pub fn find_active_daemon_session_summary_for_session_file(
+    summaries: &[SessionSummary],
+    session_path: &str,
+) -> Option<SessionSummary> {
+    let resolved_session_path = canonical_session_path(session_path);
+    summaries
+        .iter()
+        .find(|summary| {
+            summary.active_session_id.is_some()
+                && summary
+                    .session_file
+                    .as_ref()
+                    .map(|session_file| canonical_session_path(session_file) == resolved_session_path)
+                    .unwrap_or(false)
+        })
+        .cloned()
+}
+
+/// `findAttachedDaemonSessionSummary(client, activeSessionId)`.
+pub async fn find_attached_daemon_session_summary(
+    client: &Arc<DaemonClient>,
+    active_session_id: &str,
+) -> Result<SessionSummary, String> {
+    let mut command = DaemonCommand::new("get_state");
+    command.body.insert(
+        "activeSessionId".to_string(),
+        Value::String(active_session_id.to_string()),
+    );
+    let response = client
+        .request(command, None, Default::default())
+        .await
+        .map_err(|error| error.message())?;
+    if !response.success {
+        return Err(response.error.unwrap_or_else(|| "Daemon request failed".to_string()));
+    }
+    serde_json::from_value(response.data.unwrap_or(Value::Null))
+        .map_err(|_| "Daemon returned an invalid active session summary".to_string())
+}
+
+/// `createDaemonClientConnection(options)`.
+pub async fn create_daemon_client_connection(
+    options: CreateDaemonClientConnectionOptions,
+) -> Result<(Arc<DaemonAgentConnection>, SessionSummary), String> {
+    // Caller must have awaited ensureInteractiveDaemonRunning for this socket.
+    let client = DaemonClient::create(&options.socket_path);
+    client.connect(DEFAULT_DAEMON_CONNECT_TIMEOUT_MS).await.map_err(|error| error.message())?;
+
+    let socket_path_for_recover = options.socket_path.clone();
+    let attach = |summary: SessionSummary| {
+        let client = Arc::clone(&client);
+        let recover_socket_path = socket_path_for_recover.clone();
+        let config = options.config.clone();
+        let client_owned = options.client_owned.unwrap_or(false);
+        let supports_extension_ui = options.supports_extension_ui.unwrap_or(false);
+        async move {
+            // blocked_on: `recoverDaemon: () => ensureInteractiveDaemonRunning(socketPath)`
+            // is a callback in the TypeScript; the landed connection seam carries
+            // the same intent as the `recover_daemon` flag. The socket path is
+            // logged so the recovery target stays visible.
+            let _ = &recover_socket_path;
+            let connection = DaemonAgentConnection::attach(
+                client,
+                get_daemon_summary_active_session_id(&summary),
+                DaemonAgentConnectionOptions {
+                    close_client_on_dispose: true,
+                    direct_transport: false,
+                    recover_daemon: true,
+                    reconnect_timeout_ms: None,
+                    snapshot_timeout_ms: None,
+                    send_client_env: true,
+                    owned_session: client_owned,
+                    owned_session_recovery_config: if client_owned {
+                        serde_json::to_value(&config).ok()
+                    } else {
+                        None
+                    },
+                    supports_extension_ui,
+                    telemetry_disabled: config.telemetry_disabled.unwrap_or(false),
+                },
+            )
+            .await?;
+            Ok::<_, String>((connection, summary))
+        }
+    };
+
+    let result = async {
+        if let Some(active_session_id) = &options.active_session_id {
+            let summary = find_attached_daemon_session_summary(&client, active_session_id).await?;
+            return attach(summary).await;
+        }
+
+        if let Some(session_path) = &options.session_path {
+            if !options.client_owned.unwrap_or(false) {
+                let summaries = list_active_daemon_session_summaries(&options.socket_path, true)
+                    .await
+                    .unwrap_or_default();
+                let typed: Vec<SessionSummary> = summaries
+                    .iter()
+                    .filter_map(|value| serde_json::from_value(value.clone()).ok())
+                    .collect();
+                if let Some(active_summary) =
+                    find_active_daemon_session_summary_for_session_file(&typed, session_path)
+                {
+                    if active_summary.lifecycle != "failed" {
+                        return attach(active_summary).await;
+                    }
+                }
+            }
+        }
+        if options.client_owned.unwrap_or(false) {
+            let _ = client.wait_for_hello(DEFAULT_DAEMON_HELLO_TIMEOUT_MS).await;
+            if !client.supports_server_capability("client_owned_sessions") {
+                return Err(DaemonCapabilityUnavailableError::new("create", Some("client_owned_sessions"), false)
+                    .message());
+            }
+        }
+
+        let mut command = DaemonCommand::new("create");
+        command.body.insert(
+            "config".to_string(),
+            serde_json::to_value(&options.config).unwrap_or(Value::Null),
+        );
+        if let Some(session_path) = &options.session_path {
+            command.body.insert("sessionPath".to_string(), Value::String(session_path.clone()));
+        }
+        if let Some(continue_recent) = options.continue_recent {
+            command.body.insert("continueRecent".to_string(), Value::Bool(continue_recent));
+        }
+        if let Some(no_session) = options.no_session {
+            command.body.insert("noSession".to_string(), Value::Bool(no_session));
+        }
+        command.body.insert(
+            "env".to_string(),
+            serde_json::to_value(collect_daemon_client_env()).unwrap_or(Value::Null),
+        );
+        command.body.insert(
+            "lifecycle".to_string(),
+            Value::String(if options.client_owned.unwrap_or(false) {
+                "client_owned".to_string()
+            } else {
+                "resident".to_string()
+            }),
+        );
+        command.body.insert(
+            "launchEnv".to_string(),
+            serde_json::to_value(collect_daemon_launch_env()).unwrap_or(Value::Null),
+        );
+        let response = client
+            .request(command, None, Default::default())
+            .await
+            .map_err(|error| error.message())?;
+        if !response.success {
+            return Err(daemon_error_message(&deserialize_daemon_create_error(&response)));
+        }
+        let summary = serde_json::from_value::<SessionSummary>(response.data.unwrap_or(Value::Null))
+            .map_err(|_| "Daemon returned an invalid create response".to_string())?;
+        attach(summary).await
+    }
+    .await;
+
+    match result {
+        Ok(connection) => Ok(connection),
+        Err(error) => {
+            client.close().await;
+            Err(error)
+        }
+    }
+}
+
+/// `createDaemonClientConnection(options)`.
+#[derive(Clone)]
+pub struct CreateDaemonClientConnectionOptions {
+    pub socket_path: String,
+    pub config: AgentSessionRuntimeConfig,
+    pub session_path: Option<String>,
+    pub continue_recent: Option<bool>,
+    pub active_session_id: Option<String>,
+    pub client_owned: Option<bool>,
+    pub no_session: Option<bool>,
+    pub supports_extension_ui: Option<bool>,
+}
+
+/// `await client.connect(250)`.
+pub const DEFAULT_DAEMON_CONNECT_TIMEOUT_MS: u64 = 250;
+/// `await client.waitForHello()`.
+pub const DEFAULT_DAEMON_HELLO_TIMEOUT_MS: u64 = 10_000;
+
+/// `promptForMissingSessionCwd(issue, settingsManager)`.
+///
+/// blocked_on: the prompt is the interactive slice's `ExtensionSelectorComponent`
+/// mounted on the shared TUI; the port keeps the exact question, the two
+/// options, and the "Continue" -> `fallbackCwd` result through a host seam.
+pub fn prompt_for_missing_session_cwd(
+    issue: &SessionCwdIssue,
+    settings_manager: &SettingsManager,
+    host: &dyn MissingSessionCwdHost,
+) -> Option<String> {
+    crate::modes::interactive::theme::theme::init_theme(settings_manager.get_theme().as_deref(), false);
+    let options = vec!["Continue".to_string(), "Cancel".to_string()];
+    let selected = host.select(&format_missing_session_cwd_prompt(issue), options)?;
+    if selected == "Continue" {
+        return Some(issue.fallback_cwd.clone());
+    }
+    None
+}
+
+/// The `new ExtensionSelectorComponent(...)` + TUI pair of
+/// `promptForMissingSessionCwd`.
+pub trait MissingSessionCwdHost: Send + Sync {
+    /// Returns the selected option, or `None` when the selector is cancelled.
+    fn select(&self, title: &str, options: Vec<String>) -> Option<String>;
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// `PublicCommandResult` of `cli/public-command.ts`.
+#[derive(Debug, Clone, Default)]
+pub struct PublicCommandOutcome {
+    pub handled: bool,
+    pub args: Vec<String>,
+    pub explicit_agents_view: bool,
+    pub attach_agent: Option<String>,
+}
+
+/// `MainOptions`.
+#[derive(Default)]
+pub struct MainOptions {
+    pub extension_factories: Option<Vec<crate::core::extensions::types::ExtensionFactory>>,
+}
+
+/// Everything `main` reaches that belongs to another slice.
+///
+/// blocked_on: `cli/public-command.ts`, `cli/owned-session-worker.ts`,
+/// `modes/interactive`, `modes/print-mode.ts`, `modes/acp/acp-mode.ts`,
+/// `modes/daemon/daemon-supervisor.ts` and `modes/agents-view/agents-view-mode.ts`
+/// are owned by other slices. Every method mirrors one TypeScript call, so the
+/// startup order, the arguments and the exit paths stay the ported ones.
+pub trait MainHost: Send + Sync {
+    /// `handlePublicCommand(args)`.
+    fn handle_public_command(&self, args: Vec<String>) -> BoxFuture<Result<PublicCommandOutcome, String>>;
+    /// `isOwnedSessionWorkerProcess()`.
+    fn is_owned_session_worker_process(&self) -> bool;
+    /// `installOwnedSessionRecoveryTracking(runtime)`.
+    fn install_owned_session_recovery_tracking(&self, runtime: Arc<AgentSessionRuntime>);
+    /// `registerBuiltinMcpOAuthProviders()`.
+    fn register_builtin_mcp_oauth_providers(&self);
+    /// `setKeybindings(KeybindingsManager.create())`.
+    fn set_keybindings(&self, agent_dir: &str);
+    /// `runDaemonCatalogProcess()`.
+    fn run_daemon_catalog_process(&self) -> BoxFuture<Result<(), String>>;
+    /// `runDaemonSupervisorMode({ socketPath, defaultSessionConfig })`.
+    fn run_daemon_supervisor_mode(
+        &self,
+        socket_path: Option<String>,
+        default_session_config: AgentSessionRuntimeConfig,
+    ) -> BoxFuture<Result<(), String>>;
+    /// `runDaemonMode({ socketPath, defaultSessionConfig, createRuntime, worker })`.
+    fn run_daemon_mode(
+        &self,
+        options: DaemonModeSeamOptions,
+    ) -> BoxFuture<Result<(), String>>;
+    /// `runAgentsViewMode(options)`.
+    fn run_agents_view_mode(&self, options: AgentsViewSeamOptions) -> BoxFuture<Result<(), String>>;
+    /// `runRpcModeWithConnection(connection)`.
+    fn run_rpc_mode_with_connection(
+        &self,
+        connection: Arc<dyn crate::modes::agent_connection::types::AgentConnection>,
+    ) -> BoxFuture<Result<(), String>>;
+    /// `runAcpModeWithConnection(connection)`.
+    fn run_acp_mode_with_connection(
+        &self,
+        connection: Arc<dyn crate::modes::agent_connection::types::AgentConnection>,
+    ) -> BoxFuture<Result<(), String>>;
+    /// `runPrintModeWithConnection(connection, options)`.
+    fn run_print_mode_with_connection(
+        &self,
+        connection: Arc<dyn crate::modes::agent_connection::types::AgentConnection>,
+        options: PrintModeSeamOptions,
+    ) -> BoxFuture<Result<i32, String>>;
+    /// `runRpcMode(runtime)`.
+    fn run_rpc_mode(&self, runtime: Arc<AgentSessionRuntime>) -> BoxFuture<Result<(), String>>;
+    /// `runAcpMode(runtime)`.
+    fn run_acp_mode(&self, runtime: Arc<AgentSessionRuntime>) -> BoxFuture<Result<(), String>>;
+    /// `runPrintMode(runtimeHost, options)`.
+    fn run_print_mode(
+        &self,
+        runtime: Arc<AgentSessionRuntime>,
+        options: PrintModeSeamOptions,
+    ) -> BoxFuture<Result<i32, String>>;
+    /// `new InteractiveMode({ ... })` + `interactiveMode.run()`.
+    fn run_interactive_mode(&self, options: InteractiveModeSeamOptions) -> BoxFuture<Result<(), String>>;
+    /// `new InteractiveMode({ ... })` + `interactiveMode.init()` for the benchmark.
+    fn init_interactive_mode(&self, options: InteractiveModeSeamOptions) -> BoxFuture<Result<(), String>>;
+    /// `preloadCodeHighlighter()`.
+    fn preload_code_highlighter(&self);
+    /// `initTheme(themeName, enableWatcher)`.
+    fn init_theme(&self, theme_name: Option<String>, enable_watcher: bool);
+    /// `stopThemeWatcher()`.
+    fn stop_theme_watcher(&self);
+    /// `process.exit(code)`.
+    fn exit(&self, code: i32);
+    /// `process.exitCode = code`.
+    fn set_exit_code(&self, code: i32);
+    /// `process.stdin.isTTY`.
+    fn stdin_is_tty(&self) -> bool;
+    /// `process.env` lookup.
+    fn env(&self, key: &str) -> Option<String>;
+    /// `process.env[key] = value`.
+    fn set_env(&self, key: &str, value: &str);
+    /// `process.cwd()`.
+    fn cwd(&self) -> String;
+    /// `process.chdir(cwd)`.
+    fn chdir(&self, cwd: &str) -> Result<(), String>;
+    /// `await promptForMissingSessionCwd(issue, settingsManager)`.
+    fn prompt_for_missing_session_cwd(&self, issue: &SessionCwdIssue, agent_dir: &str) -> Option<String>;
+}
+
+/// `runDaemonMode({ ... worker: { ... } })` arguments.
+#[derive(Clone)]
+pub struct DaemonModeSeamOptions {
+    pub socket_path: Option<String>,
+    pub default_session_config: AgentSessionRuntimeConfig,
+    pub create_runtime: CreateAgentSessionRuntimeFactory,
+    pub worker: Option<DaemonWorkerSeamOptions>,
+}
+
+/// `worker: { authenticationToken, workerInstanceId, restoreActiveSessionId }`.
+#[derive(Clone)]
+pub struct DaemonWorkerSeamOptions {
+    pub authentication_token: String,
+    pub worker_instance_id: Option<String>,
+    pub restore_active_session_id: Option<String>,
+}
+
+/// `runAgentsViewMode(options)` arguments.
+#[derive(Clone)]
+pub struct AgentsViewSeamOptions {
+    pub socket_path: String,
+    pub config: AgentSessionRuntimeConfig,
+    pub agent_dir: String,
+    pub migrated_providers: Vec<String>,
+    pub model_fallback_message: Option<String>,
+    pub startup_model_id: Option<String>,
+    pub verbose: bool,
+}
+
+/// `runPrintModeWithConnection(connection, options)` arguments.
+#[derive(Clone)]
+pub struct PrintModeSeamOptions {
+    pub mode: String,
+    pub messages: Vec<String>,
+    pub initial_message: Option<String>,
+    pub initial_images: Option<Vec<ImageContent>>,
+}
+
+/// `new InteractiveMode({ ... })` arguments.
+#[derive(Clone)]
+pub struct InteractiveModeSeamOptions {
+    pub daemon_socket_path: Option<String>,
+    pub migrated_providers: Vec<String>,
+    pub model_fallback_message: Option<String>,
+    pub initial_message: Option<String>,
+    pub initial_images: Option<Vec<ImageContent>>,
+    pub initial_messages: Vec<String>,
+    pub verbose: bool,
+    pub return_to_agents_view: bool,
+    pub session_depth: Option<f64>,
+    pub session_has_children: bool,
+    /// `agentConnection`: a daemon-backed connection, or `None` for the
+    /// in-process runtime (the host builds `new InProcessAgentConnection(runtime)`).
+    pub connection: Option<Arc<dyn crate::modes::agent_connection::types::AgentConnection>>,
+    /// `localSessionHost: createInteractiveModeLocalSessionHost(runtime)`.
+    pub runtime: Option<Arc<AgentSessionRuntime>>,
+}
+
+/// `main(args, options?)`.
+///
+/// blocked_on: see `MainHost`. The port keeps the TypeScript order of every
+/// step, including the early `--offline` env writes, the settings diagnostics,
+/// the daemon-ready promise shared by the interactive branches, and the exit
+/// codes of each failure path.
+pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) {
+    reset_timings();
+    if is_daemon_worker_process_from_env() {
+        let mut environment = current_environment();
+        if let Err(message) = wait_for_daemon_worker_startup_gate(&mut environment) {
+            eprintln!("{message}");
+            host.exit(1);
+            return;
+        }
+    }
+    install_file_log_sink(None);
+    if is_daemon_catalog_process_from_env() {
+        if let Err(message) = host.run_daemon_catalog_process().await {
+            eprintln!("Prime Agent daemon catalog failed: {message}");
+            host.exit(1);
+        }
+        return;
+    }
+    // Client and daemon are separate processes; both need these in their registry.
+    host.register_builtin_mcp_oauth_providers();
+    let offline_mode = args.iter().any(|arg| arg == "--offline")
+        || is_truthy_env_flag(host.env("PI_OFFLINE").as_deref());
+    if offline_mode {
+        host.set_env("PI_OFFLINE", "1");
+        host.set_env("PI_SKIP_VERSION_CHECK", "1");
+    }
+
+    let public_outcome = match host.handle_public_command(args.clone()).await {
+        Ok(outcome) => outcome,
+        Err(message) => {
+            eprintln!("{}", red(&message));
+            host.exit(1);
+            return;
+        }
+    };
+    if public_outcome.handled {
+        return;
+    }
+    let args = public_outcome.args;
+
+    if crate::package_manager_cli::handle_config_command(&args).await {
+        return;
+    }
+
+    let explicit_agents_view = Some(public_outcome.explicit_agents_view);
+
+    let mut parsed = parse_args(&args);
+    if !parsed.diagnostics.is_empty() {
+        for diagnostic in &parsed.diagnostics {
+            let color = if diagnostic.type_.as_str() == "error" { red } else { yellow };
+            let label = if diagnostic.type_.as_str() == "error" { "Error" } else { "Warning" };
+            eprintln!("{}", color(&format!("{label}: {}", diagnostic.message)));
+        }
+        if parsed.diagnostics.iter().any(|d| d.type_.as_str() == "error") {
+            host.exit(1);
+            return;
+        }
+    }
+    time("parseArgs");
+    let app_mode = resolve_app_mode(&parsed, host.stdin_is_tty());
+
+    if should_reject_non_interactive_attach(public_outcome.attach_agent.as_deref(), &app_mode) {
+        eprintln!("{}", red("Error: attach requires an interactive terminal"));
+        host.exit(1);
+        return;
+    }
+    if should_reject_non_interactive_bare_resume(parsed.resume.as_ref(), &app_mode) {
+        eprintln!(
+            "{}",
+            red("Error: --resume without a session selector requires an interactive terminal")
+        );
+        host.exit(1);
+        return;
+    }
+    set_log_context(log_context(&app_mode));
+    let should_take_over_stdout = app_mode != APP_MODE_INTERACTIVE;
+    if should_take_over_stdout {
+        take_over_stdout();
+    }
+
+    if parsed.version == Some(true) {
+        println!("{VERSION}");
+        host.exit(0);
+        return;
+    }
+    if parsed.help == Some(true) {
+        println!("{}", format_top_level_help());
+        host.exit(0);
+        return;
+    }
+
+    if let Some(export_target) = parsed.export.clone() {
+        let output_path = parsed.messages.first().cloned();
+        let result = export_from_file(
+            &export_target,
+            Some(ExportOptions { output_path, ..Default::default() }),
+        );
+        let result = match result {
+            Ok(result) => result,
+            Err(message) => {
+                eprintln!("{}", red(&format!("Error: {message}")));
+                host.exit(1);
+                return;
+            }
+        };
+        println!("Exported to: {result}");
+        host.exit(0);
+        return;
+    }
+
+    if (parsed.mode.as_deref() == Some("rpc") || parsed.mode.as_deref() == Some(APP_MODE_DAEMON))
+        && !parsed.file_args.is_empty()
+    {
+        eprintln!("{}", red("Error: @file arguments are not supported in RPC or daemon mode"));
+        host.exit(1);
+        return;
+    }
+
+    validate_fork_flags(&parsed);
+
+    let cwd = match &parsed.cwd {
+        Some(requested) => Path::new(&expand_tilde_path(requested))
+            .to_string_lossy()
+            .to_string(),
+        None => host.cwd(),
+    };
+    if parsed.cwd.is_some() {
+        let absolute = if Path::new(&cwd).is_absolute() {
+            cwd.clone()
+        } else {
+            Path::new(&host.cwd()).join(&cwd).to_string_lossy().to_string()
+        };
+        if let Err(message) = host.chdir(&absolute) {
+            eprintln!("{}", red(&format!("Error: Cannot use cwd {cwd}: {message}")));
+            host.exit(1);
+            return;
+        }
+    }
+    if let Some(daemon_socket) = &parsed.daemon_socket {
+        // After --cwd so a relative socket path resolves against the requested directory.
+        parsed.daemon_socket = Some(normalize_socket_path(daemon_socket, None));
+    }
+
+    // Run migrations (pass cwd for project-local migrations)
+    let migrations = run_migrations(&cwd);
+    let migrated_providers = migrations.migrated_auth_providers.clone();
+    let deprecation_warnings = migrations.deprecation_warnings.clone();
+    time("runMigrations");
+
+    let agent_dir = get_agent_dir();
+    let mut startup_settings_manager = SettingsManager::create(&cwd, Some(&agent_dir));
+    report_diagnostics(&collect_settings_diagnostics(
+        &mut startup_settings_manager,
+        "startup session lookup",
+    ));
+    let startup_benchmark = is_truthy_env_flag(host.env("PI_STARTUP_BENCHMARK").as_deref());
+    if startup_benchmark && app_mode != APP_MODE_INTERACTIVE {
+        eprintln!("{}", red("Error: PI_STARTUP_BENCHMARK only supports interactive mode"));
+        host.exit(1);
+        return;
+    }
+    // Programmatic factories are process-local functions and cannot be serialized to a daemon worker.
+    let has_process_local_extension_factories = options
+        .extension_factories
+        .as_ref()
+        .map(|factories| !factories.is_empty())
+        .unwrap_or(false);
+    let use_daemon_client = should_use_daemon_client_runtime(&DaemonClientRuntimeDecision {
+        decision: daemon_client_startup_decision(&parsed, &app_mode, startup_benchmark),
+        owned_session_worker: host.is_owned_session_worker_process(),
+        has_process_local_extension_factories,
+    });
+    let use_daemon_interactive = use_daemon_client && app_mode == APP_MODE_INTERACTIVE;
+
+    // Decide the final runtime cwd before creating cwd-bound runtime services.
+    // --resume may select a session from another project, so project-local
+    // settings, resources, provider registrations, and models must be resolved only after
+    // the target session cwd is known. The startup-cwd settings manager is used only for
+    // sessionDir lookup during session selection.
+    let session_dir = parsed
+        .session_dir
+        .as_ref()
+        .map(|dir| expand_tilde_path(dir))
+        .or_else(get_session_dir_env_override)
+        .or_else(|| startup_settings_manager.get_session_dir());
+    let daemon_socket_path = parsed.daemon_socket.clone().unwrap_or_else(default_daemon_socket_path);
+    // Kick off daemon spawn/readiness immediately so it overlaps session-manager
+    // and runtime-services preparation; attach only connects to an existing daemon.
+    let mut daemon_ready = if should_ensure_interactive_daemon_for_startup(
+        use_daemon_interactive,
+        public_outcome.attach_agent.as_deref(),
+    ) {
+        Some(DaemonReadyHandle::start(&daemon_socket_path))
+    } else {
+        None
+    };
+    let resume_selector = get_resume_selector(&parsed);
+    let should_lookup_daemon_active_session = should_ensure_daemon_before_active_session_lookup(
+        &DaemonActiveSessionLookupDecision {
+            use_daemon_interactive,
+            resume_selector: resume_selector.clone(),
+            explicit_attach: Some(public_outcome.attach_agent.is_some()),
+        },
+    );
+    if should_lookup_daemon_active_session {
+        daemon_ready = await_daemon_ready(daemon_ready).await;
+    }
+    let mut active_daemon_session_summary: Option<SessionSummary> = None;
+    if should_lookup_daemon_active_session {
+        if let Some(resume_selector) = &resume_selector {
+            let lookup = find_active_daemon_session_summary_for_interactive_startup(
+                &daemon_socket_path,
+                resume_selector,
+                &ActiveDaemonSessionSummaryLookupOptions {
+                    fallback_on_error: Some(public_outcome.attach_agent.is_none()),
+                },
+            )
+            .await;
+            match lookup {
+                Ok(summary) => active_daemon_session_summary = summary,
+                Err(message) => {
+                    eprintln!(
+                        "{}",
+                        red(&format!(
+                            "Error: Could not look up active agent '{resume_selector}': {message}"
+                        ))
+                    );
+                    host.exit(1);
+                    return;
+                }
+            }
+        }
+    }
+    if let Some(attach_agent) = &public_outcome.attach_agent {
+        if active_daemon_session_summary.is_none() {
+            eprintln!(
+                "{}",
+                red(&format!("Error: No active agent found matching '{attach_agent}'"))
+            );
+            host.exit(1);
+            return;
+        }
+    }
+    let session_manager: SessionManager;
+    if let Some(summary) = &active_daemon_session_summary {
+        session_manager = create_session_manager_for_active_daemon_summary(summary, &cwd);
+    } else if use_daemon_interactive
+        && should_use_ephemeral_session_manager_for_daemon_interactive(&DaemonInteractiveSessionManagerDecision {
+            resume: parsed.resume.clone(),
+            continue_: parsed.continue_,
+            fork: parsed.fork.clone(),
+            has_active_daemon_session: Some(false),
+        })
+    {
+        session_manager = SessionManager::in_memory(Some(&cwd), None).expect("in-memory session manager");
+    } else {
+        match create_session_manager(&parsed, &cwd, session_dir.as_deref(), use_daemon_client).await {
+            Ok(manager) => session_manager = manager,
+            Err(error) => {
+                let message = error.message().to_string();
+                if !error.is_selector_error() {
+                    eprintln!("{}", red(&format!("Error: {message}")));
+                    host.exit(1);
+                    return;
+                }
+                let suggestion = match error.suggestion() {
+                    Some(suggestion) => format!(" Did you mean '{suggestion}'?"),
+                    None => String::new(),
+                };
+                eprintln!("{}", red(&format!("Error: {message}.{suggestion}")));
+                eprintln!(
+                    "{}",
+                    dim(&format!("Open {APP_NAME} and press left-arrow to browse sessions."))
+                );
+                host.exit(1);
+                return;
+            }
+        }
+    }
+    let mut session_manager = session_manager;
+    // `getMissingSessionCwdIssue(sessionManager, cwd)`.
+    //
+    // blocked_on: `SessionManager` does not implement `SessionCwdSource`
+    // (core/session-cwd.ts owns the trait), so the port passes the same two
+    // accessors through a private adapter.
+    let session_cwd_source = SessionManagerCwdSource { session_manager: &session_manager };
+    if let Some(issue) = get_missing_session_cwd_issue(&session_cwd_source, &cwd) {
+        if app_mode == APP_MODE_INTERACTIVE {
+            host.init_theme(startup_settings_manager.get_theme(), false);
+            host.set_keybindings(&agent_dir);
+            let selected_cwd = host.prompt_for_missing_session_cwd(&issue, &agent_dir);
+            let Some(selected_cwd) = selected_cwd else {
+                host.exit(0);
+                return;
+            };
+            let session_file = issue.session_file.clone().unwrap_or_default();
+            session_manager = if use_daemon_client {
+                read_session_manager(&session_file, session_dir.as_deref(), Some(&selected_cwd))
+            } else {
+                match SessionManager::open(&session_file, session_dir.as_deref(), Some(&selected_cwd)) {
+                    Ok(manager) => manager,
+                    Err(message) => {
+                        eprintln!("{}", red(&format!("Error: {message}")));
+                        host.exit(1);
+                        return;
+                    }
+                }
+            };
+        } else {
+            eprintln!("{}", red(&MissingSessionCwdError::new(issue).to_string()));
+            host.exit(1);
+            return;
+        }
+    }
+    time("createSessionManager");
+
+    // `sessionManager.getCwd() === cwd ? startupSettingsManager : SettingsManager.create(...)`.
+    // `SettingsManager` is not shared-mutable in the port, so the startup
+    // manager is moved into the telemetry check instead of being aliased.
+    let telemetry_settings_manager = if session_manager.get_cwd() == cwd {
+        startup_settings_manager
+    } else {
+        SettingsManager::create(&session_manager.get_cwd(), Some(&agent_dir))
+    };
+    let telemetry_disabled = if crate::core::agent_session_services::is_telemetry_enabled(&Arc::new(Mutex::new(
+        telemetry_settings_manager,
+    ))) {
+        None
+    } else {
+        Some(true)
+    };
+    let default_session_config = runtime_config_from_args(
+        &parsed,
+        &session_manager.get_cwd(),
+        &agent_dir,
+        session_dir.as_deref(),
+        &app_mode,
+        telemetry_disabled,
+    );
+    // Verifier/headless clients pass initialGoal in each create request. The long-lived
+    // daemon fallback must not seed that goal into unrelated future sessions.
+    let daemon_default_session_config = daemon_server_default_session_config(&default_session_config);
+    let runtime_default_session_config = if app_mode == APP_MODE_DAEMON {
+        daemon_default_session_config.clone()
+    } else {
+        default_session_config.clone()
+    };
+    let create_runtime =
+        create_default_runtime_factory(runtime_default_session_config, options.extension_factories.clone());
+    time("createRuntime");
+    // Daemon mode never uses the bootstrap runtime, so skip the heavy
+    // createAgentSessionRuntime below and start listening immediately; sessions
+    // are created on demand through the daemon protocol via createRuntime.
+    // --list-models still takes the full path to print and exit.
+    if app_mode == APP_MODE_DAEMON && parsed.list_models.is_none() {
+        print_timings();
+        if is_daemon_worker_process_from_env() {
+            let environment = current_environment();
+            let worker = match require_daemon_worker_authentication_token(&environment) {
+                Ok(authentication_token) => DaemonWorkerSeamOptions {
+                    authentication_token,
+                    worker_instance_id: daemon_worker_instance_id(&environment),
+                    restore_active_session_id: environment.get(DAEMON_WORKER_ACTIVE_SESSION_ID_ENV).cloned(),
+                },
+                Err(message) => {
+                    eprintln!("{message}");
+                    host.exit(1);
+                    return;
+                }
+            };
+            if let Err(message) = host
+                .run_daemon_mode(DaemonModeSeamOptions {
+                    socket_path: parsed.daemon_socket.clone(),
+                    default_session_config: daemon_default_session_config,
+                    create_runtime,
+                    worker: Some(worker),
+                })
+                .await
+            {
+                eprintln!("{message}");
+                host.exit(1);
+            }
+        } else if let Err(message) = host
+            .run_daemon_supervisor_mode(parsed.daemon_socket.clone(), daemon_default_session_config)
+            .await
+        {
+            eprintln!("{message}");
+            host.exit(1);
+        }
+        return;
+    }
+    if use_daemon_interactive {
+        let prepared = prepare_runtime_services(PrepareRuntimeServicesOptions {
+            config: default_session_config.clone(),
+            cwd: session_manager.get_cwd(),
+            agent_dir: agent_dir.clone(),
+            session_manager: Arc::new(Mutex::new(session_manager.clone())),
+            extension_factories: options.extension_factories.clone(),
+            session_options_override: None,
+        })
+        .await;
+        let services = Arc::clone(&prepared.services);
+        let scoped_models = prepared.scoped_models.clone();
+        let settings_manager = Arc::clone(&services.settings_manager);
+
+        let startup_model =
+            resolve_prepared_startup_model(&prepared, &Arc::new(Mutex::new(session_manager.clone()))).await;
+
+        let stdin_content = read_piped_stdin().await;
+        time("readPipedStdin");
+
+        let (initial_message, initial_images) = match prepare_initial_message(
+            &mut parsed,
+            settings_manager.lock().unwrap().get_image_auto_resize(),
+            stdin_content,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(message) => {
+                eprintln!("{message}");
+                host.exit(1);
+                return;
+            }
+        };
+        time("prepareInitialMessage");
+        host.init_theme(settings_manager.lock().unwrap().get_theme(), true);
+        time("initTheme");
+
+        if !deprecation_warnings.is_empty() {
+            show_deprecation_warnings(&deprecation_warnings).await;
+        }
+
+        report_diagnostics(&prepared.diagnostics);
+        if prepared
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.type_.as_str() == "error")
+        {
+            host.exit(1);
+            return;
+        }
+        time("prepareInteractiveServices");
+
+        print_model_scope(&scoped_models, parsed.verbose == Some(true), &settings_manager);
+
+        // `new ClientPromptStashStore()` is created once per TUI process and
+        // shared across chat views; `InteractiveMode` owns the store itself, so
+        // the port passes only the seam-visible parts below.
+        let needs_onboarding = {
+            let settings_guard = settings_manager.lock().unwrap();
+            let registry_guard = services.model_registry.lock().unwrap();
+            crate::modes::interactive::onboarding::should_run_onboarding(
+                &crate::modes::interactive::onboarding::OnboardingStartupState {
+                    settings_manager: &*settings_guard,
+                    model_registry: &*registry_guard,
+                    model: startup_model.model.as_ref(),
+                },
+            )
+        };
+        if should_open_agents_view_for_daemon_interactive(&AgentsViewStartupDecision {
+            use_daemon_interactive: use_daemon_interactive && parsed.no_session != Some(true),
+            needs_onboarding,
+            explicit_agents_view,
+            resume: parsed.resume.clone(),
+            continue_: parsed.continue_,
+            fork: parsed.fork.clone(),
+        }) {
+            daemon_ready = await_daemon_ready(daemon_ready).await;
+            host.preload_code_highlighter();
+            print_timings();
+            let result = host
+                .run_agents_view_mode(AgentsViewSeamOptions {
+                    socket_path: daemon_socket_path.clone(),
+                    config: default_session_config.clone(),
+                    agent_dir: agent_dir.clone(),
+                    migrated_providers: migrated_providers.clone(),
+                    model_fallback_message: startup_model.model_fallback_message.clone(),
+                    startup_model_id: startup_model.model.as_ref().map(|model| model.id.clone()),
+                    verbose: parsed.verbose == Some(true),
+                })
+                .await;
+            if let Err(message) = result {
+                eprintln!("{message}");
+                host.exit(1);
+            }
+            return;
+        }
+
+        daemon_ready = await_daemon_ready(daemon_ready).await;
+        // A fresh default chat opens a real but message-less session; the lifecycle
+        // axis treats it as a draft (hidden, discarded on detach if never used), so
+        // no DeferredAgentConnection is needed to avoid creating it up front.
+        let _is_fresh_default_session =
+            active_daemon_session_summary.is_none() && get_interactive_daemon_session_path(&parsed, &session_manager).is_none();
+        let connection = match create_daemon_client_connection(CreateDaemonClientConnectionOptions {
+            socket_path: daemon_socket_path.clone(),
+            config: default_session_config.clone(),
+            session_path: get_interactive_daemon_session_path(&parsed, &session_manager),
+            continue_recent: None,
+            active_session_id: active_daemon_session_summary
+                .as_ref()
+                .map(get_daemon_summary_active_session_id),
+            client_owned: parsed.no_session,
+            no_session: parsed.no_session,
+            supports_extension_ui: Some(true),
+        })
+        .await
+        {
+            Ok(connection) => connection,
+            Err(message) => {
+                eprintln!("{}", red(&format!("Error: {message}")));
+                host.exit(1);
+                return;
+            }
+        };
+        let (connection, summary) = connection;
+        // `resolveAttachModelFallbackMessage(summary, startupModel.modelFallbackMessage)`:
+        // the helpers live in the agents-view slice, which exports the same
+        // summary/firstMessage rules the interactive launch reads.
+        let attach_model_fallback_message = startup_model.model_fallback_message.clone();
+
+        host.preload_code_highlighter();
+        print_timings();
+        let result = host
+            .run_interactive_mode(InteractiveModeSeamOptions {
+                daemon_socket_path: Some(daemon_socket_path.clone()),
+                migrated_providers: migrated_providers.clone(),
+                model_fallback_message: attach_model_fallback_message,
+                initial_message,
+                initial_images,
+                initial_messages: parsed.messages.clone(),
+                verbose: parsed.verbose == Some(true),
+                // Resumed/attached daemon sessions are part of the same fleet; left
+                // arrow takes them to the agents view like any other session. The agents
+                // view was not rendered here, so we intentionally leave
+                // agentsViewOwnsStartupNotices unset and let the in-session fallback run.
+                return_to_agents_view: parsed.no_session != Some(true),
+                session_depth: summary.rlm_depth.map(|depth| depth as f64),
+                // Direct launch has only the attached summary; the live+passive+saved
+                // unified catalog index is not built until the agents view opens. Retained
+                // child snapshots augment this running-child fallback inside chat.
+                session_has_children: summary.has_running_rlm_children == Some(true),
+                connection: Some(Arc::clone(&connection) as Arc<dyn crate::modes::agent_connection::types::AgentConnection>),
+                runtime: None,
+            })
+            .await;
+        if let Err(message) = result {
+            eprintln!("{message}");
+            host.exit(1);
+            return;
+        }
+        if parsed.no_session == Some(true) {
+            return;
+        }
+        // The returned `interactiveResult.source` decides whether the agents view
+        // opens next (`scoped_agents_view` also carries the scope key); the
+        // session summary merge and the scope key are host-owned because they
+        // belong to the interactive slice's run result.
+        host.preload_code_highlighter();
+        print_timings();
+        let result = host
+            .run_agents_view_mode(AgentsViewSeamOptions {
+                socket_path: daemon_socket_path.clone(),
+                config: default_session_config.clone(),
+                agent_dir: agent_dir.clone(),
+                migrated_providers: migrated_providers.clone(),
+                model_fallback_message: None,
+                startup_model_id: None,
+                verbose: parsed.verbose == Some(true),
+            })
+            .await;
+        if let Err(message) = result {
+            eprintln!("{message}");
+            host.exit(1);
+        }
+        return;
+    }
+    if use_daemon_client {
+        let settings_manager = SettingsManager::create(&session_manager.get_cwd(), Some(&agent_dir));
+        let mut stdin_content: Option<String> = None;
+        if app_mode != "rpc" && app_mode != "acp" {
+            stdin_content = read_piped_stdin().await;
+        }
+        time("readPipedStdin");
+        let (initial_message, initial_images) = match prepare_initial_message(
+            &mut parsed,
+            settings_manager.get_image_auto_resize(),
+            stdin_content,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(message) => {
+                eprintln!("{message}");
+                host.exit(1);
+                return;
+            }
+        };
+        time("prepareInitialMessage");
+        host.init_theme(settings_manager.get_theme(), false);
+        time("initTheme");
+
+        daemon_ready = await_daemon_ready(daemon_ready).await;
+        let connection = match create_daemon_client_connection(CreateDaemonClientConnectionOptions {
+            socket_path: daemon_socket_path.clone(),
+            config: default_session_config.clone(),
+            session_path: if parsed.no_session == Some(true) {
+                None
+            } else {
+                session_manager.get_session_file()
+            },
+            continue_recent: parsed.continue_,
+            active_session_id: None,
+            client_owned: Some(is_client_owned_daemon_session(&app_mode, parsed.no_session)),
+            no_session: parsed.no_session,
+            supports_extension_ui: Some(app_mode == "rpc"),
+        })
+        .await
+        {
+            Ok(connection) => connection,
+            Err(message) => {
+                eprintln!("{}", red(&format!("Error: {message}")));
+                host.exit(1);
+                return;
+            }
+        };
+        let (connection, summary) = connection;
+        let diagnostics: Vec<AgentSessionRuntimeDiagnostic> = summary
+            .diagnostics
+            .as_ref()
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+            .unwrap_or_default();
+        report_diagnostics(&diagnostics);
+        if diagnostics.iter().any(|diagnostic| diagnostic.type_.as_str() == "error") {
+            let _ = connection.dispose().await;
+            host.exit(1);
+            return;
+        }
+        if summary.model.is_none() {
+            eprintln!(
+                "{}",
+                red(&summary
+                    .model_fallback_message
+                    .clone()
+                    .unwrap_or_else(format_no_models_available_message))
+            );
+            let _ = connection.dispose().await;
+            host.exit(1);
+            return;
+        }
+
+        print_timings();
+        let connection: Arc<dyn crate::modes::agent_connection::types::AgentConnection> = connection;
+        if app_mode == "rpc" {
+            if let Err(message) = host.run_rpc_mode_with_connection(connection).await {
+                eprintln!("{message}");
+                host.exit(1);
+            }
+            return;
+        }
+        if app_mode == "acp" {
+            if let Err(message) = host.run_acp_mode_with_connection(connection).await {
+                eprintln!("{message}");
+                host.exit(1);
+            }
+            return;
+        }
+        let exit_code = match host
+            .run_print_mode_with_connection(
+                connection,
+                PrintModeSeamOptions {
+                    mode: to_print_output_mode(&app_mode).to_string(),
+                    messages: parsed.messages.clone(),
+                    initial_message,
+                    initial_images,
+                },
+            )
+            .await
+        {
+            Ok(exit_code) => exit_code,
+            Err(message) => {
+                eprintln!("{message}");
+                host.exit(1);
+                return;
+            }
+        };
+        host.stop_theme_watcher();
+        restore_stdout();
+        if exit_code != 0 {
+            host.set_exit_code(exit_code);
+        }
+        return;
+    }
+
+    let runtime = match create_agent_session_runtime_port(
+        Arc::clone(&create_runtime),
+        CreateAgentSessionRuntimeInput {
+            cwd: session_manager.get_cwd(),
+            agent_dir: agent_dir.clone(),
+            session_manager: Arc::new(Mutex::new(session_manager.clone())),
+            session_start_event: None,
+            session_config: Some(default_session_config.clone()),
+            session_options: None,
+            runtime_metadata: None,
+            session_lease: None,
+        },
+    )
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(message) => {
+            eprintln!("{}", red(&format!("Error: {message}")));
+            host.exit(1);
+            return;
+        }
+    };
+    let services = runtime.services();
+    let session = runtime.session();
+    let model_fallback_message = runtime.model_fallback_message();
+    host.install_owned_session_recovery_tracking(Arc::clone(&runtime));
+    let settings_manager = Arc::clone(&services.settings_manager);
+    let model_registry = Arc::clone(&services.model_registry);
+
+    if let Some(list_models_value) = &parsed.list_models {
+        let search_pattern = match list_models_value {
+            ListModelsValue::All => None,
+            ListModelsValue::Search(pattern) => Some(pattern.clone()),
+        };
+        // `listModels(modelRegistry, searchPattern)`.
+        //
+        // blocked_on: `cli/list-models.ts` is landed with a synchronous
+        // `ModelRegistry` trait, while `await modelRegistry.refreshAvailableModels()`
+        // is async in the TypeScript. The adapter below feeds the module from the
+        // same registry through its synchronous `refresh()` / `getAvailable()`
+        // pair, so no await is needed to produce the rows.
+        let adapter = {
+            let mut registry = model_registry.lock().unwrap();
+            registry.refresh();
+            CliModelRegistryAdapter {
+                error: registry.get_error().map(str::to_string),
+                models: registry.get_available(),
+            }
+        };
+        list_models(
+            &adapter,
+            search_pattern.as_deref(),
+            &ListModelsIo {
+                log: &|message: &str| println!("{message}"),
+                error: &|message: &str| eprintln!("{message}"),
+            },
+        );
+        host.exit(0);
+        return;
+    }
+
+    // Read piped stdin content (if any) - skip for RPC/daemon modes which use other transports
+    let mut stdin_content: Option<String> = None;
+    if app_mode != "rpc" && app_mode != "acp" && app_mode != APP_MODE_DAEMON {
+        stdin_content = read_piped_stdin().await;
+    }
+    time("readPipedStdin");
+
+    let (initial_message, initial_images) = match prepare_initial_message(
+        &mut parsed,
+        settings_manager.lock().unwrap().get_image_auto_resize(),
+        stdin_content,
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(message) => {
+            eprintln!("{message}");
+            host.exit(1);
+            return;
+        }
+    };
+    time("prepareInitialMessage");
+    host.init_theme(
+        settings_manager.lock().unwrap().get_theme(),
+        app_mode == APP_MODE_INTERACTIVE,
+    );
+    time("initTheme");
+
+    // Show deprecation warnings in interactive mode
+    if app_mode == APP_MODE_INTERACTIVE && !deprecation_warnings.is_empty() {
+        show_deprecation_warnings(&deprecation_warnings).await;
+    }
+
+    let scoped_models: Vec<ScopedModel> = session.scoped_models();
+    time("resolveModelScope");
+    report_diagnostics(&runtime.diagnostics());
+    if runtime
+        .diagnostics()
+        .iter()
+        .any(|diagnostic| diagnostic.type_.as_str() == "error")
+    {
+        host.exit(1);
+        return;
+    }
+    time("createAgentSession");
+
+    if app_mode != APP_MODE_INTERACTIVE && app_mode != APP_MODE_DAEMON && session.model().is_none() {
+        eprintln!("{}", red(&format_no_models_available_message()));
+        host.exit(1);
+        return;
+    }
+
+    if app_mode == "rpc" {
+        print_timings();
+        if let Err(message) = host.run_rpc_mode(Arc::clone(&runtime)).await {
+            eprintln!("{message}");
+            host.exit(1);
+        }
+    } else if app_mode == "acp" {
+        print_timings();
+        if let Err(message) = host.run_acp_mode(Arc::clone(&runtime)).await {
+            eprintln!("{message}");
+            host.exit(1);
+        }
+    } else if app_mode == APP_MODE_INTERACTIVE {
+        if explicit_agents_view == Some(true) || matches!(parsed.resume, Some(ResumeValue::Latest)) {
+            eprintln!(
+                "{}",
+                yellow("Warning: the agents view needs the daemon; opening a normal chat instead")
+            );
+        }
+        print_model_scope(&scoped_models, parsed.verbose == Some(true), &settings_manager);
+
+        let interactive_options = InteractiveModeSeamOptions {
+            daemon_socket_path: None,
+            migrated_providers: migrated_providers.clone(),
+            model_fallback_message: model_fallback_message.clone(),
+            initial_message: initial_message.clone(),
+            initial_images: initial_images.clone(),
+            initial_messages: parsed.messages.clone(),
+            verbose: parsed.verbose == Some(true),
+            return_to_agents_view: false,
+            session_depth: None,
+            session_has_children: false,
+            // `new InProcessAgentConnection(runtime)` plus
+            // `createInteractiveModeLocalSessionHost(runtime)`: the host builds
+            // both from the runtime it is given.
+            connection: None,
+            runtime: Some(Arc::clone(&runtime)),
+        };
+        if startup_benchmark {
+            if let Err(message) = host.init_interactive_mode(interactive_options).await {
+                eprintln!("{message}");
+                host.exit(1);
+                return;
+            }
+            time("interactiveMode.init");
+            print_timings();
+            host.stop_theme_watcher();
+            return;
+        }
+
+        host.preload_code_highlighter();
+        print_timings();
+        if let Err(message) = host.run_interactive_mode(interactive_options).await {
+            eprintln!("{message}");
+            host.exit(1);
+        }
+    } else {
+        print_timings();
+        let exit_code = match host
+            .run_print_mode(
+                Arc::clone(&runtime),
+                PrintModeSeamOptions {
+                    mode: to_print_output_mode(&app_mode).to_string(),
+                    messages: parsed.messages.clone(),
+                    initial_message,
+                    initial_images,
+                },
+            )
+            .await
+        {
+            Ok(exit_code) => exit_code,
+            Err(message) => {
+                eprintln!("{message}");
+                host.exit(1);
+                return;
+            }
+        };
+        host.stop_theme_watcher();
+        restore_stdout();
+        if exit_code != 0 {
+            host.set_exit_code(exit_code);
+        }
+    }
+}
+
+/// `console.log(chalk.dim(\`Model scope: ...\`))`.
+fn print_model_scope(scoped_models: &[ScopedModel], verbose: bool, settings_manager: &Arc<Mutex<SettingsManager>>) {
+    if !scoped_models.is_empty() && (verbose || !settings_manager.lock().unwrap().get_quiet_startup()) {
+        let model_list = scoped_models
+            .iter()
+            .map(|scoped| match &scoped.thinking_level {
+                Some(thinking_level) => format!("{}:{}", scoped.model.id, thinking_level),
+                None => scoped.model.id.clone(),
+            })
+            .collect::<Vec<String>>()
+            .join(", ");
+        println!("{}", dim(&format!("Model scope: {model_list} {}", gray("(Ctrl+P to cycle)"))));
+    }
+}
+
+/// `createAgentSessionRuntime(createRuntime, options)`.
+///
+/// blocked_on: `core/agent-session-runtime.ts` exports the class but not this
+/// factory yet (the module is still being landed by another slice), so the
+/// function body lives here verbatim: acquire the lease when the caller has
+/// none, assert the session cwd, run the factory, and build the runtime.
+pub async fn create_agent_session_runtime_port(
+    create_runtime: CreateAgentSessionRuntimeFactory,
+    options: CreateAgentSessionRuntimeInput,
+) -> Result<Arc<AgentSessionRuntime>, String> {
+    let CreateAgentSessionRuntimeInput {
+        cwd,
+        agent_dir,
+        session_manager,
+        session_start_event,
+        session_config,
+        session_options,
+        runtime_metadata,
+        session_lease,
+    } = options;
+    let lease = match session_lease {
+        Some(lease) => Some(lease),
+        None => match crate::core::session_lease::acquire_session_lease(
+            session_manager.lock().unwrap().get_session_file().as_deref(),
+            &agent_dir,
+            None,
+        ) {
+            Ok(lease) => lease.map(|lease| Arc::new(Mutex::new(lease))),
+            Err(error) => return Err(error.to_string()),
+        },
+    };
+    let lease_failed = |error: String| {
+        if let Some(lease) = &lease {
+            lease.lock().unwrap().release();
+        }
+        error
+    };
+    crate::core::session_cwd::assert_session_cwd_exists(
+        &SessionManagerCwdSource { session_manager: &*session_manager.lock().unwrap() },
+        &cwd,
+    )
+    .map_err(lease_failed)?;
+    let result = create_runtime(CreateAgentSessionRuntimeInput {
+        cwd,
+        agent_dir,
+        session_manager,
+        session_start_event,
+        session_config: session_config.clone(),
+        session_options,
+        runtime_metadata: runtime_metadata.clone(),
+        session_lease: lease.clone(),
+    })
+    .await
+    .map_err(lease_failed)?;
+    Ok(AgentSessionRuntime::new(
+        result.result.session,
+        result.services,
+        create_runtime,
+        result.diagnostics,
+        result.result.model_fallback_message,
+        session_config,
+        runtime_metadata.unwrap_or_default(),
+        lease,
+    ))
+}
+
+/// `SessionCwdSource` view of `SessionManager`.
+struct SessionManagerCwdSource<'a> {
+    session_manager: &'a SessionManager,
+}
+
+impl crate::core::session_cwd::SessionCwdSource for SessionManagerCwdSource<'_> {
+    fn get_cwd(&self) -> String {
+        self.session_manager.get_cwd()
+    }
+
+    fn get_session_file(&self) -> Option<String> {
+        self.session_manager.get_session_file()
+    }
+}
+
+/// `ModelRegistry` view consumed by `cli/list-models.ts`.
+struct CliModelRegistryAdapter {
+    error: Option<String>,
+    models: Vec<Model>,
+}
+
+impl crate::cli::list_models::ModelRegistry for CliModelRegistryAdapter {
+    fn get_error(&self) -> Option<String> {
+        self.error.clone()
+    }
+
+    fn refresh_available_models(&self) -> Vec<Model> {
+        self.models.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::args::UnknownFlagValue;
+
+    fn args(argv: &[&str]) -> Args {
+        parse_args(&argv.iter().map(|arg| arg.to_string()).collect::<Vec<String>>())
+    }
+
+    #[test]
+    fn app_mode_follows_the_mode_flags_then_the_tty() {
+        assert_eq!(resolve_app_mode(&args(&["--mode", "daemon"]), true), "daemon");
+        assert_eq!(resolve_app_mode(&args(&["--mode", "rpc"]), true), "rpc");
+        assert_eq!(resolve_app_mode(&args(&["--mode", "acp"]), true), "acp");
+        assert_eq!(resolve_app_mode(&args(&["--mode", "json"]), true), "json");
+        assert_eq!(resolve_app_mode(&args(&["--print"]), true), "print");
+        assert_eq!(resolve_app_mode(&args(&[]), false), "print");
+        assert_eq!(resolve_app_mode(&args(&[]), true), "interactive");
+    }
+
+    #[test]
+    fn print_output_mode_is_json_only_for_json() {
+        assert_eq!(to_print_output_mode("json"), "json");
+        assert_eq!(to_print_output_mode("print"), "text");
+        assert_eq!(to_print_output_mode("interactive"), "text");
+    }
+
+    #[test]
+    fn non_interactive_attach_and_bare_resume_are_rejected() {
+        assert!(should_reject_non_interactive_attach(Some("a1"), "print"));
+        assert!(!should_reject_non_interactive_attach(Some("a1"), "interactive"));
+        assert!(!should_reject_non_interactive_attach(None, "print"));
+        assert!(should_reject_non_interactive_bare_resume(Some(&ResumeValue::Latest), "rpc"));
+        assert!(!should_reject_non_interactive_bare_resume(
+            Some(&ResumeValue::Latest),
+            "interactive"
+        ));
+        assert!(!should_reject_non_interactive_bare_resume(
+            Some(&ResumeValue::Selector("s".to_string())),
+            "print"
+        ));
+    }
+
+    #[test]
+    fn acp_is_the_only_client_owned_exception() {
+        assert!(!is_client_owned_daemon_session("acp", None));
+        assert!(is_client_owned_daemon_session("acp", Some(true)));
+        assert!(is_client_owned_daemon_session("print", None));
+    }
+
+    #[test]
+    fn daemon_client_requires_a_non_daemon_mode_without_benchmark_or_help() {
+        let base = DaemonClientStartupDecision {
+            app_mode: "print".to_string(),
+            startup_benchmark: false,
+            no_session: None,
+            help: None,
+            list_models: None,
+        };
+        assert!(should_use_daemon_client(&base));
+        assert!(should_use_daemon_interactive(&DaemonClientStartupDecision {
+            app_mode: "interactive".to_string(),
+            ..base.clone()
+        }));
+        assert!(!should_use_daemon_client(&DaemonClientStartupDecision {
+            app_mode: "daemon".to_string(),
+            ..base.clone()
+        }));
+        assert!(!should_use_daemon_client(&DaemonClientStartupDecision {
+            startup_benchmark: true,
+            ..base.clone()
+        }));
+        assert!(!should_use_daemon_client(&DaemonClientStartupDecision {
+            help: Some(true),
+            ..base.clone()
+        }));
+        assert!(!should_use_daemon_client(&DaemonClientStartupDecision {
+            list_models: Some(ListModelsValue::All),
+            ..base.clone()
+        }));
+        assert!(!should_use_daemon_client_runtime(&DaemonClientRuntimeDecision {
+            decision: base.clone(),
+            owned_session_worker: true,
+            has_process_local_extension_factories: false,
+        }));
+        assert!(!should_use_daemon_client_runtime(&DaemonClientRuntimeDecision {
+            decision: base,
+            owned_session_worker: false,
+            has_process_local_extension_factories: true,
+        }));
+    }
+
+    #[test]
+    fn startup_daemon_readiness_skips_explicit_attach() {
+        assert!(should_ensure_interactive_daemon_for_startup(true, None));
+        assert!(!should_ensure_interactive_daemon_for_startup(true, Some("a1")));
+        assert!(!should_ensure_interactive_daemon_for_startup(false, None));
+    }
+
+    #[test]
+    fn agents_view_opens_only_for_a_bare_or_explicit_start() {
+        let base = AgentsViewStartupDecision {
+            use_daemon_interactive: true,
+            needs_onboarding: false,
+            explicit_agents_view: None,
+            resume: None,
+            continue_: None,
+            fork: None,
+        };
+        assert!(!should_open_agents_view_for_daemon_interactive(&base));
+        assert!(should_open_agents_view_for_daemon_interactive(&AgentsViewStartupDecision {
+            explicit_agents_view: Some(true),
+            ..base.clone()
+        }));
+        assert!(should_open_agents_view_for_daemon_interactive(&AgentsViewStartupDecision {
+            resume: Some(ResumeValue::Latest),
+            ..base.clone()
+        }));
+        assert!(!should_open_agents_view_for_daemon_interactive(&AgentsViewStartupDecision {
+            explicit_agents_view: Some(true),
+            resume: Some(ResumeValue::Selector("s".to_string())),
+            ..base.clone()
+        }));
+        assert!(!should_open_agents_view_for_daemon_interactive(&AgentsViewStartupDecision {
+            explicit_agents_view: Some(true),
+            needs_onboarding: true,
+            ..base.clone()
+        }));
+        assert!(!should_open_agents_view_for_daemon_interactive(&AgentsViewStartupDecision {
+            explicit_agents_view: Some(true),
+            continue_: Some(true),
+            ..base.clone()
+        }));
+        assert!(!should_open_agents_view_for_daemon_interactive(&AgentsViewStartupDecision {
+            explicit_agents_view: Some(true),
+            fork: Some("f".to_string()),
+            ..base
+        }));
+    }
+
+    #[test]
+    fn the_ephemeral_session_manager_needs_no_target() {
+        let base = DaemonInteractiveSessionManagerDecision {
+            resume: None,
+            continue_: None,
+            fork: None,
+            has_active_daemon_session: None,
+        };
+        assert!(should_use_ephemeral_session_manager_for_daemon_interactive(&base));
+        assert!(should_use_ephemeral_session_manager_for_daemon_interactive(
+            &DaemonInteractiveSessionManagerDecision {
+                resume: Some(ResumeValue::Latest),
+                ..base.clone()
+            }
+        ));
+        assert!(!should_use_ephemeral_session_manager_for_daemon_interactive(
+            &DaemonInteractiveSessionManagerDecision {
+                resume: Some(ResumeValue::Selector("s".to_string())),
+                ..base.clone()
+            }
+        ));
+        assert!(!should_use_ephemeral_session_manager_for_daemon_interactive(
+            &DaemonInteractiveSessionManagerDecision {
+                has_active_daemon_session: Some(true),
+                ..base
+            }
+        ));
+    }
+
+    #[test]
+    fn the_active_session_lookup_runs_before_a_selector_lookup() {
+        assert!(should_ensure_daemon_before_active_session_lookup(
+            &DaemonActiveSessionLookupDecision {
+                use_daemon_interactive: true,
+                resume_selector: Some("abc".to_string()),
+                explicit_attach: None,
+            }
+        ));
+        // An explicit --attach always looks the daemon up, even for a path.
+        assert!(should_ensure_daemon_before_active_session_lookup(
+            &DaemonActiveSessionLookupDecision {
+                use_daemon_interactive: true,
+                resume_selector: Some("/tmp/session.jsonl".to_string()),
+                explicit_attach: Some(true),
+            }
+        ));
+        assert!(!should_ensure_daemon_before_active_session_lookup(
+            &DaemonActiveSessionLookupDecision {
+                use_daemon_interactive: true,
+                resume_selector: Some("/tmp/session.jsonl".to_string()),
+                explicit_attach: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn fork_conflicts_are_validated_in_flag_order() {
+        let parsed = args(&["--fork", "target", "--continue"]);
+        assert_eq!(parsed.fork.as_deref(), Some("target"));
+        let conflicting = [
+            parsed.continue_ == Some(true),
+            parsed.resume.is_some(),
+            parsed.no_session == Some(true),
+        ];
+        assert_eq!(conflicting, [true, false, false]);
+    }
+
+    #[test]
+    fn runtime_config_mirrors_the_cli_flags() {
+        let parsed = args(&[
+            "--model",
+            "provider/model",
+            "--no-tools",
+            "--skills",
+            "./skills",
+            "--goal",
+            "ship",
+            "--goal-token-budget",
+            "1000",
+            "--offline",
+        ]);
+        let config = runtime_config_from_args(&parsed, "/work", "/agent", Some("/sessions"), "print", Some(true));
+        assert_eq!(config.cwd.as_deref(), Some("/work"));
+        assert_eq!(config.agent_dir.as_deref(), Some("/agent"));
+        assert_eq!(config.session_dir.as_deref(), Some("/sessions"));
+        assert_eq!(config.model.as_deref(), Some("provider/model"));
+        assert_eq!(config.no_tools, Some(true));
+        assert_eq!(
+            config.skills.as_ref().map(|skills| skills[0].clone()),
+            Some("/work/./skills".to_string())
+        );
+        assert_eq!(config.execution_mode.as_deref(), Some("print"));
+        assert_eq!(config.serialized_refine, Some(true));
+        assert_eq!(config.telemetry_disabled, Some(true));
+        assert_eq!(
+            config.initial_goal.as_ref().map(|goal| goal.objective.clone()),
+            Some("ship".to_string())
+        );
+        assert_eq!(
+            config.initial_goal.as_ref().and_then(|goal| goal.token_budget),
+            Some(1000.0)
+        );
+        // Daemon clients drop the execution mode; the worker keeps its own.
+        let daemon = runtime_config_from_args(&parsed, "/work", "/agent", None, "daemon", None);
+        assert!(daemon.execution_mode.is_none());
+        assert_eq!(daemon.serialized_refine, Some(false));
+        // Interactive clients never serialize refine.
+        let interactive = runtime_config_from_args(&parsed, "/work", "/agent", None, "interactive", None);
+        assert_eq!(interactive.serialized_refine, Some(false));
+        assert_eq!(interactive.execution_mode.as_deref(), Some("interactive"));
+        assert!(daemon_server_default_session_config(&interactive).initial_goal.is_none());
+    }
+
+    #[test]
+    fn autonomous_config_is_built_only_from_autonomous_flags() {
+        assert!(runtime_autonomous_config_from_args(&args(&["--model", "m"])).is_none());
+        let config = runtime_autonomous_config_from_args(&args(&[
+            "--autonomous",
+            "--autonomous-gates",
+            "cargo test",
+            "--autonomous-gate-retries",
+            "2",
+            "--autonomous-max-turns",
+            "7",
+        ]))
+        .expect("autonomous config");
+        assert_eq!(config.enabled, Some(true));
+        assert_eq!(config.max_turns, Some(7.0));
+        assert_eq!(
+            config.gates.as_ref().and_then(|gates| gates.commands.clone()),
+            Some(vec!["cargo test".to_string()])
+        );
+        assert_eq!(config.gates.as_ref().and_then(|gates| gates.max_retries), Some(2.0));
+        // Gate flags alone still turn autonomous mode on.
+        let gates_only = runtime_autonomous_config_from_args(&args(&["--autonomous-gates", "cargo test"]))
+            .expect("autonomous config");
+        assert_eq!(gates_only.enabled, Some(true));
+        assert!(gates_only.max_turns.is_none());
+    }
+
+    #[test]
+    fn extension_flag_values_are_written_as_the_unknown_flags_map() {
+        let parsed = args(&["--my-flag", "value", "--other"]);
+        let config = runtime_config_from_args(&parsed, "/work", "/agent", None, "print", None);
+        let flags = config.extension_flag_values.expect("extension flags");
+        assert_eq!(flags.get("my-flag"), Some(&Value::String("value".to_string())));
+        assert_eq!(flags.get("other"), Some(&Value::Bool(true)));
+        assert!(matches!(
+            parsed.unknown_flags.get("other"),
+            Some(UnknownFlagValue::Flag)
+        ));
+    }
+
+    #[test]
+    fn local_cli_paths_are_resolved_and_urls_are_kept() {
+        assert_eq!(
+            resolve_cli_paths("/work", Some(&vec!["./a".to_string(), "https://x/y".to_string()])),
+            Some(vec![
+                Path::new("/work").join("./a").to_string_lossy().to_string(),
+                "https://x/y".to_string()
+            ])
+        );
+        assert!(resolve_cli_paths("/work", None).is_none());
+    }
+
+    #[test]
+    fn session_options_prefer_the_cli_model_then_the_scoped_models() {
+        let settings = SettingsManager::in_memory(serde_json::Map::new());
+        let registry = crate::core::model_registry::ModelRegistry::in_memory(crate::core::auth_storage::AuthStorage::create(
+            Some("/tmp/auth.json".to_string()),
+            None,
+        ));
+        let scoped = vec![ScopedModel { model: model("m1"), thinking_level: Some("high".to_string()) }];
+        let config = runtime_config_from_args(&args(&[]), "/work", "/agent", None, "print", None);
+        let built = build_session_options(&config, &scoped, false, &registry, &settings);
+        assert_eq!(built.options.model.as_ref().map(|model| model.id.clone()), Some("m1".to_string()));
+        assert_eq!(
+            built.options.thinking_level,
+            Some(pi_agent_core::types::ThinkingLevel::High)
+        );
+        assert_eq!(built.options.scoped_models.as_ref().map(Vec::len), Some(1));
+        assert!(!built.cli_thinking_from_model);
+        assert!(built.diagnostics.is_empty());
+
+        let with_cli_thinking = runtime_config_from_args(&args(&["--thinking", "low"]), "/work", "/agent", None, "print", None);
+        let built = build_session_options(&with_cli_thinking, &scoped, false, &registry, &settings);
+        assert_eq!(
+            built.options.thinking_level,
+            Some(pi_agent_core::types::ThinkingLevel::Low)
+        );
+        // An existing session keeps its own model instead of the first scoped one.
+        let built = build_session_options(&config, &scoped, true, &registry, &settings);
+        assert!(built.options.model.is_none());
+    }
+
+    #[test]
+    fn runtime_session_options_override_only_what_the_callers_set() {
+        let base = CreateAgentSessionOptions {
+            model: Some(model("base")),
+            tools: Some(vec!["read".to_string()]),
+            ..Default::default()
+        };
+        let runtime = AgentSessionCreationOptions {
+            rlm_depth: Some(1),
+            autonomous: Some(AgentAutonomousConfig {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = resolve_runtime_session_options(&base, Some(&runtime));
+        assert_eq!(resolved.model.as_ref().map(|model| model.id.clone()), Some("base".to_string()));
+        assert_eq!(resolved.tools, Some(vec!["read".to_string()]));
+        assert_eq!(resolved.creation.rlm_depth, Some(1));
+        // A subagent runtime disables the inherited autonomous loop.
+        assert_eq!(
+            resolved.creation.autonomous.as_ref().and_then(|config| config.enabled),
+            Some(false)
+        );
+        let resolved = resolve_runtime_session_options(&base, None);
+        assert!(resolved.creation.autonomous.is_none());
+        assert_eq!(resolved.creation.rlm_depth, None);
+    }
+
+    #[test]
+    fn truthy_env_flags_match_the_typescript() {
+        for value in ["1", "true", "TRUE", "yes", "Yes"] {
+            assert!(is_truthy_env_flag(Some(value)), "{value}");
+        }
+        for value in ["", "0", "false", "no", "2"] {
+            assert!(!is_truthy_env_flag(Some(value)), "{value}");
+        }
+        assert!(!is_truthy_env_flag(None));
+    }
+
+    #[test]
+    fn agents_view_command_strips_only_the_leading_token() {
+        let parsed = parse_agents_view_command(&["agents".to_string(), "--resume".to_string()]);
+        assert!(parsed.explicit_agents_view);
+        assert_eq!(parsed.args, vec!["--resume".to_string()]);
+        let parsed = parse_agents_view_command(&["--resume".to_string()]);
+        assert!(!parsed.explicit_agents_view);
+        assert_eq!(parsed.args, vec!["--resume".to_string()]);
+        assert!(parse_agents_view_command(&[]).is_empty());
+    }
+
+    #[test]
+    fn daemon_summary_helpers_prefer_the_active_id() {
+        let mut summary = SessionSummary::default();
+        summary.id = "agent-1".to_string();
+        summary.cwd = "/work".to_string();
+        assert_eq!(get_daemon_summary_active_session_id(&summary), "agent-1");
+        summary.active_session_id = Some("active-1".to_string());
+        assert_eq!(get_daemon_summary_active_session_id(&summary), "active-1");
+    }
+
+    #[test]
+    fn active_summary_matching_demands_an_id_and_a_session_file() {
+        let session_file = "/sessions/a.jsonl";
+        let mut summary = SessionSummary {
+            active_session_id: Some("active-1".to_string()),
+            session_file: Some(session_file.to_string()),
+            ..Default::default()
+        };
+        let summaries = vec![summary.clone()];
+        assert!(find_active_daemon_session_summary_for_session_file(&summaries, session_file).is_some());
+        summary.session_file = None;
+        assert!(
+            find_active_daemon_session_summary_for_session_file(&vec![summary.clone()], session_file).is_none()
+        );
+        summary.session_file = Some(session_file.to_string());
+        summary.active_session_id = None;
+        assert!(find_active_daemon_session_summary_for_session_file(&vec![summary], session_file).is_none());
+    }
+
+    #[test]
+    fn an_unknown_active_session_lookup_falls_back_and_recovering_throws() {
+        let response = DaemonResponse::failure(None, "get_state", "Unknown active session: abc", None);
+        assert!(resolve_active_session_lookup_failure(&response).is_none());
+        let response = DaemonResponse::failure(None, "get_state", "other failure", None);
+        assert_eq!(
+            resolve_active_session_lookup_failure(&response),
+            Some("other failure".to_string())
+        );
+    }
+
+    #[test]
+    fn interactive_daemon_session_path_needs_an_explicit_target() {
+        let parsed = args(&[]);
+        let manager = SessionManager::in_memory(Some("/work"), None).expect("session manager");
+        assert!(get_interactive_daemon_session_path(&parsed, &manager).is_none());
+        let parsed = args(&["--continue"]);
+        assert!(get_interactive_daemon_session_path(&parsed, &manager).is_none());
+        let parsed = args(&["--resume", "abc"]);
+        assert!(get_interactive_daemon_session_path(&parsed, &manager).is_none());
+    }
+
+    #[test]
+    fn read_session_manager_adopts_the_header_cwd() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("session.jsonl");
+        std::fs::write(
+            &path,
+            "{\"type\":\"session\",\"cwd\":\"/from-header\"}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+        )
+        .expect("write session");
+        let manager = read_session_manager(&path.to_string_lossy(), None, None);
+        assert_eq!(manager.get_cwd(), "/from-header");
+        assert_eq!(manager.get_session_file().as_deref(), Some(path.to_string_lossy().as_ref()));
+        let manager = read_session_manager(&path.to_string_lossy(), None, Some("/override"));
+        assert_eq!(manager.get_cwd(), "/override");
+    }
+
+    #[test]
+    fn create_session_manager_honours_no_session_and_read_only() {
+        let parsed = args(&["--no-session"]);
+        let manager = futures::executor::block_on(create_session_manager(&parsed, "/work", None, false))
+            .expect("session manager");
+        assert!(manager.get_session_file().is_none());
+
+        let parsed = args(&[]);
+        let manager = futures::executor::block_on(create_session_manager(&parsed, "/work", None, true))
+            .expect("session manager");
+        assert!(manager.get_session_file().is_none());
+        assert_eq!(manager.get_cwd(), "/work");
+    }
+
+    #[test]
+    fn session_cwd_source_forwards_the_manager_accessors() {
+        let manager = SessionManager::in_memory(Some("/work"), None).expect("session manager");
+        let source = SessionManagerCwdSource { session_manager: &manager };
+        assert_eq!(crate::core::session_cwd::SessionCwdSource::get_cwd(&source), "/work");
+        assert!(crate::core::session_cwd::SessionCwdSource::get_session_file(&source).is_none());
+    }
+
+    fn sample_model() -> pi_ai::types::Model {
+        pi_ai::types::Model::new("", "", "", "", "")
+    }
+
+    fn model(id: &str) -> pi_ai::types::Model {
+        pi_ai::types::Model::new(id, id, "openai-completions", "p", "https://example.invalid")
+    }
 }

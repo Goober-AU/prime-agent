@@ -594,7 +594,7 @@ pub async fn execute_edit(
             let raw_content = String::from_utf8_lossy(&buffer).into_owned();
 
             // Strip BOM before matching. The model will not include an invisible BOM in oldText.
-            let strip_bom::StripBomResult { bom, text: content } = strip_bom(&raw_content);
+            let super::edit_diff::StripBomResult { bom, text: content } = strip_bom(&raw_content);
             let original_ending = detect_line_ending(&content);
             let normalized_content = normalize_to_lf(&content);
             let AppliedEditsResult {

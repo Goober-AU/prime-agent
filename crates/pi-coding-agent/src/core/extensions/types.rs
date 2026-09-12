@@ -306,7 +306,7 @@ pub trait ReadonlyFooterDataProvider: Send + Sync {}
 pub use crate::core::system_prompt::BuildSystemPromptOptions;
 
 /// blocked_on: needs pi-agent-core::types::{AgentToolResult, AgentToolUpdateCallback, ThinkingLevel, ToolExecutionMode}
-pub use pi_agent_core::types::{AgentToolResult, AgentToolUpdateCallback, ThinkingLevel, ToolExecutionMode};
+pub use pi_agent_core::types::{AgentToolResult, AgentToolUpdateCallback, CustomAgentMessage, ThinkingLevel, ToolExecutionMode};
 
 /// blocked_on: needs pi-ai::types::{AssistantMessageEvent, AssistantMessageEventStream, Context, ImageContent, Model, TextContent, ToolResultMessage}
 pub use pi_ai::types::{
@@ -1316,9 +1316,23 @@ pub struct MessageRenderOptions {
     pub expanded: bool,
 }
 
+/// `ExtensionRuntimeState.pendingProviderRegistrations` element.
+///
+/// The TypeScript declares this inline (`Array<{ name; config; extensionPath }>`),
+/// so this module is its owner.
+pub struct PendingProviderRegistration {
+    pub name: String,
+    pub config: ProviderConfig,
+    pub extension_path: String,
+}
+
 /// `MessageRenderer<T>`.
+///
+/// The TypeScript parameter is `CustomMessage<T>` from `../messages.js`. In this
+/// port the value handed to the renderer is the ported `CustomAgentMessage`
+/// custom member, so the alias names that owner type.
 pub type MessageRenderer =
-    Arc<dyn Fn(CustomMessage, MessageRenderOptions, Theme) -> Option<Arc<dyn Component>> + Send + Sync>;
+    Arc<dyn Fn(CustomAgentMessage, MessageRenderOptions, Theme) -> Option<Arc<dyn Component>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Tool call / tool result events

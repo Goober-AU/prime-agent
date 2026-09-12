@@ -7,6 +7,8 @@ pub mod config;
 pub mod core;
 pub mod main_entry;
 pub mod migrations;
+#[path = "mod.rs"]
+pub mod index;
 pub mod modes;
 pub mod package_manager_cli;
 pub mod postinstall;

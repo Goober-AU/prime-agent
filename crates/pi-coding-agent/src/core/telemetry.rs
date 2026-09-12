@@ -1173,7 +1173,8 @@ pub fn install_agent_telemetry(
                     run.agent_ended = false;
                 }
             }
-            AgentSessionEvent::Agent(AgentEvent::MessageStart { message }) => {
+            AgentSessionEvent::Agent(AgentEvent::MessageStart { message })
+            | AgentSessionEvent::MessageStart { message } => {
                 if message.role() == "user" {
                     let mut guard = state.lock().unwrap();
                     guard.session_totals.prompt_count += 1.0;
@@ -1212,7 +1213,11 @@ pub fn install_agent_telemetry(
                     }
                 }
             }
-            AgentSessionEvent::Agent(AgentEvent::MessageEnd { message }) => {
+            // The TypeScript union is flat, so `message_start` / `message_end`
+            // arrive for agent messages and for the session's own messages
+            // through the same case. Both Rust variants therefore share one arm.
+            AgentSessionEvent::Agent(AgentEvent::MessageEnd { message })
+            | AgentSessionEvent::MessageEnd { message } => {
                 let Some(message) = assistant_message_from_agent_message(&message) else {
                     return;
                 };

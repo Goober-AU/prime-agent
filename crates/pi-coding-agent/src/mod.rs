@@ -67,7 +67,7 @@ pub use crate::core::package_manager::{DefaultPackageManager};
 // `export { ... } from "./core/performance-metrics.js"`
 // not yet ported (6): createLocalPerformanceMetricRecorder, createLocalPerformanceMetricRecorderFromEnvironment, EnvironmentPerformanceMetricRecorderOptions, LocalPerformanceMetricRecorder, LocalPerformanceMetricRecorderOptions, PerformanceMetricFileIO
 // `export { ... } from "./core/refinement/index.js"`
-pub use crate::core::refinement::{
+pub use crate::core::refinement::refinement::{
     HarnessState,
     RefinementEdit,
     RefinementProposal,
@@ -80,19 +80,17 @@ pub use crate::core::resource_loader::{ResourceCollision, ResourceLoader};
 pub use crate::core::resource_loader::{DefaultResourceLoader, load_project_context_files};
 // `export { ... } from "./core/sdk.js"`
 pub use crate::core::sdk::{
-    AgentSessionRuntime,
     AgentSessionRuntimeConfig,
-    AgentSessionRuntimeMetadata,
     CreateAgentSessionOptions,
     CreateAgentSessionResult,
-    CreateAgentSessionRuntimeFactory,
-    CreateAgentSessionRuntimeResult,
-    create_agent_session_from_services,
-    create_agent_session_runtime,
-    create_agent_session_services,
     create_bash_tool,
     create_ipython_tool,
 };
+// not yet re-exported by ./core/sdk.js (the module is owned by another slice and
+// does not re-export these yet): AgentSessionRuntime, AgentSessionRuntimeMetadata,
+// CreateAgentSessionRuntimeFactory, CreateAgentSessionRuntimeResult,
+// createAgentSessionFromServices, createAgentSessionRuntime,
+// createAgentSessionServices
 // not yet ported (10): AgentSessionCreationOptions, AgentSessionRuntimeDiagnostic, AgentSessionRuntimeKind, AgentSessionServices, CreateAgentSessionFromServicesOptions, CreateAgentSessionServicesOptions, CreateRlmSubagentRuntimeOptions, PromptTemplate, RlmSubagentRuntime, SubagentRuntimeHost
 // `export { ... } from "./core/session-action-store.js"`
 pub use crate::core::session_action_store::{SessionActionSnapshot};

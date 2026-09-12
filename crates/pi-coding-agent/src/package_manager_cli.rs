@@ -11,40 +11,51 @@ use serde_json::Value;
 use crate::cli::config_selector::{select_config, ConfigSelectorOptions};
 use crate::cli::daemon_launch::{
     ensure_interactive_daemon_running, is_daemon_session_summary, is_session_busy, probe_running_daemon_sessions,
-    shutdown_connected_daemon_and_wait, RunningDaemonProbe, StaleDaemonError,
+    shutdown_connected_daemon_and_wait, RunningDaemonProbe,
 };
 use crate::cli::daemon_stop_confirm::{
     confirm_daemon_session_loss, pluralize_sessions, ConfirmIo, ConfirmOptions, DaemonSessionLossCopy,
 };
 use crate::cli::daemon_update_restart::{
-    acquire_daemon_shutdown_admission, acquire_daemon_update_restart_coordinator, build_daemon_update_restart_report,
+    acquire_daemon_update_restart_coordinator, build_daemon_update_restart_report,
     launch_daemon_update_restart_coordinator, wait_for_active_daemon_update_restart_coordinator,
-    DaemonUpdateRestartCoordinatorAlreadyRunningError, DaemonUpdateRestartCounts, DaemonUpdateRestartFailure,
-    DaemonUpdateRestartProcessIdentity, DaemonUpdateRestartStatus, DaemonUpdateRestartStatusWriter,
-    DaemonUpdateRestartUpdate, DAEMON_UPDATE_RESTART_COORDINATOR_FLAG, DAEMON_UPDATE_RESTART_ORIGIN_FLAG,
-    DAEMON_UPDATE_RESTART_STATUS_FLAG,
+    DaemonUpdateRestartCounts, DaemonUpdateRestartFailure, DaemonUpdateRestartProcessIdentity,
+    DaemonUpdateRestartStatus, DaemonUpdateRestartStatusWriter, DaemonUpdateRestartUpdate,
+    DAEMON_UPDATE_RESTART_COORDINATOR_FLAG, DAEMON_UPDATE_RESTART_ORIGIN_FLAG, DAEMON_UPDATE_RESTART_STATUS_FLAG,
 };
 use crate::config::{
     get_agent_dir, get_daemon_update_restart_manifest_path, get_legacy_daemon_update_restart_manifest_path,
     get_self_update_command, get_self_update_unavailable_instruction, APP_NAME, CONFIG_DIR_NAME, PACKAGE_NAME,
     SELF_UPDATE_INTERACTIVE_CHILD_ENV, SELF_UPDATE_NOT_ATTEMPTED_EXIT_CODE, VERSION,
 };
-use crate::core::messages::{is_session_slash_command, CustomMessage};
+use crate::core::messages::CustomMessage;
 use crate::core::package_manager::{DefaultPackageManager, PackageManagerOptions, ProgressEvent};
 use crate::core::settings_manager::{SettingsError, SettingsManager};
-use crate::modes::daemon::daemon_client::protocol::{
-    is_unknown_daemon_command_error, DaemonCommand, DaemonHello, DaemonResponse,
+use crate::modes::daemon::daemon_client::{DaemonClient, DaemonClientRequestOptions};
+use crate::modes::daemon::daemon_protocol::{
+    is_unknown_daemon_command_error, DaemonCommand, DaemonResponse, DaemonUpdateRestartManifest,
+    DaemonUpdateRestartSession, DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID,
     DAEMON_UPDATE_RESTART_FORMAT_VERSION,
 };
-use crate::modes::daemon::daemon_client::{DaemonClient, DaemonClientRequestOptions};
-use crate::modes::daemon::daemon_socket::{default_daemon_socket_path, normalize_socket_path};
+use crate::cli::daemon_update_restart::{
+    DaemonUpdateRestartCoordinatorLease, DaemonUpdateRestartCoordinatorRecord, DaemonUpdateRestartPhase,
+    AcquireDaemonUpdateRestartCoordinatorOptions, DEFAULT_COORDINATOR_PROGRESS_TIMEOUT_MS,
+};
+use crate::cli::daemon_stop_confirm::Pluralized;
+use crate::core::agent_session::{
+    SessionActionRecoveryPayload, SessionActionRecoverySnapshot, SESSION_ACTION_RECOVERY_FORMAT_VERSION,
+};
+use crate::modes::daemon::daemon_protocol::AgentSessionRuntimeMetadata;
+use crate::modes::daemon::daemon_supervisor_ownership::{DaemonShutdownAdmission, DaemonSupervisorHelloIdentity};
+use crate::modes::daemon::daemon_socket::{default_daemon_socket_dir, default_daemon_socket_path};
+use crate::utils::daemon_socket_path::normalize_socket_path;
 use crate::modes::daemon::daemon_supervisor_ownership::{
     persist_daemon_startup_fence_from_owner, wait_for_daemon_startup_fence,
 };
 use crate::modes::daemon::daemon_worker_protocol::{
     DAEMON_WORKER_ACTIVE_SESSION_ID_ENV, DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
 };
-use crate::utils::child_process::{should_use_windows_shell, SpawnOptions};
+use crate::utils::child_process::should_use_windows_shell;
 use crate::utils::update_source::PRIME_AGENT_UPDATE_REPOSITORY_URL;
 use crate::utils::version_check::{get_latest_pi_release, is_main_build_update_available};
 
@@ -940,10 +951,6 @@ fn has_fixed_daemon_supervisor_owner_identity(identity: &DaemonSupervisorHelloId
         && identity.supervisor_pid.is_some_and(|pid| pid > 0)
         && identity.supervisor_process_start_id.is_some()
         && identity.supervisor_socket_path.is_some()
-}
-
-fn daemon_hello_raw(hello: Option<&crate::modes::daemon::daemon_client::protocol::DaemonHello>) -> Option<Value> {
-    hello.map(|hello| hello.raw.clone())
 }
 
 async fn prepare_connected_daemon_update_restart(
@@ -2303,4 +2310,174 @@ fn read_prompt_line(prompt: &str) -> String {
     let mut answer = String::new();
     let _ = std::io::stdin().read_line(&mut answer);
     answer
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(|arg| arg.to_string()).collect()
+    }
+
+    #[test]
+    fn self_update_sources_match_the_typescript_set() {
+        for source in ["self", "pi", "prime-agent"] {
+            assert!(is_self_update_source(source), "{source}");
+        }
+        for source in ["", "extensions", "github:owner/repo"] {
+            assert!(!is_self_update_source(source), "{source}");
+        }
+    }
+
+    #[test]
+    fn install_parses_the_local_and_source_flags() {
+        let options = parse_package_command(&args(&["install", "github:owner/repo"])).expect("install");
+        assert_eq!(options.command, "install");
+        assert_eq!(options.source.as_deref(), Some("github:owner/repo"));
+        assert_eq!(options.update_target, None);
+
+        let options = parse_package_command(&args(&["install", "--local"])).expect("install");
+        assert_eq!(options.extension, None);
+
+        let options = parse_package_command(&args(&["install", "--extension", "my-ext", "src"])).expect("install");
+        assert_eq!(options.extension.as_deref(), Some("my-ext"));
+        assert_eq!(options.source.as_deref(), Some("src"));
+    }
+
+    #[test]
+    fn update_parses_each_target() {
+        assert_eq!(
+            parse_package_command(&args(&["update"])).expect("update").update_target,
+            Some(UpdateTarget::All)
+        );
+        assert_eq!(
+            parse_package_command(&args(&["update", "--self"]))
+                .expect("update")
+                .update_target,
+            Some(UpdateTarget::Self_)
+        );
+        assert_eq!(
+            parse_package_command(&args(&["update", "--extensions", "github:owner/repo"]))
+                .expect("update")
+                .update_target,
+            Some(UpdateTarget::Extensions {
+                source: Some("github:owner/repo".to_string())
+            })
+        );
+        assert_eq!(
+            parse_package_command(&args(&["update", "source-name"]))
+                .expect("update")
+                .update_target,
+            Some(UpdateTarget::Extensions {
+                source: Some("source-name".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn update_target_membership_matches_its_variants() {
+        assert!(update_target_includes_self(&UpdateTarget::All));
+        assert!(!update_target_includes_self(&UpdateTarget::Extensions { source: None }));
+        assert!(update_target_includes_extensions(&UpdateTarget::All));
+        assert!(update_target_includes_extensions(&UpdateTarget::Extensions { source: None }));
+        assert!(!update_target_includes_extensions(&UpdateTarget::Self_));
+    }
+
+    #[test]
+    fn remove_and_list_require_only_the_optional_source() {
+        let options = parse_package_command(&args(&["remove", "github:owner/repo"])).expect("remove");
+        assert_eq!(options.command, "remove");
+        assert_eq!(options.source.as_deref(), Some("github:owner/repo"));
+
+        let options = parse_package_command(&args(&["list"])).expect("list");
+        assert_eq!(options.command, "list");
+        assert_eq!(options.source, None);
+    }
+
+    #[test]
+    fn unknown_commands_and_removed_flags_are_rejected() {
+        assert!(parse_package_command(&args(&["frobnicate"])).is_none());
+        assert!(parse_package_command(&args(&[])).is_none());
+        // `--daemon-socket` is only accepted for update and the coordinator flag.
+        assert!(parse_package_command(&args(&["install", "--daemon-socket", "/tmp/d.sock"])).is_none());
+        assert!(parse_package_command(&args(&["update", "--daemon-socket", "/tmp/d.sock"])).is_some());
+        // `--self` conflicts with an explicit source.
+        assert!(parse_package_command(&args(&["update", "--self", "src"])).is_none());
+        assert!(parse_package_command(&args(&["update", "--local", "--self"])).is_none());
+    }
+
+    #[test]
+    fn usage_lists_every_package_command() {
+        let usage = get_package_command_usage();
+        for command in PACKAGE_COMMANDS {
+            assert!(usage.contains(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn update_restart_manifest_round_trips_through_the_parser() {
+        let manifest = serde_json::json!({
+            "formatVersion": DAEMON_UPDATE_RESTART_FORMAT_VERSION,
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "sessions": [],
+        });
+        let parsed = parse_daemon_update_restart_manifest(&manifest).expect("manifest");
+        assert_eq!(parsed.created_at, "2026-01-01T00:00:00.000Z");
+        assert!(parsed.sessions.is_empty());
+        assert!(!has_restorable_daemon_update_restart(Some(&parsed)));
+
+        let unsupported = serde_json::json!({
+            "formatVersion": DAEMON_UPDATE_RESTART_FORMAT_VERSION + 1.0,
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "sessions": [],
+        });
+        let error = parse_daemon_update_restart_manifest(&unsupported).expect_err("unsupported version");
+        assert!(error.starts_with("Unsupported daemon update restart format version"));
+
+        assert!(parse_daemon_update_restart_manifest(&serde_json::json!([])).is_err());
+        assert!(parse_daemon_update_restart_manifest(&serde_json::json!({
+            "formatVersion": DAEMON_UPDATE_RESTART_FORMAT_VERSION,
+            "createdAt": "2026-01-01T00:00:00.000Z",
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn a_manifest_with_a_session_is_restorable() {
+        let mut session = serde_json::Map::new();
+        session.insert("activeSessionId".to_string(), Value::String("a1".to_string()));
+        session.insert("sessionId".to_string(), Value::String("s1".to_string()));
+        session.insert("sessionFile".to_string(), Value::String("/sessions/s1.jsonl".to_string()));
+        session.insert("cwd".to_string(), Value::String("/work".to_string()));
+        session.insert(
+            "config".to_string(),
+            serde_json::json!({ "cwd": "/work", "agentDir": "/agent" }),
+        );
+        session.insert("queue".to_string(), serde_json::json!({
+            "actions": { "formatVersion": 1, "actions": [] },
+            "nextTurn": [],
+        }));
+        for field in [
+            "shouldResume",
+            "wasStreaming",
+            "wasCompacting",
+            "wasBashRunning",
+            "hadRunningRlmChildren",
+            "wasRetrying",
+            "hadAcceptedPromptInFlight",
+        ] {
+            session.insert(field.to_string(), Value::Bool(false));
+        }
+        let manifest = serde_json::json!({
+            "formatVersion": DAEMON_UPDATE_RESTART_FORMAT_VERSION,
+            "createdAt": "2026-01-01T00:00:00.000Z",
+            "sessions": [Value::Object(session)],
+        });
+        let parsed = parse_daemon_update_restart_manifest(&manifest).expect("manifest");
+        assert_eq!(parsed.sessions.len(), 1);
+        assert_eq!(parsed.sessions[0].active_session_id, "a1");
+        assert!(!parsed.sessions[0].should_resume);
+        assert!(has_restorable_daemon_update_restart(Some(&parsed)));
+    }
 }

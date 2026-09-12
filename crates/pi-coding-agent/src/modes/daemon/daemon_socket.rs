@@ -396,12 +396,20 @@ fn ensure_default_daemon_socket_dir(socket_path: &str) -> Result<(), DaemonSocke
     Ok(())
 }
 
+#[cfg(unix)]
 async fn can_connect_to_unix_socket(socket_path: &str) -> bool {
     let connect = tokio::net::UnixStream::connect(socket_path);
     match tokio::time::timeout(Duration::from_millis(250), connect).await {
         Ok(Ok(_stream)) => true,
         _ => false,
     }
+}
+
+/// Windows uses named pipes, so the Unix probe is never reached there
+/// (every caller returns early when `process.platform === "win32"`).
+#[cfg(not(unix))]
+async fn can_connect_to_unix_socket(_socket_path: &str) -> bool {
+    false
 }
 
 fn parent_dir(path: &str) -> String {

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use pi_agent_core::types::AgentMessage;
-use pi_ai::types::{AssistantMessage, BoxFuture, STOP_REASON_ABORTED, STOP_REASON_ERROR};
+use pi_ai::types::{AssistantMessage, BoxFuture, Message, STOP_REASON_ABORTED, STOP_REASON_ERROR};
 use serde_json::Value;
 
 use crate::core::messages::{
@@ -74,7 +74,7 @@ pub fn select_headless_terminal_result(messages: &[AgentMessage]) -> HeadlessTer
         None
     };
     let primary = preceding.and_then(|message| match message {
-        AgentMessage::Message(pi_agent_core::types::Message::Assistant(assistant)) => {
+        AgentMessage::Message(Message::Assistant(assistant)) => {
             Some(HeadlessTerminalResultMessage::Assistant(Box::new(assistant.clone())))
         }
         other => {
@@ -258,7 +258,7 @@ mod tests {
     use pi_ai::types::{ContentBlock, Usage, STOP_REASON_STOP};
 
     fn assistant(stop_reason: &str, text: &str) -> AgentMessage {
-        AgentMessage::Message(pi_agent_core::types::Message::Assistant(AssistantMessage {
+        AgentMessage::Message(Message::Assistant(AssistantMessage {
             role: "assistant".to_string(),
             content: if text.is_empty() {
                 Vec::new()

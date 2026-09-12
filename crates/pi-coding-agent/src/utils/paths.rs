@@ -33,7 +33,9 @@ pub fn is_local_path(value: &str) -> bool {
         .any(|prefix| trimmed.starts_with(prefix))
 }
 
-fn resolve_path(value: &str) -> String {
+/// `path.resolve(value)` - Node's lexical resolution, public for callers in
+/// other slices that need `resolvePath` (the TypeScript keeps it private).
+pub fn resolve_path(value: &str) -> String {
     let path = Path::new(value);
     let absolute = if path.is_absolute() {
         path.to_path_buf()

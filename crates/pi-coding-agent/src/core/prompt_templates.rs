@@ -335,7 +335,7 @@ fn resolve_prompt_path(p: &str, cwd: &str) -> String {
 }
 
 fn resolve_path(base: &str, part: &str) -> String {
-    crate::utils::paths::resolve_absolute(&join_path(base, part))
+    crate::utils::paths::resolve_path(&join_path(base, part))
 }
 
 fn join_path(base: &str, part: &str) -> String {
@@ -344,7 +344,7 @@ fn join_path(base: &str, part: &str) -> String {
 }
 
 fn is_under_path(target: &str, root: &str) -> bool {
-    let normalized_root = crate::utils::paths::resolve_absolute(root);
+    let normalized_root = crate::utils::paths::resolve_path(root);
     if target == normalized_root {
         return true;
     }

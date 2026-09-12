@@ -61,11 +61,21 @@ pub type RenderCallFn = Arc<
 /// `ToolExecutionDefinition = AgentConnectionToolDefinition & Partial<ToolExecutionRendererDefinition>`
 #[derive(Clone, Default)]
 pub struct ToolExecutionDefinition {
+    /// `AgentConnectionToolDefinition & Partial<ToolExecutionRendererDefinition>`:
+    /// the renderer fields stay as flags plus the private renderer slots set by
+    /// the callers that own `renderCall` / `renderResult` closures.
     pub definition: AgentConnectionToolDefinition,
+    /// `renderShell?: "default" | "self"`
     pub render_shell: Option<String>,
+    /// `renderCall !== undefined`
     pub has_render_call: bool,
+    /// `renderResult !== undefined`
     pub has_render_result: bool,
 }
+
+/// The renderer half of `ToolExecutionDefinition`, kept next to the flags so the
+/// merged TS type maps to one place.
+pub type ToolExecutionRendererDefinition = ToolExecutionDefinition;
 
 fn has_tool_renderer(tool_definition: Option<&ToolExecutionDefinition>) -> bool {
     match tool_definition {

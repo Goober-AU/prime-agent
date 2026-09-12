@@ -383,7 +383,7 @@ pub trait AuthStorageBackend: Send + Sync {
 }
 
 pub type LockFn = Box<
-    dyn FnOnce(Option<String>) -> BoxFuture<'static, Result<Option<String>, String>> + Send,
+    dyn FnOnce(Option<String>) -> BoxFuture<Result<Option<String>, String>> + Send,
 >;
 
 fn auth_path_default() -> String {

@@ -1,17 +1,18 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/oauth-selector.ts
 //!
 //! PARTIAL: `MenuPanel`, `MenuList`, `MenuRow`, `MenuSearchInput` live in
-//! components/menu-panel.ts (another slice, Rust file still empty). The
-//! providers/tabs/filtering/status logic of this file is ported 1:1 against the
-//! private `MenuListLayout` stand-in in `model_selector.rs`'s sibling module.
+//! components/menu-panel.ts -> `super::menu_panel`. The providers, tabs,
+//! filtering and status logic of this file is ported 1:1 against that real
+//! module.
 
 use crate::core::auth_storage::{AuthCredential, AuthStatus, AuthStorage};
 use crate::core::prime_inference_auth::PRIME_INFERENCE_PROVIDER_ID;
 use crate::modes::interactive::theme::theme::theme;
 
-use super::model_selector::{
+use super::menu_panel::{
     get_menu_list_layout, MenuListLayout, MenuListLayoutOptions, MenuViewportProvider,
 };
+use std::rc::Rc;
 
 /// `type AuthSelectorCategory = "provider" | "service"`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,7 +65,7 @@ impl AuthSelectorProvider {
 /// `OAuthSelectorOptions`
 #[derive(Default)]
 pub struct OAuthSelectorOptions {
-    pub get_rows: Option<std::rc::Rc<dyn Fn() -> Option<f64>>>,
+    pub get_rows: Option<Rc<dyn Fn() -> f64>>,
     pub initial_category: Option<AuthSelectorCategory>,
     pub header_rows: Option<f64>,
     pub title: Option<String>,
@@ -88,13 +89,13 @@ pub fn compare_auth_selector_providers(
 }
 
 /// `PREFERRED_VISIBLE_PROVIDERS`
-pub const PREFERRED_VISIBLE_PROVIDERS: f64 = 8.0;
+pub const PREFERRED_VISIBLE_PROVIDERS: usize = 8;
 /// `PROVIDER_LIST_RESERVED_ROWS`
-pub const PROVIDER_LIST_RESERVED_ROWS: f64 = 7.0;
+pub const PROVIDER_LIST_RESERVED_ROWS: usize = 7;
 /// Extra fixed rows the Providers/MCP Connections tab bar (text + spacer) consumes.
 pub const TAB_BAR_RESERVED_ROWS: f64 = 2.0;
 /// `PROVIDER_SCROLL_INDICATOR_ROWS`
-pub const PROVIDER_SCROLL_INDICATOR_ROWS: f64 = 1.0;
+pub const PROVIDER_SCROLL_INDICATOR_ROWS: usize = 1;
 
 /// The storage surface the selector reads.
 pub trait AuthStorageLike {
@@ -206,8 +207,8 @@ impl OAuthSelectorComponent {
         component.list_layout = get_menu_list_layout(&MenuListLayoutOptions {
             preferred_visible_items: PREFERRED_VISIBLE_PROVIDERS,
             reserved_rows: PROVIDER_LIST_RESERVED_ROWS,
-            comfortable_item_rows: 3.0,
-            compact_item_rows: Some(2.0),
+            comfortable_item_rows: 3,
+            compact_item_rows: Some(2),
             ..Default::default()
         });
         component.all_providers = component.sort_providers(&component.all_providers, providers);
@@ -462,7 +463,7 @@ impl OAuthSelectorComponent {
     }
 
     fn reserved_rows(&self) -> f64 {
-        PROVIDER_LIST_RESERVED_ROWS
+        PROVIDER_LIST_RESERVED_ROWS as f64
             + (self.get_header_rows)()
             + if self.has_tab_bar {
                 TAB_BAR_RESERVED_ROWS
@@ -476,10 +477,10 @@ impl OAuthSelectorComponent {
         self.list_layout = get_menu_list_layout(&MenuListLayoutOptions {
             get_rows: self.viewport.get_rows.clone(),
             preferred_visible_items: PREFERRED_VISIBLE_PROVIDERS,
-            total_items: Some(self.filtered_providers.len() as f64),
-            reserved_rows: self.reserved_rows(),
-            comfortable_item_rows: 3.0,
-            compact_item_rows: Some(2.0),
+            total_items: Some(self.filtered_providers.len()),
+            reserved_rows: self.reserved_rows() as usize,
+            comfortable_item_rows: 3,
+            compact_item_rows: Some(2),
             scroll_indicator_rows: Some(PROVIDER_SCROLL_INDICATOR_ROWS),
             ..Default::default()
         });

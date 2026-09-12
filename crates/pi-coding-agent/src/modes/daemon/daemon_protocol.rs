@@ -755,7 +755,7 @@ pub enum DaemonPromptContent {
 pub struct DaemonCustomMessageBody {
     #[serde(rename = "customType")]
     pub custom_type: String,
-    pub content: crate::core::messages::CustomMessageContent,
+    pub content: pi_agent_core::types::CustomMessageContent,
     pub display: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub details: Option<Value>,

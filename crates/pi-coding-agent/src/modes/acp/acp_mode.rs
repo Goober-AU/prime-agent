@@ -269,6 +269,14 @@ pub struct AcpStream {
     pub reader: mpsc::UnboundedReceiver<AcpIncomingMessage>,
 }
 
+impl AcpStream {
+    /// The TypeScript `Stream` shape is a plain object literal, so callers build one
+    /// from a writer plus a parsed-message receiver.
+    pub fn new(writable: AcpStreamWritable, reader: mpsc::UnboundedReceiver<AcpIncomingMessage>) -> Self {
+        Self { writable, reader }
+    }
+}
+
 /// Outgoing half of an ACP stream; `write` is the observed boundary.
 #[derive(Clone)]
 pub struct AcpStreamWritable {
@@ -867,7 +875,7 @@ impl AcpUpdateProducer {
         });
         let published_flag = published.clone();
         tokio::spawn(async move {
-            previous.wait().await.ok();
+            let _ = previous.wait().await;
             // Drop only this update; a rejected queue tail would strand later updates.
             let _ = async {
                 producer.admission_ready.wait().await?;
@@ -884,7 +892,7 @@ impl AcpUpdateProducer {
             .await;
             resolver.resolve();
         });
-        link.wait().await.ok();
+        let _ = link.wait().await;
         published.load(Ordering::SeqCst)
     }
 
@@ -1393,14 +1401,17 @@ impl AcpModeState {
     }
 
     /// `stopSessionWork(pending?, promptTask?)`.
+    ///
+    /// Every step rejects in the TypeScript, so the port propagates the first
+    /// failure the same way (`await` inside the caller's `try`).
     async fn stop_session_work(
         &self,
         pending: Option<Arc<AcpPendingTerminal>>,
         prompt_task: Option<AcpPromise>,
-    ) {
-        let _ = self.abort_connection_work().await;
-        let _ = self.connection.wait_for_idle().await;
-        let _ = self.cancel_outstanding_rlm_children().await;
+    ) -> Result<(), String> {
+        self.abort_connection_work().await?;
+        self.connection.wait_for_idle().await?;
+        self.cancel_outstanding_rlm_children().await?;
         if let Some(pending) = pending {
             if let Some(task) = pending.task() {
                 let _ = task.wait().await;
@@ -1409,6 +1420,7 @@ impl AcpModeState {
         if let Some(prompt_task) = prompt_task {
             let _ = prompt_task.wait().await;
         }
+        Ok(())
     }
 }
 
@@ -1700,7 +1712,7 @@ impl AcpAgentApp {
             // Only latch after a successful bind: a rejected bind must not leave
             // extensions permanently unavailable for the rest of the process.
             if let Some(bind) = &self.state.bind_headless_extensions {
-                bind().await.map_err(AcpHandlerError::Thrown)?;
+                (bind)().await.map_err(AcpHandlerError::Thrown)?;
             }
             self.state.bound.store(true, Ordering::SeqCst);
         }
@@ -1791,9 +1803,11 @@ impl AcpAgentApp {
                         drop(children);
                         let event = AgentConnectionSessionEvent::RlmChildUpdate { child };
                         let turn_id = producer.turn_for_event(&event);
-                        for update in
-                            acp_updates_for_session_event(&event, &mut mapping_state.lock().expect("mapping poisoned"))
-                        {
+                        let updates = {
+                            let mut state = mapping_state.lock().expect("mapping poisoned");
+                            acp_updates_for_session_event(&event, &mut state)
+                        };
+                        for update in updates {
                             producer.publish(update, turn_id, PHASE_EVENT, None).await;
                         }
                     }
@@ -1862,7 +1876,10 @@ async fn dispatch_acp_connection_event(
             .insert(child.id.clone(), serde_json::to_value(child).unwrap_or(Value::Null));
     }
     let turn_id = producer.turn_for_event(&event);
-    let updates = acp_updates_for_session_event(&event, &mut mapping_state.lock().expect("mapping poisoned"));
+    let updates = {
+        let mut state = mapping_state.lock().expect("mapping poisoned");
+        acp_updates_for_session_event(&event, &mut state)
+    };
     for update in updates {
         producer.publish(update, turn_id, PHASE_EVENT, None).await;
     }
@@ -2049,7 +2066,14 @@ impl AcpAgentApp {
     ) -> Result<Value, AcpHandlerError> {
         let cancelled = || json!({ "stopReason": acp_stop_reason(true, None) });
         let (text, images) = prompt_content(prompt_blocks);
-        let prior_messages = turn_boundary(&self.state.connection.get_messages().await.unwrap_or_default());
+        let prior_messages = turn_boundary(
+            &self
+                .state
+                .connection
+                .get_messages()
+                .await
+                .map_err(AcpHandlerError::Thrown)?,
+        );
         if abort.is_cancelled() {
             entry.producer.drain().await;
             return Ok(cancelled());
@@ -2104,7 +2128,7 @@ impl AcpAgentApp {
         }
         let outcome = if failure.is_some() { OUTCOME_ERROR } else { OUTCOME_RESULT };
         let mut terminal_status = status.clone();
-        let observed_quiescence = quiescence_meta(&status, Some(&live_children));
+        let observed_quiescence = quiescence_meta(&status, Some(live_children.as_slice()));
         // The roster is telemetry at the response cut, not proof of terminality:
         // a child can publish a terminal status before its result reaches the parent.
         // Every turn therefore finalizes through the strong settlement barrier.
@@ -2216,7 +2240,7 @@ fn finalize_pending_terminal(
             if pending_for_task.abort.is_cancelled() || !pending_is_current(&entry_for_task, &pending_for_task) {
                 return;
             }
-            let terminal_quiescence = quiescence_meta(&status, Some(&live_children));
+            let terminal_quiescence = quiescence_meta(&status, Some(live_children.as_slice()));
             if terminal_quiescence.outstanding_subagents != 0 {
                 continue;
             }
@@ -2366,7 +2390,7 @@ impl AcpAgentApp {
             return Err(AcpHandlerError::Thrown(error));
         };
         let outcome: Result<(), String> = async {
-            self.state.stop_session_work(pending, prompt_task).await;
+            self.state.stop_session_work(pending, prompt_task).await?;
             if let Some(unsubscribe) = closing.unsubscribe.lock().expect("unsubscribe poisoned").take() {
                 unsubscribe();
             }
@@ -2454,29 +2478,29 @@ impl AcpAgentApp {
         let prompt_task = cancelling.prompt_task();
         cancelling.cancelling.store(true, Ordering::SeqCst);
 
-        let connection = self.state.connection.clone();
         let cancel_state = self.state.clone();
-        let entry = cancelling.clone();
+        let cancel_entry = cancelling.clone();
         let abort_for_task = abort.clone();
         let (cancel_task, cancel_resolver) = AcpPromise::new();
         *cancelling.cancel_task.lock().expect("cancel task poisoned") = Some(cancel_task.clone());
+        let cancel_task_for_task = cancel_task.clone();
         tokio::spawn(async move {
             if let Some(abort) = &abort_for_task {
                 abort.cancel();
             }
             let outcome: Result<(), String> = async {
-                let input_pause = cancel_state.acquire_stop_input_pause(&entry).await?;
-                cancel_state.stop_session_work(pending.clone(), prompt_task).await;
+                let input_pause = cancel_state.acquire_stop_input_pause(&cancel_entry).await?;
+                cancel_state.stop_session_work(pending.clone(), prompt_task).await?;
                 input_pause.release().await?;
                 {
-                    let mut entry_pause = entry.input_pause.lock().expect("input pause poisoned");
+                    let mut entry_pause = cancel_entry.input_pause.lock().expect("input pause poisoned");
                     if entry_pause
                         .as_ref()
                         .map(|pause| Arc::ptr_eq(pause, &input_pause))
                         .unwrap_or(false)
                     {
                         *entry_pause = None;
-                        *entry.input_pause_key.lock().expect("input pause key poisoned") = None;
+                        *cancel_entry.input_pause_key.lock().expect("input pause key poisoned") = None;
                     }
                 }
                 {
@@ -2493,10 +2517,10 @@ impl AcpAgentApp {
                             .expect("closed pause key poisoned") = None;
                     }
                 }
-                *entry.input_pause_release.lock().expect("input pause release poisoned") = None;
-                *entry.stop_failure.lock().expect("stop failure poisoned") = None;
+                *cancel_entry.input_pause_release.lock().expect("input pause release poisoned") = None;
+                *cancel_entry.stop_failure.lock().expect("stop failure poisoned") = None;
                 if let Some(pending) = &pending {
-                    let mut slot = entry.pending_terminal.lock().expect("pending terminal poisoned");
+                    let mut slot = cancel_entry.pending_terminal.lock().expect("pending terminal poisoned");
                     if slot
                         .as_ref()
                         .map(|current| Arc::ptr_eq(current, pending))
@@ -2506,7 +2530,7 @@ impl AcpAgentApp {
                     }
                 }
                 if let Some(abort) = &abort_for_task {
-                    let mut slot = entry.abort.lock().expect("abort poisoned");
+                    let mut slot = cancel_entry.abort.lock().expect("abort poisoned");
                     if slot
                         .as_ref()
                         .map(|current| Arc::ptr_eq(current, abort))
@@ -2515,22 +2539,21 @@ impl AcpAgentApp {
                         *slot = None;
                     }
                 }
-                let _ = connection;
                 Ok(())
             }
             .await;
             if let Err(error) = outcome {
-                *entry.stop_failure.lock().expect("stop failure poisoned") = Some(error);
+                *cancel_entry.stop_failure.lock().expect("stop failure poisoned") = Some(error);
             }
-            let mut slot = entry.cancel_task.lock().expect("cancel task poisoned");
+            let mut slot = cancel_entry.cancel_task.lock().expect("cancel task poisoned");
             if slot
                 .as_ref()
-                .map(|current| current.ptr_eq(&cancel_task))
+                .map(|current| current.ptr_eq(&cancel_task_for_task))
                 .unwrap_or(false)
             {
                 *slot = None;
             }
-            entry.cancelling.store(false, Ordering::SeqCst);
+            cancel_entry.cancelling.store(false, Ordering::SeqCst);
             cancel_resolver.resolve();
         });
         // `await cancelTask` in the handler: the notification is only handled once

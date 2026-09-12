@@ -473,7 +473,7 @@ impl TelegramBridge {
     }
 
     /// `flushReplies()`.
-    pub async fn flush_replies(&self) -> Result<(), TelegramBridgeError> {
+    pub async fn flush_replies(&self, has_signal: bool) -> Result<(), TelegramBridgeError> {
         if let Some(sending) = self.sending.lock().unwrap().clone() {
             return sending.wait().await;
         }
@@ -482,7 +482,7 @@ impl TelegramBridge {
         }
         let sending = SendingState::new();
         *self.sending.lock().unwrap() = Some(sending.clone());
-        let outcome = match self.flush_replies_inner().await {
+        let outcome = match self.flush_replies_inner(has_signal).await {
             Ok(()) => Ok(()),
             Err(error) => {
                 let failures = {
@@ -504,7 +504,7 @@ impl TelegramBridge {
     }
 
     /// The `(async () => { ... })()` body of `flushReplies()`.
-    async fn flush_replies_inner(&self) -> Result<(), TelegramBridgeError> {
+    async fn flush_replies_inner(&self, has_signal: bool) -> Result<(), TelegramBridgeError> {
         let controller = self.shared.controller.clone();
         loop {
             if controller.is_cancelled() {
@@ -526,7 +526,7 @@ impl TelegramBridge {
                 self.save();
                 continue;
             }
-            self.api.send(next.0, &next.1, true).await.map_err(call_error_to_bridge)?;
+            self.api.send(next.0, &next.1, has_signal).await.map_err(call_error_to_bridge)?;
             if controller.is_cancelled() {
                 return Ok(());
             }
@@ -1042,7 +1042,7 @@ impl TelegramBridge {
             })
             .collect();
         self.api
-            .call("setMyCommands", serde_json::json!({ "commands": commands }), controller)
+            .call("setMyCommands", serde_json::json!({ "commands": commands }), has_signal)
             .await
             .map_err(call_error_to_bridge)?;
         let state = self
@@ -1057,7 +1057,7 @@ impl TelegramBridge {
             let handle = start_interval(1000, move || {
                 let bridge = bridge.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = bridge.flush_replies().await {
+                    if let Err(error) = bridge.flush_replies(true).await {
                         if !bridge.shared.controller.is_cancelled() {
                             (bridge.report_error)(Some(bridge.api.redact(&error.message())));
                         }
@@ -1081,7 +1081,7 @@ impl TelegramBridge {
                             .call(
                                 "sendChatAction",
                                 serde_json::json!({ "chat_id": paired, "action": "typing" }),
-                                &bridge.shared.controller,
+                                true,
                             )
                             .await;
                     }
@@ -1111,7 +1111,7 @@ impl TelegramBridge {
         while !controller.is_cancelled() {
             match self
                 .api
-                .updates(self.shared.state.lock().unwrap().offset, controller)
+                .updates(self.shared.state.lock().unwrap().offset, has_signal)
                 .await
             {
                 Ok(updates) => {
@@ -1384,7 +1384,7 @@ mod tests {
     fn sha256_keys_match_the_typescript_dedupe_key() {
         assert_eq!(
             sha256_hex("session-1:12:hi"),
-            "b6a2b2f6f5a2f8bb1f3a2e0c9b0a8c7e5d1f4a3b2c1d0e9f8a7b6c5d4e3f2a1"
+            "01fbbc5620a195e70ea5e06164dcf93dd19bed8f59aa4f39f4112cae02f89c32"
         );
     }
 }

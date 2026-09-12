@@ -168,7 +168,7 @@ pub async fn telegram_worker_running(store: &TelegramStore) -> bool {
 /// `withTelegramManagement(store, action)`.
 pub async fn with_telegram_management<T, F>(store: &TelegramStore, action: F) -> Result<T, TelegramLockError>
 where
-    F: FnOnce() -> pi_ai::types::BoxFuture<'static, Result<T, String>>,
+    F: FnOnce() -> pi_ai::types::BoxFuture<Result<T, String>>,
 {
     std::fs::create_dir_all(&store.directory).map_err(|error| TelegramLockError::Io(error.to_string()))?;
     let lock = TelegramFileLock::acquire(
