@@ -381,10 +381,13 @@ pub fn bash_output_to_text(msg: &BashExecutionMessage) -> String {
         }
     }
     if msg.truncated {
-        text += match &msg.full_output_path {
-            Some(path) => &format!("\n\n[Output truncated. Full output: {path}]"),
-            None => "\n\n[Output truncated.]",
+        // The formatted suffix is bound to a local: a `&format!(..)` arm would borrow a temporary
+        // that is freed at the end of the `match`.
+        let suffix = match &msg.full_output_path {
+            Some(path) => format!("\n\n[Output truncated. Full output: {path}]"),
+            None => "\n\n[Output truncated.]".to_string(),
         };
+        text += &suffix;
     }
     text
 }
