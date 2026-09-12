@@ -1,0 +1,23 @@
+{
+ "slice": "agent-core-missing",
+ "crate": "pi-agent-core",
+ "files": [
+  {
+   "src": "packages/agent/src/agent.ts",
+   "rust": "crates/pi-agent-core/src/agent.rs",
+   "loc": 605
+  },
+  {
+   "src": "packages/agent/src/proxy.ts",
+   "rust": "crates/pi-agent-core/src/proxy.rs",
+   "loc": 348
+  },
+  {
+   "src": "packages/agent/src/index.ts",
+   "rust": "crates/pi-agent-core/src/mod.rs",
+   "loc": 5
+  }
+ ],
+ "note": "These three files were never written (agent.rs, proxy.rs, mod.rs are 0 bytes). Port them 1:1 from packages/agent/src/agent.ts, proxy.ts and index.ts. agent.ts is the Agent class with steering/followUp queues (PendingMessageQueue 'all'|'one-at-a-time'), AgentContinueError{code:'busy'|'nothing-to-continue'}, prompt/continue/run_with_lifecycle/process_events. Note: types.rs and agent_loop.rs are being repaired in parallel by another worker - do not edit those two files. If you need a type they export, use it as-is; if it is missing, add it ONLY inside your own files.",
+ "loc": 958
+}
