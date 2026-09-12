@@ -1,0 +1,3 @@
+cli/daemon_command.rs
+cli/daemon_ps_format.rs
+cli/daemon_update_restart.rs

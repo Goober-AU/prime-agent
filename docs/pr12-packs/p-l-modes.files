@@ -1,0 +1,15 @@
+modes/acp/acp_events.rs
+modes/agents_view/agents_view_state.rs
+modes/agents_view/roster_store.rs
+modes/daemon/active_session_state.rs
+modes/daemon/command_recovery_journal.rs
+modes/daemon/daemon_protocol.rs
+modes/daemon/daemon_socket.rs
+modes/daemon/heartbeat_catalog.rs
+modes/daemon/saved_session_catalog.rs
+modes/daemon/saved_session_info.rs
+modes/daemon/snapshot_transcript_cache.rs
+modes/daemon/worker_recovery_journal.rs
+modes/rpc/jsonl.rs
+modes/rpc/rpc_extension_ui_context.rs
+modes/telegram/manager.rs

@@ -1,0 +1,5042 @@
+[
+ {
+  "f": "core/agent_session_runtime.rs",
+  "l": 33,
+  "m": "file not found for module `daemon_adapter`",
+  "code": "E0583",
+  "notes": [
+   "to create the module `daemon_adapter`, create file \"crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs\" or \"crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter\\mod.rs\"",
+   "if there is a `mod daemon_adapter` elsewhere in the crate already, import it with `use crate::...` instead"
+  ]
+ },
+ {
+  "f": "core/agent_session_runtime.rs",
+  "l": 34,
+  "m": "file not found for module `in_process_adapter`",
+  "code": "E0583",
+  "notes": [
+   "to create the module `in_process_adapter`, create file \"crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\in_process_adapter.rs\" or \"crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\in_process_adapter\\mod.rs\"",
+   "if there is a `mod in_process_adapter` elsewhere in the crate already, import it with `use crate::...` instead"
+  ]
+ },
+ {
+  "f": "core/tools/bash.rs",
+  "l": 917,
+  "m": "the name `tests` is defined multiple times",
+  "code": "E0428",
+  "notes": [
+   "`tests` must be defined only once in the type namespace of this module"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2746,
+  "m": "cannot find type `ToolCallEvent` in this scope",
+  "code": "E0433",
+  "notes": [
+   "consider importing this enum through its public re-export"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2774,
+  "m": "cannot find type `ToolResultEvent` in this scope",
+  "code": "E0433",
+  "notes": [
+   "consider importing this enum through its public re-export"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 7218,
+  "m": "cannot find value `return_after_accepted` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8865,
+  "m": "cannot find value `prepared_turn` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8869,
+  "m": "cannot find value `prepared_turn` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/saved_session_catalog.rs",
+  "l": 181,
+  "m": "missing lifetime specifier",
+  "code": "E0106",
+  "notes": [
+   "this function's return type contains a borrowed value, but the signature does not say whether it is borrowed from `command` or `key`",
+   "consider introducing a named lifetime parameter"
+  ]
+ },
+ {
+  "f": "core/extensions/runner.rs",
+  "l": 1946,
+  "m": "cannot find function `create_extension_for_test` in module `crate::core::extensions::loader`",
+  "code": "E0425",
+  "notes": [
+   "a function with a similar name exists"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/mod.rs",
+  "l": 136,
+  "m": "cannot find value `FILTER_MODES` in this scope",
+  "code": "E0425",
+  "notes": [
+   "consider importing this constant"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 8,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::sync::Arc<dyn extensions::types::ExtensionUiContext>`\n     found enum `serde_json::Value`",
+   "the type constructed contains `serde_json::Value` due to the type of the argument passed",
+   "tuple variant defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 9,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "the type constructed contains `serde_json::Value` due to the type of the argument passed",
+   "tuple variant defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 10,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::sync::Arc<(dyn Fn(extensions::types::ExtensionError) + std::marker::Send + Sync + 'static)>`\n   found struct `std::sync::Arc<dyn Fn(serde_json::Value) + std::marker::Send + Sync>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 433,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<agent_messages::AgentSessionMessageListResult>`\n   found enum `std::option::Option<AgentFamilyRosterResult>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 493,
+  "m": "no field `agents` on type `rlm_runtime::RlmListSubagentsResult`",
+  "code": "E0609",
+  "notes": [
+   "available field is: `subagents`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 509,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 510,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 511,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 518,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 519,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 520,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 540,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 541,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 542,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 588,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 591,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `label`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 591,
+  "m": "no field `label` on type `&agent_session::RlmChildRun`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `id`, `prompt`, `session_name`, `session_dir`, `model` ... and 27 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 592,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `model`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 679,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 680,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 681,
+  "m": "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagent`, `outcome`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 782,
+  "m": "this function takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "function defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 809,
+  "m": "`match` arms have incompatible types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<pi_ai::index::Model>`\n   found enum `std::option::Option<std::option::Option<pi_ai::index::Model>>`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 814,
+  "m": "struct `agent_session::RlmSubagentModelSelection` has no field named `thinking_level`",
+  "code": "E0560",
+  "notes": [
+   "all struct fields are already assigned"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 828,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::string::String`\n     found enum `std::option::Option<std::string::String>`",
+   "consider using `Option::expect` to unwrap the `std::option::Option<std::string::String>` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 832,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `pi_ai::index::Model`\n     found enum `std::option::Option<std::string::String>`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 826,
+  "m": "missing fields `id`, `spawn_code` and `spawned_by_request_id` in initializer of `agent_session::RlmSubagentRuntimeOptionsInput`",
+  "code": "E0063",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 842,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 844,
+  "m": "struct `rlm_runtime::RlmCreateSessionResult` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `active_session_id`, `session_id`, `name`, `session_file`, `model`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 844,
+  "m": "no field `runtime_id` on type `rlm_runtime::RlmSubagentRuntime`",
+  "code": "E0609",
+  "notes": [
+   "available field is: `session`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 845,
+  "m": "struct `rlm_runtime::RlmCreateSessionResult` has no field named `session_dir`",
+  "code": "E0560",
+  "notes": [
+   "a field with a similar name exists"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 845,
+  "m": "no field `session_dir` on type `rlm_runtime::RlmSubagentRuntime`",
+  "code": "E0609",
+  "notes": [
+   "available field is: `session`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 846,
+  "m": "struct `rlm_runtime::RlmCreateSessionResult` has no field named `session_name`",
+  "code": "E0560",
+  "notes": [
+   "a field with a similar name exists"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 858,
+  "m": "struct `rlm_runtime::RlmSpawnHandle` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `name`, `model`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 858,
+  "m": "no field `child_id` on type `rlm_runtime::RlmCreateSessionResult`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `active_session_id`, `session_id`, `name`, `session_file`, `model`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 859,
+  "m": "no field `session_dir` on type `rlm_runtime::RlmCreateSessionResult`",
+  "code": "E0609",
+  "notes": [
+   "a field with a similar name exists"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 860,
+  "m": "struct `rlm_runtime::RlmSpawnHandle` has no field named `session_name`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `name`, `model`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 860,
+  "m": "no field `session_name` on type `rlm_runtime::RlmCreateSessionResult`",
+  "code": "E0609",
+  "notes": [
+   "a field with a similar name exists"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 975,
+  "m": "no field `max_attempts` on type `ResolvedRetrySettings`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `enabled`, `max_retries`, `base_delay_ms`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 985,
+  "m": "no field `max_attempts` on type `ResolvedRetrySettings`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `enabled`, `max_retries`, `base_delay_ms`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 991,
+  "m": "no field `delay_ms` on type `ResolvedRetrySettings`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `enabled`, `max_retries`, `base_delay_ms`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1003,
+  "m": "no field `max_attempts` on type `ResolvedRetrySettings`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `enabled`, `max_retries`, `base_delay_ms`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1023,
+  "m": "the method `clone` exists for struct `MutexGuard<'_, Option<Pin<Box<dyn Future<Output = ...> + Send>>>>`, but its trait bounds were not satisfied",
+  "code": "E0599",
+  "notes": [
+   "the following trait bounds were not satisfied:\n`Pin<Box<dyn futures::Future<Output = Result<(), std::string::String>> + std::marker::Send>>: Clone`\nwhich is required by `std::option::Option<Pin<Box<dyn futures::Future<Output = Result<(), std::string::String>> + std::marker::Send>>>: Clone`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-7398158230812515204.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1209,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1216,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "you can convert an `i64` to an `f64`, producing the floating point representation of the integer, rounded if necessary"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1216,
+  "m": "struct `agent_session::SetRlmMaxDepthResult` has no field named `global`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `source`, `global_saved`, `global_error`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1251,
+  "m": "this function takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "expected `&[CompactionSessionEntry]`, found `&Vec<Map<String, Value>>`",
+   "expected reference `&[CompactionSessionEntry]`\n   found reference `&Vec<serde_json::Map<std::string::String, serde_json::Value>>`",
+   "function defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1252,
+  "m": "no method named `is_empty` found for struct `BranchPreparation` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following traits define an item `is_empty`, perhaps you need to implement one of them:\ncandidate #1: `ExactSizeIterator`\ncandidate #2: `RangeBounds`\ncandidate #3: `SampleRange`\ncandidate #4: `bitflags::traits::Flags`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1256,
+  "m": "struct `branch_summarization::GenerateBranchSummaryOptions` has no field named `messages`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `model`, `api_key`, `headers`, `custom_instructions`, `replace_instructions` ... and 2 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1255,
+  "m": "this function takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "function defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1261,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `BranchSummaryResult`\n     found enum `Result<_, _>`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1293,
+  "m": "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied",
+  "code": "E0599",
+  "notes": [
+   "the following trait bounds were not satisfied:\n`Box<dyn futures::Future<Output = Result<(), std::string::String>> + std::marker::Send>: Clone`\nwhich is required by `Pin<Box<dyn futures::Future<Output = Result<(), std::string::String>> + std::marker::Send>>: Clone`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-3228384159012691998.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3929,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 5659,
+  "m": "this method takes 1 argument but 3 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "method defined here",
+   "remove the extra arguments"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 6066,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&agent_session::RlmChildRun`\n   found reference `&std::sync::Arc<std::sync::Mutex<agent_session::RlmChildRun>>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 6670,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `PreparedPromptPreparation`\n     found enum `std::option::Option<PreparedPromptPreparation>`",
+   "the type constructed contains `std::option::Option<PreparedPromptPreparation>` due to the type of the argument passed",
+   "tuple variant defined here",
+   "consider using `Option::expect` to unwrap the `std::option::Option<PreparedPromptPreparation>` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 7661,
+  "m": "the `?` operator can only be applied to values that implement `Try`",
+  "code": "E0277",
+  "notes": [
+   "the nightly-only, unstable trait `Try` is not implemented for `bool`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 7784,
+  "m": "struct `PreparedTurnActionOptions` has no field named `records`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `message`, `prefix_messages`, `preview_label`, `source`, `execution_policy`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8683,
+  "m": "no method named `prepare_active_turns` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8806,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8936,
+  "m": "no method named `emit_refine_failed` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8957,
+  "m": "no method named `is_empty` found for enum `std::option::Option<T>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "the method `is_empty` exists on the type `std::string::String`",
+   "consider using `Option::expect` to unwrap the `std::string::String` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8958,
+  "m": "`std::option::Option<std::string::String>` doesn't implement `std::fmt::Display`",
+  "code": "E0277",
+  "notes": [
+   "the trait `std::fmt::Display` is not implemented for `std::option::Option<std::string::String>`",
+   "in format strings you may be able to use `{:?}` (or {:#?} for pretty-print) instead"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9102,
+  "m": "the trait bound `messages::CustomMessage: std::default::Default` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `std::default::Default` is not implemented for `messages::CustomMessage`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9171,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9207,
+  "m": "no method named `prompt_with_options` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `compact_with_options` with a similar name"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9213,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "the type constructed contains `std::string::String` due to the type of the argument passed",
+   "tuple variant defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9830,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<Pin<_>>`\n found struct `Pin<_>`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10048,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&AgentEvent`\n   found reference `&'static str`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10049,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<pi_ai::index::Model>`\n found struct `pi_ai::index::Model`",
+   "method defined here",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10321,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::string::String`\n     found enum `std::option::Option<std::string::String>`",
+   "the type constructed contains `std::option::Option<std::string::String>` due to the type of the argument passed",
+   "tuple variant defined here",
+   "consider using `Option::expect` to unwrap the `std::option::Option<std::string::String>` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10661,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&[evidence::AgentMessage]`\n   found reference `&Vec<pi_agent_core::types::AgentMessage>`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10672,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::collections::HashMap<std::string::String, std::string::String>>`\n found struct `IndexMap<std::string::String, std::string::String>`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10792,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`pi_agent_core::types::AgentMessage` and `evidence::AgentMessage` have similar names, but are actually distinct types",
+   "`pi_agent_core::types::AgentMessage` is defined in crate `pi_agent_core`",
+   "`evidence::AgentMessage` is defined in the current crate"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10800,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::collections::HashMap<std::string::String, std::string::String>>`\n found struct `IndexMap<std::string::String, std::string::String>`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10855,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<_>`\n found struct `std::string::String`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10989,
+  "m": "cannot find function `options_source` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10989,
+  "m": "expected `{closure@agent_session.rs:10985:13}` to return `Pin<Box<dyn Future<Output = Result<RefinementResult, String>> + Send>>`, but it returns `Pin<Box<{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:10989:26: 10989:36}>>`",
+  "code": "E0271",
+  "notes": [
+   "expected struct `Pin<Box<(dyn futures::Future<Output = Result<RefinementResult, std::string::String>> + std::marker::Send + 'static)>>`\n   found struct `Pin<Box<{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:10989:26: 10989:36}>>`",
+   "required for the cast from `std::sync::Arc<{closure@crates\\pi-coding-agent\\src\\core\\agent_session.rs:10985:13: 10985:20}>` to `Arc<dyn Fn() -> Pin<Box<...>> + Send + Sync>`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-10728532008645411617.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11935,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::string::String`\n     found enum `std::option::Option<std::string::String>`",
+   "the type constructed contains `std::option::Option<std::string::String>` due to the type of the argument passed",
+   "tuple variant defined here",
+   "consider using `Option::expect` to unwrap the `std::option::Option<std::string::String>` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12106,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `IndexMap<_, _>`\n     found enum `std::option::Option<IndexMap<_, _>>`",
+   "consider using `Option::expect` to unwrap the `std::option::Option<IndexMap<std::string::String, std::string::String>>` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12251,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&AutoRefineReason`\n   found reference `&'static str`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12259,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&AutoRefineReason`\n   found reference `&str`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12485,
+  "m": "this method takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "method defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12491,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "you can convert a `u64` to an `i64` and panic if the converted value doesn't fit"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12497,
+  "m": "missing field `options` in initializer of `SerializedBackgroundPlanResult`",
+  "code": "E0063",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12504,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<bool>`\n   found type `bool`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12530,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "you can convert a `u64` to an `i64` and panic if the converted value doesn't fit"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12536,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "you can convert a `u64` to an `i64` and panic if the converted value doesn't fit"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12538,
+  "m": "no associated function or constant named `SelfOnly` found for struct `std::string::String` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12540,
+  "m": "no associated function or constant named `Auto` found for struct `std::string::String` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12534,
+  "m": "missing fields `abort` and `options` in initializer of `SerializedBackgroundPlanResult`",
+  "code": "E0063",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12543,
+  "m": "missing field `options` in initializer of `SerializedBackgroundPlanResult`",
+  "code": "E0063",
+  "notes": []
+ },
+ {
+  "f": "core/kernel/repl_manager.rs",
+  "l": 686,
+  "m": "future cannot be sent between threads safely",
+  "code": null,
+  "notes": [
+   "within `{async block@crates\\pi-coding-agent\\src\\core\\kernel\\repl_manager.rs:686:30: 686:40}`, the trait `std::marker::Send` is not implemented for `MutexGuard<'_, Option<(String, Arc<SharedPromise<String>>)>>`",
+   "future is not `Send` as this value is used across an await",
+   "required by a bound in `tokio::spawn`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-4130261705517836813.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 3986,
+  "m": "no method named `contains_key` found for reference `&serde_json::Value` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4002,
+  "m": "arguments to this method are incorrect",
+  "code": "E0308",
+  "notes": [
+   "expected `&[Arc<Mutex<ActiveSessionState>>]`, found `Vec<Arc<DaemonSessionState>>`",
+   "expected reference `&[std::sync::Arc<std::sync::Mutex<ActiveSessionState>>]`\n      found struct `Vec<std::sync::Arc<DaemonSessionState>>`",
+   "expected `&[AgentCronJob]`, found `Vec<AgentCronJob>`",
+   "expected reference `&[cron_jobs::AgentCronJob]`\n      found struct `Vec<cron_jobs::AgentCronJob>`",
+   "method defined here",
+   "consider borrowing here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4017,
+  "m": "this function takes 3 arguments but 2 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "expected `Option<&str>`, found `Option<String>`",
+   "expected enum `std::option::Option<&str>`\n   found enum `std::option::Option<std::string::String>`",
+   "associated function defined here",
+   "consider borrowing here",
+   "try using `.as_deref()` to convert `std::option::Option<std::string::String>` to `std::option::Option<&str>`",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4019,
+  "m": "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4021,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<&str>`\n   found enum `std::option::Option<std::string::String>`",
+   "associated function defined here",
+   "try using `.as_deref()` to convert `std::option::Option<std::string::String>` to `std::option::Option<&str>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4023,
+  "m": "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4025,
+  "m": "arguments to this method are incorrect",
+  "code": "E0308",
+  "notes": [
+   "expected `&[Arc<Mutex<ActiveSessionState>>]`, found `Vec<Arc<DaemonSessionState>>`",
+   "expected reference `&[std::sync::Arc<std::sync::Mutex<ActiveSessionState>>]`\n      found struct `Vec<std::sync::Arc<DaemonSessionState>>`",
+   "expected `&[AgentCronJob]`, found `Vec<AgentCronJob>`",
+   "expected reference `&[cron_jobs::AgentCronJob]`\n      found struct `Vec<cron_jobs::AgentCronJob>`",
+   "method defined here",
+   "consider borrowing here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4048,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::string::String>`\n found struct `std::string::String`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4122,
+  "m": "no associated function or constant named `list_with_callbacks` found for struct `session_manager::SessionManager` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "if you're trying to build a new `session_manager::SessionManager` consider using one of the following associated functions:\nsession_manager::SessionManager::create\nsession_manager::SessionManager::open\nsession_manager::SessionManager::continue_recent\nsession_manager::SessionManager::in_memory\nsession_manager::SessionManager::fork_from"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4126,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<Box<(dyn Fn(i64, i64) + std::marker::Send + Sync + 'static)>>`\n   found enum `std::option::Option<std::sync::Arc<dyn Fn(f64, f64) + std::marker::Send + Sync>>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4127,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<Box<(dyn for<'a> Fn(&'a session_manager::SessionInfo) + std::marker::Send + Sync + 'static)>>`\n   found enum `std::option::Option<std::sync::Arc<dyn for<'a> Fn(&'a session_manager::SessionInfo) + std::marker::Send + Sync>>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4133,
+  "m": "no associated function or constant named `list_all_with_callbacks` found for struct `session_manager::SessionManager` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "if you're trying to build a new `session_manager::SessionManager` consider using one of the following associated functions:\nsession_manager::SessionManager::create\nsession_manager::SessionManager::open\nsession_manager::SessionManager::continue_recent\nsession_manager::SessionManager::in_memory\nsession_manager::SessionManager::fork_from"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4135,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<Box<(dyn Fn(i64, i64) + std::marker::Send + Sync + 'static)>>`\n   found enum `std::option::Option<std::sync::Arc<dyn Fn(f64, f64) + std::marker::Send + Sync>>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4136,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<Box<(dyn for<'a> Fn(&'a session_manager::SessionInfo) + std::marker::Send + Sync + 'static)>>`\n   found enum `std::option::Option<std::sync::Arc<dyn for<'a> Fn(&'a session_manager::SessionInfo) + std::marker::Send + Sync>>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4146,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `RlmSpawnLedger`\n   found struct `std::sync::Arc<RlmSpawnLedger>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4201,
+  "m": "a value of type `&std::collections::HashSet<std::string::String>` cannot be built from an iterator over elements of type `std::string::String`",
+  "code": "E0277",
+  "notes": [
+   "the trait `FromIterator<std::string::String>` is not implemented for `&std::collections::HashSet<_, RandomState>`\nbut it is implemented for `std::collections::HashSet<_, _>`",
+   "for that trait implementation, expected `std::collections::HashSet<std::string::String, _>`, found `&std::collections::HashSet<std::string::String>`",
+   "the method call chain might not have had the expected associated types",
+   "required by a bound in `std::iter::Iterator::collect`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4225,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<&std::collections::HashMap<_, _>>`\n   found enum `std::option::Option<std::collections::HashMap<_, _>>`",
+   "function defined here",
+   "try using `.as_ref()` to convert `std::option::Option<std::collections::HashMap<std::string::String, std::string::String>>` to `std::option::Option<&std::collections::HashMap<std::string::String, std::string::String>>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4255,
+  "m": "binary operation `!=` cannot be applied to type `std::option::Option<&std::sync::Arc<DaemonSessionState>>`",
+  "code": "E0369",
+  "notes": [
+   "`std::option::Option<&std::sync::Arc<DaemonSessionState>>` does not implement `PartialEq<std::option::Option<&std::sync::Arc<std::sync::Mutex<ActiveSessionState>>>>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4279,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonSocketClient>`\n   found reference `&std::sync::Arc<std::sync::Mutex<DaemonSocketClient>>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4458,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "you can convert an `i64` to an `f64`, producing the floating point representation of the integer, rounded if necessary"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4469,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "you can convert an `i64` to an `f64`, producing the floating point representation of the integer, rounded if necessary"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4524,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `RlmSpawnLedger`\n   found struct `std::sync::Arc<RlmSpawnLedger>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 4578,
+  "m": "the trait bound `session_file_actions::DeleteSessionFileResult: serde::Serialize` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `Serialize` is not implemented for `session_file_actions::DeleteSessionFileResult`",
+   "for local types consider adding `#[derive(serde::Serialize)]` to your `session_file_actions::DeleteSessionFileResult` type",
+   "for types from other crates check whether the crate offers a `serde` feature flag",
+   "the following other types implement trait `Serialize`:\n  &'a T\n  &'a mut T\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\n  (T0, T1, T2, T3)\n  (T0, T1, T2, T3, T4)\nand 880 others",
+   "required by a bound in `serde_json::to_value`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5039,
+  "m": "the method `clone` exists for struct `Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>`, but its trait bounds were not satisfied",
+  "code": "E0599",
+  "notes": [
+   "the following trait bounds were not satisfied:\n`Box<dyn futures::Future<Output = Result<serde_json::Value, std::string::String>> + std::marker::Send>: Clone`\nwhich is required by `Pin<Box<dyn futures::Future<Output = Result<serde_json::Value, std::string::String>> + std::marker::Send>>: Clone`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-10108152314471409513.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5075,
+  "m": "no method named `lock` found for reference `&std::sync::Arc<DaemonSessionState>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `lock`, perhaps you need to implement it:\ncandidate #1: `lock_api::mutex::RawMutex`",
+   "one of the expressions' fields has a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5278,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<&pi_ai::index::Model>`\n   found enum `std::option::Option<&ModelIdentity>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5281,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&SessionHistorySnapshot`\n   found reference `&Result<SessionHistorySnapshot, std::string::String>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5307,
+  "m": "this function takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "method defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "C:/Users/openclawuser/optimus-rust-toolchain/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.151/src/macros.rs",
+  "l": 279,
+  "m": "the trait bound `ModelIdentity: serde::Serialize` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `Serialize` is not implemented for `ModelIdentity`",
+   "for local types consider adding `#[derive(serde::Serialize)]` to your `ModelIdentity` type",
+   "for types from other crates check whether the crate offers a `serde` feature flag",
+   "the following other types implement trait `Serialize`:\n  &'a T\n  &'a mut T\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\n  (T0, T1, T2, T3)\n  (T0, T1, T2, T3, T4)\nand 880 others",
+   "required for `Vec<ModelIdentity>` to implement `Serialize`",
+   "1 redundant requirement hidden",
+   "required for `&Vec<ModelIdentity>` to implement `Serialize`",
+   "required by a bound in `serde_json::to_value`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5458,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `Result<std::option::Option<cron_jobs::AgentCronJob>, std::string::String>`\n   found enum `std::option::Option<_>`",
+   "try wrapping the pattern in `Ok`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5582,
+  "m": "the trait bound `ModelIdentity: serde::Serialize` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `Serialize` is not implemented for `ModelIdentity`",
+   "for local types consider adding `#[derive(serde::Serialize)]` to your `ModelIdentity` type",
+   "for types from other crates check whether the crate offers a `serde` feature flag",
+   "the following other types implement trait `Serialize`:\n  &'a T\n  &'a mut T\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\n  (T0, T1, T2, T3)\n  (T0, T1, T2, T3, T4)\nand 880 others",
+   "required for `&ModelIdentity` to implement `Serialize`",
+   "required by a bound in `serde_json::to_value`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5600,
+  "m": "the trait bound `ModelIdentity: serde::Serialize` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `Serialize` is not implemented for `ModelIdentity`",
+   "for local types consider adding `#[derive(serde::Serialize)]` to your `ModelIdentity` type",
+   "for types from other crates check whether the crate offers a `serde` feature flag",
+   "the following other types implement trait `Serialize`:\n  &'a T\n  &'a mut T\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\n  (T0, T1, T2, T3)\n  (T0, T1, T2, T3, T4)\nand 880 others",
+   "required by a bound in `serde_json::to_value`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5648,
+  "m": "no method named `lock` found for struct `std::sync::Arc<SettingsManager>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `lock`, perhaps you need to implement it:\ncandidate #1: `lock_api::mutex::RawMutex`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5927,
+  "m": "the trait bound `SessionTreeFlatNode: serde::Serialize` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `Serialize` is not implemented for `SessionTreeFlatNode`",
+   "for local types consider adding `#[derive(serde::Serialize)]` to your `SessionTreeFlatNode` type",
+   "for types from other crates check whether the crate offers a `serde` feature flag",
+   "the following other types implement trait `Serialize`:\n  &'a T\n  &'a mut T\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\n  (T0, T1, T2, T3)\n  (T0, T1, T2, T3, T4)\nand 880 others",
+   "required for `Vec<SessionTreeFlatNode>` to implement `Serialize`",
+   "required by a bound in `serde_json::to_value`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5979,
+  "m": "the trait bound `tool_definition::ToolDefinition: serde::de::DeserializeOwned` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `for<'de> Deserialize<'de>` is not implemented for `tool_definition::ToolDefinition`",
+   "the following other types implement trait `Deserialize<'de>`:\n  &'a RawValue\n  &'a [u8]\n  &'a std::path::Path\n  &'a str\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\nand 898 others",
+   "required for `tool_definition::ToolDefinition` to implement `DeserializeOwned`",
+   "required by a bound in `serde_json::from_value`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-14285116414068720956.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5987,
+  "m": "no method named `append_label_change` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6189,
+  "m": "borrow of moved value: `runtime_open_guard`",
+  "code": "E0382",
+  "notes": [
+   "consider changing this parameter type in method `create_runtime` to borrow instead if owning the value isn't necessary",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-7113105720569917786.txt'",
+   "consider using `--verbose` to print the full type name to the console",
+   "consider cloning the value if the performance cost is acceptable"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6410,
+  "m": "this method takes 1 argument but 2 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "expected reference `&session_manager::SessionState`\n   found reference `&'static str`",
+   "method defined here",
+   "remove the extra argument"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6437,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&serde_json::Value`\n   found reference `&daemon_mode::DaemonOutbound`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6435,
+  "m": "type mismatch in closure arguments",
+  "code": "E0631",
+  "notes": [
+   "expected closure signature `for<'a> fn(&'a ActiveSessionState, daemon_extension_binding::DaemonOutbound) -> _`\n   found closure signature `fn(&ActiveSessionState, daemon_mode::DaemonOutbound) -> _`",
+   "required for the cast from `Arc<{closure@daemon_mode.rs:6436:21}>` to `Arc<dyn Fn(&ActiveSessionState, DaemonOutbound) + Send + Sync>`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-13385276450551422862.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8114,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<&DaemonResumeCursor>`\n   found enum `std::option::Option<serde_json::Value>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8216,
+  "m": "attempted to take value of method `role` on type `&pi_agent_core::types::AgentMessage`",
+  "code": "E0615",
+  "notes": [
+   "use parentheses to call the method"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8216,
+  "m": "no field `timestamp` on type `&pi_agent_core::types::AgentMessage`",
+  "code": "E0609",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8223,
+  "m": "this function takes 1 argument but 2 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "function defined here",
+   "remove the extra argument"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8548,
+  "m": "use of unstable library feature `iter_next_chunk`",
+  "code": "E0658",
+  "notes": [
+   "see issue #98326 <https://github.com/rust-lang/rust/issues/98326> for more information"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8548,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `Result<[Result<Vec<u8>, SnapshotTranscriptAborted>; _], std::array::IntoIter<Result<Vec<u8>, SnapshotTranscriptAborted>, _>>`\n   found enum `std::option::Option<_>`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-14852717800897891196.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8561,
+  "m": "the size for values of type `[u8]` cannot be known at compilation time",
+  "code": "E0277",
+  "notes": [
+   "the trait `Sized` is not implemented for `[u8]`",
+   "all local variables must have a statically known size"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8562,
+  "m": "the size for values of type `[u8]` cannot be known at compilation time",
+  "code": "E0277",
+  "notes": [
+   "the trait `Sized` is not implemented for `[u8]`",
+   "all local variables must have a statically known size"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8594,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::sync::Arc<_>`\nfound reference `&std::sync::Arc<_>`",
+   "method defined here",
+   "consider using clone here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9048,
+  "m": "no method named `acquire` found for struct `MutationDrainLatch` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9252,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonClientHandle>`\n   found reference `&std::sync::Arc<DaemonSocketClient>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9457,
+  "m": "no method named `abort_for_update_restart` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9486,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&DaemonClientHandle`\n   found reference `&std::sync::Arc<DaemonSocketClient>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9497,
+  "m": "no field `state` on type `&std::sync::Arc<DaemonSocketClient>`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `id`, `attached_active_session_ids`, `catchup_active_session_ids`, `catchup_purposes`, `backpressured` ... and 12 others"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9502,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&DaemonClientHandle`\n   found reference `&std::sync::Arc<DaemonSocketClient>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9541,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "function defined here",
+   "consider mutably borrowing here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9543,
+  "m": "`session_file_actions::DeleteSessionFileResult` is not a future",
+  "code": "E0277",
+  "notes": [
+   "the trait `futures::Future` is not implemented for `session_file_actions::DeleteSessionFileResult`",
+   "session_file_actions::DeleteSessionFileResult must be a future or must implement `IntoFuture` to be awaited",
+   "required for `session_file_actions::DeleteSessionFileResult` to implement `std::future::IntoFuture`",
+   "remove the `.await`",
+   "alternatively, consider making `fn delete_session_file` asynchronous"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 10307,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<dyn Fn() + std::marker::Send + Sync>`\n   found reference `&std::sync::Arc<{closure@crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_mode.rs:10253:22: 10253:29}>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 10522,
+  "m": "no method named `rlm_spawn_ledger` found for reference `&AgentDaemon` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 10596,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`session_manager::SessionInfo` and `daemon_session_list::SessionInfo` have similar names, but are actually distinct types",
+   "`session_manager::SessionInfo` is defined in module `crate::core::session_manager` of the current crate",
+   "`daemon_session_list::SessionInfo` is defined in module `crate::modes::daemon::daemon_session_list` of the current crate",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 10750,
+  "m": "cannot move out of an `Arc`",
+  "code": "E0507",
+  "notes": [
+   "clone the value to increment its reference count"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 10989,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&PassiveRlmSubagentEntry`\n   found reference `&RlmSubagentDisplayEntry`",
+   "closure parameter defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 11223,
+  "m": "arguments to this function are incorrect",
+  "code": "E0308",
+  "notes": [
+   "expected `&[SessionInfo]`, found `&Vec<SessionInfo>`",
+   "expected reference `&[daemon_session_list::SessionInfo]`\n   found reference `&Vec<session_manager::SessionInfo>`",
+   "expected `daemon_session_list::AgentCronJob`, found `cron_jobs::AgentCronJob`",
+   "`cron_jobs::AgentCronJob` and `daemon_session_list::AgentCronJob` have similar names, but are actually distinct types",
+   "`cron_jobs::AgentCronJob` is defined in module `crate::core::cron_jobs` of the current crate",
+   "`daemon_session_list::AgentCronJob` is defined in module `crate::modes::daemon::daemon_session_list` of the current crate",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 11353,
+  "m": "cannot move out of an `Arc`",
+  "code": "E0507",
+  "notes": [
+   "clone the value to increment its reference count"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 11780,
+  "m": "no field `last_activity_at` on type `SessionPassivationSnapshot`",
+  "code": "E0609",
+  "notes": [
+   "one of the expressions' fields has a field of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 11781,
+  "m": "no field `last_activity_at` on type `SessionPassivationSnapshot`",
+  "code": "E0609",
+  "notes": [
+   "one of the expressions' fields has a field of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12480,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<&str>`\n   found enum `std::option::Option<std::string::String>`",
+   "associated function defined here",
+   "try using `.as_deref()` to convert `std::option::Option<std::string::String>` to `std::option::Option<&str>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12482,
+  "m": "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12597,
+  "m": "no method named `in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12604,
+  "m": "no method named `set_in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12606,
+  "m": "no method named `set_in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12717,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonSocketClient>`\n   found reference `&std::sync::Arc<std::sync::Mutex<DaemonSocketClient>>`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12755,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonSocketClient>`\n   found reference `&std::sync::Arc<std::sync::Mutex<DaemonSocketClient>>`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12783,
+  "m": "arguments to this function are incorrect",
+  "code": "E0308",
+  "notes": [
+   "expected `String`, found `Option<_>`",
+   "expected struct `std::string::String`\n     found enum `std::option::Option<_>`",
+   "expected `&str`, found `Option<&String>`",
+   "expected reference `&str`\n        found enum `std::option::Option<&std::string::String>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12804,
+  "m": "the trait bound `pi_agent_core::types::AgentMessage: std::default::Default` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_or_default`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12840,
+  "m": "arguments to this function are incorrect",
+  "code": "E0308",
+  "notes": [
+   "expected `String`, found `Option<_>`",
+   "expected struct `std::string::String`\n     found enum `std::option::Option<_>`",
+   "expected `&str`, found `Option<&String>`",
+   "expected reference `&str`\n        found enum `std::option::Option<&std::string::String>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13005,
+  "m": "the trait bound `pi_agent_core::types::AgentMessage: std::default::Default` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_or_default`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13389,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<&str>`\n   found enum `std::option::Option<std::string::String>`",
+   "associated function defined here",
+   "try using `.as_deref()` to convert `std::option::Option<std::string::String>` to `std::option::Option<&str>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13447,
+  "m": "the trait bound `active_session_state::AgentSessionRuntimeMetadata: serde::de::DeserializeOwned` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `for<'de> Deserialize<'de>` is not implemented for `active_session_state::AgentSessionRuntimeMetadata`",
+   "the following other types implement trait `Deserialize<'de>`:\n  &'a RawValue\n  &'a [u8]\n  &'a std::path::Path\n  &'a str\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\nand 898 others",
+   "required for `active_session_state::AgentSessionRuntimeMetadata` to implement `DeserializeOwned`",
+   "required by a bound in `serde_json::from_value`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-14285116414068720956.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13454,
+  "m": "the trait bound `active_session_state::AgentSessionRuntimeMetadata: serde::Serialize` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `Serialize` is not implemented for `active_session_state::AgentSessionRuntimeMetadata`",
+   "for local types consider adding `#[derive(serde::Serialize)]` to your `active_session_state::AgentSessionRuntimeMetadata` type",
+   "for types from other crates check whether the crate offers a `serde` feature flag",
+   "the following other types implement trait `Serialize`:\n  &'a T\n  &'a mut T\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\n  (T0, T1, T2, T3)\n  (T0, T1, T2, T3, T4)\nand 880 others",
+   "required for `&active_session_state::AgentSessionRuntimeMetadata` to implement `Serialize`",
+   "required by a bound in `serde_json::to_value`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13779,
+  "m": "no method named `as_deref` found for enum `SessionStateStatus` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13782,
+  "m": "no method named `cancel_scheduled_jobs_for_session_file` found for reference `&AgentDaemon` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `has_scheduled_jobs_for_session` with a similar name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13662,
+  "m": "no method named `as_deref` found for enum `SessionStateStatus` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13992,
+  "m": "cannot move out of an `Arc`",
+  "code": "E0507",
+  "notes": [
+   "clone the value to increment its reference count"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14147,
+  "m": "lifetime may not live long enough",
+  "code": null,
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14384,
+  "m": "cannot apply unary operator `!` to type `std::option::Option<RlmLedgerDeleteReason>`",
+  "code": "E0600",
+  "notes": [
+   "`std::option::Option<RlmLedgerDeleteReason>` does not implement `Not`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14407,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `RlmSubagentDisplayEntry`\n     found enum `std::option::Option<_>`",
+   "the return type of this call is `std::option::Option<_>` due to the type of the argument passed",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14409,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14417,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14422,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14426,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14429,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14432,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14435,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14438,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14442,
+  "m": "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14468,
+  "m": "`?` couldn't convert the error to `std::string::String`",
+  "code": "E0277",
+  "notes": [
+   "the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait",
+   "`std::string::String` implements trait `From<T>`:\n  From<&mut str>\n  From<&std::string::String>\n  From<&str>\n  From<Box<str>>\n  From<Cow<'_, str>>\n  From<Url>\n  From<Utf8StringRef<'_>>\n  From<Uuid>\nand 2 others"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14537,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "  expected enum `std::option::Option<&str>`\nfound reference `&'static str`",
+   "function defined here",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14632,
+  "m": "no method named `is_destroyed` found for reference `&std::sync::Arc<DaemonClientHandle>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "`PrivateFrameStream` defines an item `is_destroyed`, perhaps you need to implement it"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14635,
+  "m": "this method takes 3 arguments but 5 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "method defined here",
+   "did you mean"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 5648,
+  "m": "no method named `lock` found for struct `std::sync::Arc<settings_manager::SettingsManager>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `lock`, perhaps you need to implement it:\ncandidate #1: `lock_api::mutex::RawMutex`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9048,
+  "m": "no method named `acquire` found for struct `mutation_drain_latch::MutationDrainLatch` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 11780,
+  "m": "no field `last_activity_at` on type `session_action_store::SessionPassivationSnapshot`",
+  "code": "E0609",
+  "notes": [
+   "one of the expressions' fields has a field of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 11781,
+  "m": "no field `last_activity_at` on type `session_action_store::SessionPassivationSnapshot`",
+  "code": "E0609",
+  "notes": [
+   "one of the expressions' fields has a field of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13779,
+  "m": "no method named `as_deref` found for enum `session_manager::SessionStateStatus` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 13662,
+  "m": "no method named `as_deref` found for enum `session_manager::SessionStateStatus` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14384,
+  "m": "cannot apply unary operator `!` to type `std::option::Option<rlm_ledger::RlmLedgerDeleteReason>`",
+  "code": "E0600",
+  "notes": [
+   "`std::option::Option<rlm_ledger::RlmLedgerDeleteReason>` does not implement `Not`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14409,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 53,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<ExtensionCommandContextActions>`\n   found enum `std::option::Option<serde_json::Value>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14417,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14422,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 54,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::sync::Arc<(dyn Fn(extensions::types::ExtensionError) + std::marker::Send + Sync + 'static)>`\n   found struct `std::sync::Arc<dyn Fn(serde_json::Value) + std::marker::Send + Sync>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14426,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 68,
+  "m": "cannot find function `runtime_extension_actions` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14429,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 68,
+  "m": "cannot find function `runtime_extension_context_actions` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 81,
+  "m": "cannot find function `runtime_source_info` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14432,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 85,
+  "m": "cannot find function `runtime_source_info` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14435,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 123,
+  "m": "the trait bound `std::sync::Mutex<session_manager::SessionManager>: extensions::types::SessionManager` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `extensions::types::SessionManager` is implemented for `NullSessionManager`",
+   "required for the cast from `std::sync::Arc<std::sync::Mutex<session_manager::SessionManager>>` to `std::sync::Arc<(dyn extensions::types::SessionManager + 'static)>`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 124,
+  "m": "cannot find function, tuple struct or tuple variant `RuntimeModelRegistry` in this scope",
+  "code": "E0425",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14438,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 262,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&pi_ai::index::AssistantMessage`\n   found reference `&pi_agent_core::types::AgentMessage`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14442,
+  "m": "no method named `as_ref` found for struct `rlm_subagent_display::RlmSubagentDisplayEntry` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `as_ref`, perhaps you need to implement it:\ncandidate #1: `AsRef`",
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 272,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&pi_ai::index::AssistantMessage`\n   found reference `&pi_agent_core::types::AgentMessage`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 317,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&str`\n   found reference `&pi_agent_core::types::ThinkingLevel`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 451,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 454,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `label`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 454,
+  "m": "no field `label` on type `&agent_session::RlmChildRun`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `id`, `prompt`, `session_name`, `session_dir`, `model` ... and 27 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 455,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `model`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 459,
+  "m": "no field `subagents` on type `agent_messages::AgentSessionMessageListResult`",
+  "code": "E0609",
+  "notes": [
+   "a field with a similar name exists"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 464,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 467,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `label`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 468,
+  "m": "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `model`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `rlm_child_id`, `active_session_id`, `session_id`, `session_dir`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 474,
+  "m": "struct `rlm_runtime::RlmListSubagentsResult` has no field named `agents`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagents`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 475,
+  "m": "struct `rlm_runtime::RlmListSubagentsResult` has no field named `max_depth`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagents`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 476,
+  "m": "struct `rlm_runtime::RlmListSubagentsResult` has no field named `depth`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `subagents`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 639,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::string::String>`\n found struct `std::string::String`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 705,
+  "m": "struct `agent_session::RlmChildAgentSnapshot` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `id`, `parent_id`, `active_session_id`, `duration_ms`, `answer_preview` ... and 6 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 706,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::string::String>`\n found struct `std::string::String`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 708,
+  "m": "no field `label` on type `&agent_session::RlmChildRun`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `id`, `prompt`, `session_name`, `session_dir`, `model` ... and 27 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 709,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::string::String>`\n   found enum `std::option::Option<pi_ai::index::Model>`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 710,
+  "m": "struct `agent_session::RlmChildAgentSnapshot` has no field named `depth`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `id`, `parent_id`, `active_session_id`, `duration_ms`, `answer_preview` ... and 6 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 710,
+  "m": "no field `depth` on type `&agent_session::RlmChildRun`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `id`, `prompt`, `session_name`, `session_dir`, `model` ... and 27 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 718,
+  "m": "struct `agent_session::RlmChildAgentSnapshot` has no field named `child_id`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `id`, `parent_id`, `active_session_id`, `duration_ms`, `answer_preview` ... and 6 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 721,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::string::String`\n     found enum `std::option::Option<_>`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 722,
+  "m": "no field `id` on type `std::option::Option<pi_ai::index::Model>`",
+  "code": "E0609",
+  "notes": [
+   "one of the expressions' fields has a field of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 723,
+  "m": "struct `agent_session::RlmChildAgentSnapshot` has no field named `depth`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `id`, `parent_id`, `active_session_id`, `duration_ms`, `answer_preview` ... and 6 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 872,
+  "m": "no method named `as_deref` found for struct `std::string::String` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `as_ref` with a similar name"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 895,
+  "m": "no field `details` on type `&pi_ai::index::AssistantMessage`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `role`, `content`, `api`, `provider`, `model` ... and 8 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 905,
+  "m": "no field `details` on type `&pi_ai::index::AssistantMessage`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `role`, `content`, `api`, `provider`, `model` ... and 8 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 924,
+  "m": "no field `details` on type `&pi_ai::index::AssistantMessage`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `role`, `content`, `api`, `provider`, `model` ... and 8 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1038,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1039,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1183,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1352,
+  "m": "this function takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "expected `&[ContextTreeEntry]`, found `&Vec<Map<String, Value>>`",
+   "expected reference `&[ContextTreeEntry]`\n   found reference `&Vec<serde_json::Map<std::string::String, serde_json::Value>>`",
+   "function defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1354,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&pi_ai::index::Usage`\n        found enum `std::option::Option<&pi_ai::index::Usage>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1356,
+  "m": "struct `session_stats::SessionStats` has no field named `message_count`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `session_file`, `session_id`, `user_messages`, `assistant_messages`, `tool_calls` ... and 5 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1357,
+  "m": "struct `session_stats::SessionStats` has no field named `user_message_count`",
+  "code": "E0560",
+  "notes": [
+   "a field with a similar name exists"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1361,
+  "m": "struct `session_stats::SessionStats` has no field named `assistant_message_count`",
+  "code": "E0560",
+  "notes": [
+   "a field with a similar name exists"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1365,
+  "m": "struct `session_stats::SessionStats` has no field named `tool_call_count`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `session_file`, `session_id`, `user_messages`, `assistant_messages`, `tool_calls` ... and 5 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1367,
+  "m": "no variant, associated function, or constant named `Tool` found for enum `pi_ai::index::Message` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1369,
+  "m": "struct `session_stats::SessionStats` has no field named `usage`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `session_file`, `session_id`, `user_messages`, `assistant_messages`, `tool_calls` ... and 5 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1369,
+  "m": "no field `total` on type `std::option::Option<usage::SessionUsageSummary>`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `input_tokens`, `output_tokens`, `cost`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1370,
+  "m": "struct `session_stats::SessionStats` has no field named `tokens_before`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `session_file`, `session_id`, `user_messages`, `assistant_messages`, `tool_calls` ... and 5 others"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1382,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&pi_ai::index::Model`\n   found reference `&std::option::Option<pi_ai::index::Model>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1385,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "the type constructed contains `ContextUsageEstimate` due to the type of the argument passed",
+   "tuple variant defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1391,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "the type constructed contains `ContextUsageEstimate` due to the type of the argument passed",
+   "tuple variant defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1393,
+  "m": "cannot divide `ContextUsageEstimate` by `f64`",
+  "code": "E0369",
+  "notes": [
+   "an implementation of `Div<f64>` might be missing for `ContextUsageEstimate`",
+   "the trait `Div` must be implemented"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1412,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<_>`\n   found type `f64`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1431,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected mutable reference `&mut pi_ai::index::Usage`\n           found reference `&pi_ai::index::Usage`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 1464,
+  "m": "no method named `get` found for struct `std::sync::Arc<ExtensionRunnerRef>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following traits define an item `get`, perhaps you need to implement one of them:\ncandidate #1: `AuthStorageLike`\ncandidate #2: `SliceIndex`\ncandidate #3: `icu_collections::codepointtrie::cptrie::TypedCodePointTrie`\ncandidate #4: `icu_properties::names::PropertyEnumToValueNameLookup`\ncandidate #5: `icu_provider::baked::DataStore`",
+   "there is a method `set` with a similar name, but with different arguments"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2472,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`goals::CustomMessage` and `messages::CustomMessage` have similar names, but are actually distinct types",
+   "`goals::CustomMessage` is defined in module `crate::core::goals` of the current crate",
+   "`messages::CustomMessage` is defined in module `crate::core::messages` of the current crate",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2482,
+  "m": "closure is expected to take 2 arguments, but it takes 1 argument",
+  "code": "E0593",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2550,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`acp_mcp_types::AcpMcpServerConfig` and `tools::acp_mcp::AcpMcpServerConfig` have similar names, but are actually distinct types",
+   "`acp_mcp_types::AcpMcpServerConfig` is defined in module `crate::core::mcp::acp_mcp_types` of the current crate",
+   "`tools::acp_mcp::AcpMcpServerConfig` is defined in module `crate::core::tools::acp_mcp` of the current crate",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2552,
+  "m": "cannot apply unary operator `!` to type `Result<bool, std::string::String>`",
+  "code": "E0600",
+  "notes": [
+   "`Result<bool, std::string::String>` does not implement `Not`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2696,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&[tools::acp_mcp::AcpMcpServerConfig]`\n   found reference `&Vec<acp_mcp_types::AcpMcpServerConfig>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2704,
+  "m": "no method named `build_runtime` found for reference `&agent_session::AgentSession` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2734,
+  "m": "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:2734:26: 2734:36}` to be a future that resolves to `Result<Option<BeforeToolCallResult>, String>`, but it resolves to `Result<Option<ToolCallEventResult>, _>`",
+  "code": "E0271",
+  "notes": [
+   "expected enum `Result<std::option::Option<BeforeToolCallResult>, std::string::String>`\n   found enum `Result<std::option::Option<ToolCallEventResult>, _>`",
+   "required for the cast from `Pin<Box<{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:2734:26: 2734:36}>>` to `Pin<Box<dyn Future<Output = Result<Option<...>, ...>> + Send>>`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-13423728257944299023.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 2821,
+  "m": "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:2821:26: 2821:36}` to be a future that resolves to `Vec<AgentMessage>`, but it resolves to `Result<Vec<AgentMessage>, String>`",
+  "code": "E0271",
+  "notes": [
+   "expected struct `Vec<_>`\n     found enum `Result<Vec<_>, std::string::String>`",
+   "required for the cast from `Pin<Box<{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:2821:26: 2821:36}>>` to `Pin<Box<dyn Future<Output = Vec<AgentMessage>> + Send>>`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-6789803751838178914.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3731,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "function defined here",
+   "consider borrowing here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3781,
+  "m": "struct `GoalUsage` has no field named `cache_read`",
+  "code": "E0560",
+  "notes": [
+   "all struct fields are already assigned"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3782,
+  "m": "struct `GoalUsage` has no field named `cache_write`",
+  "code": "E0560",
+  "notes": [
+   "all struct fields are already assigned"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3783,
+  "m": "struct `GoalUsage` has no field named `total_tokens`",
+  "code": "E0560",
+  "notes": [
+   "all struct fields are already assigned"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3989,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3992,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4184,
+  "m": "`match` arms have incompatible types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<PendingRequestedRefine>`\n   found enum `std::option::Option<core::refinement::refinement::RefineOptions>`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4277,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<_>`\n   found enum `Result<std::option::Option<_>, std::string::String>`",
+   "use the `?` operator to extract the `Result<std::option::Option<std::string::String>, std::string::String>` value, propagating a `Result::Err` value to the caller"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4300,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&str`\n   found reference `&serde_json::Value`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4336,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<_>`\n   found enum `Result<std::option::Option<_>, std::string::String>`",
+   "use the `?` operator to extract the `Result<std::option::Option<std::string::String>, std::string::String>` value, propagating a `Result::Err` value to the caller"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4417,
+  "m": "this method takes 0 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "method defined here",
+   "remove the extra argument"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4428,
+  "m": "no method named `snapshot` found for struct `std::sync::Arc<dyn AgentObserveController>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4451,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4631,
+  "m": "no field `tasks` on type `std::sync::MutexGuard<'_, agent_session::RlmContinuationState>`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `pending_continuation`, `pending_results`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4790,
+  "m": "no method named `queue_pending_rlm_continuation` found for reference `&agent_session::AgentSession` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `has_queued_rlm_continuation` with a similar name"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 4811,
+  "m": "no method named `queue_pending_rlm_continuation` found for reference `&agent_session::AgentSession` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `has_queued_rlm_continuation` with a similar name"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 5266,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 5708,
+  "m": "no method named `schedule_session_input_pump` found for reference `&agent_session::AgentSession` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `set_session_name` with a similar name, but with different arguments"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 5913,
+  "m": "closure is expected to take 2 arguments, but it takes 1 argument",
+  "code": "E0593",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 6432,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 6582,
+  "m": "no method named `execute_extension_command` found for reference `&agent_session::AgentSession` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `throw_if_extension_command` with a similar name"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 6597,
+  "m": "arguments to this method are incorrect",
+  "code": "E0308",
+  "notes": [
+   "method defined here",
+   "try using a conversion method",
+   "try using a conversion method"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 7558,
+  "m": "no field `handler` on type `ResolvedCommand`",
+  "code": "E0609",
+  "notes": [
+   "one of the expressions' fields has a field of the same name"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8131,
+  "m": "struct `RuntimeActivity` has no field named `is_streaming`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8132,
+  "m": "struct `RuntimeActivity` has no field named `is_compacting`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8133,
+  "m": "struct `RuntimeActivity` has no field named `is_retrying`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8134,
+  "m": "struct `RuntimeActivity` has no field named `is_bash_running`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8135,
+  "m": "struct `RuntimeActivity` has no field named `queued_work_paused`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8136,
+  "m": "struct `RuntimeActivity` has no field named `session_input_pump_suspended`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8162,
+  "m": "this method takes 1 argument but 0 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "method defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9003,
+  "m": "missing field `command_entry_id` in initializer of `SessionSlashCommandResultDetails`",
+  "code": "E0063",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9002,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "function defined here",
+   "consider removing the borrow"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9013,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9015,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9032,
+  "m": "missing field `command_entry_id` in initializer of `SessionSlashCommandResultDetails`",
+  "code": "E0063",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9031,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "function defined here",
+   "try using a conversion method"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9051,
+  "m": "this function takes 4 arguments but 2 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "function defined here",
+   "provide the arguments"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9060,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9065,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9068,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9070,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9403,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `Vec<SessionAction<_>>`\n   found struct `Vec<&SessionAction<_>>`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9611,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9620,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9621,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9690,
+  "m": "struct `SessionActionRecoverySnapshot` has no field named `version`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `format_version`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9863,
+  "m": "no method named `schedule_session_input_pump` found for reference `&agent_session::AgentSession` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `set_session_name` with a similar name, but with different arguments"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 9869,
+  "m": "no method named `schedule_session_input_pump` found for reference `&agent_session::AgentSession` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `set_session_name` with a similar name, but with different arguments"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10024,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<Pin<_>>`\n found struct `Pin<_>`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10087,
+  "m": "no field `defer_emit` on type `&ModelSelectOptions`",
+  "code": "E0609",
+  "notes": [
+   "available field is: `wait_for_extensions`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10169,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&pi_ai::index::Model`\n   found reference `&std::option::Option<pi_ai::index::Model>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10179,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10194,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::option::Option<std::option::Option<std::string::String>>`\n   found reference `&std::string::String`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10196,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::option::Option<std::string::String>>`\n found struct `std::string::String`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10219,
+  "m": "no variant, associated function, or constant named `Standard` found for enum `std::option::Option<T>` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10240,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&pi_ai::index::Model`\n   found reference `&std::option::Option<pi_ai::index::Model>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10258,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&pi_ai::index::Model`\n   found reference `&std::option::Option<pi_ai::index::Model>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10280,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10288,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10683,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`provider_retry::ProviderRetryPolicy` and `ProviderRetryPolicy` have similar names, but are actually distinct types",
+   "`provider_retry::ProviderRetryPolicy` is defined in module `crate::core::provider_retry` of the current crate",
+   "`ProviderRetryPolicy` is defined in module `crate::core::refinement::refinement` of the current crate"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10694,
+  "m": "no field `api_key` on type `RefinementCompletionRequest`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `system_prompt`, `messages`, `max_tokens`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10696,
+  "m": "no field `headers` on type `RefinementCompletionRequest`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `system_prompt`, `messages`, `max_tokens`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10710,
+  "m": "no field `content` on type `&evidence::AgentMessage`",
+  "code": "E0609",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10711,
+  "m": "no field `timestamp` on type `&evidence::AgentMessage`",
+  "code": "E0609",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10690,
+  "m": "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:10690:22: 10690:32}` to be a future that resolves to `AssistantMessage`, but it resolves to `AssistantMessage`",
+  "code": "E0271",
+  "notes": [
+   "`pi_ai::index::AssistantMessage` and `AssistantMessage` have similar names, but are actually distinct types",
+   "`pi_ai::index::AssistantMessage` is defined in crate `pi_ai`",
+   "`AssistantMessage` is defined in the current crate",
+   "required for the cast from `Pin<Box<{async block@crates\\pi-coding-agent\\src\\core\\agent_session.rs:10690:22: 10690:32}>>` to `Pin<Box<dyn Future<Output = AssistantMessage> + Send>>`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-5243706928482596858.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11155,
+  "m": "this function takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "function defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11156,
+  "m": "no associated function or constant named `default` found for struct `HarnessState` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `default`, perhaps you need to implement it:\ncandidate #1: `std::default::Default`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11158,
+  "m": "this function takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "function defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11167,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&[CustomEntry]`\n   found reference `&std::string::String`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11168,
+  "m": "this function takes 1 argument but 0 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "function defined here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11169,
+  "m": "this function takes 2 arguments but 1 argument was supplied",
+  "code": "E0061",
+  "notes": [
+   "expected `&[RefinementResult]`, found `Vec<RefinementResult>`",
+   "expected reference `&[RefinementResult]`\n      found struct `Vec<RefinementResult>`",
+   "function defined here",
+   "consider borrowing here",
+   "provide the argument"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11185,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11218,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&serde_json::Value`\n      found struct `Vec<serde_json::Map<std::string::String, serde_json::Value>>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11227,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&[serde_json::Map<std::string::String, serde_json::Value>]`\n      found struct `Vec<serde_json::Map<std::string::String, serde_json::Value>>`",
+   "function defined here",
+   "consider borrowing here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11271,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11279,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11327,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::string::String`\n     found enum `std::option::Option<std::string::String>`",
+   "consider using `Option::expect` to unwrap the `std::option::Option<std::string::String>` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11338,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11451,
+  "m": "no associated function or constant named `default` found for struct `messages::CustomMessage` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `default`, perhaps you need to implement it:\ncandidate #1: `std::default::Default`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11551,
+  "m": "the trait bound `messages::CustomMessage: std::default::Default` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `std::default::Default` is not implemented for `messages::CustomMessage`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11553,
+  "m": "no associated function or constant named `default` found for struct `messages::CustomMessage` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following trait defines an item `default`, perhaps you need to implement it:\ncandidate #1: `std::default::Default`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11603,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::string::String`\n   found reference `&pi_agent_core::types::ThinkingLevel`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11606,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11629,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected type `bool`\n found struct `Vec<std::string::String>`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11639,
+  "m": "missing field `execution_policy` in initializer of `SessionActionRecoveryPayload`",
+  "code": "E0063",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11679,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11680,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11681,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11801,
+  "m": "`(dyn Fn() -> Result<(), std::string::String> + std::marker::Send + Sync + 'static)` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12212,
+  "m": "missing fields `custom_instructions` and `harness_digest` in initializer of `CompactionSessionEntry`",
+  "code": "E0063",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12573,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::string::String>`\n found struct `std::string::String`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/agent_traces.rs",
+  "l": 956,
+  "m": "the trait bound `f64: Eq` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the following other types implement trait `Eq`:\n  i128\n  i16\n  i32\n  i64\n  i8\n  isize\n  u128\n  u16\nand 4 others",
+   "required by a bound in `std::cmp::AssertParamIsEq`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2682,
+  "m": "`ParsedDaemonClientCommand` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedDaemonClientCommand` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2684,
+  "m": "`ParsedDaemonClientCommand` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedDaemonClientCommand` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2773,
+  "m": "`ParsedSessionArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2777,
+  "m": "`ParsedSessionArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2781,
+  "m": "`ParsedSessionArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2785,
+  "m": "`ParsedSessionArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2789,
+  "m": "`ParsedSessionArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2794,
+  "m": "`ParsedSessionArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2940,
+  "m": "`ParsedSendArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSendArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2941,
+  "m": "`ParsedSendArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSendArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2942,
+  "m": "`ParsedSendArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSendArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2944,
+  "m": "`ParsedSendArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSendArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2947,
+  "m": "`ParsedSendArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSendArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 2949,
+  "m": "`ParsedSendArgs` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedSendArgs` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_ps_format.rs",
+  "l": 178,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "the type constructed contains `{integer}` due to the type of the argument passed",
+   "tuple variant defined here",
+   "use a float literal"
+  ]
+ },
+ {
+  "f": "cli/daemon_update_restart.rs",
+  "l": 1397,
+  "m": "`DaemonUpdateRestartCoordinatorLease` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `DaemonUpdateRestartCoordinatorLease` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "core/agent_messages.rs",
+  "l": 1207,
+  "m": "expected function, found `agent_messages::AgentSessionMessagePayload`",
+  "code": "E0618",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3781,
+  "m": "struct `goals::GoalUsage` has no field named `cache_read`",
+  "code": "E0560",
+  "notes": [
+   "all struct fields are already assigned"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3782,
+  "m": "struct `goals::GoalUsage` has no field named `cache_write`",
+  "code": "E0560",
+  "notes": [
+   "all struct fields are already assigned"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 3783,
+  "m": "struct `goals::GoalUsage` has no field named `total_tokens`",
+  "code": "E0560",
+  "notes": [
+   "all struct fields are already assigned"
+  ]
+ },
+ {
+  "f": "core/prime_inference_auth.rs",
+  "l": 71,
+  "m": "`dyn Fn(HttpRequest) -> Pin<Box<...>> + Send + Sync` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "the following other types implement trait `Debug`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-ab0b3e324740a12a.long-type-13742428658234816667.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8131,
+  "m": "struct `session_action_store::RuntimeActivity` has no field named `is_streaming`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8132,
+  "m": "struct `session_action_store::RuntimeActivity` has no field named `is_compacting`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8133,
+  "m": "struct `session_action_store::RuntimeActivity` has no field named `is_retrying`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8134,
+  "m": "struct `session_action_store::RuntimeActivity` has no field named `is_bash_running`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8135,
+  "m": "struct `session_action_store::RuntimeActivity` has no field named `queued_work_paused`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 8136,
+  "m": "struct `session_action_store::RuntimeActivity` has no field named `session_input_pump_suspended`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `lower_agent_run`, `compaction`, `retry`, `bash`, `refinement_apply` ... and 3 others"
+  ]
+ },
+ {
+  "f": "core/rlm_runtime.rs",
+  "l": 182,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "the type constructed contains `std::string::String` due to the type of the argument passed",
+   "tuple variant defined here"
+  ]
+ },
+ {
+  "f": "core/compaction/branch_summarization.rs",
+  "l": 542,
+  "m": "the trait bound `FakeSession: branch_summarization::ReadonlySessionManager` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `branch_summarization::ReadonlySessionManager` is not implemented for `FakeSession`",
+   "this trait has no implementations, consider adding one",
+   "required for the cast from `&FakeSession` to `&dyn branch_summarization::ReadonlySessionManager`"
+  ]
+ },
+ {
+  "f": "core/compaction/branch_summarization.rs",
+  "l": 547,
+  "m": "the trait bound `FakeSession: branch_summarization::ReadonlySessionManager` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `branch_summarization::ReadonlySessionManager` is not implemented for `FakeSession`",
+   "this trait has no implementations, consider adding one",
+   "required for the cast from `&FakeSession` to `&dyn branch_summarization::ReadonlySessionManager`"
+  ]
+ },
+ {
+  "f": "core/cron_jobs.rs",
+  "l": 3005,
+  "m": "`ParsedAgentCronSchedule` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedAgentCronSchedule` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "core/cron_jobs.rs",
+  "l": 3009,
+  "m": "`ParsedAgentCronSchedule` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedAgentCronSchedule` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "core/cron_jobs.rs",
+  "l": 3013,
+  "m": "`ParsedAgentCronSchedule` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `ParsedAgentCronSchedule` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "core/cron_jobs.rs",
+  "l": 3215,
+  "m": "`cron_jobs::AgentCronJobStore` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "the trait `Debug` is not implemented for `cron_jobs::AgentCronJobStore`",
+   "add `#[derive(Debug)]` to `cron_jobs::AgentCronJobStore` or manually `impl Debug for cron_jobs::AgentCronJobStore`",
+   "required by a bound in `Result::<T, E>::unwrap_err`"
+  ]
+ },
+ {
+  "f": "core/telemetry.rs",
+  "l": 515,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "the return type of this call is `&serde_json::Value` due to the type of the argument passed",
+   "method defined here",
+   "consider using clone here"
+  ]
+ },
+ {
+  "f": "core/tools/bash.rs",
+  "l": 194,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<u32>`\n   found type `u32`",
+   "function defined here",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/extensions/runner.rs",
+  "l": 2416,
+  "m": "no associated function or constant named `default_marker` found for struct `ExtensionApiImpl` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/acp/acp_events.rs",
+  "l": 430,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "modes/acp/acp_events.rs",
+  "l": 433,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<f64>`\n   found type `f64`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "core/memory/mod.rs",
+  "l": 181,
+  "m": "`MemoryLock` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::expect_err`",
+   "consider annotating `MemoryLock` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "core/model_registry.rs",
+  "l": 3868,
+  "m": "expected `{async block@crates\\pi-coding-agent\\src\\core\\model_registry.rs:3868:22: 3868:32}` to be a future that resolves to `Result<HttpResponse, String>`, but it resolves to `Pin<Box<dyn Future<Output = Result<HttpResponse, String>> + Send>>`",
+  "code": "E0271",
+  "notes": [
+   "expected enum `Result<prime_inference_auth::HttpResponse, std::string::String>`\n found struct `Pin<Box<dyn futures::Future<Output = Result<prime_inference_auth::HttpResponse, std::string::String>> + std::marker::Send>>`",
+   "required for the cast from `Pin<Box<{async block@crates\\pi-coding-agent\\src\\core\\model_registry.rs:3868:22: 3868:32}>>` to `Pin<Box<dyn Future<Output = Result<HttpResponse, String>> + Send>>`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-025df1f8c04e29d8.long-type-13903207471038039540.txt'",
+   "consider using `--verbose` to print the full type name to the console"
+  ]
+ },
+ {
+  "f": "core/model_tool_output_policy.rs",
+  "l": 690,
+  "m": "struct `TextContent` has no field named `content_type`",
+  "code": "E0560",
+  "notes": [
+   "available fields are: `type_`, `text_signature`"
+  ]
+ },
+ {
+  "f": "core/performance_metrics.rs",
+  "l": 1134,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `indexmap::IndexMap<pi_agent_core::performance_metrics::PerformanceMetricMeasurement, std::option::Option<f64>>`\n   found struct `std::collections::BTreeMap<_, _>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 1674,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonSocketClient>`\n   found reference `&std::sync::Arc<std::sync::Mutex<DaemonSocketClient>>`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 3963,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`session_manager::SessionInfo` and `daemon_session_list::SessionInfo` have similar names, but are actually distinct types",
+   "`session_manager::SessionInfo` is defined in module `crate::core::session_manager` of the current crate",
+   "`daemon_session_list::SessionInfo` is defined in module `crate::modes::daemon::daemon_session_list` of the current crate",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6478,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonClientHandle>`\n   found reference `&std::sync::Arc<DaemonSocketClient>`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6643,
+  "m": "no method named `set_exec_env_provider` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "`DaemonExtensionBindingSession` defines an item `set_exec_env_provider`, perhaps you need to implement it"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6650,
+  "m": "no method named `set_runtime_env_scope` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "`DaemonExtensionBindingSession` defines an item `set_runtime_env_scope`, perhaps you need to implement it"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6654,
+  "m": "no method named `set_subagent_runtime_host` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "`DaemonExtensionBindingSession` defines an item `set_subagent_runtime_host`, perhaps you need to implement it"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6662,
+  "m": "`dyn FnOnce() + std::marker::Send` cannot be shared between threads safely",
+  "code": "E0277",
+  "notes": [
+   "the trait `Sync` is not implemented for `dyn FnOnce() + std::marker::Send`",
+   "required for `std::ptr::Unique<dyn FnOnce() + std::marker::Send>` to implement `Sync`",
+   "required because it appears within the type `Box<dyn FnOnce() + std::marker::Send>`",
+   "required because it's used within this closure",
+   "required for the cast from `Box<{closure@crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_mode.rs:6662:18: 6662:25}>` to `Box<(dyn Fn() + std::marker::Send + Sync + 'static)>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6666,
+  "m": "no method named `set_rebind_session` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "`DaemonExtensionBindingSession` defines an item `set_rebind_session`, perhaps you need to implement it",
+   "there is a method `new_session` with a similar name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 6673,
+  "m": "no method named `bind_extensions` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "the following traits define an item `bind_extensions`, perhaps you need to implement one of them:\ncandidate #1: `DaemonExtensionBindingSession`\ncandidate #2: `InteractiveModeLocalSessionHost`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7183,
+  "m": "no variant, associated function, or constant named `default` found for enum `pi_agent_core::types::AgentMessage` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7231,
+  "m": "no method named `clone_arc` found for reference `&AgentDaemon` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `clone` with a similar name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7263,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonSocketClient>`\n   found reference `&std::sync::Arc<std::sync::Mutex<DaemonSocketClient>>`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7327,
+  "m": "no method named `begin_replacement_snapshot` found for reference `&AgentDaemon` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7456,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "function defined here",
+   "consider removing the borrow"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7551,
+  "m": "no method named `clone_arc` found for reference `&AgentDaemon` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "there is a method `clone` with a similar name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7736,
+  "m": "no method named `schedule_roster_flush` found for reference `&AgentDaemon` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7767,
+  "m": "no method named `schedule_roster_flush` found for reference `&AgentDaemon` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7818,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected type `bool`\n   found enum `std::option::Option<bool>`",
+   "use `Option::is_some` to test if the `Option` has a value"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7819,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected type `bool`\n   found enum `std::option::Option<bool>`",
+   "use `Option::is_some` to test if the `Option` has a value"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7820,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected type `i64`\n   found enum `std::option::Option<{float}>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7821,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected type `i64`\n   found enum `std::option::Option<{float}>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7871,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&[daemon_session_list::AgentCronJob]`\n   found reference `&Vec<cron_jobs::AgentCronJob>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7872,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&RosterSessionSummary`\n   found reference `&daemon_session_list::SessionSummary`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7912,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<std::string::String>`\n found struct `std::string::String`",
+   "the return type of this call is `std::string::String` due to the type of the argument passed",
+   "method defined here",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 7943,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&[daemon_session_list::AgentCronJob]`\n   found reference `&Vec<cron_jobs::AgentCronJob>`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8395,
+  "m": "the trait bound `pi_agent_core::types::AgentMessage: std::default::Default` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_or_default`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8456,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonSocketClient>`\n   found reference `&std::sync::Arc<std::sync::Mutex<DaemonSocketClient>>`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8625,
+  "m": "arguments to this function are incorrect",
+  "code": "E0308",
+  "notes": [
+   "expected `&AgentSessionRuntimeSnapshotSource`, found `&Arc<Mutex<ActiveSessionState>>`",
+   "expected reference `&AgentSessionRuntimeSnapshotSource`\n   found reference `&std::sync::Arc<std::sync::Mutex<ActiveSessionState>>`",
+   "expected `Option<String>`, found `&String`",
+   "  expected enum `std::option::Option<std::string::String>`\nfound reference `&std::string::String`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8631,
+  "m": "no method named `as_object_mut` found for struct `agent_connection::types::AgentConnectionState` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8641,
+  "m": "no method named `as_object_mut` found for struct `agent_connection::types::AgentConnectionState` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "some of the expressions' fields have a method of the same name"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8645,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8686,
+  "m": "this function takes 11 arguments but 9 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "function defined here",
+   "provide the arguments"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8895,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&std::sync::Arc<DaemonSocketClient>`\n   found reference `&std::sync::Arc<std::sync::Mutex<DaemonSocketClient>>`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9176,
+  "m": "the trait bound `active_session_state::AgentSessionRuntimeMetadata: serde::Serialize` is not satisfied",
+  "code": "E0277",
+  "notes": [
+   "the trait `Serialize` is not implemented for `active_session_state::AgentSessionRuntimeMetadata`",
+   "for local types consider adding `#[derive(serde::Serialize)]` to your `active_session_state::AgentSessionRuntimeMetadata` type",
+   "for types from other crates check whether the crate offers a `serde` feature flag",
+   "the following other types implement trait `Serialize`:\n  &'a T\n  &'a mut T\n  ()\n  (T,)\n  (T0, T1)\n  (T0, T1, T2)\n  (T0, T1, T2, T3)\n  (T0, T1, T2, T3, T4)\nand 880 others",
+   "required for `&active_session_state::AgentSessionRuntimeMetadata` to implement `Serialize`",
+   "required by a bound in `serde_json::to_value`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9373,
+  "m": "this method takes 1 argument but 2 arguments were supplied",
+  "code": "E0061",
+  "notes": [
+   "expected reference `&session_manager::SessionState`\n   found reference `&'static str`",
+   "method defined here",
+   "remove the extra argument"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9609,
+  "m": "no field `state` on type `&std::sync::Arc<DaemonSocketClient>`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `id`, `attached_active_session_ids`, `catchup_active_session_ids`, `catchup_purposes`, `backpressured` ... and 12 others"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 9983,
+  "m": "the `?` operator can only be used on `Option`s, not `Result`s, in a method that returns `Option`",
+  "code": "E0277",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 10042,
+  "m": "no method named `is_empty` found for enum `std::option::Option<T>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "the method `is_empty` exists on the type `std::string::String`",
+   "consider using `Option::expect` to unwrap the `std::string::String` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 10045,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::string::String`\n     found enum `std::option::Option<std::string::String>`",
+   "tuple variant defined here",
+   "consider using `Option::expect` to unwrap the `std::option::Option<std::string::String>` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12310,
+  "m": "no field `session_dir` on type `&active_session_state::AgentSessionRuntimeMetadata`",
+  "code": "E0609",
+  "notes": [
+   "available fields are: `kind`, `prompt`, `parent_active_session_id`, `parent_session_id`, `parent_session_file` ... and 3 others"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 14293,
+  "m": "no method named `rlm_spawn_ledger` found for reference `&AgentDaemon` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "core/rlm_runtime.rs",
+  "l": 700,
+  "m": "the method `as_deref` exists for enum `std::option::Option<pi_agent_core::types::ThinkingLevel>`, but its trait bounds were not satisfied",
+  "code": "E0599",
+  "notes": [
+   "the following trait bounds were not satisfied:\n`pi_agent_core::types::ThinkingLevel: Deref`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_protocol.rs",
+  "l": 1034,
+  "m": "binary operation `==` cannot be applied to type `&SessionActionRecoverySnapshot`",
+  "code": "E0369",
+  "notes": [
+   "an implementation of `PartialEq` might be missing for `SessionActionRecoverySnapshot`",
+   "consider annotating `SessionActionRecoverySnapshot` with `#[derive(PartialEq)]`"
+  ]
+ },
+ {
+  "f": "core/telemetry.rs",
+  "l": 1490,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::sync::Arc<dyn Fn() -> std::string::String + std::marker::Send + Sync>`\n   found struct `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>`",
+   "the type constructed contains `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>` due to the type of the argument passed",
+   "tuple variant defined here",
+   "call `Into::into` on this expression to convert `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>` into `std::sync::Arc<dyn Fn() -> std::string::String + std::marker::Send + Sync>`"
+  ]
+ },
+ {
+  "f": "core/telemetry.rs",
+  "l": 1525,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::sync::Arc<dyn Fn() -> std::string::String + std::marker::Send + Sync>`\n   found struct `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>`",
+   "the type constructed contains `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>` due to the type of the argument passed",
+   "tuple variant defined here",
+   "call `Into::into` on this expression to convert `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>` into `std::sync::Arc<dyn Fn() -> std::string::String + std::marker::Send + Sync>`"
+  ]
+ },
+ {
+  "f": "core/telemetry.rs",
+  "l": 1555,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::sync::Arc<dyn Fn() -> std::string::String + std::marker::Send + Sync>`\n   found struct `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>`",
+   "the type constructed contains `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>` due to the type of the argument passed",
+   "tuple variant defined here",
+   "call `Into::into` on this expression to convert `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>` into `std::sync::Arc<dyn Fn() -> std::string::String + std::marker::Send + Sync>`"
+  ]
+ },
+ {
+  "f": "core/telemetry.rs",
+  "l": 1579,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::sync::Arc<dyn Fn() -> std::string::String + std::marker::Send + Sync>`\n   found struct `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>`",
+   "the type constructed contains `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>` due to the type of the argument passed",
+   "tuple variant defined here",
+   "call `Into::into` on this expression to convert `Box<(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)>` into `std::sync::Arc<dyn Fn() -> std::string::String + std::marker::Send + Sync>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/snapshot_transcript_cache.rs",
+  "l": 423,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `Result<std::option::Option<Vec<_>>, _>`\n   found enum `Result<Vec<_>, _>`",
+   "the return type of this call is `Result<Vec<u8>, std::string::String>` due to the type of the argument passed",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/daemon/worker_recovery_journal.rs",
+  "l": 63,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected reference `&str`\n   found reference `&std::path::Path`",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/compaction_summary_message.rs",
+  "l": 70,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`interactive::theme::theme::MarkdownTheme` and `pi_tui::r#mod::MarkdownTheme` have similar names, but are actually distinct types",
+   "`interactive::theme::theme::MarkdownTheme` is defined in the current crate",
+   "`pi_tui::r#mod::MarkdownTheme` is defined in crate `pi_tui`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "core/tools/ipython.rs",
+  "l": 1596,
+  "m": "`dyn ipython::KernelClient` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "the following other types implement trait `Debug`",
+   "required for `std::sync::Arc<dyn ipython::KernelClient>` to implement `Debug`",
+   "required by a bound in `Result::<T, E>::expect_err`"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/dynamic_border.rs",
+  "l": 38,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "implementation defined here",
+   "consider borrowing here"
+  ]
+ },
+ {
+  "f": "modes/acp/acp_events.rs",
+  "l": 561,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "use a float literal"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/skill_invocation_message.rs",
+  "l": 66,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`interactive::theme::theme::MarkdownTheme` and `pi_tui::r#mod::MarkdownTheme` have similar names, but are actually distinct types",
+   "`interactive::theme::theme::MarkdownTheme` is defined in the current crate",
+   "`pi_tui::r#mod::MarkdownTheme` is defined in crate `pi_tui`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/subagent_summary_line.rs",
+  "l": 79,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`daemon_session_list::SessionSummary` and `agents_view_state::SessionSummary` have similar names, but are actually distinct types",
+   "`daemon_session_list::SessionSummary` is defined in module `crate::modes::daemon::daemon_session_list` of the current crate",
+   "`agents_view_state::SessionSummary` is defined in module `crate::modes::agents_view::agents_view_state` of the current crate",
+   "function defined here"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/thinking_selector.rs",
+  "l": 85,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`SelectListTheme` and `pi_tui::r#mod::SelectListTheme` have similar names, but are actually distinct types",
+   "`SelectListTheme` is defined in the current crate",
+   "`pi_tui::r#mod::SelectListTheme` is defined in crate `pi_tui`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/user_message.rs",
+  "l": 120,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`interactive::theme::theme::MarkdownTheme` and `pi_tui::r#mod::MarkdownTheme` have similar names, but are actually distinct types",
+   "`interactive::theme::theme::MarkdownTheme` is defined in the current crate",
+   "`pi_tui::r#mod::MarkdownTheme` is defined in crate `pi_tui`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/interactive/onboarding.rs",
+  "l": 28,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected mutable reference `&mut interactive_mode_services::ModelRegistry`\n           found reference `&interactive_mode_services::ModelRegistry`",
+   "method defined here"
+  ]
+ },
+ {
+  "f": "modes/agents_view/agents_view_state.rs",
+  "l": 2407,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "  expected enum `std::option::Option<&UnifiedSessionIndex>`\nfound reference `&UnifiedSessionIndex`",
+   "function defined here",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "modes/agents_view/roster_store.rs",
+  "l": 549,
+  "m": "no method named `clone` found for struct `std::sync::Mutex<T>` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "the method `clone` exists on the type `Vec<std::sync::Arc<(dyn for<'a> Fn(&'a roster_store::DaemonOutbound) + std::marker::Send + Sync + 'static)>>`",
+   "the full name for the type has been written to 'C:\\Users\\openclawuser\\optimus-rust-port\\.port-env/target\\debug\\deps\\pi_coding_agent-025df1f8c04e29d8.long-type-17696141837248446308.txt'",
+   "consider using `--verbose` to print the full type name to the console",
+   "use `.lock().unwrap()` to borrow the `Vec<std::sync::Arc<(dyn for<'a> Fn(&'a roster_store::DaemonOutbound) + std::marker::Send + Sync + 'static)>>`, blocking the current thread until it can be acquired"
+  ]
+ },
+ {
+  "f": "modes/daemon/active_session_state.rs",
+  "l": 411,
+  "m": "`active_session_state::ActiveSessionState` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "the trait `Debug` is not implemented for `active_session_state::ActiveSessionState`",
+   "add `#[derive(Debug)]` to `active_session_state::ActiveSessionState` or manually `impl Debug for active_session_state::ActiveSessionState`",
+   "the trait `Debug` is conditionally implemented for `std::sync::Arc<T, A>`",
+   "required for `std::sync::Mutex<active_session_state::ActiveSessionState>` to implement `Debug`",
+   "1 redundant requirement hidden",
+   "required for `std::sync::Arc<std::sync::Mutex<active_session_state::ActiveSessionState>>` to implement `Debug`",
+   "required by a bound in `Result::<T, E>::expect_err`"
+  ]
+ },
+ {
+  "f": "modes/daemon/active_session_state.rs",
+  "l": 421,
+  "m": "`active_session_state::ActiveSessionState` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "the trait `Debug` is not implemented for `active_session_state::ActiveSessionState`",
+   "add `#[derive(Debug)]` to `active_session_state::ActiveSessionState` or manually `impl Debug for active_session_state::ActiveSessionState`",
+   "the trait `Debug` is conditionally implemented for `std::sync::Arc<T, A>`",
+   "required for `std::sync::Mutex<active_session_state::ActiveSessionState>` to implement `Debug`",
+   "1 redundant requirement hidden",
+   "required for `std::sync::Arc<std::sync::Mutex<active_session_state::ActiveSessionState>>` to implement `Debug`",
+   "required by a bound in `Result::<T, E>::expect_err`"
+  ]
+ },
+ {
+  "f": "modes/daemon/command_recovery_journal.rs",
+  "l": 377,
+  "m": "no associated function or constant named `success` found for struct `daemon_protocol::DaemonResponse` in the current scope",
+  "code": "E0599",
+  "notes": [
+   "items from traits can only be used if the trait is implemented and in scope",
+   "trait `crate::modes::daemon::daemon_mode::DaemonResponseConstruction` which provides `success` is implemented but not reachable",
+   "the following traits define an item `success`, perhaps you need to implement one of them:\ncandidate #1: `DaemonResponseConstruction`\ncandidate #2: `crossbeam_epoch::atomic::CompareAndSetOrdering`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 10070,
+  "m": "borrowed data escapes outside of method",
+  "code": "E0521",
+  "notes": []
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 11016,
+  "m": "cannot move out of `tx`, a captured variable in an `Fn` closure",
+  "code": "E0507",
+  "notes": [
+   "`Fn` and `FnMut` closures require captured values to be able to be consumed multiple times, but `FnOnce` closures may consume them only once",
+   "`tokio::sync::oneshot::Sender::<T>::send` takes ownership of the receiver `self`, which moves `tx`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_socket.rs",
+  "l": 535,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `Box<dyn for<'a> Fn(&'a daemon_socket::DaemonSocketError) + std::marker::Send + Sync>`\n  found closure `{closure@crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_socket.rs:535:33: 535:65}`",
+   "for more on the distinction between the stack and the heap, read https://doc.rust-lang.org/book/ch15-01-box.html, https://doc.rust-lang.org/rust-by-example/std/box.html, and https://doc.rust-lang.org/std/boxed/index.html",
+   "associated function defined here",
+   "store this in the heap by calling `Box::new`"
+  ]
+ },
+ {
+  "f": "modes/daemon/heartbeat_catalog.rs",
+  "l": 117,
+  "m": "no associated function or constant named `from_value` found for struct `daemon_protocol::DaemonResponse` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/saved_session_catalog.rs",
+  "l": 174,
+  "m": "no associated function or constant named `from_value` found for struct `daemon_protocol::DaemonResponse` in the current scope",
+  "code": "E0599",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/saved_session_info.rs",
+  "l": 111,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected enum `std::option::Option<_>`\n found struct `std::string::String`",
+   "try wrapping the expression in `Some`"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/conversation_components.rs",
+  "l": 360,
+  "m": "struct `pi_ai::index::ImageContent` has no field named `r#type`",
+  "code": "E0560",
+  "notes": [
+   "a field with a similar name exists"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/conversation_components.rs",
+  "l": 396,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "modes/interactive/components/conversation_components.rs",
+  "l": 419,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": []
+ },
+ {
+  "f": "modes/interactive/components/custom_editor.rs",
+  "l": 605,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`interactive::theme::theme::EditorTheme` and `pi_tui::r#mod::EditorTheme` have similar names, but are actually distinct types",
+   "`interactive::theme::theme::EditorTheme` is defined in the current crate",
+   "`pi_tui::r#mod::EditorTheme` is defined in crate `pi_tui`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_input.rs",
+  "l": 213,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "associated function defined here",
+   "try removing the method call"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_input.rs",
+  "l": 222,
+  "m": "the method `get` exists for struct `std::rc::Rc<Cell<std::string::String>>`, but its trait bounds were not satisfied",
+  "code": "E0599",
+  "notes": [
+   "the following trait bounds were not satisfied:\n`std::string::String: std::marker::Copy`",
+   "items from traits can only be used if the trait is implemented and in scope",
+   "`oauth_selector::AuthStorageLike` defines an item `get`, perhaps you need to implement it"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_input.rs",
+  "l": 231,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "associated function defined here",
+   "try removing the method call"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_input.rs",
+  "l": 245,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "associated function defined here",
+   "try removing the method call"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_selector.rs",
+  "l": 326,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "associated function defined here",
+   "try removing the method call"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_selector.rs",
+  "l": 345,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "associated function defined here",
+   "try removing the method call"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_selector.rs",
+  "l": 352,
+  "m": "the method `get` exists for struct `std::rc::Rc<Cell<std::string::String>>`, but its trait bounds were not satisfied",
+  "code": "E0599",
+  "notes": [
+   "the following trait bounds were not satisfied:\n`std::string::String: std::marker::Copy`",
+   "items from traits can only be used if the trait is implemented and in scope",
+   "`oauth_selector::AuthStorageLike` defines an item `get`, perhaps you need to implement it"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_selector.rs",
+  "l": 355,
+  "m": "the method `get` exists for struct `std::rc::Rc<Cell<std::string::String>>`, but its trait bounds were not satisfied",
+  "code": "E0599",
+  "notes": [
+   "the following trait bounds were not satisfied:\n`std::string::String: std::marker::Copy`",
+   "items from traits can only be used if the trait is implemented and in scope",
+   "`oauth_selector::AuthStorageLike` defines an item `get`, perhaps you need to implement it"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/extension_selector.rs",
+  "l": 364,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "associated function defined here",
+   "try removing the method call"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/user_message.rs",
+  "l": 151,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`interactive::theme::theme::MarkdownTheme` and `pi_tui::r#mod::MarkdownTheme` have similar names, but are actually distinct types",
+   "`interactive::theme::theme::MarkdownTheme` is defined in the current crate",
+   "`pi_tui::r#mod::MarkdownTheme` is defined in crate `pi_tui`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/user_message.rs",
+  "l": 165,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "`interactive::theme::theme::MarkdownTheme` and `pi_tui::r#mod::MarkdownTheme` have similar names, but are actually distinct types",
+   "`interactive::theme::theme::MarkdownTheme` is defined in the current crate",
+   "`pi_tui::r#mod::MarkdownTheme` is defined in crate `pi_tui`",
+   "associated function defined here"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/mod.rs",
+  "l": 133,
+  "m": "expected a type, found a trait",
+  "code": "E0782",
+  "notes": [
+   "you can add the `dyn` keyword if you want a trait object"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/mod.rs",
+  "l": 134,
+  "m": "expected a type, found a trait",
+  "code": "E0782",
+  "notes": [
+   "you can add the `dyn` keyword if you want a trait object"
+  ]
+ },
+ {
+  "f": "/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/macros.rs",
+  "l": 113,
+  "m": "temporary value dropped while borrowed",
+  "code": "E0716",
+  "notes": [
+   "consider using a `let` binding to create a longer lived value"
+  ]
+ },
+ {
+  "f": "modes/telegram/manager.rs",
+  "l": 385,
+  "m": "`manager::TelegramFileLock` doesn't implement `Debug`",
+  "code": "E0277",
+  "notes": [
+   "required by a bound in `Result::<T, E>::unwrap_err`",
+   "consider annotating `manager::TelegramFileLock` with `#[derive(Debug)]`"
+  ]
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 3081,
+  "m": "cannot borrow `logged` as mutable, as it is a captured variable in a `Fn` closure",
+  "code": "E0596",
+  "notes": []
+ },
+ {
+  "f": "cli/daemon_command.rs",
+  "l": 3082,
+  "m": "cannot borrow `errors` as mutable, as it is not declared as mutable",
+  "code": "E0596",
+  "notes": [
+   "consider changing this to be mutable"
+  ]
+ },
+ {
+  "f": "core/tools/edit.rs",
+  "l": 463,
+  "m": "cannot borrow `*component` as mutable because it is also borrowed as immutable",
+  "code": "E0502",
+  "notes": []
+ },
+ {
+  "f": "core/extensions/runner.rs",
+  "l": 2090,
+  "m": "cannot borrow `guard` as immutable because it is also borrowed as mutable",
+  "code": "E0502",
+  "notes": []
+ },
+ {
+  "f": "core/extensions/runner.rs",
+  "l": 2093,
+  "m": "cannot borrow `guard` as immutable because it is also borrowed as mutable",
+  "code": "E0502",
+  "notes": []
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 2326,
+  "m": "future cannot be sent between threads safely",
+  "code": null,
+  "notes": [
+   "the trait `std::marker::Send` is not implemented for `dyn futures::Future<Output = Result<dir_lock::DirLockAttempt, std::io::Error>>`",
+   "future is not `Send` as it awaits another future which is not `Send`",
+   "required by a bound in `tokio::spawn`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 2499,
+  "m": "future cannot be sent between threads safely",
+  "code": null,
+  "notes": [
+   "within `{async block@crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_mode.rs:2499:35: 2499:45}`, the trait `std::marker::Send` is not implemented for `std::sync::MutexGuard<'_, std::option::Option<tokio::task::JoinHandle<()>>>`",
+   "future is not `Send` as this value is used across an await",
+   "required by a bound in `tokio::spawn`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 8364,
+  "m": "cannot borrow data in an `Arc` as mutable",
+  "code": "E0596",
+  "notes": [
+   "trait `DerefMut` is required to modify through a dereference, but it is not implemented for `std::sync::Arc<DaemonClientHandle>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12917,
+  "m": "cannot borrow data in an `Arc` as mutable",
+  "code": "E0596",
+  "notes": [
+   "trait `DerefMut` is required to modify through a dereference, but it is not implemented for `std::sync::Arc<DaemonClientHandle>`"
+  ]
+ },
+ {
+  "f": "modes/daemon/daemon_mode.rs",
+  "l": 12905,
+  "m": "cannot borrow data in an `Arc` as mutable",
+  "code": "E0596",
+  "notes": [
+   "trait `DerefMut` is required to modify through a dereference, but it is not implemented for `std::sync::Arc<DaemonClientHandle>`"
+  ]
+ },
+ {
+  "f": "core/legacy_rlm_continuation.rs",
+  "l": 320,
+  "m": "borrow of partially moved value: `state`",
+  "code": "E0382",
+  "notes": [
+   "`std::option::Option::<T>::expect` takes ownership of the receiver `self`, which moves `state.pending_result`",
+   "partial move occurs because `state.pending_result` has type `std::option::Option<rlm_continuation::RlmPendingResult>`, which does not implement the `Copy` trait",
+   "consider calling `.as_ref()` to borrow the value's contents",
+   "consider calling `.as_mut()` to mutably borrow the value's contents",
+   "you can `clone` the value and consume it, but this might not be your desired behavior"
+  ]
+ },
+ {
+  "f": "core/mcp/mcp_manager.rs",
+  "l": 563,
+  "m": "lifetime may not live long enough",
+  "code": null,
+  "notes": [
+   "to declare that the trait object captures data from argument `entries`, you can add an explicit `'_` lifetime bound"
+  ]
+ },
+ {
+  "f": "core/prime_inference_model_catalog.rs",
+  "l": 762,
+  "m": "the type `Arc` does not implement `Copy`",
+  "code": "E0382",
+  "notes": [
+   "consider using `Arc::clone`",
+   "borrow occurs due to deref coercion to `std::sync::Mutex<Vec<prime_inference_auth::HttpRequest>>`",
+   "consider cloning the value before moving it into the closure"
+  ]
+ },
+ {
+  "f": "modes/interactive/components/daxnuts.rs",
+  "l": 114,
+  "m": "future cannot be sent between threads safely",
+  "code": null,
+  "notes": [
+   "within `{async block@crates\\pi-coding-agent\\src\\modes\\interactive\\components\\daxnuts.rs:114:33: 114:43}`, the trait `std::marker::Send` is not implemented for `Rc<RefCell<TUI>>`",
+   "captured value is not `Send`",
+   "required by a bound in `tokio::spawn`"
+  ]
+ },
+ {
+  "f": "modes/rpc/rpc_extension_ui_context.rs",
+  "l": 101,
+  "m": "use of moved value: `payload`",
+  "code": "E0382",
+  "notes": [
+   "`into_iter` takes ownership of the receiver `self`, which moves `payload`",
+   "consider iterating over a slice of the `serde_json::Map<std::string::String, serde_json::Value>`'s content to avoid moving into the `for` loop"
+  ]
+ },
+ {
+  "f": "core/agent_session/runtime_members.rs",
+  "l": 837,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "expected struct `std::string::String`\n     found enum `std::option::Option<std::string::String>`",
+   "consider using `Option::expect` to unwrap the `std::option::Option<std::string::String>` value, panicking if the value is an `Option::None`"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12499,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "you can convert a `u64` to an `i64` and panic if the converted value doesn't fit"
+  ]
+ },
+ {
+  "f": "core/agent_session.rs",
+  "l": 12545,
+  "m": "mismatched types",
+  "code": "E0308",
+  "notes": [
+   "you can convert a `u64` to an `i64` and panic if the converted value doesn't fit"
+  ]
+ },
+ {
+  "f": "modes/rpc/jsonl.rs",
+  "l": 234,
+  "m": "the type `Arc` does not implement `Copy`",
+  "code": "E0382",
+  "notes": [
+   "consider using `Arc::clone`",
+   "borrow occurs due to deref coercion to `std::sync::Mutex<Vec<std::string::String>>`",
+   "consider cloning the value before moving it into the closure"
+  ]
+ }
+]

@@ -1,0 +1,13 @@
+modes/interactive/components/compaction_summary_message.rs
+modes/interactive/components/conversation_components.rs
+modes/interactive/components/custom_editor.rs
+modes/interactive/components/daxnuts.rs
+modes/interactive/components/dynamic_border.rs
+modes/interactive/components/extension_input.rs
+modes/interactive/components/extension_selector.rs
+modes/interactive/components/mod.rs
+modes/interactive/components/skill_invocation_message.rs
+modes/interactive/components/subagent_summary_line.rs
+modes/interactive/components/thinking_selector.rs
+modes/interactive/components/user_message.rs
+modes/interactive/onboarding.rs
