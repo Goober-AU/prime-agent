@@ -981,7 +981,7 @@ mod tests {
 
     #[test]
     fn layout_prefers_compact_only_when_it_shows_more_or_the_comfortable_one_does_not_fit() {
-        let layout = get_menu_list_layout(&MenuListLayoutOptions {
+        let layout = get_menu_list_layout(MenuListLayoutOptions {
             get_rows: Some(Rc::new(|| 20.0)),
             preferred_visible_items: 10,
             reserved_rows: 7,

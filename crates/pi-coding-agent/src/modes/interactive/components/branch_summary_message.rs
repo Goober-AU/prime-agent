@@ -196,9 +196,11 @@ mod tests {
     }
 
     fn component() -> BranchSummaryMessageComponent {
+        // `markdownTheme: MarkdownTheme = getMarkdownTheme()` - the port's component
+        // holds the pi-tui theme, so the test converts it the same way.
         BranchSummaryMessageComponent::new(
             "Earlier work summarised.".to_string(),
-            get_markdown_theme(),
+            to_tui_markdown_theme(get_markdown_theme()),
         )
     }
 

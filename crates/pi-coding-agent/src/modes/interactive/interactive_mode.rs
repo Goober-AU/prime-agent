@@ -3726,6 +3726,8 @@ mod tests {
             id,
             "read",
             Vec::new(),
+            false,
+            0,
         )))
     }
 
@@ -4076,13 +4078,17 @@ mod tests {
 
     #[test]
     fn goal_tray_labels_follow_the_status() {
-        let mode = test_mode();
+        let mut mode = test_mode();
         let mut goal = GoalState::empty();
         goal.status = "active".to_string();
         goal.time_used_seconds = 61.0;
-        assert_eq!(mode.get_tray_goal_label_for(&goal).as_deref(), Some("Pursuing goal (1m 01s)"));
+        // `getTrayGoalLabel()` reads `this.getGoalState()`, so the label is driven
+        // through the connection state exactly like the reference.
+        mode.connection_state = Some(AgentConnectionState { goal: goal.clone(), ..Default::default() });
+        assert_eq!(mode.get_tray_goal_label().as_deref(), Some("Pursuing goal (1m 01s)"));
         goal.status = "idle".to_string();
-        assert_eq!(mode.get_tray_goal_label_for(&goal), None);
+        mode.connection_state = Some(AgentConnectionState { goal, ..Default::default() });
+        assert_eq!(mode.get_tray_goal_label(), None);
     }
 
     #[test]

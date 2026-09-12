@@ -1207,70 +1207,14 @@ pub struct AutonomousRuntimeSnapshot {
 }
 
 /// `AgentAutonomousConfig` / `AgentAutonomousStatus` / `AutonomousRuntimeState`
-/// from `core/autonomous.ts` (another slice).
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentAutonomousStatus {
-    pub enabled: bool,
-    pub continuations_used: f64,
-    pub gate_attempts: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_gate_failure: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_gate_failure_snapshot: Option<String>,
-}
+/// come from
+/// `core::autonomous`; the snapshot keeps only the picked fields.
+pub use crate::core::autonomous::{
+    add_autonomous_continuation, add_autonomous_usage, autonomous_status,
+    create_autonomous_runtime_state, next_autonomous_continuation,
+    refresh_autonomous_quality_gates, set_autonomous_enabled, AgentAutonomousStatus,
+};
 
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct AutonomousRuntimeState {
-    pub enabled: bool,
-    pub continuations_used: f64,
-    pub gate_attempts: f64,
-    pub last_gate_failure: Option<String>,
-    pub last_gate_failure_snapshot: Option<String>,
-    pub cwd: Option<String>,
-}
-
-pub fn create_autonomous_runtime_state(
-    config: Option<&AgentAutonomousConfig>,
-    options: Option<&AgentAutonomousConfig>,
-) -> AutonomousRuntimeState {
-    AutonomousRuntimeState {
-        enabled: config.and_then(|config| config.enabled).unwrap_or(false),
-        continuations_used: 0.0,
-        gate_attempts: 0.0,
-        last_gate_failure: None,
-        last_gate_failure_snapshot: None,
-        cwd: options.and_then(|options| options.cwd.clone()),
-    }
-}
-
-pub fn add_autonomous_continuation(state: &mut AutonomousRuntimeState) {
-    state.continuations_used += 1.0;
-}
-
-pub fn add_autonomous_usage(state: &mut AutonomousRuntimeState, usage: &Usage) {
-    state.gate_attempts += usage.total_tokens;
-}
-
-pub fn next_autonomous_continuation(state: &mut AutonomousRuntimeState) -> bool {
-    state.enabled
-}
-
-pub fn set_autonomous_enabled(state: &mut AutonomousRuntimeState, enabled: bool) {
-    state.enabled = enabled;
-}
-
-pub fn autonomous_status(state: &AutonomousRuntimeState) -> AgentAutonomousStatus {
-    AgentAutonomousStatus {
-        enabled: state.enabled,
-        continuations_used: state.continuations_used,
-        gate_attempts: state.gate_attempts,
-        last_gate_failure: state.last_gate_failure.clone(),
-        last_gate_failure_snapshot: state.last_gate_failure_snapshot.clone(),
-    }
-}
-
-pub fn refresh_autonomous_quality_gates(_state: &mut AutonomousRuntimeState) {}
 
 /// `AgentSessionConfig`.
 pub struct AgentSessionConfig {
@@ -2054,7 +1998,7 @@ pub struct AgentSession {
     goal_continuation_awaits_rlm_work: AtomicBool,
     goal_accounted_assistant_messages: Mutex<HashSet<i64>>,
     goal_abort_in_progress: AtomicBool,
-    autonomous_state: Mutex<AutonomousRuntimeState>,
+    autonomous_state: Mutex<crate::core::autonomous::AutonomousRuntimeState>,
     autonomous_continuation_suppression_depth: AtomicU64,
     autonomous_continuation_suppressed_messages: Mutex<HashSet<i64>>,
     compaction_abort_controller: Mutex<Option<CancellationToken>>,
@@ -2311,10 +2255,6 @@ impl AgentSession {
             goal_abort_in_progress: AtomicBool::new(false),
             autonomous_state: Mutex::new(create_autonomous_runtime_state(
                 config.autonomous.as_ref(),
-                Some(&AgentAutonomousConfig {
-                    enabled: None,
-                    cwd: Some(config.cwd.clone()),
-                }),
             )),
             autonomous_continuation_suppression_depth: AtomicU64::new(0),
             autonomous_continuation_suppressed_messages: Mutex::new(HashSet::new()),
@@ -3529,27 +3469,62 @@ impl AgentSession {
     fn format_autonomous_status(&self) -> String {
         let status = self.get_autonomous_status();
         let state = if status.enabled { "on" } else { "off" };
-        let mut line = format!(
-            "Autonomous continuation: {state} | continuations used: {} | quality gate attempts: {}",
-            status.continuations_used, status.gate_attempts
-        );
-        if let Some(failure) = &status.last_gate_failure {
-            line.push_str(&format!(" | last gate failure: {failure}"));
-        }
-        line
+        format!(
+            "Autonomous mode: {state}. Continuations: {}/{}. Turns: {}/{}. Tokens: {}/{}.",
+            status.continuations_used,
+            status.limits.max_continuations,
+            status.turns_used,
+            status.limits.max_turns,
+            status.tokens_used,
+            status.limits.max_tokens
+        )
     }
 
     /// `_emitAutonomousStatus`.
     fn emit_autonomous_status(&self) {
-        let content = self.format_autonomous_status();
+        let status = self.get_autonomous_status();
         let message = create_custom_message(
-            "session_status".to_string(),
-            CustomMessageContent::Text(content),
+            "autonomous_status".to_string(),
+            CustomMessageContent::Text(self.format_autonomous_status()),
             true,
-            None,
+            serde_json::to_value(&status).ok(),
             &now_iso(),
         );
-        let _ = self.append_durable_status_message(message);
+        let mut state = self.agent.state();
+        state
+            .messages
+            .push(AgentMessage::Custom(CustomAgentMessage::Custom {
+                custom_type: message.custom_type.clone(),
+                content: message.content.clone(),
+                display: message.display,
+                details: message.details.clone(),
+                timestamp: message.timestamp,
+            }));
+        self.agent.set_state(state);
+        let _ = self.session_manager.lock().unwrap().append_custom_message_entry(
+            &message.custom_type,
+            message.content.clone(),
+            message.display,
+            message.details.clone(),
+        );
+        self.emit(AgentSessionEvent::MessageStart {
+            message: AgentMessage::Custom(CustomAgentMessage::Custom {
+                custom_type: message.custom_type.clone(),
+                content: message.content.clone(),
+                display: message.display,
+                details: message.details.clone(),
+                timestamp: message.timestamp,
+            }),
+        });
+        self.emit(AgentSessionEvent::MessageEnd {
+            message: AgentMessage::Custom(CustomAgentMessage::Custom {
+                custom_type: message.custom_type.clone(),
+                content: message.content.clone(),
+                display: message.display,
+                details: message.details.clone(),
+                timestamp: message.timestamp,
+            }),
+        });
     }
 
     /// `_handleAutonomousSlashCommand`.
@@ -4179,9 +4154,10 @@ impl AgentSession {
                     == Some(true)
                     || payload.get("includeInactive").and_then(Value::as_bool) == Some(true);
                 let jobs: Vec<Value> = controller
-                    .list()
+                    .list_rlm_heartbeats(Some(crate::core::cron_jobs::RlmHeartbeatListOptions {
+                        include_inactive: Some(include_inactive),
+                    }))
                     .iter()
-                    .filter(|job| include_inactive || job.status != "paused")
                     .map(rlm_heartbeat_host_response)
                     .collect();
                 Ok(serde_json::json!({ "heartbeats": jobs }))
@@ -4210,19 +4186,21 @@ impl AgentSession {
                         .get("delivery_mode")
                         .or_else(|| payload.get("deliveryMode")),
                 );
-                let mut request = payload.clone();
-                if let Value::Object(object) = &mut request {
-                    object.insert(
-                        "deliveryMode".to_string(),
-                        Value::String(delivery_mode),
-                    );
-                }
-                match controller.create(request) {
-                    Ok(heartbeat) => Ok(serde_json::json!({
-                        "heartbeat": heartbeat,
-                    })),
-                    Err(error) => Err(error),
-                }
+                let heartbeat = controller.create_rlm_heartbeat(
+                    crate::core::cron_jobs::RlmHeartbeatCreateInput {
+                        instruction: payload
+                            .get("instruction")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        interval: option_string_of(&payload, "interval"),
+                        label: option_string_of(&payload, "label"),
+                        delivery_mode,
+                    },
+                );
+                Ok(serde_json::json!({
+                    "heartbeat": rlm_heartbeat_host_response(&heartbeat),
+                }))
             }
             "rlm_heartbeat.update" => {
                 if !matches!(payload.get("id"), Some(Value::String(_))) {
@@ -4266,24 +4244,32 @@ impl AgentSession {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string();
-                let mut request = payload.clone();
-                if let Value::Object(object) = &mut request {
-                    object.insert("deliveryMode".to_string(), Value::String(delivery_mode));
-                }
-                match controller.update(&job_id, request) {
-                    Ok(heartbeat) => Ok(serde_json::json!({ "heartbeat": heartbeat })),
-                    Err(error) => Err(error),
-                }
+                let heartbeat = controller.update_rlm_heartbeat(
+                    crate::core::cron_jobs::RlmHeartbeatUpdateInput {
+                        id: job_id,
+                        instruction: option_string_of(&payload, "instruction"),
+                        interval: option_string_of(&payload, "interval"),
+                        label: option_string_of(&payload, "label"),
+                        status: payload
+                            .get("status")
+                            .and_then(Value::as_str)
+                            .map(|value| value.to_string()),
+                        delivery_mode,
+                    },
+                );
+                Ok(serde_json::json!({
+                    "heartbeat": heartbeat.as_ref().map(rlm_heartbeat_host_response),
+                }))
             }
             "rlm_heartbeat.delete" => {
                 let job_id = match payload.get("id") {
                     Some(Value::String(id)) => id.clone(),
                     _ => return Err("rlm_heartbeat.delete id must be a string".to_string()),
                 };
-                match controller.delete(&job_id) {
-                    Ok(heartbeat) => Ok(serde_json::json!({ "heartbeat": heartbeat })),
-                    Err(error) => Err(error),
-                }
+                let heartbeat = controller.delete_rlm_heartbeat(&job_id);
+                Ok(serde_json::json!({
+                    "heartbeat": heartbeat.as_ref().map(rlm_heartbeat_host_response),
+                }))
             }
             _ => Err(format!("unknown RLM heartbeat request type \"{request_type}\"")),
         }
@@ -5493,7 +5479,7 @@ impl AgentSession {
 
                 if assistant.stop_reason != STOP_REASON_ERROR {
                     let mut state = self.autonomous_state.lock().unwrap();
-                    add_autonomous_usage(&mut state, &assistant.usage);
+                    add_autonomous_usage(&mut state, Some(&assistant.usage));
                 }
                 if assistant.stop_reason != STOP_REASON_ERROR
                     && assistant.stop_reason != STOP_REASON_ABORTED
@@ -6336,7 +6322,15 @@ impl AgentSession {
 
     /// `refreshAutonomousGates`.
     pub async fn refresh_autonomous_gates(&self) {
-        refresh_autonomous_quality_gates(&mut self.autonomous_state.lock().unwrap());
+        let options = crate::core::autonomous::AutonomousOperationOptions {
+            cwd: Some(self.cwd.clone()),
+            signal: None,
+        };
+        let _ = refresh_autonomous_quality_gates(
+            &mut self.autonomous_state.lock().unwrap(),
+            options,
+        )
+        .await;
     }
 
     /// `_runWithAutonomousContinuationSuppressed`.
@@ -6838,7 +6832,7 @@ impl AgentSession {
     ) -> Result<(), String> {
         let message = create_heartbeat_prompt_message(
             job.id.clone(),
-            job.schedule.clone(),
+            job.schedule.expression.clone(),
             job.status.clone(),
             job.run_count,
             job.prompt.clone(),
@@ -12052,6 +12046,13 @@ impl AgentSession {
 /// Field names and null-vs-absent choices follow the TypeScript exactly:
 /// `label`, `next_run_at`, `last_run_at` and `last_error` are `null` when
 /// absent (not omitted), and `delivery_mode` defaults to `"steer"`.
+fn option_string_of(payload: &Value, field: &str) -> Option<String> {
+    match payload.get(field) {
+        Some(Value::String(value)) => Some(value.clone()),
+        _ => None,
+    }
+}
+
 fn rlm_heartbeat_host_response(job: &AgentCronJob) -> Value {
     // `job.deliveryMode ?? "steer"`. The Rust alias is a `String`, so a plain
     // fallback matches the TypeScript default exactly.

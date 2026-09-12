@@ -571,6 +571,7 @@ pub fn format_api_key_status_indicator(status: &AuthStatus) -> String {
 mod tests {
     use super::*;
 
+    #[derive(Clone)]
     struct StubStorage {
         statuses: std::collections::HashMap<String, AuthStatus>,
         credentials: std::collections::HashMap<String, AuthCredential>,
@@ -643,7 +644,7 @@ mod tests {
         };
         let two = OAuthSelectorComponent::new(
             "login",
-            Box::new(storage),
+            Box::new(storage.clone()),
             vec![provider("a", "A", "oauth"), service],
             None,
             OAuthSelectorOptions::default(),
