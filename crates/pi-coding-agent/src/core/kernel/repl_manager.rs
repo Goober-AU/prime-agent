@@ -1112,7 +1112,23 @@ impl KernelState {
      * re-bootstrap discards the kernel again instead of serving user code on an
      * unprovisioned namespace.
      */
-    async fn ensure_kernel_rebootstrapped(
+    /// `ensureKernelRebootstrapped(signal)`.
+    ///
+    /// Returns a boxed future, not an `async fn`: the re-bootstrap path is
+    /// mutually recursive with `enqueueRequest` (the bootstrap cell goes back
+    /// through the queue), and a recursive `async fn` would have to be boxed at
+    /// the call site anyway. Boxing here states the obligation once, exactly like
+    /// the TypeScript, whose promise type carries no layout recursion.
+    fn ensure_kernel_rebootstrapped(
+        self: &Arc<Self>,
+        signal: &Option<AbortSignal>,
+    ) -> pi_ai::types::BoxFuture<Result<(), KernelError>> {
+        let this = self.clone();
+        let signal = signal.clone();
+        Box::pin(async move { this.ensure_kernel_rebootstrapped_body(&signal).await })
+    }
+
+    async fn ensure_kernel_rebootstrapped_body(
         self: &Arc<Self>,
         signal: &Option<AbortSignal>,
     ) -> Result<(), KernelError> {
@@ -1791,7 +1807,31 @@ impl KernelState {
     }
 
     /// Queue one protocol request (execute or state op) behind every other request.
-    async fn enqueue_request(
+    ///
+    /// Boxed rather than a plain `async fn`: the queue path is mutually recursive
+    /// (`enqueue_request` -> `execute_queued` -> `execute_in_queue_slot` ->
+    /// `enqueue_request` when a repair starts while a request waits for its slot).
+    /// A recursive `async fn` needs indirection to have a finite layout, and the
+    /// same indirection is what lets the compiler prove the spawned bootstrap
+    /// future `Send`. The TypeScript promise has neither problem.
+    fn enqueue_request(
+        self: &Arc<Self>,
+        request_fields: &Value,
+        code: &str,
+        opts: ExecuteOptions,
+        execution_timeout_ms: Option<u64>,
+        snapshot_metric: Option<SnapshotMetricState>,
+    ) -> pi_ai::types::BoxFuture<Result<InternalExecuteResult, KernelError>> {
+        let this = self.clone();
+        let request_fields = request_fields.clone();
+        let code = code.to_string();
+        Box::pin(async move {
+            this.enqueue_request_body(&request_fields, &code, opts, execution_timeout_ms, snapshot_metric)
+                .await
+        })
+    }
+
+    async fn enqueue_request_body(
         self: &Arc<Self>,
         request_fields: &Value,
         code: &str,

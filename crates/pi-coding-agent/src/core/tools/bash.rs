@@ -148,6 +148,9 @@ impl BashOperations for LocalBashOperations {
 
             let mut timed_out = false;
             let mut aborted = false;
+            // `wait` holds a mutable borrow of `child` for as long as it lives, so
+            // the pid is captured before the wait starts.
+            let child_pid = child.id();
             let wait = child.wait();
             tokio::pin!(wait);
 
@@ -187,9 +190,6 @@ impl BashOperations for LocalBashOperations {
                 }
             };
 
-            // `wait` still holds the mutable borrow of `child`, so the pid is
-            // captured before the loop instead of read through `child` here.
-            let child_pid = child.id();
             if result.is_none() {
                 if let Some(pid) = child_pid {
                     // `utils/shell.ts killProcessTree(pid: number)`.

@@ -72,5 +72,13 @@
    "modes/rpc/rpc_extension_ui_context.rs",
    "modes/telegram/manager.rs"
   ]
+ },
+ "p-h-adapters": {
+  "worker": "repairH-adapters",
+  "errors": 0,
+  "files": [
+   "core/agent_session_runtime/in_process_adapter.rs",
+   "core/agent_session_runtime/daemon_adapter.rs"
+  ]
  }
 }

@@ -9,7 +9,7 @@ use pi_tui::selection_metadata::TableCellSelectionRegion;
 use pi_tui::tui::Component;
 
 use crate::core::slash_commands::{builtin_slash_command_takes_argument, parse_slash_command};
-use crate::modes::interactive::theme::theme::{get_markdown_theme, theme};
+use crate::modes::interactive::theme::theme::{get_markdown_theme, theme, MarkdownTheme};
 
 use super::prompt_highlight::PromptTokenMask;
 

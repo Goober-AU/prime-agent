@@ -83,6 +83,7 @@ impl ThinkingSelectorComponent {
             })
             .collect();
 
+        let mut on_select = on_select;
         let mut select_list = SelectList::new(
             thinking_levels.clone(),
             thinking_levels.len(),
