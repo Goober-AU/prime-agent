@@ -13,7 +13,9 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{oneshot, Mutex};
 
-use super::daemon_client::protocol::{is_daemon_response, DaemonCommand, DaemonHello, DaemonResponse};
+use super::daemon_protocol::DaemonCommand;
+use super::daemon_client::DaemonHello;
+// UNKNOWN: ['::{is_daemon_response', 'DaemonResponse}']
 use super::daemon_client::{
     is_daemon_closing, serialize_json_line, DaemonClientError, DaemonClientMessageListener,
     DaemonClientRequestOptions, DaemonClientResult, DaemonSocketClosedError,

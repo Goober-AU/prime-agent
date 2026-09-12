@@ -20,15 +20,15 @@ pub mod wrapper;
 pub use crate::core::slash_commands::{SlashCommandInfo, SlashCommandSource};
 pub use crate::core::source_info::SourceInfo;
 
-pub use super::builtin::herdr_agent_state::{
+pub use self::builtin::herdr_agent_state::{
     create_herdr_agent_state_extension, has_file_based_herdr_integration, herdr_agent_state_extension,
 };
-pub use super::loader::{
+pub use self::loader::{
     create_extension_runtime, discover_and_load_extensions, load_extension_from_factory, load_extensions,
 };
-pub use super::runner::ExtensionRunner;
-pub use super::types::*;
-pub use super::wrapper::{wrap_registered_tool, wrap_registered_tools};
+pub use self::runner::ExtensionRunner;
+pub use self::types::*;
+pub use self::wrapper::{wrap_registered_tool, wrap_registered_tools};
 
 /// `ExtensionErrorListener`.
 pub type ExtensionErrorListener = std::sync::Arc<dyn Fn(&ExtensionError) + Send + Sync>;

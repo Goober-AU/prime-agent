@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, oneshot, Mutex as TokioMutex, Notify};
 
 use pi_agent_core::types::AgentMessage;
 
+use crate::cli::subprocess_launch::{create_cli_subprocess_env, create_cli_subprocess_launch_spec};
 use crate::core::agent_messages::{
     agent_family_relationship, assert_agent_family_reach, assert_agent_session_name_available,
     assert_direct_agent_message_target, build_agent_family_roster, create_agent_session_message,
@@ -102,13 +103,7 @@ use super::agent_roster::{
 use super::compact_session_stream::create_compact_assistant_delta;
 // The daemon protocol module is owned by another slice; the wire primitives
 // this module consumes are carried by daemon_client's protocol submodule.
-use super::daemon_client::protocol::{
-    create_daemon_event_meta, create_daemon_replay_info, is_daemon_command_envelope,
-    is_daemon_dialog_extension_ui_request, is_daemon_mutating_command,
-    is_session_plane_daemon_command, salvage_daemon_command_id, DaemonCommand, DaemonResponse,
-    DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID,
-    DAEMON_SCHEMA_REVISION, DAEMON_SUPPORTED_CLIENT_CAPABILITIES,
-};
+use super::daemon_protocol::{create_daemon_event_meta, create_daemon_replay_info, is_daemon_command_envelope, is_daemon_dialog_extension_ui_request, is_daemon_mutating_command, is_session_plane_daemon_command, salvage_daemon_command_id, DaemonCommand, DaemonResponse, DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, DAEMON_SUPPORTED_CLIENT_CAPABILITIES};
 use super::daemon_client::DaemonClient;
 use super::daemon_client_env::{filter_client_env, with_client_env};
 use super::daemon_errors::{
@@ -492,6 +487,22 @@ pub trait DaemonRuntimeApi: Send + Sync {
         input_path: &str,
         cwd_override: Option<&str>,
     ) -> BoxFuture<'static, Result<Value, String>>;
+}
+
+/// The `DaemonUpdateRestartSession` fields `appendUpdateRestartMarker` reads.
+/// The protocol slice owns the wire type; the daemon carries the projection it
+/// consumes (the same shape, serialized by the manifest writer).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRestartSessionSnapshot {
+    pub active_session_id: String,
+    pub should_resume: bool,
+    pub was_streaming: bool,
+    pub was_compacting: bool,
+    pub was_bash_running: bool,
+    pub had_running_rlm_children: bool,
+    pub was_retrying: bool,
+    pub had_accepted_prompt_in_flight: bool,
 }
 
 /// `recordRlmSubagentState`'s `input` object.
@@ -6987,21 +6998,21 @@ struct MissingRuntime;
 impl DaemonRuntimeApi for MissingRuntime {
     fn new_session(
         &self,
-        _parent_session: Option<Value>,
+        _options: Option<NewSessionRuntimeOptions>,
     ) -> BoxFuture<'static, Result<Value, String>> {
         Box::pin(async { Err("Active session is not resident".to_string()) })
     }
     fn switch_session(
         &self,
         _session_path: &str,
-        _cwd_override: Option<&str>,
+        _options: SessionPathOptions,
     ) -> BoxFuture<'static, Result<Value, String>> {
         Box::pin(async { Err("Active session is not resident".to_string()) })
     }
     fn fork(
         &self,
         _entry_id: &str,
-        _position: Option<&str>,
+        _options: ForkOptions,
     ) -> BoxFuture<'static, Result<Value, String>> {
         Box::pin(async { Err("Active session is not resident".to_string()) })
     }
@@ -7343,13 +7354,10 @@ impl AgentDaemon {
             object.insert(
                 "cursor".to_string(),
                 serde_json::to_value(meta.cursor.clone().unwrap_or_else(|| {
-                    crate::modes::daemon::daemon_client::protocol::DaemonEventCursor {
+                    crate::modes::daemon::daemon_protocol::DaemonEventCursor {
                         generation: generation.clone(),
                         sequence,
                     }
-                }))
-                .unwrap_or(Value::Null),
-            );
             object.insert(
                 "emittedAt".to_string(),
                 Value::String(meta.emitted_at.clone()),
@@ -8001,7 +8009,9 @@ impl AgentDaemon {
         Ok(DaemonAttachResult {
             protocol: Some(
                 serde_json::to_value(
-                    crate::modes::daemon::daemon_client::protocol::daemon_protocol_info(),
+            protocol: Some(
+                serde_json::to_value(
+                    crate::modes::daemon::daemon_protocol::daemon_protocol_info(),
                 )
                 .unwrap_or(Value::Null),
             ),
@@ -8021,15 +8031,6 @@ impl AgentDaemon {
                 "capabilities": capabilities.into_iter().collect::<Vec<_>>(),
             })),
         })
-    }
-
-    /// `createSessionSnapshot(state, recentFirstHistory = false)`.
-    async fn create_session_snapshot(
-        self: &Arc<Self>,
-        state: &Arc<StdMutex<ActiveSessionState>>,
-        recent_first_history: bool,
-    ) -> Result<Value, String> {
-        let entry = self.session_entry_for_state(state);
         entry.sync_view();
         let metadata = entry.runtime_metadata.clone();
         let parent = if metadata.parent_active_session_id.is_some()
@@ -14327,9 +14328,9 @@ impl AgentDaemon {
     fn append_update_restart_marker(
         &self,
         state: &Arc<StdMutex<ActiveSessionState>>,
-        restart_session: &DaemonUpdateRestartSession,
+        restart_session: &UpdateRestartSessionSnapshot,
     ) {
-        if restart_session.should_resume != Some(true) {
+        if !restart_session.should_resume {
             return;
         }
         let session = Self::session_of(state);
@@ -14485,5 +14486,326 @@ impl AgentDaemon {
             rlm_parent_node_id: summary.rlm_parent_node_id.clone(),
             ..AgentObserveAgentSummary::default()
         }
+    }
+}
+
+impl AgentDaemon {
+    /// `isAgentFamilyReachable(currentState, targetState)`.
+    fn is_agent_family_reachable(
+        &self,
+        current_state: &Arc<StdMutex<ActiveSessionState>>,
+        target_state: &Arc<StdMutex<ActiveSessionState>>,
+    ) -> bool {
+        match assert_agent_family_reach(
+            &self.agent_family_entry(current_state),
+            &self.agent_family_entry(target_state),
+        ) {
+            Ok(_) => true,
+            Err(error) if error == AGENT_FAMILY_REACH_ERROR => false,
+            Err(_) => false,
+        }
+    }
+
+    /// `resolveAgentFamilySessionName(currentState, target, ambiguity)`.
+    fn resolve_agent_family_session_name(
+        &self,
+        current_state: &Arc<StdMutex<ActiveSessionState>>,
+        target: &str,
+        ambiguity: &str,
+    ) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
+        let current_active_session_id = current_state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        let mut matches: Vec<Arc<StdMutex<ActiveSessionState>>> = Vec::new();
+        for state in self.state_refs() {
+            let session = Self::session_of(&state);
+            let is_match =
+                session.session_id() == target || session.session_name().as_deref() == Some(target);
+            if !is_match {
+                continue;
+            }
+            let same = state
+                .lock()
+                .expect("active session poisoned")
+                .active_session_id
+                == current_active_session_id;
+            if same || self.is_agent_family_reachable(current_state, &state) {
+                matches.push(state);
+            }
+        }
+        if matches.len() != 1 {
+            return Err(ambiguity.to_string());
+        }
+        Ok(matches.remove(0))
+    }
+
+    /// `getOrHydrateAuthorizedAgentFamilyTarget(currentState, target)`.
+    async fn get_or_hydrate_authorized_agent_family_target(
+        self: &Arc<Self>,
+        current_state: &Arc<StdMutex<ActiveSessionState>>,
+        target: &str,
+    ) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
+        match self.get_bound_session_state(target) {
+            Ok(state) => return Ok(state),
+            Err(error) => {
+                if error.starts_with("__bound_session_unavailable__") {
+                    let target_state = self.get_session_state(target)?;
+                    self.assert_agent_family_reachable(current_state, &target_state)?;
+                    return self.get_or_hydrate_bound_session_state(target).await;
+                }
+                if error.starts_with("__ambiguous_active_session__") {
+                    let resolved =
+                        self.resolve_agent_family_session_name(current_state, target, &error)?;
+                    let active_session_id = resolved
+                        .lock()
+                        .expect("active session poisoned")
+                        .active_session_id
+                        .clone();
+                    return self
+                        .get_or_hydrate_bound_session_state(&active_session_id)
+                        .await;
+                }
+            }
+        }
+        let Some(passive) = self.find_passive_rlm_subagent(target, false).await else {
+            return self.get_or_hydrate_bound_session_state(target).await;
+        };
+        assert_agent_family_reach(
+            &self.agent_family_entry(current_state),
+            &self.passive_agent_family_entry(&passive),
+        )?;
+        self.hydrate_passive_rlm_subagent(passive, None).await
+    }
+
+    /// `createAgentObserveAgentSnapshot(currentState, target)`.
+    async fn create_agent_observe_agent_snapshot(
+        self: &Arc<Self>,
+        current_state: &Arc<StdMutex<ActiveSessionState>>,
+        target: &str,
+    ) -> Result<AgentObserveAgentSnapshot, String> {
+        let target_state = self
+            .get_or_hydrate_authorized_agent_family_target(current_state, target)
+            .await?;
+        self.assert_agent_family_reachable(current_state, &target_state)?;
+        Ok(AgentObserveAgentSnapshot {
+            agent: self.create_agent_observe_summary(&target_state, current_state),
+        })
+    }
+
+    /// `createAgentObserveRecentMessages(currentState, input)`.
+    async fn create_agent_observe_recent_messages(
+        self: &Arc<Self>,
+        current_state: &Arc<StdMutex<ActiveSessionState>>,
+        input: AgentObserveRecentMessagesInput,
+    ) -> Result<AgentObserveRecentMessagesResult, String> {
+        let target_state = self
+            .get_or_hydrate_authorized_agent_family_target(current_state, &input.target)
+            .await?;
+        self.assert_agent_family_reachable(current_state, &target_state)?;
+        let limit = normalize_observe_limit(input.limit, 20)?;
+        let max_chars = normalize_observe_max_chars(input.max_chars, 4000)?;
+        let messages = Self::session_of(&target_state).messages();
+        let start_index = messages.len().saturating_sub(limit as usize);
+        Ok(AgentObserveRecentMessagesResult {
+            agent: self.create_agent_observe_summary(&target_state, current_state),
+            messages: messages[start_index..]
+                .iter()
+                .enumerate()
+                .map(|(offset, message)| {
+                    create_agent_observe_message_preview(
+                        message,
+                        (start_index + offset) as f64,
+                        max_chars as usize,
+                    )
+                })
+                .collect(),
+            limit: limit as f64,
+            max_chars: max_chars as f64,
+            truncated: start_index > 0,
+        })
+    }
+
+    /// `createAgentObserveListResult(currentState)`.
+    async fn create_agent_observe_list_result(
+        self: &Arc<Self>,
+        current_state: &Arc<StdMutex<ActiveSessionState>>,
+    ) -> Result<AgentObserveListResult, String> {
+        let current_active_session_id = current_state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        let mut agents: Vec<AgentObserveAgentSummary> = self
+            .list_targetable_session_states(current_state)
+            .into_iter()
+            .filter(|state| {
+                state
+                    .lock()
+                    .expect("active session poisoned")
+                    .active_session_id
+                    == current_active_session_id
+                    || self.is_agent_family_reachable(current_state, state)
+            })
+            .map(|state| self.create_agent_observe_summary(&state, current_state))
+            .collect();
+        let mut resident_ids: HashSet<String> = agents
+            .iter()
+            .map(|agent| agent.active_session_id.clone())
+            .collect();
+        for passive in self.list_passive_rlm_subagents(Vec::new(), false).await {
+            if resident_ids.contains(&passive.info.id) {
+                continue;
+            }
+            match assert_agent_family_reach(
+                &self.agent_family_entry(current_state),
+                &self.passive_agent_family_entry(&passive),
+            ) {
+                Ok(_) => {}
+                Err(error) if error == AGENT_FAMILY_REACH_ERROR => continue,
+                Err(error) => return Err(error),
+            }
+            let root_parent_active_session_id = match &passive.root {
+                PassiveRlmRoot::Resident(state) => Some(
+                    state
+                        .lock()
+                        .expect("active session poisoned")
+                        .active_session_id
+                        .clone(),
+                ),
+                PassiveRlmRoot::Saved(_) => None,
+            };
+            let parent_active_session_id = if passive.chain.len() == 1 {
+                root_parent_active_session_id
+            } else {
+                None
+            };
+            let name = passive
+                .info
+                .name
+                .clone()
+                .or_else(|| Some(passive.entry.session_name.clone()));
+            agents.push(AgentObserveAgentSummary {
+                active_session_id: passive.info.id.clone(),
+                session_id: passive.info.id.clone(),
+                name: name.clone(),
+                session_name: name,
+                runtime_kind: Some(RUNTIME_KIND_SUBAGENT.to_string()),
+                cwd: passive.info.cwd.clone(),
+                status: FAMILY_STATUS_IDLE.to_string(),
+                is_session_active: false,
+                message_count: passive.info.message_count as f64,
+                parent_active_session_id,
+                parent_session_id: Some(passive.entry.parent_session_id.clone()),
+                rlm_child_id: Some(passive.entry.child_id.clone()),
+                rlm_parent_node_id: passive.entry.rlm_parent_node_id.clone(),
+                ..AgentObserveAgentSummary::default()
+            });
+            resident_ids.insert(passive.info.id.clone());
+        }
+        let current = self.create_agent_observe_summary(current_state, current_state);
+        Ok(AgentObserveListResult { current, agents })
+    }
+
+    /// `setStateSessionNameViaSupervisor(state, name)`.
+    ///
+    /// Without a supervisor socket path (or outside a worker) the local setter
+    /// is authoritative, exactly as the TS fallback does.
+    async fn set_state_session_name_via_supervisor(
+        self: &Arc<Self>,
+        state: &Arc<StdMutex<ActiveSessionState>>,
+        name: &str,
+    ) -> Result<(), String> {
+        let supervisor_socket_path = self.supervisor_socket_path_from_env();
+        if !self.is_worker() || supervisor_socket_path.is_none() {
+            return self.set_state_session_name(state, name).await;
+        }
+        // The supervisor request (`{type:"set_session_name", ...}`) is served by
+        // the supervisor slice; until it lands the local setter answers.
+        self.set_state_session_name(state, name).await
+    }
+
+    /// `createAgentObserveController(getCurrentState)`.
+    fn create_agent_observe_controller(
+        self: &Arc<Self>,
+        get_current_state: Arc<dyn Fn() -> Option<Arc<StdMutex<ActiveSessionState>>> + Send + Sync>,
+    ) -> Arc<dyn AgentObserveController> {
+        Arc::new(DaemonAgentObserveController {
+            daemon: Arc::clone(self),
+            get_current_state,
+        })
+    }
+}
+
+/// The `AgentObserveController` the daemon hands to a session runtime.
+struct DaemonAgentObserveController {
+    daemon: Arc<AgentDaemon>,
+    get_current_state: Arc<dyn Fn() -> Option<Arc<StdMutex<ActiveSessionState>>> + Send + Sync>,
+}
+
+impl DaemonAgentObserveController {
+    fn require_current_state(&self) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
+        (self.get_current_state)()
+            .ok_or_else(|| "Agent observe state is not ready for this session yet".to_string())
+    }
+}
+
+impl AgentObserveController for DaemonAgentObserveController {
+    fn list_agents(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentObserveListResult, String>> + Send>,
+    > {
+        let daemon = Arc::clone(&self.daemon);
+        let current = self.require_current_state();
+        Box::pin(async move {
+            let current = match current {
+                Ok(current) => current,
+                Err(error) => return Err(error),
+            };
+            daemon.create_agent_observe_list_result(&current).await
+        })
+    }
+
+    fn get_agent(
+        &self,
+        target: String,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentObserveAgentSnapshot, String>> + Send>,
+    > {
+        let daemon = Arc::clone(&self.daemon);
+        let current = self.require_current_state();
+        Box::pin(async move {
+            let current = match current {
+                Ok(current) => current,
+                Err(error) => return Err(error),
+            };
+            daemon
+                .create_agent_observe_agent_snapshot(&current, &target)
+                .await
+        })
+    }
+
+    fn recent_messages(
+        &self,
+        input: AgentObserveRecentMessagesInput,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<AgentObserveRecentMessagesResult, String>>
+                + Send,
+        >,
+    > {
+        let daemon = Arc::clone(&self.daemon);
+        let current = self.require_current_state();
+        Box::pin(async move {
+            let current = match current {
+                Ok(current) => current,
+                Err(error) => return Err(error),
+            };
+            daemon
+                .create_agent_observe_recent_messages(&current, input)
+                .await
+        })
     }
 }

@@ -54,13 +54,8 @@ use super::compact_session_stream::{
     create_compact_assistant_delta, is_compact_assistant_delta, CompactAssistantStreamReconstructor,
 };
 use super::daemon_catalog_process::{DaemonCatalogClient, DAEMON_CATALOG_ROLE_ENV};
-use super::daemon_client::protocol::{
-    collect_daemon_client_env, create_daemon_event_meta, is_daemon_command_envelope, is_daemon_mutating_command,
-    salvage_daemon_command_id, DaemonAttachResult, DaemonCommand, DaemonHello, DaemonResponse,
-    DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION, DAEMON_DEFAULT_CLIENT_CAPABILITIES,
-    DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION,
-    DAEMON_UPDATE_RESTART_FORMAT_VERSION,
-};
+use super::daemon_protocol::{collect_daemon_client_env, create_daemon_event_meta, is_daemon_command_envelope, is_daemon_mutating_command, salvage_daemon_command_id, DaemonAttachResult, DaemonCommand, DaemonResponse, DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION, DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, DAEMON_UPDATE_RESTART_FORMAT_VERSION};
+use super::daemon_client::{DaemonHello};
 use super::daemon_errors::{deserialize_daemon_error, serialize_daemon_error, DaemonSessionRecoveringError};
 use super::daemon_session_id::matches_session_id_suffix;
 use super::daemon_session_list::{

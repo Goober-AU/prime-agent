@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-use super::daemon_client::protocol::DaemonSavedSessionInfo;
+use super::daemon_protocol::DaemonSavedSessionInfo;
 use super::daemon_session_list::{AgentStatusRecord, SessionInfo, SessionState};
 
 /// `SessionInfo` on the wire: dates become ISO strings.

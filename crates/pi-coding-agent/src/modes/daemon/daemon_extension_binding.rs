@@ -19,7 +19,7 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 
 use super::active_session_state::{ActiveSessionExtensionUiRequest, ActiveSessionState, DaemonExtensionUIResponse};
-use super::daemon_client::protocol::is_daemon_dialog_extension_ui_request;
+use super::daemon_protocol::is_daemon_dialog_extension_ui_request;
 use super::daemon_client_env::{exec_env_for_session, with_client_env, EnvMap};
 
 /// Minimal local view of the `DaemonOutbound` variants this binding emits.

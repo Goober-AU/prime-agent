@@ -7,7 +7,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::daemon_client::protocol::{DaemonResponse, DaemonSavedSessionInfo};
+// UNKNOWN: ['::{DaemonResponse', 'DaemonSavedSessionInfo}']
+use super::daemon_protocol::{DaemonResponse, DaemonSavedSessionInfo};
+
 use crate::utils::atomic_file::{write_file_atomic_sync, WriteFileAtomicOptions};
 
 const COMPACT_AFTER_RECORDS: usize = 4096;

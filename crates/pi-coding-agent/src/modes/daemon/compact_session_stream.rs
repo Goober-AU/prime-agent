@@ -7,7 +7,7 @@ use pi_ai::utils::json_parse::parse_streaming_json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::daemon_client::protocol::DaemonEventMeta;
+use super::daemon_protocol::DaemonEventMeta;
 
 /// A compact assistant delta: `assistant_stream_delta` on the worker wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
 
-use super::daemon_client::protocol::DAEMON_CLIENT_ENV_KEYS;
+use super::daemon_protocol::DAEMON_CLIENT_ENV_KEYS;
 
 pub type EnvMap = HashMap<String, String>;
 

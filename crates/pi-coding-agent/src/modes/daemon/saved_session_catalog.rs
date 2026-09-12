@@ -2,11 +2,12 @@
 
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
-use super::daemon_client::protocol::{DaemonCommand, DaemonResponse};
 use super::daemon_client::{DaemonClientError, DaemonClientResult};
-use super::daemon_errors::{deserialize_daemon_error, DaemonErrorInfo, DaemonErrorResponse};
+use super::daemon_errors::deserialize_daemon_error;
+use super::daemon_client::DaemonCommandBody;
+use super::daemon_protocol::{DaemonResponse, DaemonSavedSessionInfo};
 use super::saved_session_info::{deserialize_saved_session_info, AgentConnectionSavedSessionInfo};
 
 /// `{ activeSessionId } | { cwd, sessionDir? }` from the TypeScript union.
@@ -30,7 +31,7 @@ pub struct AgentConnectionSessionListCallbacks {
 pub trait SavedSessionCatalogClient: Send + Sync {
     fn request_boxed(
         &self,
-        command: DaemonCommand,
+        command: DaemonCommandBody,
         timeout_ms: Option<u64>,
         on_progress: Option<Arc<dyn Fn(&Value) + Send + Sync>>,
     ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>>;
@@ -42,24 +43,22 @@ pub async fn list_daemon_saved_sessions(
     scope: &str,
     callbacks: Option<AgentConnectionSessionListCallbacks>,
 ) -> DaemonClientResult<Vec<AgentConnectionSavedSessionInfo>> {
-    let mut command = DaemonCommand::new("list_saved_sessions");
+    let mut command: DaemonCommandBody = Map::from_iter([(
+        "type".to_string(),
+        Value::String("list_saved_sessions".to_string()),
+    )]);
     match context {
         DaemonSavedSessionCatalogContext::ActiveSessionId { active_session_id } => {
-            command.body.insert(
-                "activeSessionId".to_string(),
-                Value::String(active_session_id.clone()),
-            );
+            command.insert("activeSessionId".to_string(), Value::String(active_session_id.clone()));
         }
         DaemonSavedSessionCatalogContext::Cwd { cwd, session_dir } => {
-            command.body.insert("cwd".to_string(), Value::String(cwd.clone()));
+            command.insert("cwd".to_string(), Value::String(cwd.clone()));
             if let Some(session_dir) = session_dir {
-                command
-                    .body
-                    .insert("sessionDir".to_string(), Value::String(session_dir.clone()));
+                command.insert("sessionDir".to_string(), Value::String(session_dir.clone()));
             }
         }
     }
-    command.body.insert("scope".to_string(), Value::String(scope.to_string()));
+    command.insert("scope".to_string(), Value::String(scope.to_string()));
 
     let progress: Option<Arc<dyn Fn(&Value) + Send + Sync>> = callbacks.as_ref().map(|callbacks| {
         let callbacks = callbacks.clone();
@@ -76,9 +75,7 @@ pub async fn list_daemon_saved_sessions(
                 }
             } else if let Some(on_session) = &callbacks.on_session {
                 if let Some(session) = candidate.get("session").cloned() {
-                    if let Ok(session) = serde_json::from_value::<
-                        super::daemon_client::protocol::DaemonSavedSessionInfo,
-                    >(session)
+                    if let Ok(session) = serde_json::from_value::<DaemonSavedSessionInfo>(session)
                     {
                         on_session(deserialize_saved_session_info(&session));
                     }
@@ -99,10 +96,7 @@ pub async fn list_daemon_saved_sessions(
         .map(|entries| {
             entries
                 .iter()
-                .filter_map(|entry| {
-                    serde_json::from_value::<super::daemon_client::protocol::DaemonSavedSessionInfo>(entry.clone())
-                        .ok()
-                })
+                .filter_map(|entry| serde_json::from_value::<DaemonSavedSessionInfo>(entry.clone()).ok())
                 .map(|wire| deserialize_saved_session_info(&wire))
                 .collect::<Vec<AgentConnectionSavedSessionInfo>>()
         })
@@ -116,19 +110,15 @@ pub async fn rename_daemon_saved_session(
     session_path: &str,
     name: &str,
 ) -> DaemonClientResult<()> {
-    let mut command = DaemonCommand::new("rename_saved_session");
+    let mut command: DaemonCommandBody = Map::from_iter([(
+        "type".to_string(),
+        Value::String("rename_saved_session".to_string()),
+    )]);
     if let DaemonSavedSessionCatalogContext::ActiveSessionId { active_session_id } = context {
-        command.body.insert(
-            "activeSessionId".to_string(),
-            Value::String(active_session_id.clone()),
-        );
+        command.insert("activeSessionId".to_string(), Value::String(active_session_id.clone()));
     }
-    command
-        .body
-        .insert("sessionPath".to_string(), Value::String(session_path.to_string()));
-    command
-        .body
-        .insert("name".to_string(), Value::String(name.to_string()));
+    command.insert("sessionPath".to_string(), Value::String(session_path.to_string()));
+    command.insert("name".to_string(), Value::String(name.to_string()));
     let response = client.request_boxed(command, None, None).await?;
     if !response.success {
         return Err(daemon_error_from_response(&response));
@@ -141,16 +131,14 @@ pub async fn delete_daemon_saved_session(
     context: &DaemonSavedSessionCatalogContext,
     session_path: &str,
 ) -> DaemonClientResult<Value> {
-    let mut command = DaemonCommand::new("delete_saved_session");
+    let mut command: DaemonCommandBody = Map::from_iter([(
+        "type".to_string(),
+        Value::String("delete_saved_session".to_string()),
+    )]);
     if let DaemonSavedSessionCatalogContext::ActiveSessionId { active_session_id } = context {
-        command.body.insert(
-            "activeSessionId".to_string(),
-            Value::String(active_session_id.clone()),
-        );
+        command.insert("activeSessionId".to_string(), Value::String(active_session_id.clone()));
     }
-    command
-        .body
-        .insert("sessionPath".to_string(), Value::String(session_path.to_string()));
+    command.insert("sessionPath".to_string(), Value::String(session_path.to_string()));
     let response = client.request_boxed(command, None, None).await?;
     if !response.success {
         return Err(daemon_error_from_response(&response));
@@ -159,15 +147,10 @@ pub async fn delete_daemon_saved_session(
 }
 
 fn daemon_error_from_response(response: &DaemonResponse) -> DaemonClientError {
-    let error = deserialize_daemon_error(&DaemonErrorResponse {
-        error: response.error.clone().unwrap_or_default(),
-        error_info: response.error_info.clone().map(Into::into),
-    });
+    // `throw deserializeDaemonError(response)`: the parser reads the whole response.
+    let error = deserialize_daemon_error(response);
     DaemonClientError::Message(error.message())
 }
-
-#[allow(dead_code)]
-fn _error_info_marker(_info: DaemonErrorInfo) {}
 
 #[cfg(test)]
 mod tests {
@@ -176,13 +159,13 @@ mod tests {
 
     struct FakeClient {
         response: Mutex<serde_json::Value>,
-        commands: Mutex<Vec<DaemonCommand>>,
+        commands: Mutex<Vec<DaemonCommandBody>>,
     }
 
     impl SavedSessionCatalogClient for FakeClient {
         fn request_boxed(
             &self,
-            command: DaemonCommand,
+            command: DaemonCommandBody,
             _timeout_ms: Option<u64>,
             _on_progress: Option<Arc<dyn Fn(&Value) + Send + Sync>>,
         ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>> {
@@ -193,6 +176,11 @@ mod tests {
                     .ok_or_else(|| DaemonClientError::Message("invalid response".to_string()))
             })
         }
+    }
+
+    /// A command body field, as the JSON object the client writes.
+    fn field(command: &DaemonCommandBody, key: &str) -> Option<&str> {
+        command.get(key).and_then(Value::as_str)
     }
 
     fn client(response: serde_json::Value) -> FakeClient {
@@ -236,9 +224,9 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "abc");
         let commands = client.commands.lock().expect("commands poisoned");
-        assert_eq!(commands[0].string_field("activeSessionId"), Some("active-1"));
-        assert_eq!(commands[0].string_field("scope"), Some("all"));
-        assert!(commands[0].field("cwd").is_none());
+        assert_eq!(field(&commands[0], "activeSessionId"), Some("active-1"));
+        assert_eq!(field(&commands[0], "scope"), Some("all"));
+        assert!(commands[0].get("cwd").is_none());
     }
 
     #[tokio::test]
@@ -262,9 +250,9 @@ mod tests {
         .expect("ok");
         assert!(sessions.is_empty());
         let commands = client.commands.lock().expect("commands poisoned");
-        assert_eq!(commands[0].string_field("cwd"), Some("/tmp"));
-        assert_eq!(commands[0].string_field("sessionDir"), Some("/tmp/sessions"));
-        assert!(commands[0].field("activeSessionId").is_none());
+        assert_eq!(field(&commands[0], "cwd"), Some("/tmp"));
+        assert_eq!(field(&commands[0], "sessionDir"), Some("/tmp/sessions"));
+        assert!(commands[0].get("activeSessionId").is_none());
     }
 
     #[tokio::test]
@@ -308,8 +296,8 @@ mod tests {
         .await
         .expect("ok");
         let commands = client.commands.lock().expect("commands poisoned");
-        assert_eq!(commands[0].type_, "rename_saved_session");
-        assert_eq!(commands[0].string_field("name"), Some("new name"));
-        assert!(commands[0].field("activeSessionId").is_none());
+        assert_eq!(field(&commands[0], "type"), Some("rename_saved_session"));
+        assert_eq!(field(&commands[0], "name"), Some("new name"));
+        assert!(commands[0].get("activeSessionId").is_none());
     }
 }

@@ -1,9 +1,9 @@
 //! Port of packages/coding-agent/src/modes/daemon/heartbeat-catalog.ts
 
-use super::daemon_client::protocol::{DaemonCommand, DaemonResponse};
 use super::daemon_client::{DaemonClientError, DaemonClientResult};
-use super::daemon_errors::{deserialize_daemon_error, DaemonErrorResponse};
-use super::daemon_client::protocol::is_unknown_daemon_command_error;
+use super::daemon_errors::deserialize_daemon_error;
+use super::daemon_client::DaemonCommandBody;
+use super::daemon_protocol::{is_unknown_daemon_command_error, DaemonResponse};
 
 /// One heartbeat row as the agents view consumes it.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -19,7 +19,7 @@ pub trait HeartbeatCatalogClient: Send + Sync {
     fn supports_server_capability(&self, capability: &str) -> bool;
     fn request_boxed(
         &self,
-        command: DaemonCommand,
+        command: DaemonCommandBody,
         timeout_ms: Option<u64>,
     ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>>;
 }
@@ -34,9 +34,12 @@ pub async fn list_daemon_heartbeats(
     if !client.supports_server_capability("heartbeat_catalog") {
         return Ok(Vec::new());
     }
-    let mut command = DaemonCommand::new("heartbeats_list");
+    let mut command: DaemonCommandBody = serde_json::Map::from_iter([(
+        "type".to_string(),
+        serde_json::Value::String("heartbeats_list".to_string()),
+    )]);
     if let Some(active_session_id) = active_session_id {
-        command.body.insert(
+        command.insert(
             "activeSessionId".to_string(),
             serde_json::Value::String(active_session_id.to_string()),
         );
@@ -63,10 +66,8 @@ pub async fn list_daemon_heartbeats(
 }
 
 fn daemon_error_from_response(response: &DaemonResponse) -> DaemonClientError {
-    let error = deserialize_daemon_error(&DaemonErrorResponse {
-        error: response.error.clone().unwrap_or_default(),
-        error_info: response.error_info.clone(),
-    });
+    // `throw deserializeDaemonError(response)`: the parser reads the whole response.
+    let error = deserialize_daemon_error(response);
     DaemonClientError::Message(error.message())
 }
 
@@ -84,7 +85,7 @@ mod tests {
         hello: bool,
         capability: bool,
         response: Mutex<Option<serde_json::Value>>,
-        commands: Arc<Mutex<Vec<DaemonCommand>>>,
+        commands: Arc<Mutex<Vec<DaemonCommandBody>>>,
     }
 
     impl HeartbeatCatalogClient for FakeClient {
@@ -105,7 +106,7 @@ mod tests {
 
         fn request_boxed(
             &self,
-            command: DaemonCommand,
+            command: DaemonCommandBody,
             _timeout_ms: Option<u64>,
         ) -> futures::future::BoxFuture<'static, DaemonClientResult<DaemonResponse>> {
             let commands = Arc::clone(&self.commands);
@@ -152,8 +153,8 @@ mod tests {
         assert_eq!(heartbeats[0].fields.get("id").and_then(|v| v.as_str()), Some("h1"));
         let commands = client.commands.lock().expect("commands");
         assert_eq!(commands.len(), 1);
-        assert_eq!(commands[0].type_, "heartbeats_list");
-        assert_eq!(commands[0].string_field("activeSessionId"), Some("active-1"));
+        assert_eq!(commands[0].get("type").and_then(|value| value.as_str()), Some("heartbeats_list"));
+        assert_eq!(commands[0].get("activeSessionId").and_then(|value| value.as_str()), Some("active-1"));
     }
 
     #[tokio::test]

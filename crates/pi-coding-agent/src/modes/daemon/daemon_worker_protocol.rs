@@ -6,8 +6,11 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use super::daemon_client::DaemonHello;
+use super::daemon_protocol::DaemonCommand;
+
 use super::agent_roster::WorkerRosterEntry;
-use super::daemon_client::protocol::{DaemonCommand, DaemonHello};
+// UNKNOWN: ['::{DaemonCommand', 'DaemonHello}']
 
 pub const SESSION_LEASE_OWNER_ID_ENV: &str = "PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID";
 pub const SESSION_LEASES_ENABLED_ENV: &str = "PRIME_AGENT_INTERNAL_SESSION_LEASES";

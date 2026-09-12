@@ -61,7 +61,7 @@ impl SnapshotTranscriptChunks {
             json_string(&self.options.snapshot_id),
             self.index
         );
-        let line = format!("{prefix}{}]}\n", self.serialized_messages.join(","));
+        let line = format!("{prefix}{}]}}\n", self.serialized_messages.join(","));
         self.serialized_messages = Vec::new();
         self.serialized_bytes = 0;
         self.index += 1;
@@ -361,7 +361,7 @@ impl SnapshotTranscriptCache {
             json_string(&self.options.snapshot_id),
             index
         );
-        let line = format!("{prefix}{}]}\n", serialized_messages.join(","));
+        let line = format!("{prefix}{}]}}\n", serialized_messages.join(","));
         let _ = self.store_chunk(line.into_bytes());
         serialized_messages.clear();
         *serialized_bytes = 0;

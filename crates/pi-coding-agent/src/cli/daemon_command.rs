@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use std::sync::Arc;
 
-use crate::modes::daemon::daemon_client::protocol::{DaemonCommand, DaemonResponse};
+use crate::modes::daemon::daemon_protocol::{DaemonCommand, DaemonResponse};
 use crate::modes::daemon::daemon_client::{DaemonClient, DaemonClientError, DaemonClientRequestOptions};
 
 use super::args::is_valid_thinking_level;
