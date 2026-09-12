@@ -117,7 +117,7 @@ const MAX_CHILD_PROCESS_OUTPUT_CHARS: usize = 1024 * 1024;
 
 /// `interface GitWorktreeSnapshot`.
 #[derive(Debug, Clone, Default, PartialEq)]
-struct GitWorktreeSnapshot {
+pub struct GitWorktreeSnapshot {
     status: String,
     diff: String,
     untracked_hash: String,

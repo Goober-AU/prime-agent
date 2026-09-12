@@ -1,0 +1,97 @@
+[
+ [
+  "C:/Users/openclawuser/optimus-rust-toolchain/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.151/src/macros.rs",
+  279,
+  "the trait bound `ClearedQueue: serde::Serialize` is not satisfied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  783,
+  "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs:783:18: 783:28}` to be a future that resolves to `Result<f64, String>`, but it resolves to `Result<usize, String>`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  783,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  789,
+  "this method takes 3 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  816,
+  "arguments to this method are incorrect"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  924,
+  "this method takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  932,
+  "method `refine` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  935,
+  "method `refine_with_options` is private"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  953,
+  "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs:953:18: 953:28}` to be a future that resolves to `Result<Value, String>`, but it resolves to `Result<SetRlmMaxDepthResult, String>`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  953,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  994,
+  "no variant, associated function, or constant named `Assistant` found for enum `pi_agent_core::types::AgentMessage` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1003,
+  "cannot find type `NavigateTreeOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1020,
+  "cannot find type `SideQuestionOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1035,
+  "cannot find type `NewSessionRuntimeOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1055,
+  "cannot find type `SessionPathOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1065,
+  "cannot find type `ForkOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1084,
+  "`()` is not a future"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1093,
+  "not all trait items implemented, missing: `new_session`, `switch_session`, `fork`, `import_from_jsonl`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1094,
+  "method `runtime_kind` is not a member of trait `DaemonRuntimeApi`"
+ ]
+]

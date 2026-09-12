@@ -273,7 +273,6 @@ impl ExtensionUiContext {
             .lock()
             .expect("requests poisoned")
             .insert(request_id.clone(), sender);
-        let _ = self.requests.lock().expect("requests poisoned");
         let timeout_duration = timeout.map(Duration::from_millis);
         let response = match timeout_duration {
             Some(duration) => match tokio::time::timeout(duration, receiver).await {

@@ -1,0 +1,287 @@
+[
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  585,
+  "no method named `settings_manager` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  595,
+  "no method named `set_exec_env_provider` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  599,
+  "no method named `set_runtime_env_scope` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  603,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  607,
+  "no method named `set_rebind_session` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  612,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  632,
+  "no method named `register_rlm_child_session` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  636,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  739,
+  "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs:739:18: 739:28}` to be a future that resolves to `Result<(), String>`, but it resolves to `Result<bool, String>`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  741,
+  "this method takes 1 argument but 3 arguments were supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  758,
+  "this method takes 1 argument but 3 arguments were supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  764,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  770,
+  "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs:770:18: 770:28}` to be a future that resolves to `Result<f64, String>`, but it resolves to `Result<usize, String>`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  770,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  776,
+  "this method takes 3 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  780,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  784,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  788,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  798,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  799,
+  "arguments to this method are incorrect"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  803,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  807,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  811,
+  "method `cancel_rlm_child_run` is private"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  881,
+  "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs:881:18: 881:28}` to be a future that resolves to `Result<Option<Model>, String>`, but it resolves to `Result<ModelCycleResult, String>`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  883,
+  "arguments to this method are incorrect"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  889,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  893,
+  "no method named `set_transport` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  901,
+  "this method takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  909,
+  "method `refine` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  914,
+  "method `refine_with_options` is private"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  923,
+  "no method named `reload` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  928,
+  "method `set_rlm_max_depth` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  932,
+  "arguments to this method are incorrect"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  932,
+  "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs:932:18: 932:28}` to be a future that resolves to `Result<Value, String>`, but it resolves to `Result<SetRlmMaxDepthResult, String>`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  961,
+  "method `export_to_jsonl` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  967,
+  "method `get_last_assistant_text` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  975,
+  "no variant, associated function, or constant named `Assistant` found for enum `pi_agent_core::types::AgentMessage` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  983,
+  "method `navigate_tree` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1006,
+  "method `start_side_question` has 2 parameters but the declaration in trait `DaemonSession::start_side_question` has 3"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1009,
+  "no method named `start_side_question` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1012,
+  "method `abort_side_question` has 1 parameter but the declaration in trait `DaemonSession::abort_side_question` has 2"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1013,
+  "no method named `abort_side_question` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1018,
+  "method `new_session` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1028,
+  "method `release_rlm_child_session` has 2 parameters but the declaration in trait `DaemonSession::release_rlm_child_session` has 3"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1029,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1029,
+  "this method takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1035,
+  "method `switch_session` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1047,
+  "method `fork` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1057,
+  "method `import_from_jsonl` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1066,
+  "method `dispose` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1068,
+  "`()` is not a future"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1078,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1084,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1085,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1086,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1097,
+  "not all trait items implemented, missing: `new_session`, `switch_session`, `fork`, `import_from_jsonl`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1098,
+  "method `runtime_kind` is not a member of trait `DaemonRuntimeApi`"
+ ]
+]

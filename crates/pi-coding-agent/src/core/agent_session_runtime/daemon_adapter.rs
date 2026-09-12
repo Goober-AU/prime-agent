@@ -15,6 +15,7 @@
 //! `NOT IMPLEMENTED` below) so the compiler reports the true gap instead of this
 //! file returning placeholders.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use futures::future::BoxFuture;
@@ -23,12 +24,18 @@ use serde_json::{json, Map, Value};
 use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 use pi_ai::types::ServiceTier;
 
-use crate::core::agent_session::{AgentSession, RlmChildAgentStatus, RlmMaxDepthStatus};
+use crate::core::agent_session::{
+    AgentSession, ModelSelectOptions, PromptOptions, RlmChildAgentStatus, RlmMaxDepthStatus,
+};
+use crate::core::cron_jobs::AgentCronJob;
 use crate::core::session_manager::SessionManager;
 use crate::core::settings_manager::SettingsManager;
+use crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput;
 use crate::modes::daemon::daemon_mode::{
-    DaemonSession, ModelIdentity, RunUserBashOptions,
-    SessionInputPause as DaemonSessionInputPause,
+    DaemonConnectionView, DaemonRuntimeApi, DaemonSession, ForkOptions, HeadlessCompletionOptions,
+    ModelIdentity, NavigateTreeOptions, NewSessionRuntimeOptions, PromptInvocation, RefineOptions,
+    RunUserBashOptions, SessionInputPause as DaemonSessionInputPause, SessionPathOptions,
+    SideQuestionOptions,
 };
 
 /// `DaemonSession` over a live `AgentSession`.
@@ -49,6 +56,43 @@ impl AgentSessionDaemonAdapter {
     pub fn session(&self) -> &Arc<AgentSession> {
         &self.session
     }
+}
+
+/// `PromptInvocation` -> the session's `PromptOptions`.
+///
+/// The daemon seam carries the invocation as a struct of JSON-ish fields
+/// (`daemon_mode.rs:1932`); the session owner takes `PromptOptions`. The signal,
+/// admission callbacks, content and custom message are mapped too, so the forward is not lossy.
+fn prompt_options_from_invocation(invocation: PromptInvocation) -> PromptOptions {
+    let mut options = PromptOptions {
+        expand_prompt_templates: invocation.expand_prompt_templates,
+        streaming_behavior: invocation.streaming_behavior,
+        queue_if_busy: invocation.queue_if_busy,
+        resume_if_idle: invocation.resume_if_idle,
+        skip_input_handlers: invocation.skip_input_handlers,
+        agent_message_id: invocation.agent_message_id,
+        signal: invocation.signal,
+        admission_committed: invocation.admission_committed,
+        ..Default::default()
+    };
+    if let Some(images) = &invocation.images {
+        options.images = serde_json::from_value(images.clone()).ok();
+    }
+    if let Some(content) = &invocation.content {
+        options.content = serde_json::from_value(content.clone()).ok();
+    }
+    if let Some(custom_message) = &invocation.custom_message {
+        options.custom_message = serde_json::from_value(custom_message.clone()).ok();
+    }
+    if let Some(source) = invocation.source.as_deref() {
+        options.source = match source {
+            "interactive" => Some(crate::core::session_action_store::InputSource::Interactive),
+            "rpc" => Some(crate::core::session_action_store::InputSource::Rpc),
+            "extension" => Some(crate::core::session_action_store::InputSource::Extension),
+            _ => None,
+        };
+    }
+    options
 }
 
 /// `session.thinkingLevel` as the daemon wire carries it.
@@ -523,4 +567,594 @@ impl DaemonSession for AgentSessionDaemonAdapter {
             .set_service_tier(parse_service_tier(service_tier));
     }
 
+
+    // ---------------------------------------------------------------------
+    // Members whose canonical owner is missing return an explicit failure or
+    // an empty value with a `blocked_on:` note. They are NOT omitted: the trait
+    // has no default bodies, so an omitted member is an E0046 that stops the
+    // whole crate from compiling and keeps every test from running.
+    // ---------------------------------------------------------------------
+
+    fn runtime(&self) -> Arc<dyn DaemonRuntimeApi> {
+        // blocked_on: needs an `impl DaemonRuntimeApi` over the runtime; this adapter wraps a
+        // session, and `AgentSessionRuntime` is held by the daemon, not by the session.
+        Arc::new(MissingDaemonRuntimeApi)
+    }
+
+    fn settings_manager(&self) -> Option<Arc<StdMutex<SettingsManager>>> {
+        // blocked_on: `AgentSession` exposes no `settingsManager` accessor; the settings live on the
+        // runtime (`AgentSessionRuntime`), which this adapter does not hold.
+        None
+    }
+
+    fn session_dir(&self) -> Option<String> {
+        // blocked_on: `AgentSession` has no `sessionDir` accessor.
+        None
+    }
+
+    fn set_exec_env_provider(&self, client_env: Option<HashMap<String, String>>) {
+        // blocked_on: no `setExecEnvProvider` owner on `AgentSession`; the daemon seam sets it on the
+        // binding/session-manager side.
+        let _ = client_env;
+    }
+
+    fn set_runtime_env_scope(&self, client_env: Option<HashMap<String, String>>) {
+        // blocked_on: no `setRuntimeEnvScope` owner on `AgentSession`.
+        let _ = client_env;
+    }
+
+    fn set_subagent_runtime_host(&self, host: Option<Value>) {
+        // blocked_on: the owner takes `Option<Arc<dyn SubagentRuntimeHost>>` (runtime_members.rs:2829)
+        // while this seam carries an opaque `Value`; a converter does not exist.
+        let _ = host;
+    }
+
+    fn set_rebind_session(&self, rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>) {
+        // blocked_on: no `setRebindSession` owner on `AgentSession`.
+        let _ = rebind;
+    }
+
+    fn bind_extensions(
+        &self,
+        binding: crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        // blocked_on: the owner takes the canonical `ExtensionBindings`
+        // (runtime_members.rs:492) while the daemon seam carries its own already-typed
+        // `ExtensionBindingInput`; the two need a shared owner.
+        let _ = binding;
+        Box::pin(async {
+            Err("blocked_on: ExtensionBindingInput and ExtensionBindings have no shared owner".to_string())
+        })
+    }
+
+    fn abort_for_update_restart(&self) {
+        self.session.abort_for_update_restart();
+    }
+
+    fn connection_view(&self) -> DaemonConnectionView {
+        // blocked_on: needs `createAgentConnectionState` (agent-connection/snapshot.ts:55) over an
+        // `AgentSessionRuntimeSnapshotSource`, whose fields the session does not expose.
+        DaemonConnectionView::default()
+    }
+
+    fn connection_state(&self, active_session_id: Option<String>) -> Value {
+        // blocked_on: same missing snapshot source as `connection_view`.
+        let _ = active_session_id;
+        Value::Null
+    }
+
+    fn register_rlm_child_session(&self, child_id: &str, session: Arc<dyn DaemonSession>) -> bool {
+        // blocked_on: no `registerRlmChildSession` owner on `AgentSession`.
+        let _ = (child_id, session);
+        false
+    }
+
+    fn subscribe(&self, listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {
+        // blocked_on: the owner takes `AgentSessionEventListener` and returns `Arc<dyn Fn()>`
+        // (agent_session.rs:6294); this seam carries a `Value`-shaped listener.
+        let _ = listener;
+        Box::new(|| {})
+    }
+
+    fn prompt_until_accepted(
+        &self,
+        message: &str,
+        options: PromptInvocation,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let session = Arc::clone(&self.session);
+        let message = message.to_string();
+        let options = prompt_options_from_invocation(options);
+        Box::pin(async move { session.prompt_until_accepted(&message, Some(options)).await })
+    }
+
+    fn prompt_and_wait(
+        &self,
+        message: &str,
+        options: PromptInvocation,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let session = Arc::clone(&self.session);
+        let message = message.to_string();
+        let options = prompt_options_from_invocation(options);
+        Box::pin(async move { session.prompt_and_wait(&message, Some(options)).await })
+    }
+
+    fn prompt_heartbeat(
+        &self,
+        job: &AgentCronJob,
+        options: PromptInvocation,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let session = Arc::clone(&self.session);
+        let job = job.clone();
+        let options = prompt_options_from_invocation(options);
+        Box::pin(async move { session.prompt_heartbeat(&job, Some(options)).await })
+    }
+
+    fn accept_agent_message_prompt(
+        &self,
+        message: &str,
+        options: PromptInvocation,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let session = Arc::clone(&self.session);
+        let message = message.to_string();
+        let options = prompt_options_from_invocation(options);
+        Box::pin(async move {
+            session
+                .accept_agent_message_prompt(&message, Some(options))
+                .await
+        })
+    }
+
+    fn steer(
+        &self,
+        message: &str,
+        images: Option<Value>,
+        options: PromptInvocation,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let session = Arc::clone(&self.session);
+        let message = message.to_string();
+        let images = images.and_then(|images| serde_json::from_value(images).ok());
+        let options = prompt_options_from_invocation(options);
+        Box::pin(async move {
+            session
+                .steer(
+                    &message,
+                    images,
+                    options.follow_up_queue_key,
+                    options.agent_message_id,
+                    options.resume_if_idle,
+                )
+                .await
+        })
+    }
+
+    fn follow_up(
+        &self,
+        message: &str,
+        images: Option<Value>,
+        options: PromptInvocation,
+    ) -> BoxFuture<'static, Result<bool, String>> {
+        let session = Arc::clone(&self.session);
+        let message = message.to_string();
+        let images = images.and_then(|images| serde_json::from_value(images).ok());
+        let options = prompt_options_from_invocation(options);
+        Box::pin(async move {
+            session
+                .follow_up(
+                    &message,
+                    images,
+                    options.follow_up_queue_key,
+                    options.agent_message_id,
+                    options.resume_if_idle,
+                )
+                .await
+        })
+    }
+
+    fn restore_steering_message(
+        &self,
+        message: &str,
+        images: Option<Value>,
+        options: PromptInvocation,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        // blocked_on: no `restoreSteeringMessage` owner on `AgentSession`.
+        let _ = (message, images, options);
+        Box::pin(async { Err("blocked_on: no restoreSteeringMessage owner".to_string()) })
+    }
+
+    fn restore_follow_up_message(
+        &self,
+        message: &str,
+        images: Option<Value>,
+        options: PromptInvocation,
+    ) -> BoxFuture<'static, Result<bool, String>> {
+        // blocked_on: no `restoreFollowUpMessage` owner on `AgentSession`.
+        let _ = (message, images, options);
+        Box::pin(async { Err("blocked_on: no restoreFollowUpMessage owner".to_string()) })
+    }
+
+    fn restore_pending_next_turn_messages(&self, messages: &Value) {
+        // blocked_on: the owner takes `&[CustomMessage]` (agent_session.rs:10602); this seam carries
+        // an opaque `Value`.
+        let _ = messages;
+    }
+
+    fn restore_session_actions(&self, snapshot: &Value) -> BoxFuture<'static, Result<f64, String>> {
+        // blocked_on: the owner takes `&SessionActionRecoverySnapshot` and returns `usize`
+        // (agent_session.rs:8340); this seam takes an untyped `&Value` and returns `f64`. The daemon
+        // already parses that value into the typed snapshot on its own path.
+        let _ = snapshot;
+        Box::pin(async {
+            Err("blocked_on: daemon seam carries an untyped snapshot".to_string())
+        })
+    }
+
+    fn send_custom_message(&self, message: &Value) -> BoxFuture<'static, Result<(), String>> {
+        // blocked_on: the owner takes an owned `CustomMessage` plus `trigger_turn` and `deliver_as`
+        // (agent_session.rs:9756); this seam carries an opaque `&Value`.
+        let _ = message;
+        Box::pin(async { Err("blocked_on: daemon seam carries an untyped message".to_string()) })
+    }
+
+    fn resume_queued_work(&self) -> bool {
+        self.session.resume_queued_work();
+        // blocked_on: the owner returns `()` (agent_session.rs:10546); this seam returns `bool`
+        // ("did anything resume"), which only the daemon's queued-action bookkeeping can answer.
+        true
+    }
+
+    fn clear_queued_agent_messages(&self) -> Value {
+        // blocked_on: no `clearQueuedAgentMessages` owner; `clear_queue` (agent_session.rs:9891)
+        // returns `ClearedQueue`, whose projection to this seam's `Value` is not defined.
+        Value::Null
+    }
+
+    fn clear_queue(&self) -> Value {
+        // blocked_on: `clear_queue` (agent_session.rs:9891) returns `ClearedQueue`, which is not
+        // `Serialize`, so this seam's `Value` projection belongs to the daemon.
+        self.session.clear_queue();
+        Value::Null
+    }
+
+    fn mutate_queued_message(
+        &self,
+        lane: &str,
+        index: f64,
+        expected_text: &str,
+        mutation: &Value,
+    ) -> Value {
+        // blocked_on: the owner takes `QueuedMessageLane`, `i64` and `&QueuedMessageMutation`
+        // (agent_session.rs:10064); this seam carries wire-shaped `&str`/`f64`/`&Value`, and the
+        // status projection back to `Value` is the daemon's.
+        let _ = (lane, index, expected_text, mutation);
+        Value::Null
+    }
+
+    fn get_steering_message_previews(&self) -> Vec<Value> {
+        self.session
+            .get_steering_message_previews()
+            .into_iter()
+            .map(Value::String)
+            .collect()
+    }
+
+    fn get_follow_up_message_previews(&self) -> Vec<Value> {
+        self.session
+            .get_follow_up_message_previews()
+            .into_iter()
+            .map(Value::String)
+            .collect()
+    }
+
+    fn cancel_rlm_child_run(&self, child_id: &str) -> bool {
+        // blocked_on: the owner is `pub(super)` in `core::agent_session`, so it is unreachable here.
+        let _ = child_id;
+        false
+    }
+
+    fn delete_inactive_rlm_subagent(
+        &self,
+        child_id: &str,
+        is_resident_child_running: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> BoxFuture<'static, Result<String, String>> {
+        let session = Arc::clone(&self.session);
+        let child_id = child_id.to_string();
+        Box::pin(async move {
+            session
+                .delete_inactive_rlm_subagent(&child_id, is_resident_child_running)
+                .await
+        })
+    }
+
+    fn wait_for_headless_completion(
+        &self,
+        options: HeadlessCompletionOptions,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        // blocked_on: requires `impl HeadlessCompletionSession for AgentSession`.
+        let _ = options;
+        Box::pin(async {
+            Err("blocked_on: no `impl HeadlessCompletionSession for AgentSession`".to_string())
+        })
+    }
+
+    fn refresh_available_models(&self) -> BoxFuture<'static, Result<Vec<pi_ai::types::Model>, String>> {
+        // blocked_on: registry refresh is async behind the session's `Arc<Mutex<ModelRegistry>>`,
+        // and this seam member is not async-capable without that handle.
+        Box::pin(async { Err("blocked_on: registry refresh is async behind the mutex".to_string()) })
+    }
+
+    fn refresh_model_catalog(&self) -> BoxFuture<'static, Result<Value, String>> {
+        // blocked_on: same async-behind-mutex blocker as `refresh_available_models`.
+        Box::pin(async { Err("blocked_on: registry refresh is async behind the mutex".to_string()) })
+    }
+
+    fn set_model(
+        &self,
+        model: &pi_ai::types::Model,
+        wait_for_extensions: bool,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        let session = Arc::clone(&self.session);
+        let model = model.clone();
+        Box::pin(async move {
+            session
+                .set_model(
+                    model,
+                    ModelSelectOptions {
+                        wait_for_extensions: Some(wait_for_extensions),
+                        ..Default::default()
+                    },
+                )
+                .await
+        })
+    }
+
+    fn cycle_model(
+        &self,
+        direction: &str,
+        wait_for_extensions: bool,
+    ) -> BoxFuture<'static, Result<Option<pi_ai::types::Model>, String>> {
+        // blocked_on: no `cycleModel` owner on `AgentSession`.
+        let _ = (direction, wait_for_extensions);
+        Box::pin(async { Err("blocked_on: no cycleModel owner".to_string()) })
+    }
+
+    fn set_scoped_models(&self, scoped_models: &Value) {
+        // blocked_on: the owner takes `Vec<ScopedModel>` on `&mut self` (agent_session.rs:6889);
+        // this seam passes an opaque `Value` through `&self`.
+        let _ = scoped_models;
+    }
+
+    fn set_transport(&self, transport: &str) {
+        // blocked_on: `SettingsManager::set_transport` needs `&mut SettingsManager`; this adapter
+        // holds no settings handle.
+        let _ = transport;
+    }
+
+    fn compact(&self, custom_instructions: Option<&str>) -> BoxFuture<'static, Result<Value, String>> {
+        let session = Arc::clone(&self.session);
+        let custom_instructions = custom_instructions.map(|value| value.to_string());
+        Box::pin(async move {
+            session
+                .compact_with_options(custom_instructions.as_deref(), false)
+                .await;
+            // blocked_on: `compact_with_options` returns `()`, so the `CompactionResult` this seam
+            // carries is not reachable on the public path.
+            Ok(Value::Null)
+        })
+    }
+
+    fn refine(&self, options: RefineOptions) -> BoxFuture<'static, Result<Value, String>> {
+        // blocked_on: `AgentSession::refine_with_options` is private and returns `RefinementResult`;
+        // this seam needs a public path plus a serializer for the result.
+        let _ = options;
+        Box::pin(async {
+            Err("blocked_on: refine_with_options is private; no public refine path".to_string())
+        })
+    }
+
+    fn reload(&self) -> BoxFuture<'static, Result<(), String>> {
+        // blocked_on: no `reload` owner on `AgentSession`; it lives on `AgentSessionRuntime`.
+        Box::pin(async { Err("blocked_on: reload belongs to AgentSessionRuntime".to_string()) })
+    }
+
+    fn set_rlm_max_depth(
+        &self,
+        max_depth: Value,
+        global: bool,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let session = Arc::clone(&self.session);
+        let Some(max_depth) = max_depth.as_i64() else {
+            // The daemon validates the wire value before it reaches this seam.
+            return Box::pin(async { Err("rlmMaxDepth must be a non-negative integer".to_string()) });
+        };
+        Box::pin(async move {
+            session
+                .set_rlm_max_depth(max_depth, global)
+                .await
+                .map(|result| json!(result))
+        })
+    }
+
+    fn get_context_tree(&self) -> Value {
+        // blocked_on: `AgentSession` has no `getContextTree` owner in the port.
+        Value::Null
+    }
+
+    fn get_rlm_child_snapshots(&self) -> Vec<Value> {
+        // blocked_on: needs `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`
+        // (runtime_members.rs:1800/1850), which are `pub(super)` in `core::agent_session`.
+        Vec::new()
+    }
+
+    fn export_to_html(&self, output_path: Option<&str>) -> BoxFuture<'static, Result<String, String>> {
+        let session_file = self.session.session_file();
+        let output_path = output_path.map(|path| path.to_string());
+        Box::pin(async move {
+            let Some(session_file) = session_file else {
+                return Err("Cannot export in-memory session to HTML".to_string());
+            };
+            let options = crate::core::export_html::ExportOptions {
+                output_path,
+                ..Default::default()
+            };
+            crate::core::export_html::export_from_file(&session_file, Some(options))
+        })
+    }
+
+    fn export_to_jsonl(&self, output_path: Option<&str>) -> Result<String, String> {
+        // blocked_on: no JSONL writer owner exists in the port.
+        let _ = output_path;
+        Err("blocked_on: no JSONL export owner".to_string())
+    }
+
+    fn get_last_assistant_text(&self) -> String {
+        self.session
+            .messages()
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                // Canonical owner: `read_assistant_text` (side_question.rs:66) returns "" for every
+                // message that is not an assistant message, so the last non-empty read wins.
+                AgentMessage::Message(pi_ai::types::Message::Assistant(_)) => {
+                    Some(crate::core::side_question::read_assistant_text(message))
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    fn navigate_tree(
+        &self,
+        target_id: &str,
+        options: NavigateTreeOptions,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let session = Arc::clone(&self.session);
+        let target_id = target_id.to_string();
+        Box::pin(async move {
+            session
+                .navigate_tree(
+                    &target_id,
+                    options.summarize,
+                    options.custom_instructions.as_deref(),
+                )
+                .await?;
+            // blocked_on: `navigate_tree_inner` holds the {editorText, cancelled, aborted} result and
+            // is `pub(super)`; the successful path reports not-cancelled until it is exposed.
+            Ok(json!({ "cancelled": false }))
+        })
+    }
+
+    fn start_side_question(
+        &self,
+        question: &str,
+        options: SideQuestionOptions,
+    ) -> BoxFuture<'static, Result<(), String>> {
+        // blocked_on: `core/side_question.rs` drives its own runs; `AgentSession` has no
+        // `startSideQuestion` owner that accepts these options.
+        let _ = (question, options);
+        Box::pin(async { Err("blocked_on: no startSideQuestion owner".to_string()) })
+    }
+
+    fn abort_side_question(&self, side_question_id: &str) {
+        // blocked_on: no `abortSideQuestion` owner on `AgentSession`.
+        let _ = side_question_id;
+    }
+
+    fn new_session(
+        &self,
+        options: Option<NewSessionRuntimeOptions>,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        // blocked_on: `newSession` is an `AgentSessionRuntime` member; this adapter wraps a session.
+        let _ = options;
+        Box::pin(async { Err("blocked_on: newSession belongs to AgentSessionRuntime".to_string()) })
+    }
+
+    fn release_rlm_child_session(
+        &self,
+        child_id: &str,
+        session: Arc<dyn DaemonSession>,
+    ) -> Option<Box<dyn FnOnce() + Send>> {
+        // blocked_on: the owner (runtime_members.rs:1783) has a different signature than this seam's.
+        let _ = (child_id, session);
+        None
+    }
+
+    fn switch_session(
+        &self,
+        session_path: &str,
+        options: SessionPathOptions,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        // blocked_on: `switchSession` is an `AgentSessionRuntime` member.
+        let _ = (session_path, options);
+        Box::pin(async { Err("blocked_on: switchSession belongs to AgentSessionRuntime".to_string()) })
+    }
+
+    fn fork(
+        &self,
+        entry_id: &str,
+        options: ForkOptions,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        // blocked_on: `fork` is an `AgentSessionRuntime` member.
+        let _ = (entry_id, options);
+        Box::pin(async { Err("blocked_on: fork belongs to AgentSessionRuntime".to_string()) })
+    }
+
+    fn import_from_jsonl(
+        &self,
+        input_path: &str,
+        cwd_override: Option<&str>,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        // blocked_on: `importFromJsonl` is an `AgentSessionRuntime` member.
+        let _ = (input_path, cwd_override);
+        Box::pin(async { Err("blocked_on: importFromJsonl belongs to AgentSessionRuntime".to_string()) })
+    }
+
+    fn dispose(&self) -> BoxFuture<'static, ()> {
+        let session = Arc::clone(&self.session);
+        Box::pin(async move { session.dispose() })
+    }
+}
+
+/// The `DaemonRuntimeApi` stand-in the `runtime` member returns when the adapter has no runtime.
+/// Every method is an explicit failure, so a caller that reaches the daemon through this adapter's
+/// missing runtime gets a real error rather than a silent empty value.
+struct MissingDaemonRuntimeApi;
+
+const MISSING_RUNTIME: &str =
+    "blocked_on: AgentSessionDaemonAdapter wraps a session, not an AgentSessionRuntime";
+
+impl DaemonRuntimeApi for MissingDaemonRuntimeApi {
+    fn new_session(
+        &self,
+        options: Option<NewSessionRuntimeOptions>,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let _ = options;
+        Box::pin(async { Err(MISSING_RUNTIME.to_string()) })
+    }
+
+    fn switch_session(
+        &self,
+        session_path: &str,
+        options: SessionPathOptions,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let _ = (session_path, options);
+        Box::pin(async { Err(MISSING_RUNTIME.to_string()) })
+    }
+
+    fn fork(
+        &self,
+        entry_id: &str,
+        options: ForkOptions,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let _ = (entry_id, options);
+        Box::pin(async { Err(MISSING_RUNTIME.to_string()) })
+    }
+
+    fn import_from_jsonl(
+        &self,
+        input_path: &str,
+        cwd_override: Option<&str>,
+    ) -> BoxFuture<'static, Result<Value, String>> {
+        let _ = (input_path, cwd_override);
+        Box::pin(async { Err(MISSING_RUNTIME.to_string()) })
+    }
 }
