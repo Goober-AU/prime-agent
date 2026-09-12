@@ -6,7 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::cli::config_selector::{select_config, ConfigSelectorOptions};
 use crate::cli::daemon_launch::{
@@ -31,9 +31,9 @@ use crate::config::{
 use crate::core::messages::CustomMessage;
 use crate::core::package_manager::{DefaultPackageManager, PackageManagerOptions, ProgressEvent};
 use crate::core::settings_manager::{SettingsError, SettingsManager};
-use crate::modes::daemon::daemon_client::{DaemonClient, DaemonClientRequestOptions};
+use crate::modes::daemon::daemon_client::{DaemonClient, DaemonCommandBody, DaemonClientRequestOptions};
 use crate::modes::daemon::daemon_protocol::{
-    is_unknown_daemon_command_error, DaemonCommand, DaemonResponse, DaemonUpdateRestartManifest,
+    is_unknown_daemon_command_error, DaemonResponse, DaemonUpdateRestartManifest,
     DaemonUpdateRestartSession, DAEMON_PROTOCOL_VERSION, DAEMON_SCHEMA_ID,
     DAEMON_UPDATE_RESTART_FORMAT_VERSION,
 };
@@ -132,9 +132,7 @@ fn report_settings_errors(settings_manager: &mut SettingsManager, context: &str)
                 context, settings_error.scope, settings_error.error.message
             ))
         );
-        if let Some(stack) = &settings_error.error.stack {
-            eprintln!("{}", dim(stack));
-        }
+        // REPAIR CURSOR: TS prints `error.stack`; SettingsErrorValue has only `message` (core/settings_manager.rs:370).
     }
 }
 
@@ -563,7 +561,7 @@ fn set_self_update_no_change_exit_code() {
 
 /// `getSelfUpdatePlan(force)`.
 pub async fn get_self_update_plan(force: bool) -> Result<SelfUpdatePlan, String> {
-    let latest_release = get_latest_pi_release(VERSION).await.ok_or_else(|| {
+    let latest_release = get_latest_pi_release(VERSION, None).await.ok_or_else(|| {
         format!(
             "No installable main build is available from {PRIME_AGENT_UPDATE_REPOSITORY_URL}. Check the connection and the main release build, then retry."
         )
@@ -992,7 +990,7 @@ async fn prepare_connected_daemon_update_restart(
             if !manifest.sessions.is_empty() {
                 let list_response = client
                     .request(
-                        DaemonCommand::new("list"),
+                        Map::from_iter([("type".to_string(), Value::String("list".to_string()))]),
                         Some(30_000),
                         DaemonClientRequestOptions::default(),
                     )
@@ -1007,7 +1005,10 @@ async fn prepare_connected_daemon_update_restart(
         started_at = Some(now_ms());
         let response = client
             .request(
-                DaemonCommand::new("prepare_update_restart"),
+                Map::from_iter([(
+                    "type".to_string(),
+                    Value::String("prepare_update_restart".to_string()),
+                )]),
                 Some(120_000),
                 DaemonClientRequestOptions::default(),
             )
@@ -1105,12 +1106,15 @@ async fn restore_next_turn_messages(
     if messages.is_empty() {
         return true;
     }
-    let mut command = DaemonCommand::new("restore_next_turn");
-    command.body.insert(
+    let mut command: DaemonCommandBody = Map::from_iter([(
+        "type".to_string(),
+        Value::String("restore_next_turn".to_string()),
+    )]);
+    command.insert(
         "activeSessionId".to_string(),
         Value::String(active_session_id.to_string()),
     );
-    command.body.insert(
+    command.insert(
         "messages".to_string(),
         Value::Array(
             messages
@@ -1181,7 +1185,7 @@ fn remap_daemon_update_restart_runtime_metadata(
 
 async fn request_command(
     client: &Arc<DaemonClient>,
-    command: DaemonCommand,
+    command: DaemonCommandBody,
     timeout_ms: u64,
 ) -> Result<DaemonResponse, String> {
     client
@@ -1197,23 +1201,27 @@ async fn restore_daemon_update_restart_session(
     restart_origin_active_session_id: Option<&str>,
 ) -> Result<RestoreDaemonUpdateRestartSessionResult, String> {
     let runtime_metadata = remap_daemon_update_restart_runtime_metadata(session, restored_active_session_ids);
-    let mut create = DaemonCommand::new("create");
-    create.body.insert(
+    // DaemonCommandBody is the JSON object body the daemon wire protocol takes.
+    let mut create: DaemonCommandBody = Map::from_iter([(
+        "type".to_string(),
+        Value::String("create".to_string()),
+    )]);
+    create.insert(
         "sessionPath".to_string(),
         Value::String(session.session_file.clone()),
     );
-    create.body.insert(
+    create.insert(
         "config".to_string(),
         serde_json::to_value(&session.config).unwrap_or(Value::Null),
     );
     if let Some(runtime_metadata) = &runtime_metadata {
-        create.body.insert(
+        create.insert(
             "runtimeMetadata".to_string(),
             serde_json::to_value(runtime_metadata).unwrap_or(Value::Null),
         );
     }
     if let Some(client_env) = &session.client_env {
-        create.body.insert(
+        create.insert(
             "env".to_string(),
             serde_json::to_value(client_env).unwrap_or(Value::Null),
         );
@@ -1236,12 +1244,15 @@ async fn restore_daemon_update_restart_session(
     let active_session_id = read_created_active_session_id(create_response.data.as_ref())?;
     restored_active_session_ids.insert(session.active_session_id.clone(), active_session_id.clone());
     if Some(session.active_session_id.as_str()) == restart_origin_active_session_id {
-        let mut notice = DaemonCommand::new("append_custom_message");
-        notice.body.insert(
+        let mut notice: DaemonCommandBody = Map::from_iter([(
+            "type".to_string(),
+            Value::String("append_custom_message".to_string()),
+        )]);
+        notice.insert(
             "activeSessionId".to_string(),
             Value::String(active_session_id.clone()),
         );
-        notice.body.insert(
+        notice.insert(
             "message".to_string(),
             serde_json::json!({
                 "customType": "prime-agent.update_complete",
@@ -1297,12 +1308,15 @@ async fn restore_daemon_update_restart_session(
     let mut resumed_session = false;
     let mut restored_queued_work = false;
     if !session.queue.actions.actions.is_empty() {
-        let mut restore = DaemonCommand::new("restore_actions");
-        restore.body.insert(
+        let mut restore: DaemonCommandBody = Map::from_iter([(
+            "type".to_string(),
+            Value::String("restore_actions".to_string()),
+        )]);
+        restore.insert(
             "activeSessionId".to_string(),
             Value::String(active_session_id.clone()),
         );
-        restore.body.insert(
+        restore.insert(
             "snapshot".to_string(),
             serde_json::to_value(&session.queue.actions).unwrap_or(Value::Null),
         );
@@ -1339,16 +1353,19 @@ async fn restore_daemon_update_restart_session(
             SessionActionRecoveryPayload::SessionCommand { .. } => false,
         });
     if needs_continuation_prompt && !restored_accepted_turn {
-        let mut prompt = DaemonCommand::new("prompt");
-        prompt.body.insert(
+        let mut prompt: DaemonCommandBody = Map::from_iter([(
+            "type".to_string(),
+            Value::String("prompt".to_string()),
+        )]);
+        prompt.insert(
             "activeSessionId".to_string(),
             Value::String(active_session_id.clone()),
         );
-        prompt.body.insert(
+        prompt.insert(
             "message".to_string(),
             Value::String(UPDATE_RESTART_CONTINUATION_PROMPT.to_string()),
         );
-        prompt.body.insert("expandPromptTemplates".to_string(), Value::Bool(false));
+        prompt.insert("expandPromptTemplates".to_string(), Value::Bool(false));
         match request_command(client, prompt, 120_000).await {
             Ok(response) if response.success => resumed_session = true,
             Ok(response) => {
@@ -1370,8 +1387,11 @@ async fn restore_daemon_update_restart_session(
         }
     }
     if !resumed_session && restored_queued_work {
-        let mut resume_queue = DaemonCommand::new("resume_queue");
-        resume_queue.body.insert(
+        let mut resume_queue: DaemonCommandBody = Map::from_iter([(
+            "type".to_string(),
+            Value::String("resume_queue".to_string()),
+        )]);
+        resume_queue.insert(
             "activeSessionId".to_string(),
             Value::String(active_session_id.clone()),
         );
@@ -1620,8 +1640,7 @@ pub async fn run_daemon_update_restart_coordinator(
 
         shutdown_admission = Some(
             crate::modes::daemon::daemon_supervisor_ownership::acquire_daemon_shutdown_admission()
-                .await
-                .map_err(|error| error.message())?,
+                .await?,
         );
         let daemon_probe = probe_running_daemon_sessions(&options.socket_path).await;
         let report_restore_progress = |progress: &RestoreDaemonUpdateRestartResult| {
@@ -1685,7 +1704,7 @@ pub async fn run_daemon_update_restart_coordinator(
                 .expect("shutdown admission")
                 .assert_or_renew()
                 .await
-                .map_err(|error| error.message())?;
+                .map_err(|error| error.message)?;
             let launch_hello = crate::cli::daemon_launch::DaemonHello::from_json(&hello_value);
             let stopped = shutdown_connected_daemon_and_wait(
                 &options.socket_path,
@@ -1759,7 +1778,7 @@ pub async fn run_daemon_update_restart_coordinator(
             .expect("shutdown admission")
             .assert_or_renew()
             .await
-            .map_err(|error| error.message())?;
+            .map_err(|error| error.message)?;
         let admission = shutdown_admission.take().expect("shutdown admission");
         admissions_release(&admission).await;
         ensure_interactive_daemon_running(&options.socket_path, None)
@@ -1900,7 +1919,7 @@ pub async fn handle_config_command(args: &[String]) -> bool {
     let agent_dir = get_agent_dir();
     let mut settings_manager = SettingsManager::create(&cwd, Some(&agent_dir));
     report_settings_errors(&mut settings_manager, "config command");
-    let settings_manager = Arc::new(tokio::sync::Mutex::new(settings_manager));
+    let settings_manager = Arc::new(std::sync::Mutex::new(settings_manager));
     let package_manager = DefaultPackageManager::new(PackageManagerOptions {
         cwd: cwd.clone(),
         agent_dir: agent_dir.clone(),
@@ -2012,7 +2031,7 @@ pub async fn handle_package_command(args: &[String]) -> bool {
         let agent_dir = get_agent_dir();
         let status_path = options.restart_status_path.clone();
         let daemon_socket_path = options.daemon_socket_path.clone();
-        let restart_directory = resolve_path(Path::new(&agent_dir).join("update-restarts"));
+        let restart_directory = resolve_path(&Path::new(&agent_dir).join("update-restarts"));
         let status_path_valid = status_path.as_ref().is_some_and(|status_path| {
             resolve_path(Path::new(status_path)).starts_with(&format!(
                 "{restart_directory}{}",
@@ -2070,7 +2089,7 @@ pub async fn handle_package_command(args: &[String]) -> bool {
                 .collect::<Vec<String>>()
         });
 
-    let settings_manager = Arc::new(tokio::sync::Mutex::new(settings_manager));
+    let settings_manager = Arc::new(std::sync::Mutex::new(settings_manager));
     let mut package_manager = DefaultPackageManager::new(PackageManagerOptions {
         cwd: cwd.clone(),
         agent_dir: agent_dir.clone(),

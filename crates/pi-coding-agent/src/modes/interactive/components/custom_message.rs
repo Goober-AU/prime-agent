@@ -34,15 +34,72 @@ pub struct CustomMessageComponent {
 }
 
 /// The `customType` / `content` / `display` / `details` fields the component reads.
-fn message_parts(message: &CustomMessage) -> (&str, &CustomMessageContent, bool) {
+fn message_parts(message: &CustomMessage) -> (String, CustomMessageContent, bool) {
     match message {
         CustomAgentMessage::Custom {
             custom_type,
             content,
             display,
             ..
-        } => (custom_type.as_str(), content, *display),
-        _ => ("", &CustomMessageContent::Text(String::new()), false),
+        } => (custom_type.clone(), content.clone(), *display),
+        _ => (
+            String::new(),
+            CustomMessageContent::Text(String::new()),
+            false,
+        ),
+    }
+}
+
+/// `pi-tui`'s `MarkdownTheme` holds `Rc` closures; `theme.ts`'s holds `Arc`
+/// closures that need `Send + Sync`. This is the same conversion as
+/// `toTuiMarkdownTheme` in the other message components.
+/// `MessageRenderer` takes `extensions::types::Theme` (the extension-slice
+/// stand-in) while this component holds the live `theme.ts` theme, so the
+/// renderer receives the shared identity fields.
+///
+/// REPAIR CURSOR: shared-type contract - `core/extensions/types.rs` declares its
+/// own `Theme` instead of re-exporting
+/// `crate::modes::interactive::theme::theme::Theme` (the TypeScript
+/// `MessageRenderer` takes that one type). Fixing it belongs to the extensions
+/// slice; until then `sourceInfo` cannot be carried across because the two
+/// `SourceInfo` shapes differ.
+fn to_extension_theme(source: &crate::modes::interactive::theme::theme::Theme) -> crate::core::extensions::types::Theme {
+    crate::core::extensions::types::Theme {
+        name: source.name.clone(),
+        source_path: source.source_path.clone(),
+        source_info: None,
+        extra: serde_json::Map::new(),
+    }
+}
+
+fn to_tui_markdown_theme(
+    source: crate::modes::interactive::theme::theme::MarkdownTheme,
+) -> pi_tui::components::markdown::MarkdownTheme {
+    fn rc(value: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
+        Rc::new(move |text: &str| value(text))
+    }
+
+    pi_tui::components::markdown::MarkdownTheme {
+        heading: rc(source.heading),
+        link: rc(source.link),
+        link_url: rc(source.link_url),
+        code: rc(source.code),
+        code_block: rc(source.code_block),
+        code_block_border: rc(source.code_block_border),
+        quote: rc(source.quote),
+        quote_border: rc(source.quote_border),
+        hr: rc(source.hr),
+        list_bullet: rc(source.list_bullet),
+        bold: rc(source.bold),
+        italic: rc(source.italic),
+        strikethrough: rc(source.strikethrough),
+        underline: rc(source.underline),
+        highlight_code: Some(Rc::new(move |code: &str, language: Option<&str>| {
+            (source.highlight_code)(code, language)
+        })),
+        code_block_indent: source.code_block_indent.clone(),
+        math: Some(rc(source.math)),
+        math_block: Some(rc(source.math_block)),
     }
 }
 
@@ -92,7 +149,7 @@ impl CustomMessageComponent {
                     crate::core::extensions::types::MessageRenderOptions {
                         expanded: self.expanded,
                     },
-                    (*theme()).clone(),
+                    to_extension_theme(&theme()),
                 )
             }))
             .ok()
@@ -133,7 +190,7 @@ impl CustomMessageComponent {
             text,
             0,
             0,
-            self.markdown_theme.clone(),
+            to_tui_markdown_theme(self.markdown_theme.clone()),
             Some(pi_tui::components::markdown::DefaultTextStyle {
                 color: Some(Rc::new(|text: &str| theme().fg("customMessageText", text))),
                 ..Default::default()

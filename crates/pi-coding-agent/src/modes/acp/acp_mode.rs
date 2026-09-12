@@ -121,10 +121,12 @@ impl AcpPromise {
 
     pub async fn wait(&self) -> Result<(), String> {
         let mut rx = self.inner.rx.clone();
-        match rx.wait_for(|value| value.is_some()).await {
-            Ok(value) => (*value).clone().unwrap_or(Ok(())),
-            Err(_) => Ok(()),
-        }
+        // The `Ref` borrow must end before `rx` drops, so settle into a local first.
+        let settled = match rx.wait_for(|value| value.is_some()).await {
+            Ok(value) => (*value).clone(),
+            Err(_) => None,
+        };
+        settled.unwrap_or(Ok(()))
     }
 
     pub fn is_settled(&self) -> bool {
@@ -449,7 +451,7 @@ fn same_cwd(left: &str, right: &str) -> bool {
 /// directories on different volumes, since file IDs are volume-local.
 fn file_identity(path: &str) -> Option<(u64, u64)> {
     let metadata = std::fs::metadata(path).ok()?;
-    let (dev, ino) = metadata_identity(&metadata)?;
+    let (dev, ino) = metadata_identity(path, &metadata)?;
     if dev == 0 || ino == 0 {
         return None;
     }
@@ -457,21 +459,56 @@ fn file_identity(path: &str) -> Option<(u64, u64)> {
 }
 
 #[cfg(unix)]
-fn metadata_identity(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+fn metadata_identity(_path: &str, metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     Some((metadata.dev(), metadata.ino()))
 }
 
 #[cfg(windows)]
-fn metadata_identity(metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
-    use std::os::windows::fs::MetadataExt;
-    // `st_dev` is the volume serial number; `st_ino` is the file index.
-    Some((metadata.volume_serial_number()? as u64, metadata.file_index()?))
+fn metadata_identity(path: &str, _metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+    windows_file_identity(path)
 }
 
 #[cfg(not(any(unix, windows)))]
-fn metadata_identity(_metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
+fn metadata_identity(_path: &str, _metadata: &std::fs::Metadata) -> Option<(u64, u64)> {
     None
+}
+
+/// Windows side of `statSync(..., { bigint: true })`: the `volume_serial_number`
+/// and `file_index` accessors are unstable std, so read the same pair from the
+/// file handle the way Node does (`BY_HANDLE_FILE_INFORMATION`).
+#[cfg(windows)]
+fn windows_file_identity(path: &str) -> Option<(u64, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = std::ffi::OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect();
+    unsafe {
+        // `FILE_FLAG_BACKUP_SEMANTICS` is what makes directories openable.
+        let handle = CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            std::ptr::null_mut(),
+        );
+        if handle == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        let ok = GetFileInformationByHandle(handle, &mut info);
+        CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        let ino = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+        Some((info.dwVolumeSerialNumber as u64, ino))
+    }
 }
 
 /// `AcpModeOptions`.
@@ -973,10 +1010,15 @@ fn autonomous_meta(status: Option<&AgentAutonomousStatus>) -> Option<PrimeAgentA
     let gate_attempt = latest_autonomous_gate_attempt(status);
     Some(PrimeAgentAutonomousMeta {
         enabled: status.enabled,
-        continuations_used: status.continuations_used,
-        turns_used: status.turns_used,
-        tokens_used: status.tokens_used,
-        gate_attempt: if gate_attempt == 0 { None } else { Some(gate_attempt) },
+        // The meta struct carries the wire integers the reference serializes.
+        continuations_used: status.continuations_used as i64,
+        turns_used: status.turns_used as i64,
+        tokens_used: status.tokens_used as i64,
+        gate_attempt: if gate_attempt == 0.0 {
+            None
+        } else {
+            Some(gate_attempt as i64)
+        },
         gate_failure: status.last_gate_failure.as_ref().map(|failure| failure.exit_text.clone()),
         limit_reason: None,
     })
@@ -999,7 +1041,7 @@ fn quiescence_meta(
     PrimeAgentQuiescenceMeta {
         outstanding_subagents: outstanding_subagent_count(children),
         remaining_autonomous_continuations: if status.enabled {
-            (status.limits.max_continuations - status.continuations_used).max(0)
+            (status.limits.max_continuations - status.continuations_used).max(0.0) as i64
         } else {
             0
         },
@@ -1363,7 +1405,7 @@ impl AcpModeState {
         let cancellations = futures::future::join_all(
             children
                 .iter()
-                .map(|child| self.connection.cancel_rlm_child(child.id.clone())),
+                .map(|child| self.connection.cancel_rlm_child(child.id.as_str())),
         )
         .await;
         for result in cancellations {
@@ -1795,12 +1837,22 @@ impl AcpAgentApp {
             match initial_snapshot {
                 Ok(snapshot) => {
                     for child in snapshot.children.unwrap_or_default() {
-                        let mut children = observed_children.lock().expect("observed children poisoned");
-                        if children.contains_key(&child.id) {
+                        // Scope the guard so it cannot be held across the publish await.
+                        let already_observed = {
+                            let mut children = observed_children.lock().expect("observed children poisoned");
+                            if children.contains_key(&child.id) {
+                                true
+                            } else {
+                                children.insert(
+                                    child.id.clone(),
+                                    serde_json::to_value(&child).unwrap_or(Value::Null),
+                                );
+                                false
+                            }
+                        };
+                        if already_observed {
                             continue;
                         }
-                        children.insert(child.id.clone(), serde_json::to_value(&child).unwrap_or(Value::Null));
-                        drop(children);
                         let event = AgentConnectionSessionEvent::RlmChildUpdate { child };
                         let turn_id = producer.turn_for_event(&event);
                         let updates = {
@@ -2366,7 +2418,8 @@ impl AcpAgentApp {
     }
 
     async fn session_close_inner(&self, closing: &Arc<AcpSessionEntry>) -> Result<Value, AcpHandlerError> {
-        if let Some(cancel_task) = closing.cancel_task.lock().expect("cancel task poisoned").clone() {
+        let cancel_task = closing.cancel_task.lock().expect("cancel task poisoned").clone();
+        if let Some(cancel_task) = cancel_task {
             let _ = cancel_task.wait().await;
         }
         closing.cancelling.store(true, Ordering::SeqCst);

@@ -75,7 +75,7 @@ use crate::core::session_manager::{
     get_session_artifact_path_for_file, order_session_context_for_transcript, read_session_info,
     resolve_session_rlm_depth, SessionHistorySnapshot, SessionInfo,
 };
-use crate::core::session_resolver::resolve_session_path;
+use crate::core::session_resolver::{resolve_session_path, ResolvedSession};
 use crate::core::settings_manager::SettingsManager;
 use crate::modes::agent_connection::snapshot::{
     create_agent_connection_commands, create_agent_connection_resource_snapshot,
@@ -103,7 +103,7 @@ use super::agent_roster::{
 use super::compact_session_stream::create_compact_assistant_delta;
 // The daemon protocol module is owned by another slice; the wire primitives
 // this module consumes are carried by daemon_client's protocol submodule.
-use super::daemon_protocol::{create_daemon_event_meta, create_daemon_replay_info, is_daemon_command_envelope, is_daemon_dialog_extension_ui_request, is_daemon_mutating_command, is_session_plane_daemon_command, salvage_daemon_command_id, DaemonResponse, DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, DAEMON_SUPPORTED_CLIENT_CAPABILITIES};
+use super::daemon_protocol::{create_daemon_event_meta, create_daemon_replay_info, is_daemon_command_envelope, is_daemon_dialog_extension_ui_request, is_daemon_mutating_command, is_session_plane_daemon_command, salvage_daemon_command_id, DaemonClientCapability, DaemonResponse, DAEMON_DEFAULT_CLIENT_CAPABILITIES, DAEMON_DEFAULT_SERVER_CAPABILITIES, DAEMON_SCHEMA_ID, DAEMON_SCHEMA_REVISION, DAEMON_SUPPORTED_CLIENT_CAPABILITIES};
 use super::daemon_client::DaemonClient;
 use super::daemon_client_env::{filter_client_env, with_client_env};
 use super::daemon_errors::{
@@ -124,6 +124,7 @@ use super::daemon_socket::{
 };
 use super::daemon_supervisor_ownership::{
     assert_daemon_supervisor_owner_current, is_daemon_shutdown_admission_active,
+    DaemonSupervisorOwnerRecord,
 };
 use super::daemon_worker_client::{encode_private_frame, PrivateFrameDecoder};
 use super::daemon_worker_protocol::{
@@ -719,13 +720,12 @@ pub const DAEMON_COMMAND_TYPES: [&str; 100] = [
     "shutdown",
 ];
 
-const DAEMON_CLIENT_CAPABILITY_SET: [&str; 0] = [];
 const CLIENT_CATCHUP_RETRY_MS: u64 = 250;
 const UPDATE_RESTART_ABORT_BASH_TIMEOUT_MS: u64 = 5000;
 const SUPERVISOR_FENCE_POLL_MS: u64 = 250;
 const UPDATE_RESTART_MARKER: &str = "<prime_agent_update_interrupted>\nPrime Agent was updated and intentionally interrupted this session. Continue from the saved transcript and restored tool/kernel state. Any running model, tool, bash, or child-agent work may have been stopped.\n</prime_agent_update_interrupted>";
 
-const RECOVERY_CHECKPOINT_EVENTS: [&str; 17] = [
+const RECOVERY_CHECKPOINT_EVENTS: [&str; 16] = [
     "agent_start",
     "agent_end",
     "turn_start",
@@ -1588,6 +1588,21 @@ impl std::fmt::Debug for DaemonClientHandle {
     }
 }
 
+/// The wire name of a client capability, as `daemon-protocol.ts` writes it.
+fn daemon_client_capability_name(capability: &DaemonClientCapability) -> String {
+    match serde_json::to_value(capability) {
+        Ok(Value::String(name)) => name,
+        _ => String::new(),
+    }
+}
+
+/// `DAEMON_CLIENT_CAPABILITY_SET.has(capability)`.
+fn is_supported_client_capability(capability: &str) -> bool {
+    DAEMON_SUPPORTED_CLIENT_CAPABILITIES
+        .iter()
+        .any(|supported| daemon_client_capability_name(supported) == capability)
+}
+
 /// `normalizeClientCapabilities`.
 fn normalize_client_capabilities(
     capabilities: Option<&HashSet<String>>,
@@ -1596,11 +1611,10 @@ fn normalize_client_capabilities(
     let mut normalized: HashSet<String> = HashSet::new();
     let default_capabilities: HashSet<String> = DAEMON_DEFAULT_CLIENT_CAPABILITIES
         .iter()
-        .map(|value| value.to_string())
+        .map(daemon_client_capability_name)
         .collect();
-    let _ = DAEMON_CLIENT_CAPABILITY_SET;
     for capability in capabilities.unwrap_or(&default_capabilities) {
-        if DAEMON_SUPPORTED_CLIENT_CAPABILITIES.contains(&capability.as_str()) {
+        if is_supported_client_capability(capability) {
             normalized.insert(capability.clone());
         }
     }
@@ -1817,10 +1831,19 @@ pub async fn resolve_daemon_session_path(
     cwd: &str,
     session_dir: Option<&str>,
 ) -> Result<String, String> {
-    Ok(resolve_session_path(selector, cwd, session_dir)
+    let resolved = resolve_session_path(selector, cwd, session_dir)
         .await
-        .map_err(|error| error.to_string())?
-        .path)
+        .map_err(|error| error.to_string())?;
+    Ok(resolved_path(&resolved))
+}
+
+/// The `path` field shared by every `ResolvedSession` variant.
+fn resolved_path(resolved: &ResolvedSession) -> String {
+    match resolved {
+        ResolvedSession::Path { path }
+        | ResolvedSession::Local { path }
+        | ResolvedSession::Global { path, .. } => path.clone(),
+    }
 }
 
 /// `WorkerRosterReporterState`.
@@ -1854,7 +1877,7 @@ const ROSTER_SESSION_EVENT_TRIGGERS: [&str; 14] = [
 /// `runDaemonMode(options)`.
 pub async fn run_daemon_mode(options: DaemonModeOptions) -> Result<(), String> {
     let socket_path = normalize_socket_path(
-        options
+        &options
             .socket_path
             .clone()
             .unwrap_or_else(default_daemon_socket_path),
@@ -1985,7 +2008,7 @@ pub struct AgentDaemon {
     pub passivating_sessions: StdMutex<HashMap<String, u64>>,
     pub closing_sessions: StdMutex<HashMap<String, ClosingSession>>,
     pub side_question_runs: StdMutex<HashMap<String, SideQuestionRunEntry>>,
-    pub prompt_admissions: StdMutex<HashMap<String, PromptAdmission>>,
+    pub prompt_admissions: Arc<StdMutex<HashMap<String, PromptAdmission>>>,
     pub signal_cleanup_handlers: StdMutex<Vec<Arc<dyn Fn() + Send + Sync>>>,
     pub cron_store: Arc<AgentCronJobStore>,
     pub agent_dir: String,
@@ -2045,7 +2068,7 @@ impl AgentDaemon {
         // or their first access kills the worker.
         let settings = SettingsManager::create(
             options.default_session_config.cwd.as_deref().unwrap_or("."),
-            &agent_dir,
+            Some(agent_dir.as_str()),
         );
         init_theme_headless(settings.get_theme().as_deref());
         let cron_store = Arc::new(if options.worker.is_some() {
@@ -2087,7 +2110,7 @@ impl AgentDaemon {
             passivating_sessions: StdMutex::new(HashMap::new()),
             closing_sessions: StdMutex::new(HashMap::new()),
             side_question_runs: StdMutex::new(HashMap::new()),
-            prompt_admissions: StdMutex::new(HashMap::new()),
+            prompt_admissions: Arc::new(StdMutex::new(HashMap::new())),
             signal_cleanup_handlers: StdMutex::new(Vec::new()),
             cron_store: Arc::clone(&cron_store),
             agent_dir,
@@ -2095,6 +2118,7 @@ impl AgentDaemon {
             agent_message_rate_limiter: StdMutex::new(AgentSessionMessageRateLimiter::new(
                 DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY,
                 DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
+                None,
             )),
             binding_sessions: StdMutex::new(HashSet::new()),
             pending_session_names: StdMutex::new(HashSet::new()),
@@ -2519,24 +2543,31 @@ impl AgentDaemon {
         claim: &SupervisorGenerationClaim,
         validated_fingerprint: Option<&str>,
     ) -> Result<String, String> {
-        assert_daemon_supervisor_owner_current(
-            claim.supervisor_generation.as_str(),
-            claim.supervisor_socket_path.as_str(),
-            claim.supervisor_pid as f64,
-            claim.supervisor_process_start_id.as_deref(),
-            validated_fingerprint,
-            None,
-            None,
-        )
-        .await
-        .map_err(|error| error.to_string())
+        let owner = DaemonSupervisorOwnerRecord {
+            version: 1,
+            role: "supervisor".to_string(),
+            token: String::new(),
+            generation: claim.supervisor_generation.clone(),
+            pid: claim.supervisor_pid,
+            process_start_id: claim.supervisor_process_start_id.clone(),
+            socket_path: claim.supervisor_socket_path.clone(),
+            descriptor_dir: String::new(),
+            agent_dir: String::new(),
+            app_version: VERSION.to_string(),
+            phase: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        assert_daemon_supervisor_owner_current(&owner, validated_fingerprint, None, None)
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// `canConnectToSupervisor(socketPath)`.
     async fn can_connect_to_supervisor(&self, socket_path: &str) -> bool {
         // `createConnection(...)`/`connect` with a 250 ms deadline: true only when
         // the socket actually accepted this probe.
-        let client = DaemonClient::new(socket_path);
+        let client = Arc::new(DaemonClient::new(socket_path));
         match tokio::time::timeout(Duration::from_millis(250), client.connect(250)).await {
             Ok(Ok(())) => {
                 client.close();
@@ -2576,12 +2607,18 @@ impl AgentDaemon {
             if owns_lock {
                 break;
             }
-            match try_acquire_dir_lock(&lock_directory.to_string_lossy()) {
-                crate::utils::dir_lock::DirLockAttempt::Acquired => owns_lock = true,
-                crate::utils::dir_lock::DirLockAttempt::Held => {
-                    delay(50).await;
-                }
-                crate::utils::dir_lock::DirLockAttempt::Failed => break,
+            let attempt = try_acquire_dir_lock(
+                &lock_directory.to_string_lossy(),
+                |owner_pid: Option<i32>| async move {
+                    owner_pid.is_some_and(is_process_alive)
+                },
+            )
+            .await;
+            match attempt {
+                Ok(crate::utils::dir_lock::DirLockAttempt::Held) => return Ok(()),
+                Ok(crate::utils::dir_lock::DirLockAttempt::Acquired) => owns_lock = true,
+                Ok(crate::utils::dir_lock::DirLockAttempt::Reclaimed) => {}
+                Err(_) => break,
             }
         }
         if !owns_lock {
@@ -2621,7 +2658,7 @@ impl AgentDaemon {
                             .clone()
                             .unwrap_or_else(|| ".".to_string()),
                     ),
-                    env: Some(env),
+                    env: Some(env.into_iter().collect()),
                     ..SpawnOptions::default()
                 },
             );
@@ -2629,7 +2666,7 @@ impl AgentDaemon {
                 Ok(child) => child,
                 Err(error) => return Err(error.to_string()),
             };
-            let child_pid = child.pid().unwrap_or(0);
+            let child_pid = child.child.id().map(|pid| pid as i32).unwrap_or(0);
             let deadline = now_millis() + 30_000.0;
             while !self.shutting_down.load(Ordering::SeqCst) && now_millis() < deadline {
                 if !is_process_alive(child_pid) {
@@ -2718,12 +2755,13 @@ impl AgentDaemon {
             .session_states()
             .into_iter()
             .filter(|candidate| {
-                let candidate = candidate.lock().expect("active session poisoned");
+                let candidate = candidate.state.lock().expect("active session poisoned");
                 let metadata = candidate.runtime.metadata.as_ref();
                 metadata.and_then(|value| value.kind.as_deref()) == Some("subagent")
                     && metadata.and_then(|value| value.parent_active_session_id.as_deref())
                         == Some(parent_active_session_id.as_str())
             })
+            .map(|candidate| Arc::clone(&candidate.state))
             .collect();
         for child in children {
             self.adopt_client_env(&child, Some(env.clone()));
@@ -2813,7 +2851,7 @@ impl AgentDaemon {
         parent_session_id: &str,
     ) -> String {
         join_path(
-            &get_session_artifact_path_for_file(parent_session_file, parent_session_id),
+            &get_session_artifact_path_for_file(parent_session_file, Some(parent_session_id)),
             RLM_SUBAGENT_REGISTRY_FILE,
         )
     }
@@ -3370,7 +3408,7 @@ impl AgentDaemon {
                 }
             };
             {
-                let prompt_admissions = self.prompt_admissions.clone();
+                let prompt_admissions = Arc::clone(&self.prompt_admissions);
                 let parsed_admission = parsed_admission.clone();
                 clear_parsed_admission = Arc::new(move || {
                     let Some((_, active_session_id, admission_id)) = parsed_admission.as_ref()
@@ -4415,41 +4453,48 @@ impl AgentDaemon {
                     let parent_session_path = (depth > 0)
                         .then(|| info.parent_session_path.clone())
                         .flatten();
-                    let reservation =
-                        crate::core::agent_messages::AgentSessionNameAvailabilityInput {
-                            name: name.clone(),
-                            depth,
-                            parent_session_path: parent_session_path.clone(),
-                            ignore_session_id: None,
-                        };
+                    let reservation = NameReservationInput {
+                        name: name.clone(),
+                        depth,
+                        parent_session_id: None,
+                        parent_session_path: parent_session_path.clone(),
+                    };
                     let name_for_update = name.clone();
                     let path_for_update = session_path.to_string();
                     let info_id = info.id.clone();
-                    self.with_session_name_reservation(
-                        reservation.clone(),
-                        Box::new(move || {
+                    self.with_session_name_reservation(reservation, move |daemon| {
                             Box::pin(async move {
-                                let availability = crate::core::agent_messages::AgentSessionNameAvailabilityInput {
+                                let availability = AgentSessionNameAvailabilityInput {
+                                    name: name_for_update.clone(),
+                                    depth,
+                                    parent_session_id: None,
+                                    parent_session_path: parent_session_path.clone(),
                                     ignore_session_id: Some(info_id),
-                                    ..reservation
                                 };
-                                let _ = availability;
-                                SessionManager::open(&path_for_update)
-                                    .lock()
-                                    .expect("session manager poisoned")
+                                daemon
+                                    .assert_family_session_name_available(
+                                        &availability,
+                                        None,
+                                        true,
+                                    )
+                                    .await?;
+                                SessionManager::open(&path_for_update, None, None)
+                                    .map_err(|error| error.to_string())?
                                     .append_session_info(&name_for_update);
+                                if let Err(error) = daemon
+                                    .rlm_spawn_ledger()
+                                    .await
+                                    .append_rename_by_child_path(&path_for_update, &name_for_update)
+                                    .await
+                                {
+                                    daemon.log(&format!(
+                                        "failed to append RLM ledger rename: {error}"
+                                    ));
+                                }
+                                Ok(())
                             })
-                        }),
-                    )
-                    .await;
-                    if let Err(error) = self
-                        .rlm_spawn_ledger()
-                        .await
-                        .append_rename_by_child_path(session_path, &name)
-                        .await
-                    {
-                        self.log(&format!("failed to append RLM ledger rename: {error}"));
-                    }
+                        })
+                        .await?;
                 }
                 Ok(Some(DaemonResponse::success(
                     id,
@@ -4486,16 +4531,15 @@ impl AgentDaemon {
                 let result = self
                     .delete_saved_session_file(
                         session_path,
-                        DeleteSessionFileOptions {
-                            after_file_removed: Some(Arc::new(move || {
+                        Some(DeleteSessionFileOptions {
+                            after_file_removed: Some(Box::new(move || {
                                 daemon_for_cancel
                                     .cancel_scheduled_jobs_for_session_file(&removed_path);
                             })),
-                            ..DeleteSessionFileOptions::default()
-                        },
+                        }),
                     )
                     .await;
-                if result.ok && self.is_worker() {
+                if result.is_ok() && self.is_worker() {
                     let removed_agent_id = composed_entry
                         .as_ref()
                         .map(|entry| entry.agent_id.clone())
@@ -4753,10 +4797,15 @@ impl AgentDaemon {
                             .and_then(Value::as_str)
                             .unwrap_or("")
                             .to_string(),
-                        message: body.get("message").cloned().unwrap_or(Value::Null),
+                        message: body
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
                         from_state,
-                        client_id: client.id(),
-                        sender_key: self.create_cli_agent_message_sender_key(),
+                        sender: None,
+                        client_id: Some(client.id()),
+                        sender_key: Some(self.create_cli_agent_message_sender_key()),
                         origin: if body.get("agentOrigin").and_then(Value::as_bool) == Some(true) {
                             "agent".to_string()
                         } else {
@@ -5445,7 +5494,7 @@ impl AgentDaemon {
                     .get(&job.active_session_id)
                     .cloned();
                 if let Some(state) = state {
-                    self.remove_queued_heartbeat_follow_up(&state, &job);
+                    self.remove_queued_heartbeat_follow_up(&state.state, &job);
                 }
                 self.cron_scheduler_wake();
                 self.schedule_roster_flush();
@@ -5595,7 +5644,10 @@ impl AgentDaemon {
                 let state = self.get_session_state(active_session_id)?;
                 let transport = body.get("transport").and_then(Value::as_str).unwrap_or("");
                 if let Some(settings) = self.session_of(&state).settings_manager() {
-                    settings.set_transport(transport);
+                    settings
+                        .lock()
+                        .expect("settings manager poisoned")
+                        .set_transport(transport.to_string());
                 }
                 self.session_of(&state).set_transport(transport);
                 Ok(Some(DaemonResponse::success(id, "set_transport", None)))
@@ -6328,7 +6380,11 @@ impl AgentDaemon {
                     .runtime
                     .metadata
                     .clone();
-                if metadata.kind.as_deref() != Some("subagent") {
+                if metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.kind.as_deref())
+                    != Some("subagent")
+                {
                     let manager = session.session_manager();
                     manager
                         .lock()
@@ -6412,7 +6468,11 @@ impl AgentDaemon {
             .runtime
             .metadata
             .clone();
-        if metadata.kind.as_deref() == Some("subagent") {
+        if metadata
+            .as_ref()
+            .and_then(|metadata| metadata.kind.as_deref())
+            == Some("subagent")
+        {
             let recap = state
                 .lock()
                 .expect("active session poisoned")
@@ -6436,7 +6496,8 @@ impl AgentDaemon {
         else {
             return;
         };
-        let artifact_dir = get_session_artifact_path_for_file(&session_file, &session_id);
+        let artifact_dir =
+            get_session_artifact_path_for_file(&session_file, Some(&session_id));
         if artifact_dir.is_empty() {
             return;
         }
@@ -6454,7 +6515,11 @@ impl AgentDaemon {
             .runtime
             .metadata
             .clone();
-        if metadata.kind.as_deref() != Some("subagent") {
+        if metadata
+            .as_ref()
+            .and_then(|metadata| metadata.kind.as_deref())
+            != Some("subagent")
+        {
             let daemon = Arc::clone(self);
             tokio::spawn(async move {
                 if let Err(error) = daemon.register_passive_descendant_cron_artifacts().await {
@@ -6469,13 +6534,13 @@ impl AgentDaemon {
     /// `registerPassiveDescendantCronArtifacts()`.
     async fn register_passive_descendant_cron_artifacts(self: &Arc<Self>) -> Result<(), String> {
         let mut registered = false;
-        for passive in self.list_passive_rlm_subagents().await {
+        for passive in self.list_passive_rlm_subagents(Vec::new(), false).await {
             let mut artifact_dir =
-                get_session_artifact_path_for_file(&passive.info.path, &passive.info.id);
+                get_session_artifact_path_for_file(&passive.info.path, Some(&passive.info.id));
             if artifact_dir.is_empty() {
                 artifact_dir = get_session_artifact_path_for_file(
                     &passive.info.path,
-                    &passive.entry.parent_session_id,
+                    Some(&passive.entry.parent_session_id),
                 );
             }
             if self
@@ -6619,7 +6684,9 @@ impl MissingSession {
 
 impl DaemonSession for MissingSession {
     fn session_manager(&self) -> Arc<StdMutex<SessionManager>> {
-        Arc::new(StdMutex::new(SessionManager::in_memory(".")))
+        Arc::new(StdMutex::new(
+            SessionManager::in_memory(Some("."), None).expect("in-memory session manager"),
+        ))
     }
     fn runtime(&self) -> Arc<dyn DaemonRuntimeApi> {
         Arc::new(MissingRuntime)
@@ -7049,6 +7116,15 @@ impl DaemonRuntimeApi for MissingRuntime {
 }
 
 impl DaemonSessionState {
+    /// `state.runtime.session.sessionManager.getCwd()`.
+    pub fn cwd(&self) -> String {
+        self.session
+            .session_manager()
+            .lock()
+            .expect("session manager poisoned")
+            .get_cwd()
+    }
+
     /// Keep the `ActiveSessionState.runtime.session` view aligned with the live
     /// session. The TypeScript reads those fields straight off the session
     /// object, so the port refreshes them at every read boundary instead.
@@ -9619,15 +9695,21 @@ impl AgentDaemon {
         }
         let daemon = Arc::clone(self);
         let job_id = job.id.clone();
-        let get_runnable_job = move || -> Option<AgentCronJob> {
-            let current = if require_persisted_job {
-                daemon.get_runnable_cron_job(&job_id)
-            } else {
-                Some(runnable_job.clone())
-            };
-            current.filter(|current| {
-                daemon.is_cron_job_runnable_for_state(current, &state, require_persisted_job)
-            })
+        let runnable_job = Arc::new(runnable_job);
+        let get_runnable_job = {
+            let daemon = Arc::clone(&daemon);
+            let runnable_job = Arc::clone(&runnable_job);
+            let state = Arc::clone(&state);
+            move || -> Option<AgentCronJob> {
+                let current = if require_persisted_job {
+                    daemon.get_runnable_cron_job(&job_id)
+                } else {
+                    Some((*runnable_job).clone())
+                };
+                current.filter(|current| {
+                    daemon.is_cron_job_runnable_for_state(current, &state, require_persisted_job)
+                })
+            }
         };
         let Some(current) = get_runnable_job() else {
             return Some(RUN_RESULT_SKIPPED.to_string());
@@ -9643,7 +9725,7 @@ impl AgentDaemon {
             let refreshed = if require_persisted_job {
                 admission_daemon.get_runnable_cron_job(&admission_job_id)
             } else {
-                Some(runnable_job.clone())
+                Some((*runnable_job).clone())
             }
             .filter(|current| {
                 admission_daemon.is_cron_job_runnable_for_state(
@@ -9834,23 +9916,22 @@ impl AgentDaemon {
         let entry = self.session_entry_for_state(state);
         let job = self
             .cron_store
-            .create_rlm_heartbeat(RlmHeartbeatCreateInput {
-                instruction: input.instruction.clone(),
-                interval: Some(normalize_heartbeat_schedule(input.interval.as_deref())),
+            .create_rlm_heartbeat(&CreateAgentCronJobInput {
+                active_session_id: state
+                    .lock()
+                    .expect("active session poisoned")
+                    .active_session_id
+                    .clone(),
+                session_id: session.session_id(),
+                session_file,
+                cwd: entry.cwd(),
+                runtime_kind: entry.runtime_metadata.kind.clone(),
                 label: input.label.clone(),
+                schedule_text: normalize_heartbeat_schedule(input.interval.as_deref()),
+                prompt: input.instruction.clone(),
                 delivery_mode: input.delivery_mode.clone(),
-                ..RlmHeartbeatCreateInput::default()
-            });
-        let mut job = job;
-        job.active_session_id = state
-            .lock()
-            .expect("active session poisoned")
-            .active_session_id
-            .clone();
-        job.session_id = session.session_id();
-        job.session_file = session_file;
-        job.cwd = entry.cwd();
-        job.runtime_kind = entry.runtime_metadata.kind.clone();
+                ..CreateAgentCronJobInput::default()
+            })?;
         self.cron_scheduler_wake();
         Ok(job)
     }
@@ -9861,15 +9942,27 @@ impl AgentDaemon {
         state: &Arc<StdMutex<ActiveSessionState>>,
         input: &RlmHeartbeatUpdateInput,
     ) -> Option<AgentCronJob> {
-        let job = self
-            .cron_store
-            .update_rlm_heartbeat(RlmHeartbeatUpdateInput {
-                interval: input
+        let active_session_id = state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        let job = self.cron_store.update_rlm_heartbeat(
+            &active_session_id,
+            &input.id,
+            &crate::core::cron_jobs::RlmHeartbeatUpdate {
+                label: input.label.clone(),
+                prompt: input.instruction.clone(),
+                schedule_text: input
                     .interval
                     .as_deref()
                     .map(|interval| normalize_heartbeat_schedule(Some(interval))),
-                ..input.clone()
-            });
+                status: input.status.clone(),
+                delivery_mode: input.delivery_mode.clone(),
+                now: None,
+            },
+        );
+        let job = job?;
         if let Some(job) = &job {
             if input.instruction.is_some()
                 || input.interval.is_some()
@@ -9889,7 +9982,14 @@ impl AgentDaemon {
         state: &Arc<StdMutex<ActiveSessionState>>,
         id: &str,
     ) -> Option<AgentCronJob> {
-        let job = self.cron_store.delete_rlm_heartbeat(id);
+        let active_session_id = state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        let job = self
+            .cron_store
+            .delete_rlm_heartbeat(&active_session_id, id, now_millis());
         if let Some(job) = &job {
             self.remove_queued_heartbeat_follow_up(state, job);
             self.cron_scheduler_wake();
@@ -9918,15 +10018,14 @@ impl AgentDaemon {
                 let mut object = Map::new();
                 object.insert("job".to_string(), job_to_value(&job));
                 if let Some(summary) = summary {
-                    if let Some(session_name) = summary.get("sessionName") {
-                        if !session_name.is_null() {
-                            object.insert("sessionName".to_string(), session_name.clone());
-                        }
+                    if let Some(session_name) = summary.session_name.clone() {
+                        object.insert("sessionName".to_string(), Value::String(session_name));
                     }
-                    if let Some(first_message) = summary.get("firstMessage") {
-                        if !first_message.is_null() {
-                            object.insert("firstMessage".to_string(), first_message.clone());
-                        }
+                    if !summary.first_message.is_empty() {
+                        object.insert(
+                            "firstMessage".to_string(),
+                            Value::String(summary.first_message.clone()),
+                        );
                     }
                 }
                 Value::Object(object)
@@ -10065,12 +10164,9 @@ impl AgentDaemon {
         &self,
         session_path: &str,
         options: Option<crate::core::session_file_actions::DeleteSessionFileOptions>,
-    ) -> Result<(), String> {
-        crate::core::session_file_actions::delete_session_file(
-            session_path,
-            options.unwrap_or_default(),
-        )
-        .await
+    ) -> DeleteSessionFileResult {
+        let mut options = options.unwrap_or_default();
+        crate::core::session_file_actions::delete_session_file(session_path, &mut options)
     }
 
     /// `removeQueuedHeartbeatFollowUp(state, job)`.
@@ -10872,7 +10968,7 @@ impl AgentDaemon {
         if let Some(display) = display {
             if display.child_id == edge.child_id {
                 // A display-file child was ledger-spawned: the edge depth is real.
-                let mut fields = metadata_fields(&display.entry);
+                let mut fields = metadata_fields(&display);
                 fields.rlm_depth = Some(edge.depth);
                 return fields;
             }
@@ -14205,8 +14301,8 @@ impl AgentDaemon {
         };
         let parent_session_id = self.session_of(parent_state).session_id();
         let parent_path = canonical_session_path(&parent_file);
-        let edges = self
-            .rlm_spawn_ledger()
+        let ledger = self.rlm_spawn_ledger().await;
+        let edges = ledger
             .edges(true)
             .await
             .into_iter()
@@ -14337,16 +14433,16 @@ impl AgentDaemon {
         // The ledger delete record is the topology tombstone; unlike the dual-write
         // era it has no other writer to fall back on, so a failed append is a failed
         // deletion.
-        self.rlm_spawn_ledger()
+        ledger
             .append_delete(child_id, &entry.session_file, reason)
             .await?;
         if self.is_worker() {
             let agent_id =
                 self.roster_agent_id_for_rlm_child(child_id, entry.parent_session_file.as_deref());
             self.roster_reporter
-                .removed_agent_ids
                 .lock()
-                .expect("roster poisoned")
+                .expect("roster reporter poisoned")
+                .removed_agent_ids
                 .insert(agent_id, basename(&entry.session_file, ".jsonl"));
             self.schedule_roster_flush();
         }

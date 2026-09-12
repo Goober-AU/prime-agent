@@ -145,7 +145,7 @@ pub(crate) fn compatibility_hello(hello: &DaemonHello) -> DaemonCompatibilityHel
 }
 
 /// The wire name of a capability (`DaemonServerCapability` is snake_case on the wire).
-fn capability_name(capability: &DaemonServerCapability) -> String {
+pub(crate) fn capability_name(capability: &DaemonServerCapability) -> String {
     serde_json::to_value(capability)
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
@@ -535,6 +535,52 @@ impl ClientSocket {
     }
 }
 
+/// The reader half of a connected socket: dispatch each line, then report the
+/// close once the stream ends (`socket.on("close", ...)` in the TypeScript).
+///
+/// The client is held weakly, as before, so a live reader never keeps it alive.
+async fn read_frames(
+    weak: std::sync::Weak<DaemonClient>,
+    mut reader: futures_util::stream::SplitStream<Framed<DaemonSocketStream, LinesCodec>>,
+    socket: Arc<ClientSocket>,
+) {
+    while let Some(line) = reader.next().await {
+        match line {
+            Ok(line) => match weak.upgrade() {
+                Some(client) => client.handle_line(&line).await,
+                None => return,
+            },
+            Err(_) => break,
+        }
+    }
+    let Some(client) = weak.upgrade() else {
+        return;
+    };
+    notify_closed_boxed(client, socket).await;
+}
+
+/// `notifyClosed` can await `autoReconnect` -> `connect`, which spawns this same
+/// reader future again. Boxing that one recursive await keeps the reader `Send`:
+/// without the box, the reader type would have to contain itself.
+fn notify_closed_boxed(
+    client: Arc<DaemonClient>,
+    socket: Arc<ClientSocket>,
+) -> futures::future::BoxFuture<'static, ()> {
+    Box::pin(async move {
+        let reason = client.state.lock().await.daemon_closing_reason.clone();
+        client
+            .notify_closed(
+                &socket,
+                Some(DaemonSocketClosedError::new(
+                    &client.socket_path,
+                    reason.as_deref(),
+                    None,
+                )),
+            )
+            .await;
+    })
+}
+
 async fn connect_daemon_socket(socket_path: &str) -> std::io::Result<DaemonSocketStream> {
     #[cfg(unix)]
     {
@@ -764,37 +810,14 @@ impl DaemonClient {
         };
 
         let framed = Framed::new(stream, LinesCodec::new_with_max_length(DAEMON_MAX_LINE_LENGTH));
-        let (writer, mut reader) = framed.split();
+        let (writer, reader) = framed.split();
         let socket = Arc::new(ClientSocket {
             writer: Mutex::new(Some(writer)),
             reader_task: StdMutex::new(None),
         });
         let weak = Arc::downgrade(self);
         let reader_socket = socket.clone();
-        let reader_task = tokio::spawn(async move {
-            while let Some(line) = reader.next().await {
-                match line {
-                    Ok(line) => match weak.upgrade() {
-                        Some(client) => client.handle_line(&line).await,
-                        None => return,
-                    },
-                    Err(_) => break,
-                }
-            }
-            if let Some(client) = weak.upgrade() {
-                let reason = client.state.lock().await.daemon_closing_reason.clone();
-                client
-                    .notify_closed(
-                        &reader_socket,
-                        Some(DaemonSocketClosedError::new(
-                            &client.socket_path,
-                            reason.as_deref(),
-                            None,
-                        )),
-                    )
-                    .await;
-            }
-        });
+        let reader_task = tokio::spawn(read_frames(weak, reader, reader_socket));
         *socket.reader_task.lock().expect("reader task slot poisoned") = Some(reader_task);
         self.state.lock().await.socket = Some(socket);
         self.quick_connected.store(true, Ordering::SeqCst);
@@ -808,7 +831,7 @@ impl DaemonClient {
         self.connect(timeout_ms).await
     }
 
-    pub async fn disconnect_for_reconnect(&self, reason: &str) {
+    pub async fn disconnect_for_reconnect(self: &Arc<Self>, reason: &str) {
         let socket = { self.state.lock().await.socket.clone() };
         let Some(socket) = socket else {
             return;

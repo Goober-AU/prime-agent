@@ -239,13 +239,13 @@ impl CompactAssistantStreamReconstructor {
                 };
                 set_content(partial, *content_index, ContentBlock::ToolCall(tool_call));
                 self.tool_call_json
-                    .insert(self.tool_call_key(&active_session_id, *content_index), String::new());
+                    .insert(Self::tool_call_key(&active_session_id, *content_index), String::new());
             }
             AssistantMessageEvent::ToolCallDelta { content_index, delta: text_delta, .. } => {
                 let arguments = match delta.tool_call_arguments.clone() {
                     Some(arguments) => arguments,
                     None => {
-                        let key = self.tool_call_key(&active_session_id, *content_index);
+                        let key = Self::tool_call_key(&active_session_id, *content_index);
                         let partial_json = format!(
                             "{}{}",
                             self.tool_call_json.get(&key).cloned().unwrap_or_default(),
@@ -266,7 +266,7 @@ impl CompactAssistantStreamReconstructor {
             AssistantMessageEvent::ToolCallEnd { content_index, tool_call, .. } => {
                 set_content(partial, *content_index, ContentBlock::ToolCall(tool_call.clone()));
                 self.tool_call_json
-                    .remove(&self.tool_call_key(&active_session_id, *content_index));
+                    .remove(&Self::tool_call_key(&active_session_id, *content_index));
             }
             AssistantMessageEvent::Start { .. }
             | AssistantMessageEvent::Done { .. }
@@ -295,7 +295,7 @@ impl CompactAssistantStreamReconstructor {
         self.tool_call_json.retain(|key, _| !key.starts_with(&prefix));
     }
 
-    fn tool_call_key(&self, active_session_id: &str, content_index: usize) -> String {
+    fn tool_call_key(active_session_id: &str, content_index: usize) -> String {
         format!("{active_session_id}:{content_index}")
     }
 }

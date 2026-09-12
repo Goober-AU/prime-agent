@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use pi_tui::components::markdown::{Markdown, MarkdownOptions, MarkdownTheme};
 use pi_tui::components::r#box::Box_;
@@ -13,13 +14,13 @@ use pi_tui::tui::Component;
 use crate::modes::interactive::components::keybinding_hints::expand_collapse_hint;
 use crate::modes::interactive::theme::theme::theme;
 
-/// `pi-tui`'s `MarkdownTheme` holds `Rc` closures; `theme.ts`'s holds `Box`
+/// `pi-tui`'s `MarkdownTheme` holds `Rc` closures; `theme.ts`'s holds `Arc`
 /// closures with `Send + Sync`. This is the same conversion as
 /// `toTuiMarkdownTheme` in the other message components.
 fn to_tui_markdown_theme(
     source: crate::modes::interactive::theme::theme::MarkdownTheme,
 ) -> MarkdownTheme {
-    fn rc(value: Box<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
+    fn rc(value: Arc<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
         Rc::new(move |text: &str| value(text))
     }
 

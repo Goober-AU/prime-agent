@@ -287,6 +287,7 @@ pub fn persist_model_tool_output_artifact(
             mode: Some(0o600),
             fsync: true,
             fsync_dir: true,
+            before_rename: None,
         },
     )
     .map_err(|error| error.to_string())?;
@@ -460,10 +461,9 @@ pub fn apply_model_tool_output_policy(
             continue;
         };
         let mut updated = tool_result.clone();
-        updated.content = vec![ImageOrTextContent::Text(pi_ai::types::TextContent {
-            content_type: pi_ai::types::TEXT_CONTENT_TYPE.to_string(),
-            text: repeated_output_notice(&previous),
-        })];
+        updated.content = vec![ImageOrTextContent::Text(pi_ai::types::TextContent::new(
+            repeated_output_notice(&previous),
+        ))];
         result.push(AgentMessage::Message(pi_ai::types::Message::ToolResult(updated)));
     }
     result

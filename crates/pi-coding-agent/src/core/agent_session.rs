@@ -43,6 +43,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
+use crate::core::extensions::types::{
+    AgentEndPayload, ExtensionError, ExtensionEvent, MessageStartPayload, MessageUpdatePayload,
+    ModelSelectPayload, ToolExecutionEndPayload, ToolExecutionStartPayload,
+    ToolExecutionUpdatePayload, TurnEndPayload, TurnStartPayload,
+};
 use crate::core::agent_messages::{
     AGENT_MESSAGE_CUSTOM_TYPE,
     AGENT_MESSAGE_RECEIVED_PREVIEW_LABEL,
@@ -97,11 +102,13 @@ use crate::core::context_tree::{
 use crate::core::goals::{
     create_goal_context_message, empty_goal_state, goal_host_response, goal_token_delta_for_usage,
     is_persisted_goal_state, normalize_goal_state, validate_goal_budget, validate_goal_objective,
-    GoalHostResponse, GoalState, GoalStatus, GOAL_CONTEXT_CUSTOM_TYPE, GOAL_CONTEXT_PREVIEW_LABEL,
+    GoalContextKind, GoalHostResponse, GoalState, GoalStatus, GOAL_CONTEXT_CUSTOM_TYPE,
+    GOAL_CONTEXT_PREVIEW_LABEL,
     GOAL_SKILL_NAME, GOAL_STATE_CUSTOM_TYPE,
 };
 use crate::core::messages::{
     ASYNC_BASH_COMPLETION_CUSTOM_TYPE,
+    REFINEMENT_SOURCE_AUTO,
     ASYNC_BASH_COMPLETION_PREVIEW_LABEL,
     AsyncBashCompletionDetails,
     BashExecutionMessage,
@@ -151,10 +158,13 @@ use crate::core::refinement::refinement::{
     get_refinement_history, infer_refinement_result_scope, load_global_refinement_history,
     load_harness_state, merge_harness_states, merge_refinement_history,
     normalize_refinement_proposal, plan_refinement, review_auto_refine, save_harness_state,
-    AutoRefineReason, AutoRefineReview, AutoRefineReviewContext, HarnessState, PlanRefinementRequest,
-    RefinementFailureError, RefinementPlan, RefinementResult, RefineOptions, REFINE_SKILL_NAME,
-    REFINEMENT_FAILURE_CUSTOM_TYPE,
+    ApplyRefinementOptions, AutoRefineReason, AutoRefineReview, AutoRefineReviewContext,
+    AutoRefineReviewer, CompletionFn, HarnessScope, HarnessState, PlanRefinementRequest,
+    ProviderRetryPolicy, RefineModel, RefinementCompletionRequest, RefinementFailureError,
+    RefinementPlan, RefinementProposal, RefinementResult, RefineOptions, ReviewAutoRefineRequest,
+    REFINE_SKILL_NAME, REFINEMENT_CUSTOM_TYPE, REFINEMENT_FAILURE_CUSTOM_TYPE,
 };
+use crate::core::session_action_store::TransitionOptions;
 use crate::core::session_action_store::{
     ActionLifecycle,
     ActionStore,
@@ -177,6 +187,8 @@ use crate::core::session_action_store::{
     SessionCommandPayload,
     SessionTurnPayload,
     WakePolicy,
+    ActionLifecycleState,
+    DeliveryOutcome,
     can_select_session_action,
     queued_message_lane_delivery_policy,
     transition_session_action,
@@ -267,6 +279,8 @@ pub struct PerformanceMetricUsageV1 {
     pub reasoning_included_in_output: Option<bool>,
 }
 
+
+/// `ExtensionRunner` - the session holds the runner behind an `Arc`.
 pub type ExtensionRunner = Arc<crate::core::extensions::runner::ExtensionRunner>;
 
 /// `hookResult` from `ExtensionRunner.emitToolResult`.
@@ -1345,9 +1359,10 @@ pub struct InitialGoal {
 /// `safePerformanceMetricNow`.
 pub fn safe_performance_metric_now(recorder: Option<&Arc<dyn PerformanceMetricRecorder>>) -> Option<f64> {
     let value = recorder?.monotonic_now();
-    match value {
-        Some(value) if value.is_finite() => Some(value),
-        _ => None,
+    if value.is_finite() {
+        Some(value)
+    } else {
+        None
     }
 }
 
@@ -1854,14 +1869,14 @@ pub async fn wait_for_promise_or_abort<T>(
     abort_message: &str,
 ) -> Result<T, String> {
     let signal = match signal {
-        None => return promise.await.map_err(|error| error.to_string()),
+        None => return Ok(promise.await),
         Some(signal) => signal.clone(),
     };
     if signal.is_cancelled() {
         return Err(abort_message.to_string());
     }
     tokio::select! {
-        value = promise => value.map_err(|error| error.to_string()),
+        value = promise => Ok(value),
         _ = signal.cancelled() => Err(abort_message.to_string()),
     }
 }
@@ -2207,7 +2222,7 @@ impl AgentSession {
         let session_id = config.session_manager.lock().unwrap().get_session_id();
         let ledger_path = crate::core::semantic_edges::semantic_edge_ledger_path(
             config.rlm_session_dir.as_deref(),
-            Some(session_artifact_dir.as_str()),
+            session_artifact_dir.as_deref(),
         );
         let semantic_edges = Arc::new(Mutex::new(
             crate::core::semantic_edges::SemanticEdgeRecorder::new(
@@ -2687,40 +2702,6 @@ impl AgentSession {
         *self.subagent_runtime_host.lock().unwrap() = host;
     }
 
-    /// `_getRequiredRequestAuth`.
-    async fn get_required_request_auth(&self, model: &Model) -> Result<RequestAuth, String> {
-        let result = {
-            let mut registry = self.model_registry.lock().unwrap();
-            registry.get_api_key_and_headers(model)
-        };
-        if !result.ok {
-            let error = result.error.clone().unwrap_or_default();
-            if error.starts_with("No API key found") {
-                return Err(format_no_api_key_found_message(&model.provider));
-            }
-            return Err(error);
-        }
-        if let Some(api_key) = result.api_key.clone() {
-            return Ok(RequestAuth {
-                api_key,
-                headers: result
-                    .headers
-                    .as_ref()
-                    .map(|headers| headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
-            });
-        }
-
-        let is_oauth = self
-            .model_registry
-            .lock()
-            .unwrap()
-            .is_using_oauth(model);
-        if is_oauth {
-            return Err(format_authentication_failed_message(&model.provider));
-        }
-        Err(format_no_api_key_found_message(&model.provider))
-    }
-
     /**
      * Install tool hooks once on the Agent instance.
      *
@@ -3140,9 +3121,9 @@ impl AgentSession {
             .filter(|action| predicate(action))
             .cloned()
             .collect();
-        let previous_states: HashMap<String, String> = matching
+        let previous_states: HashMap<String, ActionLifecycleState> = matching
             .iter()
-            .map(|action| (action.id.clone(), action.lifecycle.state().to_string()))
+            .map(|action| (action.id.clone(), action.lifecycle.state()))
             .collect();
         let preparing: Vec<QueuedSessionAction> = self
             .action_store
@@ -3152,11 +3133,16 @@ impl AgentSession {
             .into_iter()
             .filter(|action| {
                 matches!(action.payload, QueuedActionPayload::Turn(_))
-                    && action.lifecycle.state() == "preparing"
+                    && action.lifecycle.state() == ActionLifecycleState::Preparing
             })
             .collect();
         let previous_anchor = preparing.last().cloned();
-        let actions = self.action_store.lock().unwrap().remove(predicate, Some(candidates));
+        let actions = self
+            .action_store
+            .lock()
+            .unwrap()
+            .remove(predicate, Some(candidates.as_slice()))
+            .unwrap_or_default();
         let mut restorable_messages: Vec<CustomMessage> = Vec::new();
         let removed: HashSet<String> = actions.iter().map(|action| action.id.clone()).collect();
         if let Some(previous_anchor) = previous_anchor {
@@ -3165,41 +3151,43 @@ impl AgentSession {
                     if removed.contains(&action.id) {
                         continue;
                     }
-                    let mut store = self.action_store.lock().unwrap();
                     let mut next = action.clone();
                     if let QueuedActionPayload::Turn(turn) = &mut next.payload {
                         turn.prepared = None;
                     }
-                    store.replace_payload(&action.id, next.payload);
+                    let _ = self.action_store.lock().unwrap().update_action(&next);
                 }
             }
         }
         for action in &actions {
             let ticket = self.action_store.lock().unwrap().ticket_for(action);
-            let previous_state = previous_states.get(&action.id).cloned().unwrap_or_default();
+            let previous_state = previous_states
+                .get(&action.id)
+                .copied()
+                .unwrap_or(ActionLifecycleState::Queued);
             match &action.payload {
                 QueuedActionPayload::Turn(turn) => {
                     if turn.accepted_agent_message
                         || !turn.queue_visible
-                        || previous_state != "queued"
+                        || previous_state != ActionLifecycleState::Queued
                     {
-                        if let Some(ticket) = &ticket {
-                            ticket.reject_delivered(error);
+                        if let Ok(ticket) = &ticket {
+                            ticket.reject_delivered(error.to_string());
                         }
-                    } else if let Some(ticket) = &ticket {
-                        ticket.settle_delivered("not_applicable");
+                    } else if let Ok(ticket) = &ticket {
+                        ticket.settle_delivered(DeliveryOutcome::NotApplicable);
                     }
                 }
                 QueuedActionPayload::SessionCommand(_) => {
-                    if let Some(ticket) = &ticket {
-                        ticket.settle_delivered("not_applicable");
+                    if let Ok(ticket) = &ticket {
+                        ticket.settle_delivered(DeliveryOutcome::NotApplicable);
                     }
                 }
             }
-            if let Some(ticket) = &ticket {
-                ticket.settle_completed(error);
+            if let Ok(ticket) = &ticket {
+                ticket.settle_completed(Some(error.to_string()));
             }
-            let dispatched = previous_state == "committing"
+            let dispatched = previous_state == ActionLifecycleState::Committing
                 && matches!(action.payload, QueuedActionPayload::Turn(_));
             if let QueuedActionPayload::Turn(payload) = &action.payload {
                 for record in &payload.base.records {
@@ -3207,7 +3195,7 @@ impl AgentSession {
                         || (payload.accepted_agent_message
                             && record.role == DeliveryRecordRole::Prefix))
                         && matches!(record.message, DeliveryMessage::Custom(_))
-                        && record_message_custom_type(&record.message)
+                        && record_message_custom_type(&record.message).as_deref()
                             != Some(HARNESS_DIGEST_CUSTOM_TYPE)
                         && !record.durable;
                     if is_restorable {
@@ -3219,19 +3207,12 @@ impl AgentSession {
                 // Lazy injection owns digest delivery: a cancelled turn re-arms it
                 // instead of restoring a possibly stale digest message.
                 if payload.base.records.iter().any(|record| {
-                    record_message_custom_type(&record.message) == Some(HARNESS_DIGEST_CUSTOM_TYPE)
+                    record_message_custom_type(&record.message).as_deref()
+                        == Some(HARNESS_DIGEST_CUSTOM_TYPE)
                 }) {
                     self.harness_digest_pending.store(true, Ordering::SeqCst);
                 }
                 if dispatched {
-                    let capture: HashSet<usize> = payload
-                        .base
-                        .records
-                        .iter()
-                        .map(|record| record.id.len())
-                        .collect();
-                    let _ = capture;
-                    let mut store = self.action_store.lock().unwrap();
                     let mut next = action.clone();
                     if let QueuedActionPayload::Turn(turn) = &mut next.payload {
                         turn.capture_run_messages = Some(
@@ -3239,15 +3220,15 @@ impl AgentSession {
                                 .base
                                 .records
                                 .iter()
-                                .map(|record| record.id.len())
+                                .map(|record| delivery_message_key_of(&record.message))
                                 .collect(),
                         );
                     }
-                    store.replace_payload(&action.id, next.payload);
+                    let _ = self.action_store.lock().unwrap().update_action(&next);
                 }
             }
             if !dispatched {
-                self.action_store.lock().unwrap().release_terminal(action);
+                let _ = self.action_store.lock().unwrap().release_terminal(action);
             }
         }
         {
@@ -3261,6 +3242,7 @@ impl AgentSession {
         }
         actions
     }
+
 
     /// `_clearQueuedGoalContexts`.
     fn clear_queued_goal_contexts(&self) {
@@ -3634,7 +3616,7 @@ impl AgentSession {
         let goal = self.goal_state();
         let message = match create_goal_context_message(
             &goal,
-            crate::core::goals::GoalContextKind::from_str(kind),
+            goal_context_kind_of(kind),
             images.map(|images| {
                 images
                     .iter()
@@ -5000,7 +4982,7 @@ impl AgentSession {
             .owned_actions()
             .into_iter()
             .find(|action| {
-                action.lifecycle.state() == "cancelled"
+                action.lifecycle.state() == ActionLifecycleState::Cancelled
                     && match &action.payload {
                         QueuedActionPayload::Turn(turn) => turn
                             .capture_run_messages
@@ -5020,7 +5002,7 @@ impl AgentSession {
             .owned_actions()
             .iter()
             .any(|action| {
-                action.lifecycle.state() == "cancelled"
+                action.lifecycle.state() == ActionLifecycleState::Cancelled
                     && match &action.payload {
                         QueuedActionPayload::Turn(turn) => turn.capture_run_messages.is_some(),
                         QueuedActionPayload::SessionCommand(_) => false,
@@ -5059,7 +5041,7 @@ impl AgentSession {
                                 captured.insert(key);
                             }
                         }
-                        store.replace_payload(&action.id, next.payload);
+                        let _ = store.update_action(&next);
                     }
                 }
             }
@@ -5075,7 +5057,7 @@ impl AgentSession {
                         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
                             turn.cancelled_dispatch_ended = Some(true);
                         }
-                        store.replace_payload(&action.id, next.payload);
+                        let _ = store.update_action(&next);
                     }
                 }
                 let _ = messages;
@@ -5111,7 +5093,7 @@ impl AgentSession {
                                 }
                             }
                         }
-                        store.replace_payload(&action.id, next.payload);
+                        let _ = store.update_action(&next);
                         if started_primary {
                             if let Ok(ticket) = self.action_store.lock().unwrap().ticket_for(&action) {
                                 ticket.settle_delivered("delivered");
@@ -5144,8 +5126,8 @@ impl AgentSession {
                                 }
                             }
                         }
-                        store.replace_payload(&action.id, next.payload);
-                        if started_primary && action.lifecycle.state() == "committing" {
+                        let _ = store.update_action(&next);
+                        if started_primary && action.lifecycle.state() == ActionLifecycleState::Committing {
                             let mut updated = action.clone();
                             let _ = transition_session_action(
                                 &mut updated,
@@ -5285,7 +5267,7 @@ impl AgentSession {
                 .owned_actions()
                 .into_iter()
                 .filter(|action| {
-                    action.lifecycle.state() == "cancelled"
+                    action.lifecycle.state() == ActionLifecycleState::Cancelled
                         && match &action.payload {
                             QueuedActionPayload::Turn(turn) => turn.capture_run_messages.is_some(),
                             QueuedActionPayload::SessionCommand(_) => false,
@@ -5619,21 +5601,24 @@ impl AgentSession {
             AgentEvent::AgentStart => {
                 self.turn_index.store(0, Ordering::SeqCst);
                 let _ = self.session_manager.lock().unwrap().record_git_state_if_changed();
-                let _ = runner.emit(serde_json::json!({ "type": "agent_start" })).await;
+                let _ = runner.emit(ExtensionEvent::AgentStart).await;
             }
             AgentEvent::AgentEnd { messages } => {
                 // Also capture at end of turn so commits made during the run (e.g. via a bash tool) land.
                 let _ = self.session_manager.lock().unwrap().record_git_state_if_changed();
+                let values = messages
+                    .iter()
+                    .map(|message| serde_json::to_value(message).unwrap_or(Value::Null))
+                    .collect();
                 let _ = runner
-                    .emit(serde_json::json!({ "type": "agent_end", "messages": messages }))
+                    .emit(ExtensionEvent::AgentEnd(AgentEndPayload { messages: values }))
                     .await;
             }
             AgentEvent::TurnStart => {
                 let _ = runner
-                    .emit(serde_json::json!({
-                        "type": "turn_start",
-                        "turnIndex": self.turn_index.load(Ordering::SeqCst),
-                        "timestamp": now_ms(),
+                    .emit(ExtensionEvent::TurnStart(TurnStartPayload {
+                        turn_index: self.turn_index.load(Ordering::SeqCst) as f64,
+                        timestamp: now_ms(),
                     }))
                     .await;
             }
@@ -5642,18 +5627,22 @@ impl AgentSession {
                 tool_results,
             } => {
                 let _ = runner
-                    .emit(serde_json::json!({
-                        "type": "turn_end",
-                        "turnIndex": self.turn_index.load(Ordering::SeqCst),
-                        "message": message,
-                        "toolResults": tool_results,
+                    .emit(ExtensionEvent::TurnEnd(TurnEndPayload {
+                        turn_index: self.turn_index.load(Ordering::SeqCst) as f64,
+                        message: serde_json::to_value(message).unwrap_or(Value::Null),
+                        tool_results: tool_results
+                            .iter()
+                            .map(|result| serde_json::to_value(result).unwrap_or(Value::Null))
+                            .collect(),
                     }))
                     .await;
                 self.turn_index.fetch_add(1, Ordering::SeqCst);
             }
             AgentEvent::MessageStart { message } => {
                 let _ = runner
-                    .emit(serde_json::json!({ "type": "message_start", "message": message }))
+                    .emit(ExtensionEvent::MessageStart(MessageStartPayload {
+                        message: serde_json::to_value(message).unwrap_or(Value::Null),
+                    }))
                     .await;
             }
             AgentEvent::MessageUpdate {
@@ -5661,16 +5650,16 @@ impl AgentSession {
                 assistant_message_event,
             } => {
                 let _ = runner
-                    .emit(serde_json::json!({
-                        "type": "message_update",
-                        "message": message,
-                        "assistantMessageEvent": assistant_message_event,
+                    .emit(ExtensionEvent::MessageUpdate(MessageUpdatePayload {
+                        message: serde_json::to_value(message).unwrap_or(Value::Null),
+                        assistant_message_event: assistant_message_event.clone(),
                     }))
                     .await;
             }
             AgentEvent::MessageEnd { message } => {
                 let replacement = runner
-                    .emit_message_end(serde_json::json!({ "type": "message_end", "message": message }));
+                    .emit_message_end(serde_json::json!({ "type": "message_end", "message": message }))
+                    .await;
                 if let Some(replacement) = replacement {
                     if let Ok(parsed) = serde_json::from_value::<AgentMessage>(replacement) {
                         self.replace_message_in_place(parsed);
@@ -5683,11 +5672,10 @@ impl AgentSession {
                 args,
             } => {
                 let _ = runner
-                    .emit(serde_json::json!({
-                        "type": "tool_execution_start",
-                        "toolCallId": tool_call_id,
-                        "toolName": tool_name,
-                        "args": args,
+                    .emit(ExtensionEvent::ToolExecutionStart(ToolExecutionStartPayload {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        args: args.clone(),
                     }))
                     .await;
             }
@@ -5698,12 +5686,11 @@ impl AgentSession {
                 partial_result,
             } => {
                 let _ = runner
-                    .emit(serde_json::json!({
-                        "type": "tool_execution_update",
-                        "toolCallId": tool_call_id,
-                        "toolName": tool_name,
-                        "args": args,
-                        "partialResult": partial_result,
+                    .emit(ExtensionEvent::ToolExecutionUpdate(ToolExecutionUpdatePayload {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        args: args.clone(),
+                        partial_result: serde_json::to_value(partial_result).unwrap_or(Value::Null),
                     }))
                     .await;
             }
@@ -5714,12 +5701,11 @@ impl AgentSession {
                 is_error,
             } => {
                 let _ = runner
-                    .emit(serde_json::json!({
-                        "type": "tool_execution_end",
-                        "toolCallId": tool_call_id,
-                        "toolName": tool_name,
-                        "result": result,
-                        "isError": is_error,
+                    .emit(ExtensionEvent::ToolExecutionEnd(ToolExecutionEndPayload {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        result: serde_json::to_value(result).unwrap_or(Value::Null),
+                        is_error: *is_error,
                     }))
                     .await;
             }
@@ -7435,7 +7421,7 @@ impl AgentSession {
         let args = parsed.args.clone();
 
         let skills = self.resource_loader.get_skills().skills;
-        let skill = match skills.iter().find(|skill| skill.name == skill_name) {
+        let skill = match skills.iter().find(|skill| skill.name() == skill_name) {
             Some(skill) => skill.clone(),
             None => return text.to_string(), // Unknown skill, pass through
         };
@@ -7450,7 +7436,7 @@ impl AgentSession {
                 let base_dir = skill_base_dir(&skill);
                 let skill_block = format!(
                     "<skill name=\"{}\" location=\"{}\">\nReferences are relative to {}.\n\n{}\n</skill>",
-                    skill.name, file_path, base_dir, body
+                    skill.name(), file_path, base_dir, body
                 );
                 if args.is_empty() {
                     skill_block
@@ -7460,11 +7446,12 @@ impl AgentSession {
             }
             Err(error) => {
                 if let Some(runner) = self.extension_runner() {
-                    runner.emit_error_value(serde_json::json!({
-                        "extensionPath": file_path,
-                        "event": "skill_expansion",
-                        "error": error.to_string(),
-                    }));
+                    runner.emit_error(ExtensionError {
+                        extension_path: file_path.clone(),
+                        event: "skill_expansion".to_string(),
+                        error: error.to_string(),
+                        stack: None,
+                    });
                 }
                 text.to_string() // Return original on error
             }
@@ -8023,7 +8010,7 @@ impl AgentSession {
                 .unwrap()
                 .active_actions(None)
                 .into_iter()
-                .find(|action| action.lifecycle.state() == "selected");
+                .find(|action| action.lifecycle.state() == ActionLifecycleState::Selected);
             if epoch != self.session_input_pump_epoch.load(Ordering::SeqCst) {
                 if let Some(preselected) = preselected {
                     let mut store = self.action_store.lock().unwrap();
@@ -8108,7 +8095,7 @@ impl AgentSession {
                 else {
                     break;
                 };
-                if !turn_execution_policies_equal(&first_turn.base.execution_policy, &next_turn.base.execution_policy)
+                if !turn_execution_policies_equal(&first_turn.execution_policy, &next_turn.execution_policy)
                 {
                     break;
                 }
@@ -8127,7 +8114,13 @@ impl AgentSession {
             {
                 let mut store = self.action_store.lock().unwrap();
                 for action in actions.iter() {
-                    store.replace_lifecycle(&action.id, ActionLifecycle::Preparing { preparation: None });
+                    let mut next = action.clone();
+                    let _ = transition_session_action(
+                        &mut next,
+                        ActionLifecycle::Preparing { preparation: None },
+                        &TransitionOptions::default(),
+                    );
+                    let _ = store.update_action(&next);
                 }
             }
             self.notify_session_input_checkpoint_change();
@@ -8143,19 +8136,25 @@ impl AgentSession {
                                 .unwrap_or(false);
                             if durable {
                                 self.mark_delivery_record_durable(action, &current_messages_of(self));
-                                self.action_store.lock().unwrap().replace_lifecycle(
-                                    &action.id,
+                                let mut next = action.clone();
+                                let _ = transition_session_action(
+                                    &mut next,
                                     ActionLifecycle::Running {
                                         execution: ActionExecutionAlias::AgentTurn,
                                     },
+                                    &TransitionOptions::default(),
                                 );
+                                let _ = self.action_store.lock().unwrap().update_action(&next);
                             }
                         }
                         if self.action_state_of(&action.id) == Some("running".to_string()) {
-                            self.action_store.lock().unwrap().replace_lifecycle(
-                                &action.id,
+                            let mut next = action.clone();
+                            let _ = transition_session_action(
+                                &mut next,
                                 ActionLifecycle::Completed,
+                                &TransitionOptions::default(),
                             );
+                            let _ = self.action_store.lock().unwrap().update_action(&next);
                             if let Ok(ticket) = self.action_store.lock().unwrap().ticket_for(action) {
                                 ticket.settle_completed(None);
                             }
@@ -8170,7 +8169,7 @@ impl AgentSession {
                     let mut undelivered: Vec<QueuedSessionAction> = Vec::new();
                     for action in actions.iter() {
                         if !matches!(action.payload, QueuedActionPayload::Turn(_))
-                            || action.lifecycle.state() == "cancelled"
+                            || action.lifecycle.state() == ActionLifecycleState::Cancelled
                         {
                             continue;
                         }
@@ -8186,8 +8185,8 @@ impl AgentSession {
                     if self.is_deferred_session_input_error(&error, epoch) {
                         for action in undelivered.iter() {
                             let state = self.action_state_of(&action.id);
-                            match state.as_deref() {
-                                Some("committing") => {
+                            match state {
+                                Some(ActionLifecycleState::Committing) => {
                                     let mut store = self.action_store.lock().unwrap();
                                     let mut candidate = action.clone();
                                     let _ = store.rollback(
@@ -8198,7 +8197,8 @@ impl AgentSession {
                                         }),
                                     );
                                 }
-                                Some("preparing") | Some("selected") => {
+                                Some(ActionLifecycleState::Preparing)
+                                | Some(ActionLifecycleState::Selected) => {
                                     let mut store = self.action_store.lock().unwrap();
                                     let mut candidate = action.clone();
                                     let _ = store.rollback(&mut candidate, None);
@@ -8218,17 +8218,20 @@ impl AgentSession {
                     }
                     let terminal_error = self.as_error(&error);
                     for action in actions.iter() {
-                        if action.lifecycle.state() == "cancelled" {
+                        if action.lifecycle.state() == ActionLifecycleState::Cancelled {
                             continue;
                         }
                         let state = self.action_state_of(&action.id);
-                        if state.as_deref() != Some("completed") && state.as_deref() != Some("failed") {
-                            self.action_store.lock().unwrap().replace_lifecycle(
-                                &action.id,
+                        if state != Some(ActionLifecycleState::Completed) && state != Some(ActionLifecycleState::Failed) {
+                            let mut next = action.clone();
+                            let _ = transition_session_action(
+                                &mut next,
                                 ActionLifecycle::Failed {
                                     error: terminal_error.clone(),
                                 },
+                                &TransitionOptions::default(),
                             );
+                            let _ = self.action_store.lock().unwrap().update_action(&next);
                         }
                         let is_undelivered = undelivered.iter().any(|item| item.id == action.id);
                         if let Ok(ticket) = self.action_store.lock().unwrap().ticket_for(action) {
@@ -8249,7 +8252,7 @@ impl AgentSession {
                         }
                     }
                     let surface = actions.iter().any(|action| match &action.payload {
-                        QueuedActionPayload::Turn(turn) => turn.base.queue_visible,
+                        QueuedActionPayload::Turn(turn) => turn.queue_visible,
                         QueuedActionPayload::SessionCommand(_) => true,
                     });
                     if surface {
@@ -8259,12 +8262,12 @@ impl AgentSession {
             }
             for action in actions.iter() {
                 let state = self.action_state_of(&action.id);
-                let retained_cancelled_dispatch = state.as_deref() == Some("cancelled")
+                let retained_cancelled_dispatch = state == Some(ActionLifecycleState::Cancelled)
                     && matches!(action.payload, QueuedActionPayload::Turn(_));
                 if !retained_cancelled_dispatch
-                    && (state.as_deref() == Some("completed")
-                        || state.as_deref() == Some("failed")
-                        || state.as_deref() == Some("cancelled"))
+                    && (state == Some(ActionLifecycleState::Completed)
+                        || state == Some(ActionLifecycleState::Failed)
+                        || state == Some(ActionLifecycleState::Cancelled))
                 {
                     self.durable_rlm_terminal_notice_action_ids
                         .lock()
@@ -8303,7 +8306,7 @@ impl AgentSession {
             let input = input.clone();
             let work = async move {
                 let is_cancelled = || {
-                    session.action_state_of(&action_id).as_deref() == Some("cancelled")
+                    session.action_state_of(&action_id) == Some(ActionLifecycleState::Cancelled)
                 };
                 if is_cancelled() {
                     return;
@@ -8324,13 +8327,15 @@ impl AgentSession {
                     return;
                 }
                 {
-                    let mut store = session.action_store.lock().unwrap();
-                    store.replace_lifecycle(
-                        &action_id,
+                    let mut next = action.clone();
+                    let _ = transition_session_action(
+                        &mut next,
                         ActionLifecycle::Running {
                             execution: ActionExecutionAlias::SessionCommand,
                         },
+                        &TransitionOptions::default(),
                     );
+                    let _ = session.action_store.lock().unwrap().update_action(&next);
                 }
                 session.notify_session_input_checkpoint_change();
                 session.emit_queue_update();
@@ -8338,8 +8343,13 @@ impl AgentSession {
                 match outcome {
                     Ok(()) => {
                         {
-                            let mut store = session.action_store.lock().unwrap();
-                            store.replace_lifecycle(&action_id, ActionLifecycle::Completed);
+                            let mut next = action.clone();
+                            let _ = transition_session_action(
+                                &mut next,
+                                ActionLifecycle::Completed,
+                                &TransitionOptions::default(),
+                            );
+                            let _ = session.action_store.lock().unwrap().update_action(&next);
                         }
                         if let Ok(ticket) = session.action_store.lock().unwrap().ticket_for(action) {
                             ticket.settle_completed(None);
@@ -8349,13 +8359,15 @@ impl AgentSession {
                     Err(error) => {
                         let command_error = session.as_error(&error);
                         {
-                            let mut store = session.action_store.lock().unwrap();
-                            store.replace_lifecycle(
-                                &action_id,
+                            let mut next = action.clone();
+                            let _ = transition_session_action(
+                                &mut next,
                                 ActionLifecycle::Failed {
                                     error: command_error.clone(),
                                 },
+                                &TransitionOptions::default(),
                             );
+                            let _ = session.action_store.lock().unwrap().update_action(&next);
                         }
                         if let Ok(ticket) = session.action_store.lock().unwrap().ticket_for(action) {
                             ticket.reject_delivered(command_error.clone());
@@ -8434,11 +8446,12 @@ impl AgentSession {
         if let Some(runner) = self.extension_runner() {
             // Best-effort: a throwing error listener must not break the pump's requeue path.
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                runner.emit_error_value(serde_json::json!({
-                    "extensionPath": "<session-input>",
-                    "event": "session_input",
-                    "error": normalized,
-                }));
+                runner.emit_error(ExtensionError {
+                    extension_path: "<session-input>".to_string(),
+                    event: "session_input".to_string(),
+                    error: normalized,
+                    stack: None,
+                });
             }));
         }
     }
@@ -8468,7 +8481,7 @@ impl AgentSession {
             None => return Ok(()),
         };
         let execution_policy = match &first_turn.payload {
-            QueuedActionPayload::Turn(turn) => turn.base.execution_policy.clone(),
+            QueuedActionPayload::Turn(turn) => turn.execution_policy.clone(),
             QueuedActionPayload::SessionCommand(_) => return Ok(()),
         };
         let park_next_turn_messages = |session: &Arc<Self>, messages: Vec<CustomMessage>| {
@@ -8564,7 +8577,7 @@ impl AgentSession {
         }
         let transcript = self.messages();
         let missing_durable = turns.iter().any(|action| {
-            if self.action_state_of(&action.id).as_deref() == Some("cancelled") {
+            if self.action_state_of(&action.id) == Some(ActionLifecycleState::Cancelled) {
                 return false;
             }
             match primary_delivery_record(action) {
@@ -8603,7 +8616,7 @@ impl AgentSession {
         let is_deferred = self.is_session_input_handoff_deferred(epoch)
             || self.is_streaming()
             || turns.iter().any(|action| {
-                self.action_state_of(&action.id).as_deref() != Some("preparing")
+                self.action_state_of(&action.id) != Some(ActionLifecycleState::Preparing)
             });
         if is_deferred {
             return Err(DEFERRED_SESSION_INPUT_ERROR_MESSAGE.to_string());
@@ -8645,7 +8658,13 @@ impl AgentSession {
                     }
                 })
                 .unwrap_or(0);
-            store.insert_records(&first_id, first_primary_index, context_records);
+            let mut next = turns[0].clone();
+            if let QueuedActionPayload::Turn(turn) = &mut next.payload {
+                for (offset, record) in context_records.into_iter().enumerate() {
+                    turn.base.records.insert(first_primary_index + offset, record);
+                }
+            }
+            let _ = store.update_action(&next);
         }
         let prepared_messages: Vec<AgentMessage> = turns
             .iter()
@@ -8679,7 +8698,13 @@ impl AgentSession {
         {
             let mut store = self.action_store.lock().unwrap();
             for action in turns.iter() {
-                store.replace_lifecycle(&action.id, ActionLifecycle::Committing);
+                let mut next = action.clone();
+                let _ = transition_session_action(
+                    &mut next,
+                    ActionLifecycle::Committing,
+                    &TransitionOptions::default(),
+                );
+                let _ = store.update_action(&next);
             }
         }
         self.notify_session_input_checkpoint_change();
@@ -9019,12 +9044,12 @@ impl AgentSession {
             .into_iter()
             .filter(|action| match &action.payload {
                 QueuedActionPayload::SessionCommand(_) => true,
-                QueuedActionPayload::Turn(turn) => turn.base.queue_visible,
+                QueuedActionPayload::Turn(turn) => turn.queue_visible,
             })
             .collect();
         if clearable.iter().any(|action| {
             matches!(action.payload, QueuedActionPayload::Turn(_))
-                && action.lifecycle.state() == "preparing"
+                && action.lifecycle.state() == ActionLifecycleState::Preparing
         }) {
             self.session_input_pump_epoch.fetch_add(1, Ordering::SeqCst);
         }
@@ -9042,7 +9067,7 @@ impl AgentSession {
         let agent_message_error = "Queued agent message was cleared before delivery.".to_string();
         for action in clearable.iter() {
             let error = if matches!(action.payload, QueuedActionPayload::Turn(_))
-                && action.lifecycle.state() == "preparing"
+                && action.lifecycle.state() == ActionLifecycleState::Preparing
             {
                 prompt_error.clone()
             } else {
@@ -9067,10 +9092,11 @@ impl AgentSession {
         let clearable = self.action_store.lock().unwrap().clearable_actions(None);
         for action in clearable.iter() {
             if matches!(action.payload, QueuedActionPayload::Turn(_)) {
-                self.action_store
-                    .lock()
-                    .unwrap()
-                    .clear_prepared(&action.id);
+                let mut next = action.clone();
+                if let QueuedActionPayload::Turn(turn) = &mut next.payload {
+                    turn.prepared = None;
+                }
+                let _ = self.action_store.lock().unwrap().update_action(&next);
             }
         }
     }
@@ -9091,8 +9117,8 @@ impl AgentSession {
             .iter()
             .filter(|action| {
                 matches!(action.payload, QueuedActionPayload::Turn(_))
-                    && (action.lifecycle.state() == "committing"
-                        || action.lifecycle.state() == "running")
+                    && (action.lifecycle.state() == ActionLifecycleState::Committing
+                        || action.lifecycle.state() == ActionLifecycleState::Running)
             })
             .count();
         let matching: Vec<QueuedSessionAction> = owned_actions
@@ -9108,10 +9134,10 @@ impl AgentSession {
                     return false;
                 }
                 let state = action.lifecycle.state();
-                state == "queued"
-                    || state == "selected"
-                    || state == "preparing"
-                    || (state == "committing"
+                state == ActionLifecycleState::Queued
+                    || state == ActionLifecycleState::Selected
+                    || state == ActionLifecycleState::Preparing
+                    || (state == ActionLifecycleState::Committing
                         && dispatched_turn_count == 1
                         && !primary_delivery_record(action)
                             .map(|record| record.started)
@@ -9128,13 +9154,13 @@ impl AgentSession {
         let removed_texts = |delivery: DeliveryPolicy| -> Vec<String> {
             let mut texts: Vec<String> = matching
                 .iter()
-                .filter(|action| action.delivery == delivery && action.lifecycle.state() == "queued")
+                .filter(|action| action.delivery == delivery && action.lifecycle.state() == ActionLifecycleState::Queued)
                 .map(|action| action_text(action))
                 .collect();
             texts.extend(
                 matching
                     .iter()
-                    .filter(|action| action.delivery == delivery && action.lifecycle.state() != "queued")
+                    .filter(|action| action.delivery == delivery && action.lifecycle.state() != ActionLifecycleState::Queued)
                     .map(|action| action_text(action)),
             );
             texts
@@ -9168,7 +9194,7 @@ impl AgentSession {
             }
         }
         let should_abort = matching.iter().any(|action| {
-            action.lifecycle.state() == "cancelled"
+            action.lifecycle.state() == ActionLifecycleState::Cancelled
                 && matches!(action.payload, QueuedActionPayload::Turn(_))
         });
         if should_abort {
@@ -9286,22 +9312,22 @@ impl AgentSession {
                                     .cloned()
                                     .map(pi_ai::types::ImageOrTextContent::Image),
                             );
-                            turn.base.content = Some(content);
-                        } else if let Some(content) = turn.base.content.clone() {
+                            turn.content = Some(content);
+                        } else if let Some(content) = turn.content.clone() {
                             let mut next: Vec<pi_ai::types::ImageOrTextContent> = vec![
                                 pi_ai::types::ImageOrTextContent::Text(TextContent::new(text)),
                             ];
                             next.extend(content.into_iter().filter(|block| {
                                 !matches!(block, pi_ai::types::ImageOrTextContent::Text(_))
                             }));
-                            turn.base.content = Some(next);
+                            turn.content = Some(next);
                         }
                         turn.base.preview = None;
                         turn.prepared = None;
                         for record in turn.base.records.iter_mut() {
                             if record.role == DeliveryRecordRole::Primary {
                                 if let DeliveryMessage::User(user) = &mut record.message {
-                                    user.content = match turn.base.content.clone() {
+                                    user.content = match turn.content.clone() {
                                         Some(content) => UserContent::Blocks(content),
                                         None => UserContent::Text(text.clone()),
                                     };
@@ -9332,10 +9358,11 @@ impl AgentSession {
                         .unwrap()
                         .move_queued(&mut moved, target_policy, target_index);
                 } else {
-                    self.action_store
+                    let _ = self
+                        .action_store
                         .lock()
                         .unwrap()
-                        .replace_payload(&item.id, moved.payload.clone());
+                        .update_action(&moved);
                 }
                 self.resume_queued_work();
                 self.emit_queue_update();
@@ -9513,7 +9540,7 @@ impl AgentSession {
         &self,
         action: &QueuedSessionAction,
     ) -> (Option<u64>, Option<u64>) {
-        if action.lifecycle.state() == "cancelled" {
+        if action.lifecycle.state() == ActionLifecycleState::Cancelled {
             return (None, None);
         }
         let id = uuid::Uuid::new_v4().to_string();
@@ -9770,17 +9797,22 @@ impl AgentSession {
         }
     }
 
-    /// `_emitModelSelect(next, previous, reason)`.
-    async fn emit_model_select(self: &Arc<Self>, next: Model, previous: Model, reason: &str) {
-        let _ = self
-            .extension_runner()
-            .map(|runner| {
-                runner.emit_model_select_value(serde_json::json!({
-                    "next": serde_json::to_value(&next).unwrap_or(Value::Null),
-                    "previous": serde_json::to_value(&previous).unwrap_or(Value::Null),
-                    "reason": reason,
+    /// `_emitModelSelect(nextModel, previousModel, source)`.
+    async fn emit_model_select(self: &Arc<Self>, next: Model, previous: Option<Model>, source: &str) {
+        if let Some(previous) = &previous {
+            if models_are_equal(previous, &next) {
+                return;
+            }
+        }
+        if let Some(runner) = self.extension_runner() {
+            let _ = runner
+                .emit(ExtensionEvent::ModelSelect(ModelSelectPayload {
+                    model: next,
+                    previous_model: previous,
+                    source: source.to_string(),
                 }))
-            });
+                .await;
+        }
     }
 
     /// `_queueModelSelectEmit(emit)`.
@@ -10273,18 +10305,19 @@ impl AgentSession {
     }
 
     /// `_scheduleAutoRefine(reason, branchVersion)`.
-    fn schedule_auto_refine(&self, reason: &str, branch_version: Option<u64>) {
-        let branch_version = branch_version.unwrap_or_else(|| self.auto_refine_branch_version.load(Ordering::SeqCst));
-        let _ = branch_version;
+    fn schedule_auto_refine(&self, reason: &AutoRefineReason, branch_version: Option<u64>) {
+        let branch_version =
+            branch_version.unwrap_or_else(|| self.auto_refine_branch_version.load(Ordering::SeqCst));
         let pending = match reason {
-            "compact" => &self.compact_auto_refine_pending,
-            _ => &self.turn_interval_auto_refine_pending,
+            AutoRefineReason::Compact => &self.compact_auto_refine_pending,
+            AutoRefineReason::TurnInterval => &self.turn_interval_auto_refine_pending,
         };
         pending.store(true, Ordering::SeqCst);
+        let _ = branch_version;
     }
 
     /// `_maybeAutoRefine(reason)`.
-    async fn maybe_auto_refine(self: &Arc<Self>, reason: &str) -> Result<(), String> {
+    async fn maybe_auto_refine(self: &Arc<Self>, reason: &AutoRefineReason) -> Result<(), String> {
         if !self.auto_refine_allowed_for_session() {
             return Ok(());
         }
@@ -10297,87 +10330,573 @@ impl AgentSession {
     }
 
     /// The body of `_maybeAutoRefine`.
-    async fn maybe_auto_refine_inner(self: &Arc<Self>, reason: &str) -> Result<(), String> {
+    async fn maybe_auto_refine_inner(self: &Arc<Self>, reason: &AutoRefineReason) -> Result<(), String> {
         self.append_harness_digest_if_stale();
         let branch_version = self.auto_refine_branch_version.load(Ordering::SeqCst);
         self.emit(AgentSessionEvent::RefinementUpdate {
             active: true,
-            reason: Some(reason.to_string()),
+            reason: Some(reason.as_str().to_string()),
         });
-        let review = match self
+        let review = self
             .review_auto_refine(
-                &AutoRefineReviewRequest {
-                    reason: reason.to_string(),
-                    branch_version,
-                    instructions: None,
+                &AutoRefineReviewContext {
+                    reason: *reason,
+                    turns_since_last_review: self.assistant_turns_since_auto_refine.load(Ordering::SeqCst)
+                        as i64,
                 },
                 None,
             )
-            .await
-        {
+            .await;
+        let review = match review {
             Ok(review) => review,
-            Err(error) => {
+            Err(_) => {
+                *self.last_auto_refine_review_at.lock().unwrap() = now_ms();
                 self.emit(AgentSessionEvent::RefinementUpdate {
                     active: false,
-                    reason: Some(reason.to_string()),
+                    reason: Some(reason.as_str().to_string()),
                 });
-                return Err(error);
+                self.schedule_deferred_auto_refine_if_idle();
+                return Ok(());
             }
         };
-        *self.last_auto_refine_review_at.lock().unwrap() = now_ms();
+        let approved_review = if review.should_refine {
+            Some(review)
+        } else {
+            *self.last_auto_refine_review_at.lock().unwrap() = now_ms();
+            None
+        };
+        if approved_review.is_none() {
+            self.schedule_deferred_auto_refine_if_idle();
+            return Ok(());
+        }
         if self.auto_refine_branch_version.load(Ordering::SeqCst) != branch_version {
             self.emit(AgentSessionEvent::RefinementUpdate {
                 active: false,
-                reason: Some(reason.to_string()),
+                reason: Some(reason.as_str().to_string()),
             });
             return Ok(());
         }
-        *self.pending_auto_refine_review.lock().unwrap() = Some((reason.to_string(), review.clone()));
-        self.run_approved_refine(reason, &review).await
+        if let Some(approved_review) = approved_review {
+            self.run_approved_refine(reason, &approved_review).await?;
+        }
+        Ok(())
     }
 
     /// `_runApprovedRefine(reason, review)`.
-    async fn run_approved_refine(self: &Arc<Self>, reason: &str, review: &AutoRefineReview) -> Result<(), String> {
-        if !review.approved {
-            self.emit(AgentSessionEvent::RefinementUpdate {
-                active: false,
-                reason: Some(reason.to_string()),
-            });
-            return Ok(());
-        }
-        let request = PlanRefinementRequest {
-            instructions: auto_refine_instructions(&reason.to_string(), review),
-            source: RefinementSource::Auto,
+    async fn run_approved_refine(
+        self: &Arc<Self>,
+        reason: &AutoRefineReason,
+        review: &AutoRefineReview,
+    ) -> Result<(), String> {
+        self.auto_refine_in_progress.store(true, Ordering::SeqCst);
+        let options = RefineOptions {
+            instructions: Some(auto_refine_instructions(reason, review)),
+            ..Default::default()
         };
-        let plan = plan_refinement(request).await?;
-        let normalized = normalize_refinement_proposal(plan)?;
-        let result = apply_refinement_proposal(normalized)?;
-        self.record_refinement_outcome(&result);
-        self.emit(AgentSessionEvent::RefinementUpdate {
-            active: false,
-            reason: Some(reason.to_string()),
-        });
+        let outcome = self.refine_with_options(&options, false).await;
+        match outcome {
+            Ok(_) => {
+                *self.pending_auto_refine_review.lock().unwrap() = None;
+                *self.last_auto_refine_review_at.lock().unwrap() = now_ms();
+                self.assistant_turns_since_auto_refine.store(0, Ordering::SeqCst);
+                self.turn_interval_auto_refine_pending.store(false, Ordering::SeqCst);
+                if *reason == AutoRefineReason::Compact {
+                    self.compact_auto_refine_pending.store(false, Ordering::SeqCst);
+                }
+            }
+            Err(_) => {
+                // Auto-refine is opportunistic; manual /refine remains available.
+                // Stamp the cooldown so a persistently failing refine does not retry
+                // on every agent end.
+                *self.last_auto_refine_review_at.lock().unwrap() = now_ms();
+            }
+        }
+        self.auto_refine_in_progress.store(false, Ordering::SeqCst);
+        self.schedule_deferred_auto_refine_if_idle();
         Ok(())
     }
 
     /// `_reviewAutoRefine(context, signal?)`.
     async fn review_auto_refine(
         self: &Arc<Self>,
-        context: &AutoRefineReviewRequest,
+        context: &AutoRefineReviewContext,
         signal: Option<CancellationToken>,
     ) -> Result<AutoRefineReview, String> {
-        let reviewer = match &self.auto_refine_reviewer {
-            Some(reviewer) => reviewer.clone(),
+        let request = AutoRefineReviewRequest {
+            reason: context.reason,
+            turns_since_last_review: context.turns_since_last_review,
+        };
+        if let Some(reviewer) = &self.auto_refine_reviewer {
+            return reviewer(request.clone(), signal).await;
+        }
+        let model = match self.model() {
+            Some(model) => model,
             None => {
                 return Ok(AutoRefineReview {
-                    approved: false,
+                    should_refine: false,
+                    rationale: "No model selected.".to_string(),
                     instructions: None,
-                    ..Default::default()
                 })
             }
         };
-        reviewer(context.clone(), signal).await
+        let auth = self.get_required_request_auth(&model).await?;
+        let state = self.load_merged_harness_state();
+        let history = self.load_refinement_history();
+        review_auto_refine(ReviewAutoRefineRequest {
+            messages: &self.agent.state().messages,
+            state: &state,
+            history: &history,
+            model: RefineModel {
+                max_tokens: model.max_tokens,
+            },
+            api_key: auth.api_key,
+            context: AutoRefineReviewContext {
+                reason: context.reason,
+                turns_since_last_review: context.turns_since_last_review,
+            },
+            headers: auth.headers,
+            thinking_level: Some(thinking_level_name(&self.thinking_level())),
+            retry: Some(self.provider_retry_policy()),
+            complete: self.refinement_completion_fn(model),
+        })
+        .await
+        .map_err(|error| error.message)
     }
+
+    /// `providerRetryPolicy(this.settingsManager)`.
+    fn provider_retry_policy(&self) -> ProviderRetryPolicy {
+        crate::core::provider_retry::provider_retry_policy(&self.settings_manager.lock().unwrap())
+    }
+
+    /// `completeWithProviderRetry(() => completeSimple(model, context, options))`.
+    fn refinement_completion_fn(&self, model: Model) -> CompletionFn {
+        Arc::new(move |request: RefinementCompletionRequest| {
+            let model = model.clone();
+            Box::pin(async move {
+                let options = pi_ai::types::SimpleStreamOptions {
+                    stream: pi_ai::types::StreamOptions {
+                        max_tokens: Some(request.max_tokens),
+                        api_key: request.api_key.clone(),
+                        headers: request
+                            .headers
+                            .clone()
+                            .map(|headers| headers.into_iter().collect()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let context = pi_ai::types::Context {
+                    system_prompt: Some(request.system_prompt),
+                    messages: request
+                        .messages
+                        .iter()
+                        .map(|message| {
+                            pi_ai::types::Message::User(pi_ai::types::UserMessage::new(
+                                pi_ai::types::UserContent::Text(message.content.clone()),
+                                message.timestamp,
+                            ))
+                        })
+                        .collect(),
+                    tools: None,
+                };
+                pi_ai::stream::complete_simple(&model, &context, Some(&options)).await
+            })
+        })
+    }
+
+    /// `_loadMergedHarnessState()`.
+    fn load_merged_harness_state(&self) -> HarnessState {
+        let global = load_harness_state(&get_global_harness_state_dir(), HarnessScope::Global);
+        match self.local_harness_state_dir() {
+            Some(dir) => merge_harness_states(&global, Some(&load_harness_state(&dir, HarnessScope::Local))),
+            None => global,
+        }
+    }
+
+    /// `_planRefine(options, signal, trigger)`: the planning phase of `refine()`.
+    async fn plan_refine_with_options(
+        self: &Arc<Self>,
+        options: &RefineOptions,
+    ) -> Result<RefinementPlan, String> {
+        if self.disposed.load(Ordering::SeqCst) {
+            return Err("Cannot refine a disposed session.".to_string());
+        }
+        let model = match self.model() {
+            Some(model) => model,
+            None => return Err(format_no_model_selected_message()),
+        };
+        let auth = self.get_required_request_auth(&model).await?;
+        let global_dir = get_global_harness_state_dir();
+        let local_dir = self.local_harness_state_dir();
+        let global_state = load_harness_state(&global_dir, HarnessScope::Global);
+        let local_state = local_dir
+            .as_deref()
+            .map(|dir| load_harness_state(dir, HarnessScope::Local));
+        let planning_state = merge_harness_states(&global_state, local_state.as_ref());
+        let history = self.load_refinement_history();
+        let rollback_target = options
+            .rollback_id
+            .as_ref()
+            .and_then(|rollback_id| history.iter().find(|item| &item.id == rollback_id));
+        let mut baseline_scope = rollback_target
+            .and_then(infer_refinement_result_scope)
+            .unwrap_or(HarnessScope::Local);
+        let mut baseline_dir = match baseline_scope {
+            HarnessScope::Global => Some(global_dir.clone()),
+            HarnessScope::Local => local_dir.clone(),
+        };
+        if let Some(target) = rollback_target {
+            if let Some(path) = &target.harness_state_path {
+                let parent = Path::new(path)
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().to_string());
+                if let Some(parent) = parent {
+                    baseline_scope = if Path::new(&parent) == Path::new(&global_dir) {
+                        HarnessScope::Global
+                    } else {
+                        HarnessScope::Local
+                    };
+                    baseline_dir = Some(parent);
+                }
+            }
+        }
+        let baseline_state = match rollback_target {
+            Some(_) => load_harness_state(&baseline_dir.unwrap_or_default(), baseline_scope),
+            None => match baseline_scope {
+                HarnessScope::Global => global_state.clone(),
+                HarnessScope::Local => local_state.clone().unwrap_or_default(),
+            },
+        };
+        let plan = plan_refinement(PlanRefinementRequest {
+            messages: &self.agent.state().messages,
+            state: &planning_state,
+            history: &history,
+            model: RefineModel {
+                max_tokens: model.max_tokens,
+            },
+            api_key: auth.api_key,
+            options: options.clone(),
+            headers: auth.headers,
+            thinking_level: Some(thinking_level_name(&self.thinking_level())),
+            complete: self.refinement_completion_fn(model.clone()),
+        })
+        .await
+        .map_err(|error| error.message)?;
+        Ok(RefinementPlan {
+            baseline_state: Some(baseline_state),
+            ..plan
+        })
+    }
+
+    /// `_applyRefine(plan, options, refineAbort, source)`.
+    async fn apply_refine(
+        self: &Arc<Self>,
+        plan: &RefinementPlan,
+        options: &RefineOptions,
+        source: &str,
+    ) -> Result<RefinementResult, String> {
+        if self.disposed.load(Ordering::SeqCst) {
+            return Err("Cannot refine a disposed session.".to_string());
+        }
+        self.disconnect_from_agent();
+        let outcome = self.apply_refine_inner(plan, options, source).await;
+        if !self.disposed.load(Ordering::SeqCst) {
+            self.reconnect_to_agent();
+        }
+        outcome
+    }
+
+    /// The `_applyRefine` body between disconnect and reconnect.
+    async fn apply_refine_inner(
+        &self,
+        plan: &RefinementPlan,
+        options: &RefineOptions,
+        source: &str,
+    ) -> Result<RefinementResult, String> {
+        let global_dir = get_global_harness_state_dir();
+        let local_dir = self.local_harness_state_dir();
+        let requested_scope = if options.global.unwrap_or(false) {
+            HarnessScope::Global
+        } else {
+            HarnessScope::Local
+        };
+        let history = self.load_refinement_history();
+        let rollback_target = options
+            .rollback_id
+            .as_ref()
+            .and_then(|rollback_id| history.iter().find(|item| &item.id == rollback_id));
+        let mut target_scope = plan.rollback_scope.unwrap_or(requested_scope);
+        let mut target_dir = match target_scope {
+            HarnessScope::Global => Some(global_dir.clone()),
+            HarnessScope::Local => local_dir.clone(),
+        };
+        if target_scope == HarnessScope::Local {
+            if let Some(path) = rollback_target.and_then(|target| target.harness_state_path.clone()) {
+                let parent = Path::new(&path)
+                    .parent()
+                    .map(|parent| parent.to_string_lossy().to_string());
+                if let Some(parent) = parent {
+                    target_dir = Some(parent);
+                    if Path::new(&target_dir.clone().unwrap_or_default()) == Path::new(&global_dir) {
+                        target_scope = HarnessScope::Global;
+                    }
+                }
+            }
+        }
+        let target_dir = match target_dir {
+            Some(dir) => dir,
+            None => {
+                return Err(
+                    "Local harness refinement requires a persisted session; use global refinement instead."
+                        .to_string(),
+                )
+            }
+        };
+        let mut state = load_harness_state(&target_dir, target_scope);
+        let proposal = RefinementProposal {
+            edits: plan
+                .proposal
+                .edits
+                .iter()
+                .map(|edit| {
+                    let mut edit = edit.clone();
+                    if let Some(id) = &edit.id {
+                        if let Some(rest) = id.strip_prefix("local:") {
+                            edit.id = Some(rest.to_string());
+                        } else if let Some(rest) = id.strip_prefix("global:") {
+                            edit.id = Some(rest.to_string());
+                        }
+                    }
+                    edit
+                })
+                .collect(),
+            ..plan.proposal.clone()
+        };
+        if self.disposed.load(Ordering::SeqCst) {
+            return Err("Refinement cancelled because the session was disposed.".to_string());
+        }
+        let mut result = apply_refinement_proposal(
+            &mut state,
+            &proposal,
+            ApplyRefinementOptions {
+                id: plan.id.clone(),
+                rollback_of: plan.rollback_of.clone(),
+                scope: Some(target_scope),
+                baseline_state: plan.baseline_state.clone(),
+            },
+        );
+        result.harness_state_path = Some(save_harness_state(&target_dir, &state)?);
+        if target_scope == HarnessScope::Global {
+            append_global_refinement(&global_dir, &result);
+        }
+        let _ = self
+            .session_manager
+            .lock()
+            .unwrap()
+            .append_custom_entry(REFINEMENT_CUSTOM_TYPE, Some(serde_json::to_value(&result).unwrap_or(Value::Null)));
+        self.record_refinement_outcome(&result);
+        self.record_refinement_notice(&result, source);
+        self.emit(AgentSessionEvent::RefineComplete {
+            result: serde_json::to_value(&result).unwrap_or(Value::Null),
+        });
+        Ok(result)
+    }
+
+    /// `_recordRefinementNotice(result, source)`.
+    fn record_refinement_notice(&self, result: &RefinementResult, source: &str) {
+        if !result.applied_edits.iter().any(|edit| edit.applied) {
+            return;
+        }
+        self.append_durable_refine_message(&create_refinement_notice_message(
+            result,
+            source.to_string(),
+            now_ms_i64(),
+        ));
+    }
+
+    /// `refine(options, internal)`.
+    async fn refine_with_options(
+        self: &Arc<Self>,
+        options: &RefineOptions,
+        skip_abort: bool,
+    ) -> Result<RefinementResult, String> {
+        if skip_abort && self.is_streaming() {
+            return Err("Cannot refine without aborting while the agent is running.".to_string());
+        }
+        while self.refine_in_flight.lock().unwrap().is_some()
+            || self.refine_plan_in_flight.lock().unwrap().is_some()
+            || self.serialized_plan_in_flight.lock().unwrap().is_some()
+        {
+            if self.refine_in_flight.lock().unwrap().is_some() {
+                self.wait_for_refine_idle().await;
+            } else if self.refine_plan_in_flight.lock().unwrap().is_some() {
+                let in_flight = self.refine_plan_in_flight.lock().unwrap().take();
+                if let Some(in_flight) = in_flight {
+                    let _ = in_flight.await;
+                }
+            } else {
+                let in_flight = self.serialized_plan_in_flight.lock().unwrap().take();
+                if let Some(in_flight) = in_flight {
+                    let _ = in_flight.await;
+                }
+                if self.refine_in_flight.lock().unwrap().is_some()
+                    || self.refine_plan_in_flight.lock().unwrap().is_some()
+                {
+                    continue;
+                }
+                let _ = self.agent.wait_for_idle().await;
+                self.serialized_explicit_refine_options.lock().unwrap().take();
+            }
+        }
+
+        let plan = self.plan_refine_with_options(options).await;
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.schedule_session_input_pump();
+                return Err(error);
+            }
+        };
+
+        let session = self.clone();
+        let apply = Arc::new({
+            let options = options.clone();
+            move || {
+                let session = session.clone();
+                let plan = plan.clone();
+                let options = options.clone();
+                Box::pin(async move { session.apply_refine(&plan, &options, options_source(&options)).await })
+            }
+        });
+        let settle = self.create_refine_settlement(apply.clone());
+        let outcome = apply().await;
+        settle();
+        self.notify_session_input_checkpoint_change();
+        self.schedule_session_input_pump();
+        outcome
+    }
+
+    /// The shared `_refineInFlight` settlement used by concurrent `refine` callers.
+    fn create_refine_settlement(
+        self: &Arc<Self>,
+        _apply: Arc<dyn Fn() -> BoxFuture<Result<RefinementResult, String>> + Send + Sync>,
+    ) -> Arc<dyn Fn() + Send + Sync> {
+        let session = self.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let settled: BoxFuture<Result<(), String>> = Box::pin(async move {
+            let _ = rx.await;
+            Ok(())
+        });
+        *self.refine_in_flight.lock().unwrap() = Some(settled);
+        Arc::new(move || {
+            if session.refine_in_flight.lock().unwrap().is_some() {
+                session.refine_in_flight.lock().unwrap().take();
+            }
+            let _ = tx.send(());
+        })
+    }
+
+    /// `_runSerializedRefine(options, source)`.
+    async fn run_serialized_refine(
+        self: &Arc<Self>,
+        options: &RefineOptions,
+        source: &str,
+    ) -> Result<(), String> {
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        while self.serialized_plan_in_flight.lock().unwrap().is_some()
+            || self.refine_in_flight.lock().unwrap().is_some()
+            || self.refine_plan_in_flight.lock().unwrap().is_some()
+        {
+            if self.serialized_plan_in_flight.lock().unwrap().is_some() {
+                let in_flight = self.serialized_plan_in_flight.lock().unwrap().take();
+                if let Some(in_flight) = in_flight {
+                    let _ = in_flight.await;
+                }
+            } else if self.refine_in_flight.lock().unwrap().is_some() {
+                self.wait_for_refine_idle().await;
+            } else {
+                let in_flight = self.refine_plan_in_flight.lock().unwrap().take();
+                if let Some(in_flight) = in_flight {
+                    let _ = in_flight.await;
+                }
+            }
+        }
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let plan = self.plan_refine_with_options(options).await;
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.schedule_session_input_pump();
+                return Err(error);
+            }
+        };
+        if self.disposed.load(Ordering::SeqCst) {
+            self.schedule_session_input_pump();
+            return Ok(());
+        }
+        let outcome = self.apply_refine(&plan, options, source).await;
+        self.notify_session_input_checkpoint_change();
+        self.schedule_session_input_pump();
+        outcome.map(|_| ())
+    }
+
+    /// `_runSerializedRefineCheckpoint()`.
+    async fn run_serialized_refine_checkpoint(self: &Arc<Self>) {
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            return;
+        }
+        if self.serialized_plan_in_flight.lock().unwrap().is_some() {
+            let in_flight = self.serialized_plan_in_flight.lock().unwrap().take();
+            if let Some(in_flight) = in_flight {
+                let _ = in_flight.await;
+            }
+        }
+        let pending = self.pending_requested_refine.lock().unwrap().take();
+        if let Some(pending) = pending {
+            let options = RefineOptions {
+                instructions: pending.instructions,
+                rollback_id: None,
+                global: pending.global,
+                ..Default::default()
+            };
+            let _ = self.run_serialized_refine(&options, REFINEMENT_SOURCE_SELF).await;
+            return;
+        }
+        if !self.auto_refine_allowed_for_session() {
+            return;
+        }
+        let settings = self.settings_manager.lock().unwrap().get_auto_refine_settings();
+        if !settings.enabled {
+            return;
+        }
+        if (self.assistant_turns_since_auto_refine.load(Ordering::SeqCst) as f64) < settings.turn_interval {
+            return;
+        }
+        let now = now_ms();
+        let last = *self.last_auto_refine_review_at.lock().unwrap();
+        if last > 0.0 && now - last < settings.cooldown_ms {
+            return;
+        }
+        let options = RefineOptions::default();
+        let _ = self
+            .run_serialized_refine(&options, REFINEMENT_SOURCE_AUTO)
+            .await;
+    }
+
+    /// `_waitForRefineIdle()`.
+    async fn wait_for_refine_idle(self: &Arc<Self>) {
+        while self.refine_in_flight.lock().unwrap().is_some() {
+            let in_flight = self.refine_in_flight.lock().unwrap().take();
+            if let Some(in_flight) = in_flight {
+                let _ = in_flight.await;
+            }
+        }
+    }
+
 
     /// `_appendHarnessDigestIfStale()`.
     fn append_harness_digest_if_stale(&self) {
@@ -10680,12 +11199,12 @@ fn is_rlm_heartbeat_status_update(value: &str) -> bool {
 
 /// `skill.filePath`.
 fn skill_file_path(skill: &crate::core::skills::Skill) -> String {
-    skill.file_path.clone()
+    skill.file_path().to_string()
 }
 
 /// `skill.baseDir`.
 fn skill_base_dir(skill: &crate::core::skills::Skill) -> String {
-    Path::new(&skill.file_path)
+    Path::new(skill.file_path())
         .parent()
         .map(|parent| parent.to_string_lossy().to_string())
         .unwrap_or_default()
@@ -10777,12 +11296,15 @@ fn primary_delivery_record_of(action: &QueuedSessionAction) -> Option<DeliveryRe
 
 /// `goal.status` name for the `goal` slash command result row.
 fn goal_status_name(status: &GoalStatus) -> String {
-    match status {
-        GoalStatus::Active => "active".to_string(),
-        GoalStatus::Paused => "paused".to_string(),
-        GoalStatus::Completed => "completed".to_string(),
-        GoalStatus::Failed => "failed".to_string(),
-        GoalStatus::Cleared => "cleared".to_string(),
+    status.as_str().to_string()
+}
+
+/// `GoalContextKind` discriminator from its TypeScript string form.
+fn goal_context_kind_of(kind: &str) -> GoalContextKind {
+    match kind {
+        "budget_limit" => GoalContextKind::BudgetLimit,
+        "objective_updated" => GoalContextKind::ObjectiveUpdated,
+        _ => GoalContextKind::Continuation,
     }
 }
 
@@ -10870,12 +11392,12 @@ fn session_action_recovery_of(action: &QueuedSessionAction) -> Option<SessionAct
                 })
                 .collect(),
             images: turn.images.clone(),
-            content: turn.base.content.clone(),
+            content: turn.content.clone(),
             custom_message: turn
                 .custom_message
                 .as_ref()
                 .and_then(|custom| serde_json::to_value(custom).ok()),
-            queue_visible: turn.base.queue_visible,
+            queue_visible: turn.queue_visible,
             accepted_agent_message: turn.accepted_agent_message,
             accepted_before_completion: turn.accepted_before_completion,
         },
@@ -11303,12 +11825,23 @@ impl AgentSession {
             registry.get_api_key_and_headers(model).await
         };
         if !resolved.ok {
-            return Err(format_no_api_key_found_message(&model.provider));
+            let error = resolved.error.clone().unwrap_or_default();
+            if error.starts_with("No API key found") {
+                return Err(format_no_api_key_found_message(&model.provider));
+            }
+            return Err(error);
         }
-        Ok(RequestAuth {
-            api_key: resolved.api_key.unwrap_or_default(),
-            headers: resolved.headers.unwrap_or_default(),
-        })
+        if let Some(api_key) = resolved.api_key.clone() {
+            return Ok(RequestAuth {
+                api_key,
+                headers: resolved.headers.clone(),
+            });
+        }
+        let is_oauth = self.model_registry.lock().unwrap().is_using_oauth(model);
+        if is_oauth {
+            return Err(format_authentication_failed_message(&model.provider));
+        }
+        Err(format_no_api_key_found_message(&model.provider))
     }
 }
 
@@ -11490,3 +12023,304 @@ impl AgentSession {
 }
 
 // PORT CURSOR: TS line 13194 (end of agent-session.ts; last member ported: extensionRunner). FILE COMPLETE.
+
+impl AgentSession {
+    /// `_actionStore` action state lookup by id.
+    fn action_state_of(&self, action_id: &str) -> Option<ActionLifecycleState> {
+        self.action_store
+            .lock()
+            .unwrap()
+            .owned_actions()
+            .into_iter()
+            .find(|action| action.id == action_id)
+            .map(|action| action.lifecycle.state())
+    }
+
+    /// `_markDeliveryRecordDurable(action, transcript)`: the action's primary
+    /// delivery record becomes durable once its message is in the transcript.
+    fn mark_delivery_record_durable(&self, action: &QueuedSessionAction, transcript: &[AgentMessage]) {
+        let Ok(primary) = primary_delivery_record(action) else {
+            return;
+        };
+        if !transcript.contains(&agent_message_from_delivery(&primary.message)) {
+            return;
+        }
+        let mut next = action.clone();
+        if let QueuedActionPayload::Turn(turn) = &mut next.payload {
+            for record in turn.base.records.iter_mut() {
+                if record.id == primary.id {
+                    record.durable = true;
+                }
+            }
+        }
+        let _ = self.action_store.lock().unwrap().update_action(&next);
+    }
+
+    /// `record.durable ||= delivered.has(record.message)` for every record.
+    fn mark_matching_records_durable(
+        &self,
+        action: &QueuedSessionAction,
+        delivered: &HashSet<String>,
+    ) {
+        let mut next = action.clone();
+        if let QueuedActionPayload::Turn(turn) = &mut next.payload {
+            for record in turn.base.records.iter_mut() {
+                if delivered.contains(&delivery_message_key_of(&record.message)) {
+                    record.durable = true;
+                }
+            }
+        }
+        let _ = self.action_store.lock().unwrap().update_action(&next);
+    }
+
+    /// The dispatch-failure record filter from `_startPreparedTurnActions`:
+    /// keep undelivered prefix records, keep delivered next-turn records,
+    /// keep everything else.
+    fn filter_records_after_dispatch_failure(&self, action: &QueuedSessionAction) {
+        let mut next = action.clone();
+        if let QueuedActionPayload::Turn(turn) = &mut next.payload {
+            turn.base.records.retain(|record| match record.role {
+                DeliveryRecordRole::Prefix => !record.durable,
+                DeliveryRecordRole::NextTurn => record.durable,
+                DeliveryRecordRole::Primary => true,
+            });
+        }
+        let _ = self.action_store.lock().unwrap().update_action(&next);
+    }
+
+    /// `action.payload.records = records.filter((record) => record.role !== "next_turn")`.
+    fn strip_next_turn_records(&self, action_id: &str) {
+        let Some(action) = self
+            .action_store
+            .lock()
+            .unwrap()
+            .owned_actions()
+            .into_iter()
+            .find(|action| action.id == action_id)
+        else {
+            return;
+        };
+        let mut next = action.clone();
+        if let QueuedActionPayload::Turn(turn) = &mut next.payload {
+            turn.base
+                .records
+                .retain(|record| record.role != DeliveryRecordRole::NextTurn);
+        }
+        let _ = self.action_store.lock().unwrap().update_action(&next);
+    }
+
+    /// `await this._agentEventQueue`.
+    async fn await_agent_event_queue(self: &Arc<Self>) {
+        let queued = self.agent_event_queue.lock().unwrap().clone();
+        let _ = queued.await;
+    }
+
+    /// `this._agentEventQueue = this._agentEventQueue.then(task, task)`.
+    fn push_agent_event_task<F>(self: &Arc<Self>, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let previous = self.agent_event_queue.lock().unwrap().clone();
+        let next: BoxFuture<Result<(), String>> = Box::pin(async move {
+            let _ = previous.await;
+            task.await;
+            Ok(())
+        });
+        *self.agent_event_queue.lock().unwrap() = next;
+    }
+
+    /// `_waitForRefineIdle()`.
+    async fn wait_for_refine_idle(self: &Arc<Self>) {
+        while self.refine_in_flight.lock().unwrap().is_some() {
+            let in_flight = self.refine_in_flight.lock().unwrap().take();
+            if let Some(in_flight) = in_flight {
+                let _ = in_flight.await;
+            }
+        }
+    }
+
+    /// `_maybeStartSerializedBackgroundPlan()`.
+    fn maybe_start_serialized_background_plan(self: &Arc<Self>) {
+        if !self.serialized_refine
+            || self.disposed.load(Ordering::SeqCst)
+            || self.disposing.load(Ordering::SeqCst)
+        {
+            return;
+        }
+        if self.serialized_plan_in_flight.lock().unwrap().is_some()
+            || self.refine_in_flight.lock().unwrap().is_some()
+            || self.refine_plan_in_flight.lock().unwrap().is_some()
+        {
+            return;
+        }
+        let pending = self.pending_requested_refine.lock().unwrap().take();
+        if let Some(pending) = pending {
+            let options = RefineOptions {
+                instructions: pending.instructions,
+                rollback_id: None,
+                global: pending.global,
+                retry: None,
+                evidence: None,
+                max_output_tokens: None,
+            };
+            *self.serialized_explicit_refine_options.lock().unwrap() = Some(options);
+            let branch_version = self.auto_refine_branch_version.load(Ordering::SeqCst);
+            let session = self.clone();
+            *self.serialized_plan_in_flight.lock().unwrap() =
+                Some(Box::pin(async move { session.run_background_plan(branch_version, true).await }));
+            return;
+        }
+        if !self.auto_refine_allowed_for_session() {
+            return;
+        }
+        let settings = self.settings_manager.lock().unwrap().get_auto_refine_settings();
+        if !settings.enabled {
+            return;
+        }
+        if (self.assistant_turns_since_auto_refine.load(Ordering::SeqCst) as f64) < settings.turn_interval {
+            return;
+        }
+        let now = now_ms();
+        let last = *self.last_auto_refine_review_at.lock().unwrap();
+        let under_cooldown = last > 0.0 && now - last < settings.cooldown_ms;
+        if under_cooldown {
+            return;
+        }
+        let branch_version = self.auto_refine_branch_version.load(Ordering::SeqCst);
+        let session = self.clone();
+        *self.serialized_plan_in_flight.lock().unwrap() =
+            Some(Box::pin(async move { session.run_background_plan(branch_version, false).await }));
+    }
+
+    /// `_runBackgroundPlan(options, refineAbort, branchVersion, skipReview)`.
+    async fn run_background_plan(
+        self: &Arc<Self>,
+        branch_version: u64,
+        skip_review: bool,
+    ) -> Result<Option<SerializedBackgroundPlanResult>, String> {
+        if !skip_review {
+            let context = AutoRefineReviewContext {
+                reason: AutoRefineReason::TurnInterval,
+                turns_since_last_review: self.assistant_turns_since_auto_refine.load(Ordering::SeqCst)
+                    as i64,
+            };
+            let review = self.review_auto_refine(&context).await;
+            if self.disposed.load(Ordering::SeqCst)
+                || self.disposing.load(Ordering::SeqCst)
+                || branch_version != self.auto_refine_branch_version.load(Ordering::SeqCst)
+            {
+                return Ok(Some(SerializedBackgroundPlanResult::Invalidated {
+                    branch_version,
+                }));
+            }
+            let review = match review {
+                Ok(review) => review,
+                Err(_) => {
+                    return Ok(Some(SerializedBackgroundPlanResult::Failure {
+                        explicit: false,
+                        branch_version,
+                    }))
+                }
+            };
+            if !review.should_refine {
+                return Ok(Some(SerializedBackgroundPlanResult::Skip { explicit: false }));
+            }
+            *self.serialized_explicit_refine_options.lock().unwrap() = Some(RefineOptions {
+                instructions: Some(auto_refine_instructions(
+                    &AutoRefineReason::TurnInterval,
+                    &review,
+                )),
+                rollback_id: None,
+                global: None,
+                retry: None,
+                evidence: None,
+                max_output_tokens: None,
+            });
+        }
+        let options = self
+            .serialized_explicit_refine_options
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        let plan = self.plan_refine_with_options(&options).await;
+        if self.disposed.load(Ordering::SeqCst)
+            || self.disposing.load(Ordering::SeqCst)
+            || branch_version != self.auto_refine_branch_version.load(Ordering::SeqCst)
+        {
+            return Ok(Some(SerializedBackgroundPlanResult::Invalidated {
+                branch_version,
+            }));
+        }
+        match plan {
+            Ok(plan) => Ok(Some(SerializedBackgroundPlanResult::Plan {
+                plan,
+                branch_version,
+                source: if skip_review {
+                    RefinementSource::SelfOnly
+                } else {
+                    RefinementSource::Auto
+                },
+            })),
+            Err(_) => Ok(Some(SerializedBackgroundPlanResult::Failure {
+                explicit: skip_review,
+                branch_version,
+            })),
+        }
+    }
+
+    /// `_ensureHarnessDigestContext()`.
+    fn ensure_harness_digest_context(&self) {
+        if self.agent.state().messages.is_empty() {
+            self.harness_digest_pending.store(true, Ordering::SeqCst);
+            return;
+        }
+        self.harness_digest_pending.store(false, Ordering::SeqCst);
+        self.append_harness_digest_if_stale();
+    }
+
+    /// `_appendDurableStatusMessage(message)`.
+    fn append_durable_status_message(&self, message: CustomMessage) -> Result<(), String> {
+        self.append_durable_refine_message(&message);
+        Ok(())
+    }
+
+    /// `settingsManager.getCompactionSettings()`, adapted to the compaction module shape.
+    fn compaction_settings(&self) -> CompactionSettings {
+        let resolved = self.settings_manager.lock().unwrap().get_compaction_settings();
+        CompactionSettings {
+            enabled: resolved.enabled,
+            reserve_tokens: resolved.reserve_tokens,
+            keep_recent_tokens: resolved.keep_recent_tokens,
+            summary_update_policy: resolved.summary_update_policy.clone(),
+        }
+    }
+
+    /// `_getThresholdContextTokens(assistantMessage, compactionTimestamp)`.
+    fn threshold_context_tokens(&self) -> Option<f64> {
+        let messages = self.agent.state().messages;
+        let estimate = estimate_context_tokens(&messages);
+        if let Some(index) = estimate.last_usage_index {
+            let usage_message = messages.get(index)?;
+            if let AgentMessage::Message(pi_ai::types::Message::Assistant(usage_message)) = usage_message {
+                let rebuilt_at = *self.provider_context_rebuilt_at.lock().unwrap();
+                let model = self.agent.state().model;
+                if (rebuilt_at.is_some() && usage_message.timestamp as f64 <= rebuilt_at.unwrap_or(0.0))
+                    || usage_message.model != model.id
+                    || usage_message.provider != model.provider
+                {
+                    return Some(messages.iter().map(estimate_tokens).sum());
+                }
+                let compaction_timestamp = self.active_compaction_timestamp();
+                if let Some(compaction_timestamp) = compaction_timestamp {
+                    if (usage_message.timestamp as f64) <= compaction_timestamp {
+                        return None;
+                    }
+                }
+            }
+            return Some(estimate.tokens);
+        }
+        None
+    }
+}
+

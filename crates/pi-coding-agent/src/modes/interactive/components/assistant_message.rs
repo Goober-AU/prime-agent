@@ -12,6 +12,7 @@ use pi_tui::tui::{Component, Container};
 use pi_tui::utils::{truncate_to_width, visible_width};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::core::auth_guidance::LOGIN_RECOVERY_MESSAGE;
 use crate::modes::interactive::components::collapsible_error::{
@@ -53,9 +54,9 @@ impl Default for AssistantMessageComponentOptions {
 }
 
 /// Private port of `toTuiMarkdownTheme` (`MarkdownTheme` of theme.ts carries
-/// `Send + Sync` closures; the pi-tui component holds `Rc` closures).
+/// `Arc` closures with `Send + Sync`; the pi-tui component holds `Rc` closures).
 fn to_tui_markdown_theme(theme_source: MarkdownTheme) -> TuiMarkdownTheme {
-    fn rc(value: Box<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
+    fn rc(value: Arc<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
         Rc::new(move |text: &str| value(text))
     }
 

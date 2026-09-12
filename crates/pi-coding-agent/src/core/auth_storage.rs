@@ -236,7 +236,12 @@ pub(crate) async fn get_oauth_api_key(
     if (current.expires as i64) > now_millis() {
         return Some(((provider.get_api_key)(current), current.clone()));
     }
-    let refreshed = (provider.refresh_token)(current.clone()).await;
+    let refreshed = match (provider.refresh_token)(current.clone()).await {
+        Ok(refreshed) => refreshed,
+        // TS rethrows as `Failed to refresh OAuth token for <id>`; this boundary
+        // copy reports "no key" so the call site falls back like the TS catch does.
+        Err(_) => return None,
+    };
     let api_key = (provider.get_api_key)(&refreshed);
     Some((api_key, refreshed))
 }
@@ -491,6 +496,7 @@ fn write_auth_file(path: &str, content: &str) -> Result<(), String> {
             mode: Some(0o600),
             fsync: false,
             fsync_dir: false,
+            before_rename: None,
         },
     )
     .map_err(|error| error.to_string())
@@ -586,15 +592,18 @@ impl AuthStorageBackend for FileAuthStorageBackend {
 }
 
 /// `class InMemoryAuthStorageBackend`.
+///
+/// The value lives behind an `Arc` so `withLockAsync` can write it back after its
+/// await, the way `this.value` is reachable inside the TypeScript async method.
 #[derive(Default)]
 pub struct InMemoryAuthStorageBackend {
-    value: Mutex<Option<String>>,
+    value: Arc<Mutex<Option<String>>>,
 }
 
 impl InMemoryAuthStorageBackend {
     pub fn new() -> Self {
         Self {
-            value: Mutex::new(None),
+            value: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -613,15 +622,15 @@ impl AuthStorageBackend for InMemoryAuthStorageBackend {
     }
 
     fn with_lock_async(&self, f: LockFn) -> BoxFuture<Result<(), String>> {
-        let current = self
-            .value
+        let value = self.value.clone();
+        let current = value
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         Box::pin(async move {
             let next = f(current).await?;
             if let Some(next) = next {
-                let mut guard = self.value.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let mut guard = value.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 *guard = Some(next);
             }
             Ok(())
@@ -692,7 +701,7 @@ impl AuthStorage {
     pub fn in_memory(data: AuthStorageData, options: Option<AuthStorageOptions>) -> Self {
         let storage = InMemoryAuthStorageBackend::new();
         let serialized = serde_json::to_string_pretty(&data).unwrap_or_else(|_| "{}".to_string());
-        let _ = storage.with_lock(&mut |_current| Ok(Some(serialized)));
+        let _ = storage.with_lock(&mut |_current| Ok(Some(serialized.clone())));
         Self::from_storage(Box::new(storage), options)
     }
 
@@ -1256,12 +1265,10 @@ impl AuthStorage {
     ) -> Result<(), String> {
         let provider = get_oauth_provider(provider_id)
             .ok_or_else(|| format!("Unknown OAuth provider: {}", provider_id))?;
-        let credentials = (provider.login)(callbacks).await;
+        let credentials = (provider.login)(callbacks).await?;
         self.set(
             provider_id,
-            AuthCredential::OAuth {
-                credentials: credentials.clone(),
-            },
+            AuthCredential::OAuth { credentials },
         );
         Ok(())
     }
@@ -1853,8 +1860,8 @@ impl AuthStorage {
                 && (legacy_prime_team == Some(None)
                     || (config.team_id.is_none() && legacy_prime_team.is_some()))
             {
-                save_prime_cli_team_selection(legacy_prime_team.flatten().as_ref(), Some(&config_path))
-                    .map(|_| ())
+                let legacy_team = legacy_prime_team.flatten().map(|credential| to_prime_team(&credential));
+                save_prime_cli_team_selection(legacy_team.as_ref(), Some(&config_path)).map(|_| ())
             } else {
                 Ok(())
             };
@@ -2023,6 +2030,18 @@ impl AuthStorage {
 
     fn is_prime_cli_config_enabled(&self) -> bool {
         self.options.use_prime_cli_config || self.options.prime_cli_config_path.is_some()
+    }
+}
+
+/// `PrimeTeamCredential` and `prime-inference-auth.ts` `PrimeTeam` are the same
+/// TypeScript shape; the two Rust structs are this port's split of that seam.
+fn to_prime_team(team: &PrimeTeamCredential) -> PrimeTeam {
+    PrimeTeam {
+        team_id: team.team_id.clone(),
+        name: team.name.clone(),
+        slug: team.slug.clone(),
+        role: team.role.clone(),
+        created_at: team.created_at.clone(),
     }
 }
 

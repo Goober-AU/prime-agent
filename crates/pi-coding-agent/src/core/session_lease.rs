@@ -105,8 +105,7 @@ impl SessionLease {
         let directory = self.directory.clone();
         let token = self.token.clone();
         let result = with_lease_guard(&directory, || {
-            let owner = read_lease_owner(&directory);
-            if let Ok(owner) = owner {
+            if let Ok(LeaseOwnerState::Owner(owner)) = read_lease_owner(&directory) {
                 if owner.token == token {
                     reclaim_stale_lease(&directory);
                 }
@@ -388,7 +387,7 @@ fn windows_process_id_exists(pid: u32) -> bool {
     const STILL_ACTIVE: u32 = 259;
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle == 0 {
+        if handle.is_null() {
             return false;
         }
         let mut exit_code: u32 = 0;

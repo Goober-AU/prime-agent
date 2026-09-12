@@ -757,7 +757,15 @@ pub async fn acquire_daemon_update_restart_coordinator(
     let record_for_guard = record.clone();
     let already_running = with_coordinator_registry_guard(&registry_dir, move || {
         if let Ok(Some(current)) = read_coordinator_record(&path_for_guard) {
-            if is_process_identity_alive(&current) {
+            // `isProcessIdentityAlive(current)` reads the coordinator record's own
+            // identity fields, so the identity is projected out of the record first.
+            let identity = DaemonUpdateRestartProcessIdentity {
+                pid: current.pid,
+                process_start_id: current.process_start_id.clone(),
+                supervisor_generation: current.supervisor_generation.clone(),
+                supervisor_owner_token: current.supervisor_owner_token.clone(),
+            };
+            if is_process_identity_alive(&identity) {
                 return Some(DaemonUpdateRestartCoordinatorAlreadyRunningError::new(current));
             }
         }

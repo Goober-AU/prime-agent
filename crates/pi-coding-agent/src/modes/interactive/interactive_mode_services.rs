@@ -705,10 +705,16 @@ impl SessionManager {
 /// The real registry (`core/model-registry.rs`, ca-root slice) is not landed yet;
 /// this keeps the auth-flow and onboarding call shapes so the logic and its
 /// messages stay identical. See evidence/status/ca-interactive-a.json.
-#[derive(Default)]
 pub struct ModelRegistry {
     auth_storage: crate::core::auth_storage::AuthStorage,
     models: Vec<AgentConnectionModel>,
+}
+
+impl Default for ModelRegistry {
+    /// The TypeScript registry always starts with an in-memory auth store.
+    fn default() -> Self {
+        Self::in_memory()
+    }
 }
 
 impl ModelRegistry {
@@ -922,11 +928,21 @@ impl InteractiveModeUiServices {
 }
 
 /// Port of `InteractiveModeLocalToolRendererDefinition` (`Pick<ToolDefinition, "renderCall" | "renderResult" | "renderShell">`).
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct InteractiveModeLocalToolRendererDefinition {
     pub render_call: Option<Arc<dyn Fn() -> String + Send + Sync>>,
     pub render_result: Option<Arc<dyn Fn() -> String + Send + Sync>>,
     pub render_shell: Option<String>,
+}
+
+impl std::fmt::Debug for InteractiveModeLocalToolRendererDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InteractiveModeLocalToolRendererDefinition")
+            .field("render_call", &self.render_call.is_some())
+            .field("render_result", &self.render_result.is_some())
+            .field("render_shell", &self.render_shell)
+            .finish()
+    }
 }
 
 impl InteractiveModeLocalToolRendererDefinition {
@@ -987,7 +1003,7 @@ pub fn create_interactive_mode_ui_services(session: &AgentSession) -> Interactiv
     InteractiveModeUiServices {
         settings_manager: Arc::new(SettingsManager),
         model_registry: Arc::new(ModelRegistry::in_memory()),
-        get_initial_cwd: Box::new(SessionManager.get_cwd),
+        get_initial_cwd: Box::new(|| SessionManager.get_cwd()),
         get_initial_session_name: Box::new(|| SessionManager.get_session_name()),
         get_themes: Box::new(Vec::new),
         refresh_mcp_providers: Some(Box::new(move || {

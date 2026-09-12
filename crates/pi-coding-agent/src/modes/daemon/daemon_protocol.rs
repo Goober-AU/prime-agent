@@ -26,8 +26,8 @@ use crate::core::session_action_store::{InputSource, QueuedMessageLane, QueuedMe
 use crate::core::session_file_actions::DeleteSessionFileResult;
 use crate::core::usage::SessionUsageSummary;
 use crate::modes::agent_connection::types::{
-    AgentConnectionAgentStatus, AgentConnectionHeartbeat, AgentConnectionQueueMode,
-    AgentConnectionResourceSnapshot, AgentConnectionRlmChildAgentSnapshot, AgentConnectionSavedSessionScope,
+    AgentConnectionAgentStatus, AgentConnectionHeartbeat,
+    AgentConnectionResourceSnapshot, AgentConnectionRlmChildAgentSnapshot,
     AgentConnectionSavedSessionState, AgentConnectionScopedModel, AgentConnectionSessionContext,
     AgentConnectionSessionEvent, AgentConnectionSessionHeader, AgentConnectionSessionTree,
     AgentConnectionSessionTreeNode, AgentConnectionSideQuestionEvent, AgentConnectionSideQuestionTurn,
@@ -211,14 +211,14 @@ pub const DAEMON_DEFAULT_SERVER_CAPABILITIES: [DaemonServerCapability; 22] = [
 ];
 
 /// `{ dev: number; ino: number }` on the peer transport ticket.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonSocketIdentity {
     pub dev: f64,
     pub ino: f64,
 }
 
 /// Single-use short-lived credential for one direct TUI connection to one worker process incarnation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DaemonPeerTransportTicket {
     pub purpose: String,
     #[serde(rename = "socketPath")]
@@ -669,14 +669,16 @@ pub struct DaemonAttachClient {
 
 pub const DAEMON_UPDATE_RESTART_FORMAT_VERSION: f64 = 1.0;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// `SessionActionRecoverySnapshot` carries no `PartialEq`, so neither does the
+// queue that embeds it; nothing compares these wire values in the port.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonUpdateRestartQueue {
     pub actions: SessionActionRecoverySnapshot,
     #[serde(rename = "nextTurn")]
     pub next_turn: Vec<CustomMessage>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonUpdateRestartSession {
     #[serde(rename = "activeSessionId")]
     pub active_session_id: String,
@@ -707,7 +709,7 @@ pub struct DaemonUpdateRestartSession {
     pub had_accepted_prompt_in_flight: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonUpdateRestartManifest {
     #[serde(rename = "formatVersion")]
     pub format_version: f64,
@@ -730,7 +732,7 @@ pub struct DaemonSavedSessionListCommand {
     pub cwd: Option<String>,
     #[serde(rename = "sessionDir", skip_serializing_if = "Option::is_none", default)]
     pub session_dir: Option<String>,
-    pub scope: AgentConnectionSavedSessionScope,
+    pub scope: String,
 }
 
 /// `DaemonAttachClientMetadata & DaemonClientEnv & DaemonLaunchEnv` for attach/reattach.
@@ -1465,7 +1467,8 @@ pub enum DaemonCommand {
         id: Option<String>,
         #[serde(rename = "activeSessionId")]
         active_session_id: String,
-        mode: AgentConnectionQueueMode,
+        /// `AgentConnectionQueueMode` is a string union on the wire.
+        mode: String,
     },
     #[serde(rename = "set_follow_up_mode")]
     SetFollowUpMode {
@@ -1473,7 +1476,8 @@ pub enum DaemonCommand {
         id: Option<String>,
         #[serde(rename = "activeSessionId")]
         active_session_id: String,
-        mode: AgentConnectionQueueMode,
+        /// `AgentConnectionQueueMode` is a string union on the wire.
+        mode: String,
     },
     #[serde(rename = "set_auto_compaction")]
     SetAutoCompaction {
@@ -2089,7 +2093,7 @@ impl DaemonCommandCompatibility {
 
 /// `DAEMON_COMMAND_COMPATIBILITY`, verbatim from the TypeScript table
 /// (`satisfies Record<DaemonCommandName, DaemonCommandCompatibility>`).
-pub fn daemon_command_compatibility(command: DaemonCommandName) -> DaemonCommandCompatibility {
+pub fn daemon_command_compatibility(command: &str) -> DaemonCommandCompatibility {
     use DaemonServerCapability as Capability;
     match command {
         "list_agent_peers" => DaemonCommandCompatibility::revision(23),
@@ -2140,7 +2144,7 @@ const OWNED_PROMPT_CANCELLATION_COMMAND: DaemonCommandCompatibility =
 
 /// `DAEMON_COMMAND_PLANE`: which endpoint serves each command when a client
 /// holds both a supervisor and a direct worker connection.
-pub fn daemon_command_plane(command: DaemonCommandName) -> Option<&'static str> {
+pub fn daemon_command_plane(command: &str) -> Option<&'static str> {
     match command {
         "ack_result" | "list" | "list_saved_sessions" | "list_agent_peers" | "get_direct_worker_transport"
         | "create" | "reattach" | "complete_owned_session" | "promote_owned_session" | "kill" | "rename"
@@ -2803,7 +2807,7 @@ pub fn create_daemon_replay_info(
                 status: DaemonReplayStatus::Unavailable,
                 from_sequence: Some(resume_sequence),
                 to_sequence: last_event_sequence,
-                from_cursor,
+                from_cursor: Some(from_cursor.clone()),
                 to_cursor: Some(to_cursor),
                 reason: Some("event_generation_changed".to_string()),
             };

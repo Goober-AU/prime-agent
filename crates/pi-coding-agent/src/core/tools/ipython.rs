@@ -223,7 +223,13 @@ fn create_abort_error() -> KernelError {
 }
 
 /// Port of `raceWithAbort`.
-async fn race_with_abort<F, T>(promise: F, signal: Option<AbortSignal>, on_abort: Option<&dyn Fn()>) -> Result<T, KernelError>
+async fn race_with_abort<F, T>(
+    promise: F,
+    signal: Option<AbortSignal>,
+    // Held across the `select!` await, so the callback must be `Send + Sync` for
+    // the enclosing spawned startup task to stay `Send`.
+    on_abort: Option<&(dyn Fn() + Send + Sync)>,
+) -> Result<T, KernelError>
 where
     F: std::future::Future<Output = Result<T, KernelError>>,
 {
@@ -1249,7 +1255,7 @@ pub fn create_ipython_tool(cwd: &str, options: Option<IpythonToolOptions>) -> pi
     wrap_tool_definition(&create_ipython_tool_definition(cwd, options), None)
 }
 
-fn abort_signal_from_token(token: tokio_util::sync::CancellationToken) -> AbortSignal {
+pub(crate) fn abort_signal_from_token(token: tokio_util::sync::CancellationToken) -> AbortSignal {
     let signal = AbortSignal::new();
     if token.is_cancelled() {
         signal.abort(None);

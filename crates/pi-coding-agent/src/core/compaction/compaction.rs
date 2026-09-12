@@ -296,7 +296,11 @@ fn is_permanent_provider_failure_kind(kind: Option<&str>, retries_performed: u32
 
 /// `completeWithProviderRetry` for the summary call sites.
 async fn complete_with_provider_retry(
-    attempt_completion: &dyn Fn() -> pi_ai::types::BoxFuture<Result<AssistantMessage, String>>,
+    // `Send + Sync` so awaiting the attempt inside the caller's `Send` future keeps
+    // that future `Send`.
+    attempt_completion: &(dyn Fn() -> pi_ai::types::BoxFuture<Result<AssistantMessage, String>>
+              + Send
+              + Sync),
     policy: Option<&ProviderRetryPolicy>,
     signal: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<AssistantMessage, String> {
@@ -385,10 +389,7 @@ async fn request_with_provider_retry(
     let mut attempt = 0u32;
     loop {
         if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
-            return Err(ProviderRequestError {
-                message: "Aborted".to_string(),
-                ..Default::default()
-            });
+            return Err(provider_request_error("Aborted".to_string()));
         }
         match attempt_request().await {
             Ok(result) => return Ok(result),
@@ -1261,6 +1262,9 @@ async fn generate_bounded_summary(
         let suffix_for_call = suffix.clone();
         let thinking_level = thinking_level.cloned();
         let signal_for_call = signal.cloned();
+        // `SummaryCallFn` is `'static`, so the borrowed retry policy and the
+        // borrowed signal are cloned into owned values before the closure.
+        let retry_for_call = retry.cloned();
         let attempt: SummaryCallFn = Arc::new(
             move |call_headers: Option<serde_json::Map<String, Value>>| {
                 let model = model_for_call.clone();
@@ -1268,6 +1272,10 @@ async fn generate_bounded_summary(
                 let suffix = suffix_for_call.clone();
                 let thinking_level = thinking_level.clone();
                 let signal = signal_for_call.clone();
+                // The wire call owns its own copy: the retry layer below still
+                // needs `signal` to decide whether a failure was a cancel.
+                let signal_for_complete = signal.clone();
+                let retry_for_call = retry_for_call.clone();
                 let chunk = chunk.clone();
                 let headers = call_headers.clone();
                 Box::pin(async move {
@@ -1276,7 +1284,7 @@ async fn generate_bounded_summary(
                         let api_key = api_key.clone();
                         let suffix = suffix.clone();
                         let thinking_level = thinking_level.clone();
-                        let signal = signal.clone();
+                        let signal = signal_for_complete.clone();
                         let headers = headers.clone();
                         let chunk = chunk.clone();
                         Box::pin(async move {
@@ -1294,9 +1302,9 @@ async fn generate_bounded_summary(
                                 Some(map)
                             });
                             if model.reasoning {
-                                if let Some(level) = thinking_level.as_deref() {
-                                    if level != "off" {
-                                        options.reasoning = Some(level.to_string());
+                                if let Some(level) = thinking_level {
+                                    if level != pi_agent_core::types::ThinkingLevel::Off {
+                                        options.reasoning = Some(level.as_str().to_string());
                                     }
                                 }
                             }
@@ -1330,7 +1338,8 @@ async fn generate_bounded_summary(
                         })
                             as pi_ai::types::BoxFuture<Result<AssistantMessage, String>>
                     };
-                    complete_with_provider_retry(&complete, retry, signal.as_ref()).await
+                    complete_with_provider_retry(&complete, retry_for_call.as_ref(), signal.as_ref())
+                        .await
                 })
             },
         );
@@ -1432,10 +1441,10 @@ pub async fn compact(
                 let signal = signal_for_call.clone();
                 Box::pin(async move {
                     let mut merged = options.unwrap_or_default();
-                    merged.simple.api_key = Some(api_key);
-                    merged.simple.signal = signal;
+                    merged.simple.stream.api_key = Some(api_key);
+                    merged.simple.stream.signal = signal;
                     merged.custom_instructions = custom_instructions;
-                    let headers = merged.simple.headers.clone();
+                    let headers = merged.simple.stream.headers.clone();
                     let model_for_request = model.clone();
                     let context_for_request = context.clone();
                     let merged_for_request = merged.clone();
@@ -1448,7 +1457,15 @@ pub async fn compact(
                         )
                     };
                     let _ = headers;
-                    compact_call().await
+                    // `compactSimple` resolves to the value (or undefined); the
+                    // retry layer owns the error channel, so a provider failure is
+                    // mapped to `ProviderRequestError` here.
+                    match compact_call().await {
+                        Some(result) => Ok(Some(result)),
+                        None => Err(provider_request_error(
+                            "Provider compaction is not supported for this model".to_string(),
+                        )),
+                    }
                 })
                     as pi_ai::types::BoxFuture<
                         Result<
@@ -1457,11 +1474,20 @@ pub async fn compact(
                         >,
                     >
             });
-            let request = || {
+            // `attempt()` already resolves to `ProviderRequestError`, so the
+            // closure only has to pin the boxed future at that type.
+            let request = || -> pi_ai::types::BoxFuture<
+                Result<
+                    Option<pi_ai::compaction::ProviderCompactionResult>,
+                    ProviderRequestError,
+                >,
+            > {
                 let attempt = attempt.clone();
-                Box::pin(async move { attempt().await.map_err(provider_request_error) })
+                Box::pin(async move { attempt().await })
             };
-            let remote = request_with_provider_retry(&request, retry, signal).await?;
+            let remote = request_with_provider_retry(&request, retry, signal)
+                .await
+                .map_err(|error| error.message)?;
             if let Some(remote) = remote {
                 if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
                     return Err(abort_error());
@@ -1492,6 +1518,12 @@ pub async fn compact(
     }
     let mut slices: Vec<SummarySlice> = Vec::new();
     let summary: String;
+    // `settings.summaryUpdatePolicy ?? SUMMARY_UPDATE_POLICY_OFF` is read once per
+    // summarisation call; `generateSummary` takes it by reference.
+    let summary_update_policy = settings
+        .summary_update_policy
+        .clone()
+        .unwrap_or_else(|| SUMMARY_UPDATE_POLICY_OFF.to_string());
 
     if *is_split_turn && !turn_prefix_messages.is_empty() {
         // Split turns make two wire calls with different bodies; each needs its own identity.
@@ -1508,10 +1540,7 @@ pub async fn compact(
                     thinking_level,
                     retry,
                     summary_call.clone(),
-                    settings
-                        .summary_update_policy
-                        .as_deref()
-                        .unwrap_or(SUMMARY_UPDATE_POLICY_OFF),
+                    &summary_update_policy,
                 )
                 .await
             } else {
@@ -1552,10 +1581,7 @@ pub async fn compact(
             thinking_level,
             retry,
             summary_call,
-            settings
-                .summary_update_policy
-                .as_deref()
-                .unwrap_or(SUMMARY_UPDATE_POLICY_OFF),
+            &summary_update_policy,
         )
         .await?;
         summary = result.summary.clone();

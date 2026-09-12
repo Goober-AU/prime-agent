@@ -1341,9 +1341,12 @@ impl ModelRegistry {
 
         let cache_path = self.prime_inference_catalog_cache_path();
         if self.live_prime_inference_models.is_none() {
+            // `cachePath ? readCachedPrimeInferenceModels(cachePath, ...) : undefined`
+            // - the reader itself may also return undefined, so `and_then` (not `map`)
+            // keeps the slot at `Option<Vec<Model>>`.
             self.live_prime_inference_models = cache_path
                 .as_deref()
-                .map(|path| read_cached_prime_inference_models(path, &self.bundled_prime_inference_models()));
+                .and_then(|path| read_cached_prime_inference_models(path, &self.bundled_prime_inference_models()));
         }
 
         let mut private_models: IndexMap<String, Model> = IndexMap::new();
@@ -2916,11 +2919,19 @@ impl ModelRegistry {
                     stream_simple(model, context, simple.as_ref())
                 })
             };
+            // `api-registry.ts` types `stream_simple` as
+            // `StreamFunction<TApi, SimpleStreamOptions>`; the Rust port declares
+            // `ApiProvider.stream_simple` as a plain `StreamFunction` (base
+            // `StreamOptions`), so the same adapter serves both fields, exactly as
+            // the TypeScript registers one function for `stream` and `streamSimple`.
+            // REPAIR CURSOR: shared-contract drift in crates/pi-ai/src/api_registry.rs
+            // (`ApiProvider` / `ApiProviderInternal.stream_simple` should be
+            // `ApiStreamSimpleFunction`); pi-ai is outside this pack.
             pi_ai::api_registry::register_api_provider(
                 pi_ai::api_registry::ApiProvider {
                     api: api.clone(),
-                    stream,
-                    stream_simple: stream_simple.clone(),
+                    stream: stream.clone(),
+                    stream_simple: stream,
                     compact: None,
                     supports_compaction: None,
                 },

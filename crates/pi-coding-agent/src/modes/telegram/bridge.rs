@@ -55,7 +55,7 @@ fn message_text(message: &AgentMessage) -> String {
                 pi_agent_core::types::CustomMessageContent::Text(text) => text.clone(),
                 pi_agent_core::types::CustomMessageContent::Blocks(blocks) => blocks
                     .iter()
-                    .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+                    .filter_map(|block| block.as_text().map(str::to_string))
                     .collect::<Vec<_>>()
                     .join("\n"),
             },
@@ -162,9 +162,12 @@ impl DrainingState {
 }
 
 /// The in-flight `flushReplies()` promise (`this.sending`).
+///
+/// The TS promise rejects with whatever the send threw, so the stored outcome
+/// carries the bridge error rather than a stringified copy.
 struct SendingState {
     done: tokio::sync::Notify,
-    outcome: Mutex<Option<Result<(), String>>>,
+    outcome: Mutex<Option<Result<(), TelegramBridgeError>>>,
     finished: Mutex<bool>,
 }
 
@@ -177,13 +180,13 @@ impl SendingState {
         })
     }
 
-    fn finish(&self, outcome: Result<(), String>) {
+    fn finish(&self, outcome: Result<(), TelegramBridgeError>) {
         *self.outcome.lock().unwrap() = Some(outcome);
         *self.finished.lock().unwrap() = true;
         self.done.notify_waiters();
     }
 
-    async fn wait(&self) -> Result<(), String> {
+    async fn wait(&self) -> Result<(), TelegramBridgeError> {
         loop {
             if let Some(outcome) = self.outcome.lock().unwrap().clone() {
                 return outcome;
@@ -474,7 +477,9 @@ impl TelegramBridge {
 
     /// `flushReplies()`.
     pub async fn flush_replies(&self, has_signal: bool) -> Result<(), TelegramBridgeError> {
-        if let Some(sending) = self.sending.lock().unwrap().clone() {
+        // Bind first: the `if let` scrutinee's guard would otherwise live across the await.
+        let in_flight = self.sending.lock().unwrap().clone();
+        if let Some(sending) = in_flight {
             return sending.wait().await;
         }
         if now_ms() < *self.next_delivery_at.lock().unwrap() {
@@ -990,7 +995,8 @@ impl TelegramBridge {
                 .await;
         }
         self.questions.lock().unwrap().clear();
-        if let Some(sending) = self.sending.lock().unwrap().clone() {
+        let in_flight = self.sending.lock().unwrap().clone();
+        if let Some(sending) = in_flight {
             let _ = sending.wait().await;
         }
         outcome

@@ -42,7 +42,8 @@ pub struct SideQuestionTurn {
 }
 
 /// `interface SideQuestionRun { done: Promise<void>; abort(): void }`.
-#[derive(Clone)]
+///
+/// Not `Clone`: `done` is a boxed future, which cannot be duplicated.
 pub struct SideQuestionRun {
     pub done: BoxFuture<()>,
     pub abort: Arc<dyn Fn() + Send + Sync>,
@@ -115,7 +116,9 @@ pub trait SideQuestionAgent: Send + Sync {
 /// `new Agent({ initialState, convertToLlm, transformContext, streamFn, getApiKey,
 /// onPayload, onResponse, shouldStopAfterTurn, sessionId, thinkingBudgets,
 /// transport, toolExecution })`.
-#[derive(Clone, Default)]
+/// Not `Default`: the required `shouldStopAfterTurn` callback has no default
+/// value, and every construction site supplies the full option set.
+#[derive(Clone)]
 pub struct SideQuestionAgentOptions {
     pub initial_state: AgentState,
     pub convert_to_llm: Option<Arc<dyn Fn(Vec<AgentMessage>) -> Vec<pi_ai::types::Message> + Send + Sync>>,

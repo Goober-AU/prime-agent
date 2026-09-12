@@ -127,6 +127,7 @@ pub fn parse_ss_listeners(stdout: &str, app_name: &str) -> Vec<DiscoveredDaemonP
         daemons.push(DiscoveredDaemonProcess {
             pid: owner.1,
             socket_path: normalize_socket_path(socket_path, None),
+            uptime_seconds: None,
         });
     }
     daemons
@@ -167,7 +168,7 @@ pub fn parse_lsof_listeners(stdout: &str) -> Vec<DiscoveredDaemonProcess> {
             let key = format!("{}:{}", pid.unwrap(), socket_path);
             if !seen.contains(&key) {
                 seen.insert(key);
-                daemons.push(DiscoveredDaemonProcess { pid: pid.unwrap(), socket_path });
+                daemons.push(DiscoveredDaemonProcess { pid: pid.unwrap(), socket_path, uptime_seconds: None });
             }
         }
     }
@@ -268,7 +269,7 @@ pub fn is_worker_socket_path(socket_path: &str) -> bool {
     }
     let parent = Path::new(socket_path).parent().map(|path| resolve_path(path)).unwrap_or_default();
     let name = base_name(socket_path);
-    parent == resolve_path(&default_daemon_socket_dir())
+    parent == resolve_path(Path::new(&default_daemon_socket_dir()))
         && name.starts_with("worker-")
         && name.ends_with(".sock")
 }
@@ -542,6 +543,7 @@ async fn run_shutdown_all_converging(
     for action in actions {
         let socket_path = action.daemon().socket_path.clone();
         let pid = action.daemon().pid;
+        let action_kind = action.kind();
         if let Some(pid) = pid {
             if handled_pids.contains(&pid) {
                 admission.assert_or_renew().await?;
@@ -612,7 +614,7 @@ async fn run_shutdown_all_converging(
                 failed.push((socket_path.clone(), reason));
             }
         }
-        if force && action_kind(&action) != "skip" {
+        if force && action_kind != "skip" {
             for reason in force_stop_tracked_workers(&socket_path, admission).await {
                 failed.push((socket_path.clone(), reason));
             }
@@ -655,10 +657,6 @@ async fn run_shutdown_all_converging(
         (io.set_exit_code)(1);
     }
     Ok(())
-}
-
-fn action_kind(action: &ReapAction) -> &'static str {
-    action.kind()
 }
 
 async fn stop_hidden_supervisors(

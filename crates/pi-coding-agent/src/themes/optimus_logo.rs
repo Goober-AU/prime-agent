@@ -36,12 +36,12 @@ fn tones_by_row() -> &'static HashMap<&'static str, &'static [i32]> {
 /// Select a complete portrait instead of averaging its edges into dense shading.
 pub fn get_optimus_logo(max_width: f64, max_rows: f64) -> Vec<String> {
     let width = if max_width.is_finite() {
-        std::cmp::max(1.0, max_width.floor()) as usize
+        max_width.floor().max(1.0) as usize
     } else {
         50
     };
     let rows = if max_rows.is_finite() {
-        std::cmp::max(1.0, max_rows.floor()) as usize
+        max_rows.floor().max(1.0) as usize
     } else {
         25
     };

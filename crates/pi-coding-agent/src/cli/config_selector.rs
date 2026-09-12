@@ -36,6 +36,10 @@ pub async fn select_config(options: ConfigSelectorOptions) -> Result<(), String>
 
     let (close_sender, close_receiver) = tokio::sync::oneshot::channel::<()>();
     let (exit_sender, exit_receiver) = tokio::sync::oneshot::channel::<()>();
+    // The callbacks are `Fn`, invoked once by the component, so the single-use
+    // sender is taken out of a shared slot rather than moved by the closure.
+    let close_sender = std::sync::Mutex::new(Some(close_sender));
+    let exit_sender = std::sync::Mutex::new(Some(exit_sender));
     let resolved = Arc::new(AtomicBool::new(false));
 
     let mut ui = TUI::new(Box::new(ProcessTerminal::new()), None);
@@ -46,11 +50,19 @@ pub async fn select_config(options: ConfigSelectorOptions) -> Result<(), String>
         ConfigSelectorCallbacks {
             on_close: Box::new(move || {
                 if !close_flag.swap(true, Ordering::SeqCst) {
-                    let _ = close_sender.send(());
+                    if let Some(sender) =
+                        close_sender.lock().unwrap_or_else(|error| error.into_inner()).take()
+                    {
+                        let _ = sender.send(());
+                    }
                 }
             }),
             on_exit: Box::new(move || {
-                let _ = exit_sender.send(());
+                if let Some(sender) =
+                    exit_sender.lock().unwrap_or_else(|error| error.into_inner()).take()
+                {
+                    let _ = sender.send(());
+                }
             }),
             request_render: {
                 let flag = Arc::clone(&request_render);

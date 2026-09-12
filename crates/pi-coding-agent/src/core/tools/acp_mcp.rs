@@ -88,12 +88,21 @@ fn execute_status_str(status: ExecuteStatus) -> &'static str {
 }
 
 async fn execute_mcp_code(
-    provisioner: &IpythonKernelProvisioner,
+    provisioner: &Arc<IpythonKernelProvisioner>,
     code: &str,
     signal: Option<CancellationToken>,
 ) -> Result<(String, Value), String> {
-    let manager = provisioner.ensure(None, signal.clone()).await?;
-    let result = manager.execute(code, signal, None).await?;
+    // `ensure` takes the shared provisioner, a progress handler and the kernel
+    // bootstrap `AbortSignal`; the tool signal is a `CancellationToken`.
+    let abort_signal = signal.clone().map(super::ipython::abort_signal_from_token);
+    let manager = provisioner
+        .ensure(None, abort_signal.clone())
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = manager
+        .execute(code, abort_signal, None)
+        .await
+        .map_err(|error| error.to_string())?;
     execution_result(result)
 }
 

@@ -327,9 +327,9 @@ impl RpcClient {
             .lock()
             .expect("event listeners poisoned")
             .push(listener.clone());
-        let listeners = self.inner.event_listeners.clone();
+        let inner = self.inner.clone();
         Arc::new(move || {
-            let mut guard = listeners.lock().expect("event listeners poisoned");
+            let mut guard = inner.event_listeners.lock().expect("event listeners poisoned");
             if let Some(index) = guard.iter().position(|entry| Arc::ptr_eq(entry, &listener)) {
                 guard.remove(index);
             }
@@ -345,9 +345,12 @@ impl RpcClient {
             .lock()
             .expect("observed session listeners poisoned")
             .push(listener.clone());
-        let listeners = self.inner.observed_session_listeners.clone();
+        let inner = self.inner.clone();
         Arc::new(move || {
-            let mut guard = listeners.lock().expect("observed session listeners poisoned");
+            let mut guard = inner
+                .observed_session_listeners
+                .lock()
+                .expect("observed session listeners poisoned");
             if let Some(index) = guard.iter().position(|entry| Arc::ptr_eq(entry, &listener)) {
                 guard.remove(index);
             }
@@ -469,7 +472,16 @@ impl RpcClient {
             .send(RpcCommand::GetAvailableModels { id: None }, DEFAULT_REQUEST_TIMEOUT_MS)
             .await?;
         let payload: RpcModelsPayload = self.get_data(response)?;
-        Ok(payload.models)
+        Ok(payload
+            .models
+            .into_iter()
+            .map(|model| ModelInfo {
+                provider: model.provider,
+                id: model.id,
+                context_window: model.context_window,
+                reasoning: model.reasoning,
+            })
+            .collect())
     }
 
     /// Set thinking level.

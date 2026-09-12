@@ -4,8 +4,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use pi_ai::models::supports_fast_mode;
-use pi_ai::types::ThinkingLevel;
+use pi_agent_core::types::ThinkingLevel;
 
+use crate::core::cron_jobs::{format_agent_cron_job, AgentCronJob};
 use crate::core::slash_commands::{
     builtin_slash_commands, is_builtin_slash_command_name, parse_refine_command_options, parse_slash_command,
     resolve_builtin_slash_command_name,
@@ -44,7 +45,7 @@ pub fn supported_commands() -> HashSet<&'static str> {
 
 /// `telegramCommandMenu()`.
 pub fn telegram_command_menu() -> Vec<TelegramMenuCommand> {
-    let descriptions: [(&str, &str); 6] = [
+    let descriptions: [(&str, &str); 7] = [
         ("settings", "Show current session settings"),
         (
             "model",
@@ -197,8 +198,12 @@ impl TelegramCommands {
                     state.session_id,
                     state.cwd,
                     model,
-                    state.thinking_level,
-                    if state.service_tier == "priority" { "on" } else { "off" },
+                    state.thinking_level.as_str(),
+                    if state.service_tier.as_ref().and_then(|tier| tier.as_deref()) == Some("priority") {
+                        "on"
+                    } else {
+                        "off"
+                    },
                     state_text
                 ));
                 Ok(())
@@ -270,12 +275,17 @@ impl TelegramCommands {
                         .iter()
                         .map(|level| level.as_str())
                         .collect();
-                    self.reply(format!("Effort: {}\nUse /effort {}", state.thinking_level, levels.join("|")));
+                    self.reply(format!(
+                        "Effort: {}\nUse /effort {}",
+                        state.thinking_level.as_str(),
+                        levels.join("|")
+                    ));
                     return Ok(());
                 }
                 let level = thinking_level_from_str(args);
                 if !level
-                    .map(|level| state.available_thinking_levels.contains(&level))
+                    .as_ref()
+                    .map(|level| state.available_thinking_levels.contains(level))
                     .unwrap_or(false)
                 {
                     let levels: Vec<&str> = state
@@ -297,12 +307,17 @@ impl TelegramCommands {
                 if !supports_fast_mode(model) {
                     return Err("The current model does not support fast mode.".to_string());
                 }
-                let enable = args == "on" || (args.is_empty() && state.service_tier != "priority");
+                // TS: `state.serviceTier !== "priority"` - the resolved tier is not priority.
+                let service_tier_is_priority =
+                    state.service_tier.as_ref().and_then(|tier| tier.as_deref()) == Some("priority");
+                let enable = args == "on" || (args.is_empty() && !service_tier_is_priority);
                 if !args.is_empty() && args != "on" && args != "off" {
                     return Err("Usage: /fast [on|off]".to_string());
                 }
                 connection
-                    .set_service_tier(if enable { "priority" } else { "default" }.to_string())
+                    .set_service_tier(Some(Some(
+                        if enable { "priority" } else { "default" }.to_string(),
+                    )))
                     .await?;
                 self.reply(format!("Fast mode: {}", if enable { "on" } else { "off" }));
                 Ok(())
@@ -319,11 +334,12 @@ impl TelegramCommands {
                 Ok(())
             }
             "new" => {
-                let options = crate::core::new_session_command::parse_new_session_command(if args.is_empty() {
-                    ""
+                let raw_args = if args.is_empty() {
+                    String::new()
                 } else {
-                    &format!(" {args}")
-                });
+                    format!(" {args}")
+                };
+                let options = crate::core::new_session_command::parse_new_session_command(&raw_args)?;
                 if connection.new_session(None).await? {
                     self.reply("New session cancelled.");
                     return Ok(());
@@ -462,7 +478,7 @@ impl TelegramCommands {
                     crate::core::cron_jobs::ParsedHeartbeatCommand::Status => {
                         let job = connection.get_heartbeat().await?;
                         self.reply(match job {
-                            Some(job) => crate::core::cron_jobs::format_agent_cron_job(&job),
+                            Some(job) => format_heartbeat_value(&job),
                             None => "No heartbeat is configured.".to_string(),
                         });
                     }
@@ -474,7 +490,7 @@ impl TelegramCommands {
                         let job = connection
                             .set_heartbeat(&schedule, &instruction, delivery_mode.as_deref())
                             .await?;
-                        self.reply(crate::core::cron_jobs::format_agent_cron_job(&job));
+                        self.reply(format_heartbeat_value(&job));
                     }
                     crate::core::cron_jobs::ParsedHeartbeatCommand::Pause
                     | crate::core::cron_jobs::ParsedHeartbeatCommand::Resume
@@ -488,7 +504,7 @@ impl TelegramCommands {
                             .update_heartbeat(serde_json::Value::String(action.to_string()))
                             .await?;
                         self.reply(match job {
-                            Some(job) => crate::core::cron_jobs::format_agent_cron_job(&job),
+                            Some(job) => format_heartbeat_value(&job),
                             None => "Heartbeat cleared.".to_string(),
                         });
                     }
@@ -499,7 +515,7 @@ impl TelegramCommands {
                 let heartbeats = connection.list_heartbeats().await?;
                 let text = heartbeats
                     .iter()
-                    .map(|heartbeat| crate::core::cron_jobs::format_agent_cron_job(&heartbeat.job))
+                    .map(|heartbeat| format_heartbeat_value(&heartbeat.job))
                     .collect::<Vec<String>>()
                     .join("\n");
                 self.reply(if text.is_empty() { "No heartbeats.".to_string() } else { text });
@@ -638,6 +654,14 @@ impl TelegramCommands {
             }
         }
     }
+}
+
+/// The connection trait carries heartbeat jobs as wire `Value`s while the TS seam
+/// is typed (`AgentCronJob`), so decode through the canonical `Deserialize` impl
+/// before formatting. TS reads missing fields as `undefined`; the port's
+/// all-defaulted struct renders them the same way.
+fn format_heartbeat_value(value: &serde_json::Value) -> String {
+    format_agent_cron_job(&serde_json::from_value::<AgentCronJob>(value.clone()).unwrap_or_default())
 }
 
 fn thinking_level_from_str(value: &str) -> Option<ThinkingLevel> {

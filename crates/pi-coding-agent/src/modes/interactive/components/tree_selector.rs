@@ -1096,11 +1096,10 @@ impl TreeList {
                 result = theme().fg("dim", &format!("[thinking: {thinking_level}]"));
             }
             AgentConnectionSessionEntry::ServiceTierChange { service_tier, .. } => {
-                let service_tier_display = if service_tier.is_empty() {
-                    "default"
-                } else {
-                    service_tier.as_str()
-                };
+                let service_tier_display = service_tier
+                    .as_ref()
+                    .and_then(|tier| tier.as_deref())
+                    .unwrap_or("default");
                 result = theme().fg("dim", &format!("[service tier: {service_tier_display}]"));
             }
             AgentConnectionSessionEntry::Custom { custom_type, .. } => {
@@ -1541,8 +1540,8 @@ impl Component for LabelInput {
         lines.push(truncate_to_width(
             &format!(
                 "{indent}{}  {}",
-                key_hint("tui.select.confirm", "save", KeyTextOptions::default()),
-                key_hint("tui.select.cancel", "cancel", KeyTextOptions::default())
+                key_hint("tui.select.confirm", "save", &KeyTextOptions::default()),
+                key_hint("tui.select.cancel", "cancel", &KeyTextOptions::default())
             ),
             width,
             "",
@@ -1630,25 +1629,25 @@ impl TreeSelectorComponent {
             None,
         ))));
         let filter_keys = [
-            key_text("app.tree.filter.default", false),
-            key_text("app.tree.filter.noTools", false),
-            key_text("app.tree.filter.userOnly", false),
-            key_text("app.tree.filter.labeledOnly", false),
-            key_text("app.tree.filter.all", false),
+            key_text("app.tree.filter.default", &KeyTextOptions::default()),
+            key_text("app.tree.filter.noTools", &KeyTextOptions::default()),
+            key_text("app.tree.filter.userOnly", &KeyTextOptions::default()),
+            key_text("app.tree.filter.labeledOnly", &KeyTextOptions::default()),
+            key_text("app.tree.filter.all", &KeyTextOptions::default()),
         ]
         .join("/");
         let cycle_keys = format!(
             "{}/{}",
-            key_text("app.tree.filter.cycleForward", false),
-            key_text("app.tree.filter.cycleBackward", false)
+            key_text("app.tree.filter.cycleForward", &KeyTextOptions::default()),
+            key_text("app.tree.filter.cycleBackward", &KeyTextOptions::default())
         );
         container.add_child(Rc::new(RefCell::new(TruncatedText::new(
             theme().fg(
                 "muted",
                 &format!(
                     "  ↑/↓: move. ←/→: page. ^←/^→ or Alt+←/Alt+→: fold/branch. {}: label. {filter_keys}: filters ({cycle_keys} cycle). {}: label time",
-                    key_text("app.tree.editLabel", false),
-                    key_text("app.tree.toggleLabelTimestamp", false)
+                    key_text("app.tree.editLabel", &KeyTextOptions::default()),
+                    key_text("app.tree.toggleLabelTimestamp", &KeyTextOptions::default())
                 ),
             ),
             0,
@@ -1733,7 +1732,8 @@ impl TreeSelectorComponent {
         } else {
             self.tree_list.borrow_mut().handle_input(key_data);
         }
-        if let Some((entry_id, label)) = self.pending_label_edit.borrow_mut().take() {
+        let pending_label_edit = self.pending_label_edit.borrow_mut().take();
+        if let Some((entry_id, label)) = pending_label_edit {
             if entry_id.is_empty() {
                 self.hide_label_input();
             } else {
@@ -2119,12 +2119,14 @@ fn get_searchable_text(node: &AgentConnectionSessionTreeNode) -> String {
         }
         AgentConnectionSessionEntry::ServiceTierChange { service_tier, .. } => {
             parts.push("service tier".to_string());
-            parts.push(if service_tier.is_empty() {
-                "default".to_string()
-            } else {
-                service_tier.clone()
-            });
-            if service_tier == "priority" {
+            parts.push(
+                service_tier
+                    .as_ref()
+                    .and_then(|tier| tier.as_deref())
+                    .unwrap_or("default")
+                    .to_string(),
+            );
+            if service_tier.as_ref().and_then(|tier| tier.as_deref()) == Some("priority") {
                 parts.push("fast on".to_string());
             }
         }

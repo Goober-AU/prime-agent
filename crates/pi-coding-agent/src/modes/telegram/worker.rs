@@ -994,7 +994,9 @@ async fn run_telegram_worker_inner(
             let _ = writer.write();
         }) as Arc<dyn Fn(Option<String>) + Send + Sync>
     };
-    let connection_view: Arc<dyn AgentConnection> = Arc::clone(&connection);
+    // `Arc::clone` would clone at the annotated trait-object type; the concrete
+    // `Arc<DaemonAgentConnection>` coerces to the connection trait object instead.
+    let connection_view: Arc<dyn AgentConnection> = connection.clone();
     let bridge = Arc::new(TelegramBridge::new(
         TelegramStore::new(agent_dir),
         settings,

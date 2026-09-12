@@ -1244,7 +1244,20 @@ async fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-async fn acquire_attempt(
+fn acquire_attempt<'a>(
+    lock_path: &'a str,
+    owner_alive: &'a OwnerAliveFn,
+    retry_on_swept_candidate: bool,
+) -> futures::future::BoxFuture<'a, Result<DirLockAttempt, KernelError>> {
+    // The swept-candidate path retries by recursion, so the future is boxed.
+    Box::pin(acquire_attempt_inner(
+        lock_path,
+        owner_alive,
+        retry_on_swept_candidate,
+    ))
+}
+
+async fn acquire_attempt_inner(
     lock_path: &str,
     owner_alive: &OwnerAliveFn,
     retry_on_swept_candidate: bool,
@@ -1310,7 +1323,7 @@ async fn acquire_attempt(
                 #[cfg(not(unix))]
                 {
                     let _ = metadata;
-                    None
+                    None::<(u64, u64)>
                 }
             }) {
                 if pinned_identity.0 != captured.dev || pinned_identity.1 != captured.ino {
@@ -1834,7 +1847,7 @@ async fn bootstrap_venv(
         "pip".to_string(),
         "install".to_string(),
         "--python".to_string(),
-        python,
+        python.clone(),
         runtime_requirement,
         STATE_SNAPSHOT_REQUIREMENT.to_string(),
     ];

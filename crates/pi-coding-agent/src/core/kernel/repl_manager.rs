@@ -633,8 +633,7 @@ impl KernelState {
         self.client_weak
             .lock()
             .unwrap()
-            .as_ref()
-            .and_then(|weak| weak.upgrade())
+            .upgrade()
             .map(|manager| manager as Arc<dyn KernelClient>)
     }
 
@@ -705,7 +704,7 @@ impl KernelState {
                 promise
             }
         };
-        race_startup_with_abort(start_promise.wait(), options.signal).await??;
+        race_startup_with_abort(start_promise.wait(), options.signal).await?;
         Ok(())
     }
 
@@ -1162,7 +1161,7 @@ impl KernelState {
             }
             tokio::select! {
                 biased;
-                _ = wait_for_abort(signal.clone()) => return Ok(()),
+                _ = wait_for_abort(Some(signal.clone())) => return Ok(()),
                 _ = task.wait() => {}
             }
             if signal.is_aborted() {
@@ -1253,7 +1252,10 @@ impl KernelState {
                 return;
             };
             match signal {
-                None => repair.wait().await,
+                // A rejected repair still clears the holder, and the loop re-reads it.
+                None => {
+                    let _ = repair.wait().await;
+                }
                 Some(signal) => {
                     tokio::select! {
                         biased;
@@ -1620,7 +1622,7 @@ impl KernelState {
                     index.map(|index| waiters.remove(index).1)
                 };
                 if let Some(waiter) = waiter {
-                    waiter.settle(Ok(()));
+                    waiter.settle();
                 }
             } else if kind == "error" && id.is_none() {
                 let evalue = event.get("evalue").map(node_string).unwrap_or_default();
@@ -1765,7 +1767,7 @@ impl KernelState {
         opts: ExecuteOptions,
     ) -> Result<ExecuteResult, KernelError> {
         self.wait_for_protocol_repair(&opts.signal).await;
-        let result = self.enqueue_execute(code, opts).await?;
+        let result = self.enqueue_execute(code, opts, None).await?;
         // Refresh the on-disk snapshot after real work so a later resume (or a
         // crash before graceful shutdown) revives the most recent namespace.
         if result.result.status == ExecuteStatus::Ok {
@@ -1993,6 +1995,7 @@ impl KernelState {
             sent_agent_messages: Vec::new(),
             background_output: pending_background_output,
             background_output_truncated: pending_truncated,
+            error: None,
             status: ExecuteStatus::Ok,
             done_fields: None,
             settled: false,
@@ -2056,11 +2059,6 @@ impl KernelState {
         }
 
         *self.active_execution.lock().unwrap() = Some(execution.clone());
-        if is_aborted(&opts.signal) {
-            if let Some(signal) = &opts.signal {
-                signal.notify_abort_listeners();
-            }
-        }
         if !opts.internal {
             *self.last_cell_code.lock().unwrap() = Some(code.to_string());
         }
@@ -2371,7 +2369,7 @@ impl KernelState {
         let started = operation.clone();
         tokio::spawn(async move {
             let request_id = uuid_v4();
-            let done = Arc::new(tokio::sync::Notify::new());
+            let done = Latch::new();
             {
                 let mut waiters = this.pending_done_waiters.lock().unwrap();
                 ordered_set(&mut waiters, request_id.clone(), done.clone());
@@ -2870,7 +2868,7 @@ impl KernelState {
                     if sent.is_err() {
                         return;
                     }
-                    done.notified().await;
+                    done.wait().await;
                 };
                 tokio::pin!(graceful);
                 tokio::pin!(kernel_exit);

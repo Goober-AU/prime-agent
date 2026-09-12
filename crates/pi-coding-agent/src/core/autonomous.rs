@@ -694,7 +694,7 @@ async fn hash_untracked_files(
         aggregate.update([0u8]);
         aggregate.update(
             hash_untracked_path(&resolve_path(cwd, &path), signal.clone())
-                .await
+                .await?
                 .as_bytes(),
         );
         aggregate.update([0u8]);
@@ -841,8 +841,6 @@ async fn run_child_process(
     if let Some(signal) = options.signal.clone() {
         let timed_out = timed_out.clone();
         let pid_for_signal = pid;
-        let mut child_handle = None;
-        let _ = &mut child_handle;
         signal_task = Some(tokio::spawn(async move {
             signal.cancelled().await;
             let _ = timed_out;

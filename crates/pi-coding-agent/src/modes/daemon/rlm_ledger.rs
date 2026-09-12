@@ -384,7 +384,7 @@ fn resolve_path(path: &str) -> String {
         return candidate.to_string_lossy().to_string();
     }
     std::env::current_dir()
-        .map(|cwd| cwd.join(candidate).to_string_lossy().to_string())
+        .map(|cwd| cwd.join(&candidate).to_string_lossy().to_string())
         .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
 }
 
@@ -1186,7 +1186,7 @@ pub async fn tombstone_saved_session_delete(
     known_summary_runtime_kind: Option<&str>,
 ) -> TombstoneSavedSessionDeleteResult {
     let deleted_path = canonical_session_path(session_path);
-    let deleted_info = read_session_info(session_path).await.ok();
+    let deleted_info = read_session_info(session_path).await;
     let known_child = known_summary_runtime_kind == Some("subagent")
         || deleted_info
             .as_ref()

@@ -234,7 +234,7 @@ pub struct AgentFamilyRosterResult {
     pub entries: Vec<AgentFamilyRosterEntry>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionNameScope {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -244,7 +244,7 @@ pub struct AgentSessionNameScope {
     pub depth: f64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionNameAvailabilityInput {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -356,11 +356,16 @@ pub fn assert_agent_session_name_available(
     catalog: &[AgentFamilyCatalogEntry],
     input: &AgentSessionNameAvailabilityInput,
 ) -> Result<(), String> {
+    let input_scope = AgentSessionNameScope {
+        parent_session_id: input.parent_session_id.clone(),
+        parent_session_path: input.parent_session_path.clone(),
+        depth: input.depth,
+    };
     let conflict = catalog.iter().any(|entry| {
         Some(entry.id.as_str()) != input.ignore_session_id.as_deref()
             && entry.name.as_deref() == Some(input.name.as_str())
             && entry.depth == input.depth
-            && same_agent_session_name_parent(entry, input, catalog)
+            && same_agent_session_name_parent(&catalog_entry_scope(entry), &input_scope, catalog)
     });
     if conflict {
         return Err(format_agent_session_name_unavailable(
@@ -391,7 +396,11 @@ pub fn build_agent_family_roster(
         .filter(|entry| {
             entry.id != current.id
                 && entry.depth == current.depth
-                && same_agent_family_parent(entry, current, catalog)
+                && same_agent_family_parent(
+                    &catalog_entry_scope(entry),
+                    &catalog_entry_scope(current),
+                    catalog,
+                )
         })
         .collect();
     let mut children: Vec<&AgentFamilyCatalogEntry> = catalog

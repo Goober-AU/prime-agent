@@ -123,9 +123,8 @@ impl BashOperations for LocalBashOperations {
             for (key, value) in options.env.clone().unwrap_or_else(get_shell_env) {
                 command_builder.env(key, value);
             }
-            if !cfg!(windows) {
-                command_builder.process_group(0);
-            }
+            #[cfg(unix)]
+            command_builder.process_group(0);
 
             let mut child = match command_builder.spawn() {
                 Ok(child) => child,
@@ -187,8 +186,13 @@ impl BashOperations for LocalBashOperations {
                 }
             };
 
+            // `wait` still holds the mutable borrow of `child`, so the pid is
+            // captured before the loop instead of read through `child` here.
+            let child_pid = child.id();
             if result.is_none() {
-                kill_process_tree(child.id());
+                if let Some(pid) = child_pid {
+                    kill_process_tree(pid);
+                }
             }
 
             if let Some(task) = stdout_task {
@@ -333,7 +337,8 @@ pub fn format_duration(ms: f64) -> String {
 }
 
 pub fn format_bash_call(args: Option<&BashToolInput>, theme: &dyn ToolTheme) -> String {
-    let command = str_value(args.map(|args| &Value::String(args.command.clone())));
+    let command_value = args.map(|args| Value::String(args.command.clone()));
+    let command = str_value(command_value.as_ref());
     let timeout = args.and_then(|args| args.timeout);
     let timeout_suffix = match timeout {
         Some(timeout) if timeout != 0.0 => theme.fg("muted", &format!(" (timeout {timeout}s)")),
@@ -462,7 +467,7 @@ pub fn rebuild_bash_result_render_component(
                 warnings.push(format!(
                     "Truncated: {} lines shown ({} limit)",
                     truncation.output_lines,
-                    format_size(truncation.max_bytes.unwrap_or(DEFAULT_MAX_BYTES))
+                    format_size(truncation.max_bytes)
                 ));
             }
         }

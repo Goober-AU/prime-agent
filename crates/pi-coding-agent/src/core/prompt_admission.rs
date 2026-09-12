@@ -63,7 +63,10 @@ pub async fn wait_for_prompt_admission<T, F>(
     signal: Option<CancellationToken>,
 ) -> Result<T, PromptAdmissionCancelledError>
 where
-    F: std::future::Future<Output = T> + Send,
+    // The cancelled branch spawns the work so a producer still finishes; a
+    // spawned task requires its future (and result) to be `'static`.
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: 'static,
 {
     let Some(signal) = signal else {
         return Ok(work.await);

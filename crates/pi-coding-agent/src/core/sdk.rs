@@ -579,7 +579,7 @@ pub async fn create_agent_session_with_factories(
             Box::pin(async move {
                 runner.emit(crate::core::extensions::types::ExtensionEvent::AfterProviderResponse(
                     crate::core::extensions::types::AfterProviderResponsePayload {
-                        status: response.status,
+                        status: response.status as f64,
                         headers: response.headers.into_iter()
                             .map(|(key, value)| (key, Value::String(value))).collect(),
                     },
@@ -618,14 +618,41 @@ pub async fn create_agent_session_with_factories(
     };
 
     let agent_factory = agent_factory.unwrap_or_else(|| Arc::new(|options| {
+        // `AgentOptions` allows `T[] | Promise<T[]>`; the port keeps the creation
+        // options synchronous and defers the call into the returned future.
+        let convert_to_llm: Arc<dyn Fn(Vec<AgentMessage>) -> BoxFuture<Vec<Message>> + Send + Sync> = {
+            let convert = Arc::clone(&options.convert_to_llm);
+            Arc::new(move |messages: Vec<AgentMessage>| -> BoxFuture<Vec<Message>> {
+                let convert = Arc::clone(&convert);
+                Box::pin(async move { (convert)(messages) })
+            })
+        };
+        let transform_context: Arc<
+            dyn Fn(
+                    Vec<AgentMessage>,
+                    Option<tokio_util::sync::CancellationToken>,
+                ) -> BoxFuture<Vec<AgentMessage>>
+                + Send
+                + Sync,
+        > = {
+            let transform = Arc::clone(&options.transform_context);
+            Arc::new(
+                move |messages: Vec<AgentMessage>,
+                      signal: Option<tokio_util::sync::CancellationToken>|
+                      -> BoxFuture<Vec<AgentMessage>> {
+                    let transform = Arc::clone(&transform);
+                    Box::pin(async move { (transform)(messages, signal) })
+                },
+            )
+        };
         Arc::new(pi_agent_core::agent::Agent::new(pi_agent_core::agent::AgentOptions {
             initial_state: Some(options.initial_state),
-            convert_to_llm: Some(options.convert_to_llm),
+            convert_to_llm: Some(convert_to_llm),
             stream_fn: Some(options.stream_fn),
             on_payload: Some(options.on_payload),
             on_response: Some(options.on_response),
             session_id: Some(options.session_id),
-            transform_context: Some(options.transform_context),
+            transform_context: Some(transform_context),
             steering_mode: Some(if options.steering_mode == "all" {
                 pi_agent_core::agent::QueueMode::All
             } else { pi_agent_core::agent::QueueMode::OneAtATime }),

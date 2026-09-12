@@ -1,90 +1,57 @@
 //! Port of packages/coding-agent/src/modes/daemon/saved-session-info.ts
 
-use serde_json::Value;
-
 use super::daemon_protocol::DaemonSavedSessionInfo;
-use super::daemon_session_list::{AgentStatusRecord, SessionInfo, SessionState};
 
-/// `SessionInfo` on the wire: dates become ISO strings.
-pub fn serialize_saved_session_info(session: &SessionInfo) -> DaemonSavedSessionInfo {
+/// The client-facing saved-session shape, re-exported where the TypeScript
+/// module imports it (`agent-connection/types.ts`).
+pub use crate::modes::agent_connection::types::AgentConnectionSavedSessionInfo;
+
+/// `serializeSavedSessionInfo(session: SessionInfo): DaemonSavedSessionInfo`.
+pub fn serialize_saved_session_info(session: &crate::core::session_manager::SessionInfo) -> DaemonSavedSessionInfo {
     DaemonSavedSessionInfo {
         path: session.path.clone(),
         id: session.id.clone(),
         cwd: session.cwd.clone(),
         name: session.name.clone(),
-        state: session
-            .state
-            .as_ref()
-            .map(|state| serde_json::json!({ "status": state.status })),
+        state: session.state.as_ref().and_then(project),
         parent_session_path: session.parent_session_path.clone(),
-        rlm_depth: session.rlm_depth,
-        created: iso_from_ms(session.created_ms),
-        modified: iso_from_ms(session.modified_ms),
-        message_count: session.message_count as i64,
+        rlm_depth: Some(session.rlm_depth as f64),
+        created: iso_from_ms(session.created),
+        modified: iso_from_ms(session.modified),
+        message_count: session.message_count as f64,
         first_message: session.first_message.clone(),
         all_messages_text: session.all_messages_text.clone(),
-        agent_status: session.agent_status.as_ref().map(|status| {
-            serde_json::json!({
-                "summary": status.summary,
-                "taskState": status.task_state,
-                "basedOnMessageCount": status.based_on_message_count,
-            })
-        }),
-        usage: session.usage.clone(),
+        agent_status: session.agent_status.as_ref().and_then(project),
+        usage: session.usage.as_ref().and_then(project),
     }
 }
 
-/// The client-facing saved-session shape (`AgentConnectionSavedSessionInfo`).
-#[derive(Debug, Clone, PartialEq)]
-pub struct AgentConnectionSavedSessionInfo {
-    pub path: String,
-    pub id: String,
-    pub cwd: String,
-    pub name: Option<String>,
-    pub state: Option<SessionState>,
-    pub parent_session_path: Option<String>,
-    pub rlm_depth: Option<i64>,
-    pub created: f64,
-    pub modified: f64,
-    pub message_count: usize,
-    pub first_message: String,
-    pub all_messages_text: String,
-    pub agent_status: Option<AgentStatusRecord>,
-    pub usage: Option<Value>,
+/// `session.state` / `session.agentStatus` / `session.usage` are copied straight
+/// across in the TypeScript; the port moves them through their JSON shape
+/// because the core session types and the wire types are separate structs.
+fn project<T: serde::Serialize, U: serde::de::DeserializeOwned>(value: &T) -> Option<U> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| serde_json::from_value(value).ok())
 }
 
+/// `deserializeSavedSessionInfo(session): AgentConnectionSavedSessionInfo`.
 pub fn deserialize_saved_session_info(session: &DaemonSavedSessionInfo) -> AgentConnectionSavedSessionInfo {
     AgentConnectionSavedSessionInfo {
         path: session.path.clone(),
         id: session.id.clone(),
         cwd: session.cwd.clone(),
         name: session.name.clone(),
-        state: session.state.as_ref().map(|state| SessionState {
-            status: state.get("status").and_then(Value::as_str).map(str::to_string),
-        }),
+        state: session.state.clone(),
         parent_session_path: session.parent_session_path.clone(),
         rlm_depth: session.rlm_depth,
         created: parse_iso_ms(&session.created),
         modified: parse_iso_ms(&session.modified),
-        message_count: session.message_count.max(0) as usize,
+        message_count: session.message_count,
         first_message: session.first_message.clone(),
         all_messages_text: session.all_messages_text.clone(),
-        agent_status: session.agent_status.as_ref().map(|status| AgentStatusRecord {
-            summary: status
-                .get("summary")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            task_state: status
-                .get("taskState")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            based_on_message_count: status
-                .get("basedOnMessageCount")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0) as usize,
-        }),
-        usage: session.usage.clone(),
+        agent_status: session.agent_status.clone(),
+        usage: session.usage.as_ref().and_then(project),
     }
 }
 
@@ -103,6 +70,7 @@ fn parse_iso_ms(value: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::session_manager::{AgentStatus, AgentTaskState, SessionInfo, SessionState, SessionStateStatus};
 
     fn session() -> SessionInfo {
         SessionInfo {
@@ -110,19 +78,17 @@ mod tests {
             id: "abc".to_string(),
             cwd: "/tmp".to_string(),
             name: Some("named".to_string()),
-            state: Some(SessionState {
-                status: Some("archived".to_string()),
-            }),
+            state: Some(SessionState { status: SessionStateStatus::Archived }),
             parent_session_path: Some("/tmp/p.jsonl".to_string()),
-            rlm_depth: Some(1),
-            created_ms: 0.0,
-            modified_ms: 1_000.0,
+            rlm_depth: 1,
+            created: 0.0,
+            modified: 1_000.0,
             message_count: 2,
             first_message: "hello".to_string(),
             all_messages_text: "hello world".to_string(),
-            agent_status: Some(AgentStatusRecord {
+            agent_status: Some(AgentStatus {
                 summary: "done".to_string(),
-                task_state: Some("completed".to_string()),
+                task_state: Some(AgentTaskState::Completed),
                 based_on_message_count: 2,
             }),
             usage: None,
@@ -140,7 +106,7 @@ mod tests {
         assert_eq!(restored.id, original.id);
         assert_eq!(restored.created, 0.0);
         assert_eq!(restored.modified, 1000.0);
-        assert_eq!(restored.message_count, 2);
+        assert_eq!(restored.message_count, 2.0);
         assert_eq!(
             restored.state.and_then(|state| state.status).as_deref(),
             Some("archived")
@@ -157,7 +123,6 @@ mod tests {
         bare.name = None;
         bare.state = None;
         bare.parent_session_path = None;
-        bare.rlm_depth = None;
         bare.agent_status = None;
         let wire = serialize_saved_session_info(&bare);
         assert!(wire.name.is_none());

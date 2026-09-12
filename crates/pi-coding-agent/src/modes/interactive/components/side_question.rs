@@ -1,6 +1,7 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/side-question.ts
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use pi_tui::components::markdown::{
     DefaultTextStyle, Markdown, MarkdownOptions, MarkdownTheme as TuiMarkdownTheme,
@@ -13,10 +14,10 @@ use pi_tui::utils::visible_width;
 use crate::modes::agent_connection::types::AgentConnectionSideQuestionEvent;
 use crate::modes::interactive::theme::theme::{get_markdown_theme, theme, MarkdownTheme};
 
-/// `MarkdownTheme` of `theme.ts` carries `Send + Sync` closures; the pi-tui
-/// component holds `Rc` closures.
+/// `MarkdownTheme` of `theme.ts` carries `Arc` closures with `Send + Sync`; the
+/// pi-tui component holds `Rc` closures.
 fn to_tui_markdown_theme(theme: MarkdownTheme) -> TuiMarkdownTheme {
-    fn rc(value: Box<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
+    fn rc(value: Arc<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
         Rc::new(move |text: &str| value(text))
     }
 

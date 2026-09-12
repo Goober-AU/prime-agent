@@ -19,8 +19,8 @@ const DEFAULT_MAX_BUFFERED_BYTES: usize = 256 * 1024;
 const DEFAULT_MAX_RECORD_BYTES: usize = 8 * 1024;
 const DEFAULT_MAX_FILE_BYTES: usize = 4 * 1024 * 1024;
 const DEFAULT_MAX_FILES: usize = 4;
-const DEFAULT_FLUSH_INTERVAL_MS: u64 = 1_000;
-const DEFAULT_CLOSE_TIMEOUT_MS: u64 = 1_000;
+const DEFAULT_FLUSH_INTERVAL_MS: usize = 1_000;
+const DEFAULT_CLOSE_TIMEOUT_MS: usize = 1_000;
 
 /// `OPERATIONS`.
 const OPERATIONS: [PerformanceMetricOperation; 8] = [
@@ -105,8 +105,8 @@ impl PerformanceMetricIoError {
 
     fn from_io(error: std::io::Error) -> Self {
         let code = match error.kind() {
-            std::io::ErrorKind::NotFound => Some("ENOENT"),
-            std::io::ErrorKind::AlreadyExists => Some("EEXIST"),
+            std::io::ErrorKind::NotFound => Some("ENOENT".to_string()),
+            std::io::ErrorKind::AlreadyExists => Some("EEXIST".to_string()),
             _ => None,
         };
         Self {
@@ -377,7 +377,7 @@ fn sanitize_measurements(
         return None;
     };
     let mut sanitized: pi_agent_core::performance_metrics::PerformanceMetricMeasurements =
-        std::collections::BTreeMap::new();
+        indexmap::IndexMap::new();
     for (key, measurement) in map {
         if let Some(known) = MEASUREMENTS.iter().find(|known| known.as_str() == key) {
             sanitized.insert(*known, sanitize_measurement(Some(measurement)));

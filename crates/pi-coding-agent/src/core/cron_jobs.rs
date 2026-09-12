@@ -536,7 +536,7 @@ pub struct AgentCronJobStore {
     file_path: Option<String>,
     session_artifact_mode: bool,
     session_artifact_files: Mutex<HashMap<String, String>>,
-    heartbeat_change_listeners: Arc<Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>>,
+    heartbeat_change_listeners: Arc<Mutex<Vec<Option<Arc<dyn Fn() + Send + Sync>>>>>,
 }
 
 /// `updateRlmHeartbeat(activeSessionId, id, update)`.
@@ -580,14 +580,16 @@ impl AgentCronJobStore {
 
     /// `onHeartbeatChange(listener)`; the returned closure unsubscribes.
     pub fn on_heartbeat_change(&self, listener: Arc<dyn Fn() + Send + Sync>) -> Arc<dyn Fn() + Send + Sync> {
-        let slot = Arc::new(Mutex::new(listener));
-        self.heartbeat_change_listeners
-            .lock()
-            .expect("listeners poisoned")
-            .push(slot.clone());
+        let listeners = Arc::clone(&self.heartbeat_change_listeners);
+        let index = {
+            let mut guard = listeners.lock().expect("listeners poisoned");
+            guard.push(Some(listener));
+            guard.len() - 1
+        };
         Arc::new(move || {
-            if let Some(listener) = slot.lock().expect("slot poisoned").take() {
-                let _ = listener;
+            let mut guard = listeners.lock().expect("listeners poisoned");
+            if index < guard.len() {
+                guard[index] = None;
             }
         })
     }
@@ -1480,7 +1482,7 @@ impl AgentCronJobStore {
 
     fn mutate_states(
         &self,
-        mutator: impl Fn(&mut CronJobsState) -> Vec<AgentCronDispatch>,
+        mut mutator: impl FnMut(&mut CronJobsState) -> Vec<AgentCronDispatch>,
     ) -> Result<Vec<AgentCronDispatch>, String> {
         let paths: Vec<String> = if self.session_artifact_mode {
             self.session_artifact_files
@@ -1616,16 +1618,16 @@ impl AgentCronJobStore {
     }
 
     fn notify_heartbeat_change(&self) {
-        let listeners = self
+        let listeners: Vec<Arc<dyn Fn() + Send + Sync>> = self
             .heartbeat_change_listeners
             .lock()
             .expect("listeners poisoned")
-            .clone();
+            .iter()
+            .flatten()
+            .cloned()
+            .collect();
         for listener in listeners {
-            let callback = listener.lock().expect("listener poisoned").clone();
-            if let Some(callback) = callback {
-                callback();
-            }
+            listener();
         }
     }
 

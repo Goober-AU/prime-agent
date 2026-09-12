@@ -25,12 +25,14 @@ use crate::core::settings_manager::SettingsManager;
 
 
 fn refinement_retry_policy(settings: &Mutex<SettingsManager>) -> crate::core::refinement::refinement::ProviderRetryPolicy {
-    let retry = settings.lock().unwrap_or_else(|p| p.into_inner()).get_retry_settings();
+    let guard = settings.lock().unwrap_or_else(|p| p.into_inner());
+    let retry = guard.get_retry_settings();
+    let provider_retry = guard.get_provider_retry_settings();
     crate::core::refinement::refinement::ProviderRetryPolicy {
         enabled: retry.enabled,
         max_retries: retry.max_retries.max(0.0) as u32,
         base_delay_ms: retry.base_delay_ms,
-        max_retry_delay_ms: retry.max_retry_delay_ms,
+        max_retry_delay_ms: provider_retry.max_retry_delay_ms,
     }
 }
 
@@ -509,12 +511,12 @@ fn create_memory_extension_impl(
 
     // --- context: inject recall before the current user turn ---
     {
-        let pi = pi.clone();
+        let handler_pi = pi.clone();
         let agent_dir = agent_dir.clone();
         let services = services.clone();
         let recalled_turns = recalled_turns.clone();
         let handler: ExtensionHandler = Arc::new(move |event, ctx| {
-            let pi = pi.clone();
+            let pi = handler_pi.clone();
             let agent_dir = agent_dir.clone();
             let services = services.clone();
             let recalled_turns = recalled_turns.clone();
@@ -688,11 +690,11 @@ fn create_memory_extension_impl(
 
     // --- refine_complete: promote local entries to project memory ---
     {
-        let pi = pi.clone();
+        let handler_pi = pi.clone();
         let agent_dir = agent_dir.clone();
         let services = services.clone();
         let handler: ExtensionHandler = Arc::new(move |event, ctx| {
-            let pi = pi.clone();
+            let pi = handler_pi.clone();
             let agent_dir = agent_dir.clone();
             let services = services.clone();
             Box::pin(async move {

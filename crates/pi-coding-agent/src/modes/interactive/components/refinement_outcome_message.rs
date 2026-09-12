@@ -81,8 +81,14 @@ pub fn edit_diff(edit: &AppliedRefinementEdit) -> String {
             }
         }
     };
-    let before_text = before.as_ref().map(json_pretty).unwrap_or_default();
-    let after_text = after.as_ref().map(json_pretty).unwrap_or_default();
+    let before_text = before
+        .as_ref()
+        .map(|entry| json_pretty(&Value::Object(entry.clone())))
+        .unwrap_or_default();
+    let after_text = after
+        .as_ref()
+        .map(|entry| json_pretty(&Value::Object(entry.clone())))
+        .unwrap_or_default();
     let before_text = if before.is_some() {
         format!("{before_text}\n")
     } else {

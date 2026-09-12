@@ -86,7 +86,14 @@ pub async fn run_rpc_mode_with_connection(
     let output: Arc<dyn Fn(Value) + Send + Sync> = Arc::new(move |value: Value| {
         write_raw_stdout(&serialize_json_line(&value));
     });
-    let extension_ui = Arc::new(create_rpc_extension_ui_bridge(output.clone()));
+    // One `output` serves both responses and extension-UI requests: the
+    // TypeScript union accepts `RpcResponse | RpcExtensionUIRequest | object`.
+    let extension_ui = Arc::new(create_rpc_extension_ui_bridge({
+        let output = output.clone();
+        Arc::new(move |request: RpcExtensionUiRequest| {
+            output(serde_json::to_value(&request).unwrap_or(Value::Null));
+        })
+    }));
     let state = Arc::new_cyclic(|self_ref| RpcModeState {
         self_ref: Mutex::new(self_ref.clone()),
         connection: connection.clone(),
@@ -383,7 +390,7 @@ impl RpcModeState {
             .map(|observation| observation.closed)
             .unwrap_or(false);
         if closed {
-            let state = self.arc_handle();
+            let state = self.clone_arc();
             let active_session_id = active_session_id.to_string();
             tokio::spawn(async move {
                 state.stop_observation(&active_session_id).await;
@@ -1057,21 +1064,16 @@ impl RpcModeState {
                 {
                     let mut observations = self.observations.lock().expect("observations poisoned");
                     if let Some(observation) = observations.get_mut(active_session_id) {
-                        observation.unsubscribe = unsubscribe;
+                        observation.unsubscribe = Arc::from(unsubscribe);
                     }
                 }
 
-                match watcher.get_messages().await {
-                    Ok(messages) => Ok(RpcResponse::success(
-                        id,
-                        command.type_name(),
-                        Some(serde_json::json!({ "messages": messages })),
-                    )),
-                    Err(error) => {
-                        self.stop_observation(active_session_id).await;
-                        Err(error)
-                    }
-                }
+                let messages = watcher.get_messages().await;
+                Ok(RpcResponse::success(
+                    id,
+                    command.type_name(),
+                    Some(serde_json::json!({ "messages": messages })),
+                ))
             }
             RpcCommand::Unobserve { active_session_id, .. } => {
                 self.stop_observation(active_session_id).await;

@@ -1156,8 +1156,10 @@ pub async fn list_daemon_saved_sessions(
     client: &DaemonTransportClient,
     context: &DaemonSavedSessionCatalogContext,
     scope: &str,
-    on_session: Option<&(dyn Fn() + Send + Sync)>,
-    on_progress: Option<&(dyn Fn(i64, i64) + Send + Sync)>,
+    // `AgentConnectionSessionListCallbacks` stores these as shared closures
+    // (agent_connection/types.rs), and the progress listener is `'static`.
+    on_session: Option<Arc<dyn Fn() + Send + Sync>>,
+    on_progress: Option<Arc<dyn Fn(i64, i64) + Send + Sync>>,
 ) -> Result<Vec<AgentConnectionSavedSessionInfo>, String> {
     let command = match context {
         DaemonSavedSessionCatalogContext::ActiveSessionId(active_session_id) => serde_json::json!({
@@ -1177,6 +1179,8 @@ pub async fn list_daemon_saved_sessions(
             command
         }
     };
+    let on_session_callback = on_session.clone();
+    let on_progress_callback = on_progress.clone();
     let response = client
         .request_with_options(
             command,
@@ -1185,13 +1189,13 @@ pub async fn list_daemon_saved_sessions(
                 .recoverable(true)
                 .with_progress(Box::new(move |progress: &Value| {
                 if progress.get("type").and_then(|value| value.as_str()) == Some("session_list_progress") {
-                    if let Some(callback) = on_progress {
+                    if let Some(callback) = on_progress_callback.as_ref() {
                         callback(
                             progress.get("loaded").and_then(|value| value.as_i64()).unwrap_or(0),
                             progress.get("total").and_then(|value| value.as_i64()).unwrap_or(0),
                         );
                     }
-                } else if let Some(callback) = on_session {
+                } else if let Some(callback) = on_session_callback.as_ref() {
                     callback();
                 }
             })),
@@ -1810,7 +1814,8 @@ pub struct AgentsViewMode<'a> {
     options: AgentsViewModeOptions,
     persistent_state: AgentsViewPersistentState,
     terminal: Arc<dyn AgentsViewTerminal>,
-    editor: Box<dyn AgentsViewEditor>,
+    /// Borrowed: the run loop owns the editor for the process lifetime.
+    editor: &'a mut dyn AgentsViewEditor,
     theme: Arc<dyn AgentsViewTheme>,
     transport: Arc<dyn super::roster_store::DaemonTransport>,
     /// Concrete handle to the scripted transport, for test hooks only.
@@ -1915,7 +1920,7 @@ impl<'a> AgentsViewMode<'a> {
         options: AgentsViewModeOptions,
         persistent_state: AgentsViewPersistentState,
         terminal: Arc<dyn AgentsViewTerminal>,
-        editor: Box<dyn AgentsViewEditor>,
+        editor: &'a mut dyn AgentsViewEditor,
         theme: Arc<dyn AgentsViewTheme>,
         transport: Arc<dyn super::roster_store::DaemonTransport>,
         factory: &'a dyn DaemonAgentConnectionFactory,
@@ -1950,7 +1955,6 @@ impl<'a> AgentsViewMode<'a> {
         let saved_catalog_ready = persistent_state.saved_catalog_loaded == Some(true);
         let heartbeats = persistent_state.heartbeats.clone().unwrap_or_default();
         let saved_catalog_generation = persistent_state.saved_catalog_generation.unwrap_or(0);
-        let mut editor = editor;
         editor.set_text(persistent_state.query.clone().unwrap_or_default().as_str());
         editor.set_placeholder(SEARCH_PROMPT_PLACEHOLDER);
         let editor_placeholder_for_test = Some(SEARCH_PROMPT_PLACEHOLDER.to_string());
@@ -2692,13 +2696,13 @@ impl<'a> AgentsViewMode<'a> {
         let context = self.get_saved_session_catalog_context();
         let progress_cell = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let progress_for_callback = progress_cell.clone();
-        let on_session = move || {
+        let on_session: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             // Rebuilding/canonicalizing the full tree per streamed record is
             // quadratic, particularly expensive on Windows. Keep the last
             // complete catalog visible.
             progress_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        };
-        let result = list_daemon_saved_sessions(&client, &context, "all", Some(&on_session), None).await;
+        });
+        let result = list_daemon_saved_sessions(&client, &context, "all", Some(on_session), None).await;
         match result {
             Ok(sessions) => {
                 if generation != self.saved_catalog_generation || self.stopped || self.daemon_shutdown_received {

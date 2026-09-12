@@ -33,12 +33,52 @@ impl std::fmt::Display for DaemonSessionRecoveringError {
 
 impl std::error::Error for DaemonSessionRecoveringError {}
 
+/// Wire shape of `core/session-cwd.ts`'s `SessionCwdIssue`
+/// (`{ sessionFile?; sessionCwd; fallbackCwd }`). The core struct carries no
+/// serde derives, so the daemon response adapts its three camelCase fields here.
+mod session_cwd_issue_wire {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use crate::core::session_cwd::SessionCwdIssue;
+
+    #[derive(Serialize, Deserialize)]
+    struct Wire {
+        #[serde(rename = "sessionFile", skip_serializing_if = "Option::is_none", default)]
+        session_file: Option<String>,
+        #[serde(rename = "sessionCwd")]
+        session_cwd: String,
+        #[serde(rename = "fallbackCwd")]
+        fallback_cwd: String,
+    }
+
+    pub fn serialize<S: Serializer>(issue: &SessionCwdIssue, serializer: S) -> Result<S::Ok, S::Error> {
+        Wire {
+            session_file: issue.session_file.clone(),
+            session_cwd: issue.session_cwd.clone(),
+            fallback_cwd: issue.fallback_cwd.clone(),
+        }
+        .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<SessionCwdIssue, D::Error> {
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(SessionCwdIssue {
+            session_file: wire.session_file,
+            session_cwd: wire.session_cwd,
+            fallback_cwd: wire.fallback_cwd,
+        })
+    }
+}
+
 /// `DaemonErrorInfo` - the structured `errorInfo` carried on a failed response.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "code")]
 pub enum DaemonErrorInfo {
     #[serde(rename = "missing_session_cwd")]
-    MissingSessionCwd { issue: SessionCwdIssue },
+    MissingSessionCwd {
+        #[serde(with = "session_cwd_issue_wire")]
+        issue: SessionCwdIssue,
+    },
     #[serde(rename = "session_import_file_not_found")]
     SessionImportFileNotFound {
         #[serde(rename = "filePath")]

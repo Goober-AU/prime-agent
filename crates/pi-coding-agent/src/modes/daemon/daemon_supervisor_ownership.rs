@@ -35,7 +35,7 @@ const SHUTDOWN_ADMISSION_REFRESH_MS: u64 = 1000;
 const SHUTDOWN_ADMISSION_WAIT_MS: u64 = 50;
 // The 250ms fence poll must not spawn `ps` per tick; existence stays
 // kill(0)-checked every tick.
-const OWNER_ZOMBIE_CONFIRM_INTERVAL_MS: i64 = 5000;
+const OWNER_ZOMBIE_CONFIRM_INTERVAL_MS: f64 = 5000.0;
 
 pub type DaemonSupervisorOwnerPhase = String;
 
@@ -469,9 +469,10 @@ impl DaemonSupervisorOwnership {
         }
         let token = self.snapshot().token;
         let owner_directory = self.owner_directory.clone();
-        let mut released_directory: Option<String> = None;
+        let released_directory: StdMutex<Option<String>> = StdMutex::new(None);
         let result = with_daemon_supervisor_registry_guard(&self.registry_dir, {
             let owner_directory = owner_directory.clone();
+            let released_directory = &released_directory;
             move || {
                 let current = read_owner_record(&owner_directory);
                 if current.map(|current| current.token != token).unwrap_or(true) {
@@ -479,12 +480,12 @@ impl DaemonSupervisorOwnership {
                 }
                 let renamed = format!("{owner_directory}.released-{}", uuid::Uuid::new_v4());
                 std::fs::rename(&owner_directory, &renamed).map_err(|error| error.to_string())?;
-                released_directory = Some(renamed);
+                *released_directory.lock().expect("released directory poisoned") = Some(renamed);
                 Ok(())
             }
         })
         .await;
-        if let Some(directory) = released_directory {
+        if let Some(directory) = released_directory.into_inner().expect("released directory poisoned") {
             let _ = std::fs::remove_dir_all(directory);
         }
         result.map_err(|error| error.message)
@@ -492,7 +493,7 @@ impl DaemonSupervisorOwnership {
 }
 
 pub struct DaemonShutdownAdmission {
-    record: StdMutex<DaemonShutdownAdmissionRecord>,
+    record: Arc<StdMutex<DaemonShutdownAdmissionRecord>>,
     registry_dir: String,
     renewal: Arc<RenewableRegistryRecord>,
     released: AtomicBool,
@@ -641,7 +642,7 @@ fn renew_shutdown_admission(
     let now = now_ms();
     let mut updated = record_snapshot;
     updated.updated_at = iso_from_ms(now);
-    updated.expires_at = iso_from_ms(now + SHUTDOWN_ADMISSION_LEASE_MS);
+    updated.expires_at = iso_from_ms(now + SHUTDOWN_ADMISSION_LEASE_MS as f64);
     write_json_atomically(&path, &serde_json::to_value(&updated).unwrap_or(Value::Null))?;
     *record.lock().expect("admission record poisoned") = updated;
     Ok(())
@@ -762,7 +763,8 @@ pub async fn mutate_daemon_supervisor_owner(
     let generation = generation.to_string();
     let expected_token = expected_token.to_string();
     let mut mutation = Some(mutation);
-    with_daemon_supervisor_registry_guard(&registry_dir, move || {
+    let guard_dir = registry_dir.clone();
+    with_daemon_supervisor_registry_guard(&guard_dir, move || {
         let directory = owner_directory_path(&registry_dir, &generation)?;
         if !Path::new(&directory).exists() {
             return Ok(None);
@@ -823,14 +825,15 @@ pub async fn acquire_daemon_supervisor_ownership(
     let owner_directory = owner_directory_path(&registry_dir, &options.generation)?;
     std::fs::create_dir_all(&candidate_directory).map_err(|error| error.to_string())?;
     set_dir_mode(&candidate_directory, 0o700);
-    let mut stale_directories: Vec<String> = Vec::new();
-    let mut guard_error: Option<String> = None;
+    let stale_directories: StdMutex<Vec<String>> = StdMutex::new(Vec::new());
+    let guard_error: StdMutex<Option<String>> = StdMutex::new(None);
     let guard_result = with_daemon_supervisor_registry_guard(&registry_dir, {
         let record = record.clone();
         let candidate_directory = candidate_directory.clone();
         let owner_directory = owner_directory.clone();
         let registry_dir = registry_dir.clone();
-        let mut stale_directories = std::mem::take(&mut stale_directories);
+        let stale_directories = &stale_directories;
+        let guard_error = &guard_error;
         move || {
             let result = (|| -> Result<Vec<String>, String> {
                 write_owner_scope(&candidate_directory, &record)?;
@@ -861,11 +864,14 @@ pub async fn acquire_daemon_supervisor_ownership(
             })();
             match result {
                 Ok(stale) => {
-                    stale_directories.extend(stale);
+                    stale_directories
+                        .lock()
+                        .expect("stale directories poisoned")
+                        .extend(stale);
                     Ok(())
                 }
                 Err(error) => {
-                    guard_error = Some(error.clone());
+                    *guard_error.lock().expect("guard error poisoned") = Some(error.clone());
                     Err(error)
                 }
             }
@@ -874,12 +880,15 @@ pub async fn acquire_daemon_supervisor_ownership(
     .await;
     if let Err(error) = guard_result {
         let _ = std::fs::remove_dir_all(&candidate_directory);
-        for directory in stale_directories {
+        for directory in stale_directories.into_inner().expect("stale directories poisoned") {
             let _ = std::fs::remove_dir_all(directory);
         }
-        return Err(guard_error.unwrap_or(error.message));
+        return Err(guard_error
+            .into_inner()
+            .expect("guard error poisoned")
+            .unwrap_or(error.message));
     }
-    for directory in stale_directories {
+    for directory in stale_directories.into_inner().expect("stale directories poisoned") {
         let _ = std::fs::remove_dir_all(directory);
     }
     Ok(DaemonSupervisorOwnership::new(
@@ -891,7 +900,7 @@ pub async fn acquire_daemon_supervisor_ownership(
 
 /// Owner liveness with the zombie-confirmation cache (bounded by the confirm interval).
 pub fn is_owner_process_alive(pid: i64) -> bool {
-    static CONFIRMATIONS: once_cell::sync::Lazy<StdMutex<HashMap<i64, i64>>> =
+    static CONFIRMATIONS: once_cell::sync::Lazy<StdMutex<HashMap<i64, f64>>> =
         once_cell::sync::Lazy::new(|| StdMutex::new(HashMap::new()));
     if !process_id_exists(pid as i32) {
         CONFIRMATIONS.lock().expect("confirmations poisoned").remove(&pid);
@@ -968,10 +977,11 @@ pub async fn acquire_daemon_shutdown_admission() -> Result<Arc<DaemonShutdownAdm
     let registry_dir = default_daemon_supervisor_registry_dir();
     let process_start_id = get_process_start_id(std::process::id() as i64);
     loop {
-        let mut acquired: Option<DaemonShutdownAdmissionRecord> = None;
+        let acquired: StdMutex<Option<DaemonShutdownAdmissionRecord>> = StdMutex::new(None);
         let result = with_daemon_supervisor_registry_guard(&registry_dir, {
             let registry_dir = registry_dir.clone();
             let process_start_id = process_start_id.clone();
+            let acquired = &acquired;
             move || {
                 if read_active_shutdown_admission(&registry_dir).is_some() {
                     return Ok(());
@@ -984,19 +994,19 @@ pub async fn acquire_daemon_shutdown_admission() -> Result<Arc<DaemonShutdownAdm
                     process_start_id,
                     created_at: iso_from_ms(now),
                     updated_at: iso_from_ms(now),
-                    expires_at: iso_from_ms(now + SHUTDOWN_ADMISSION_LEASE_MS),
+                    expires_at: iso_from_ms(now + SHUTDOWN_ADMISSION_LEASE_MS as f64),
                 };
                 write_json_atomically(
                     &shutdown_admission_path(&registry_dir),
                     &serde_json::to_value(&record).unwrap_or(Value::Null),
                 )?;
-                acquired = Some(record);
+                *acquired.lock().expect("acquired admission poisoned") = Some(record);
                 Ok(())
             }
         })
         .await;
         result.map_err(|error| error.message)?;
-        if let Some(record) = acquired {
+        if let Some(record) = acquired.into_inner().expect("acquired admission poisoned") {
             return Ok(DaemonShutdownAdmission::new(record, &registry_dir));
         }
         tokio::time::sleep(Duration::from_millis(SHUTDOWN_ADMISSION_WAIT_MS)).await;
@@ -1035,7 +1045,8 @@ pub async fn persist_daemon_startup_fence_from_owner(
     let hello = hello.clone();
     let legacy_registry_dir = legacy_registry_dir.map(str::to_string);
     let socket_path = socket_path.to_string();
-    with_daemon_supervisor_registry_guard(&registry_dir, move || {
+    let guard_dir = registry_dir.clone();
+    with_daemon_supervisor_registry_guard(&guard_dir, move || {
         let mut owners: Vec<DaemonSupervisorOwnerRecord> = Vec::new();
         for directory in list_owner_directories(&registry_dir) {
             if let Some(owner) =
@@ -1120,7 +1131,7 @@ pub async fn wait_for_daemon_startup_fence(
             .to_string(),
         socket_path,
     );
-    let deadline = now_ms() + timeout_ms as i64;
+    let deadline = now_ms() + timeout_ms as f64;
     loop {
         let fence = match read_startup_fence(&path) {
             Ok(fence) => fence,
@@ -1232,9 +1243,10 @@ fn resolve_path(path: &str) -> String {
     if candidate.is_absolute() {
         return candidate.to_string_lossy().to_string();
     }
-    std::env::current_dir()
-        .map(|cwd| cwd.join(candidate).to_string_lossy().to_string())
-        .unwrap_or_else(|_| candidate.to_string_lossy().to_string())
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(&candidate).to_string_lossy().to_string(),
+        Err(_) => candidate.to_string_lossy().to_string(),
+    }
 }
 
 fn owner_conflicts(left: &DaemonSupervisorOwnerScope, right: &DaemonSupervisorOwnerScope) -> bool {
@@ -1497,6 +1509,7 @@ fn write_json_atomically(path: &str, value: &Value) -> Result<(), String> {
             mode: Some(0o600),
             fsync: false,
             fsync_dir: false,
+            before_rename: None,
         },
     )
     .map_err(|error| error.to_string())
@@ -1524,12 +1537,12 @@ fn shutdown_admission_path(registry_dir: &str) -> String {
         .to_string()
 }
 
-fn now_ms() -> i64 {
-    chrono::Utc::now().timestamp_millis()
+fn now_ms() -> f64 {
+    chrono::Utc::now().timestamp_millis() as f64
 }
 
-fn iso_from_ms(ms: i64) -> String {
-    chrono::DateTime::from_timestamp_millis(ms)
+fn iso_from_ms(ms: f64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms as i64)
         .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_default()
 }

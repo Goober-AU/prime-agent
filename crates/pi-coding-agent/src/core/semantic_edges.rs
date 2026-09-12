@@ -522,6 +522,7 @@ pub fn derive_semantic_edges(ledgers: &[Vec<SemanticEdgeLedgerEvent>]) -> Semant
                     .or_insert_with(|| FoldSession {
                         spawned_by_request_id: spawned_by_request_id.clone(),
                         spawn_claimed: false,
+                        last_request_id: None,
                         pending: Vec::new(),
                     });
             }
@@ -741,6 +742,8 @@ pub fn wrap_stream_fn_with_semantic_edges(
     recorder: Arc<Mutex<SemanticEdgeRecorder>>,
 ) -> pi_agent_core::types::StreamFn {
     let inner = unwrap_semantic_edge_stream_fn(&stream_fn);
+    // The registry keeps its own handle: the closure below moves `inner` too.
+    let inner_for_registry = inner.clone();
     let key = Arc::new(std::sync::OnceLock::new());
     let registration = InnerStreamFnRegistration { key: key.clone() };
     let wrapped: pi_agent_core::types::StreamFn = Arc::new(move |model, context, options| {
@@ -762,7 +765,7 @@ pub fn wrap_stream_fn_with_semantic_edges(
                 headers.insert(header, value);
             }
         }
-        let stream = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let stream_future = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             inner(model, context, call_options)
         })) {
             Ok(stream) => stream,
@@ -771,34 +774,39 @@ pub fn wrap_stream_fn_with_semantic_edges(
                 std::panic::resume_unwind(payload);
             }
         };
-        let observed = stream.clone();
         let recorder_for_result = recorder.clone();
         let request_id_for_result = request_id.clone();
-        let observe = async move {
-            let message = observed.result().await;
-            let mut recorder = recorder_for_result.lock().unwrap();
-            if message.stop_reason == pi_ai::types::STOP_REASON_ERROR
-                || message.stop_reason == pi_ai::types::STOP_REASON_ABORTED
-            {
-                recorder.fail_request(Some(&request_id_for_result));
-            } else {
-                recorder.finish_request(Some(&request_id_for_result));
+        Box::pin(async move {
+            // `observe(stream)` runs on the resolved stream, so the promise is
+            // resolved first and the same stream is handed back to the caller.
+            let stream = stream_future.await;
+            let observed = stream.clone();
+            let observe = async move {
+                let message = observed.result().await;
+                let mut recorder = recorder_for_result.lock().unwrap();
+                if message.stop_reason == pi_ai::types::STOP_REASON_ERROR
+                    || message.stop_reason == pi_ai::types::STOP_REASON_ABORTED
+                {
+                    recorder.fail_request(Some(&request_id_for_result));
+                } else {
+                    recorder.finish_request(Some(&request_id_for_result));
+                }
+            };
+            // The TypeScript `void stream.result().then(...)` detaches the observation.
+            // Without a runtime nothing can drive the stream, so the observation is
+            // skipped rather than blocking the caller.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(observe);
             }
-        };
-        // The TypeScript `void stream.result().then(...)` detaches the observation.
-        // Without a runtime nothing can drive the stream, so the observation is
-        // skipped rather than blocking the caller.
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(observe);
-        }
-        Box::pin(async move { stream })
+            stream
+        })
     });
     let address = Arc::as_ptr(&wrapped) as *const () as usize;
     let _ = key.set(address);
     inner_stream_fn_registry()
         .lock()
         .unwrap()
-        .insert(address, inner);
+        .insert(address, inner_for_registry);
     wrapped
 }
 

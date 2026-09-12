@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use futures::FutureExt;
+
 use indexmap::IndexMap;
 use pi_ai::types::{
     Compat, InputModality, Model, ModelCost, OpenAICompletionsCompat, ThinkingLevelMap,
@@ -356,6 +358,7 @@ fn write_cache(cache_path: &str, value: &Value) {
             mode: Some(0o600),
             fsync: false,
             fsync_dir: false,
+            before_rename: None,
         },
     );
 }
@@ -459,24 +462,29 @@ pub async fn refresh_prime_inference_models(
     if offline {
         return cached;
     }
-    // In-flight refreshes are deduped per cache path (a JS `Promise` shared by callers).
-    {
+    // In-flight refreshes are deduped per cache path (a JS `Promise` shared by
+    // callers). The guard's scope ends before the await so the future stays `Send`.
+    let in_flight = {
         let pending = pending_refreshes();
         let guard = pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(existing) = guard.get(cache_path) {
-            let existing = existing.clone();
-            drop(guard);
-            return existing.await;
-        }
+        guard.get(cache_path).cloned()
+    };
+    if let Some(existing) = in_flight {
+        return (*existing).clone().await;
     }
+    // The shared refresh outlives this call, so it owns its inputs instead of
+    // borrowing the caller's `cachePath` / `bundledModels`.
+    let cache_path_owned = cache_path.to_string();
+    let bundled_models_owned = bundled_models.to_vec();
     let result = async move {
         match fetch_prime_inference_model_catalog(fetch_fn, Vec::new(), None, false).await {
             Ok((payload, entries)) => {
-                let models = build_prime_inference_models(bundled_models, &entries, false, None);
+                let models =
+                    build_prime_inference_models(&bundled_models_owned, &entries, false, None);
                 match models {
                     None => cached,
                     Some(models) => {
-                        write_cache(cache_path, &payload);
+                        write_cache(&cache_path_owned, &payload);
                         Some(models)
                     }
                 }
@@ -484,13 +492,17 @@ pub async fn refresh_prime_inference_models(
             Err(_) => cached,
         }
     };
-    let shared: PendingRefresh = Arc::new(futures::future::Shared::new(Box::pin(result)));
+    // `FutureExt::shared` needs a concrete `'static` future, so the async block is
+    // boxed at that type before sharing.
+    let shared: PendingRefresh = Arc::new(futures_util::FutureExt::shared(
+        result.boxed() as futures::future::BoxFuture<'static, Option<Vec<Model>>>,
+    ));
     {
         let pending = pending_refreshes();
         let mut guard = pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         guard.insert(cache_path.to_string(), shared.clone());
     }
-    let value = shared.await;
+    let value = (*shared).clone().await;
     {
         let pending = pending_refreshes();
         let mut guard = pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

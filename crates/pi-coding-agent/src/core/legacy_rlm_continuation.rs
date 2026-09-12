@@ -69,7 +69,8 @@ pub fn parse_legacy_rlm_continuation_state(
     }
     let started = match pending {
         Some(pending) => messages.iter().any(|message| {
-            if message.role() != "user" || agent_message_timestamp(message) != pending["messageTimestamp"].as_f64() {
+            if message.role() != "user" || Some(agent_message_timestamp(message))
+                != pending.get("messageTimestamp").and_then(|value| value.as_f64()) {
                 return false;
             }
             let text = match message {
@@ -86,7 +87,7 @@ pub fn parse_legacy_rlm_continuation_state(
                 },
                 _ => return false,
             };
-            Some(&text) == pending.get("messageText").and_then(|text| text.as_str())
+            Some(text.as_str()) == pending.get("messageText").and_then(|text| text.as_str())
         }),
         None => false,
     };

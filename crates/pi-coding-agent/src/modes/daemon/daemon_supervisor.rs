@@ -151,7 +151,7 @@ const WORKER_STARTUP_GATE_FD: u32 = 3;
 pub fn supervisor_server_capabilities() -> Vec<String> {
     let mut capabilities: Vec<String> = DAEMON_DEFAULT_SERVER_CAPABILITIES
         .iter()
-        .map(|entry| entry.to_string())
+        .map(super::daemon_client::capability_name)
         .collect();
     capabilities.push("agent_roster".to_string());
     capabilities.push("direct_peer_transport".to_string());

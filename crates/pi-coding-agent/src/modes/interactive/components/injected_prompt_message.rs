@@ -1,6 +1,7 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/injected-prompt-message.ts
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use pi_agent_core::types::{AgentMessage, CustomAgentMessage, CustomMessageContent};
 use pi_tui::components::markdown::{Markdown, MarkdownOptions, MarkdownTheme as TuiMarkdownTheme};
@@ -130,10 +131,10 @@ pub fn heartbeat_prompt_schedule(schedule: Option<&str>) -> String {
     }
 }
 
-/// `MarkdownTheme` of `theme.ts` carries `Send + Sync` closures; the pi-tui
-/// component holds `Rc` closures.
+/// `MarkdownTheme` of `theme.ts` carries `Arc` closures with `Send + Sync`; the
+/// pi-tui component holds `Rc` closures.
 fn to_tui_markdown_theme(theme: MarkdownTheme) -> TuiMarkdownTheme {
-    fn rc(value: Box<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
+    fn rc(value: Arc<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
         Rc::new(move |text: &str| value(text))
     }
 

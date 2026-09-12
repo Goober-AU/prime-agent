@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::core::session_id::matches_session_id_suffix;
 use crate::modes::daemon::daemon_client::{DaemonClient, DaemonClientError, DaemonClientRequestOptions};
-use crate::modes::daemon::daemon_protocol::{DaemonCommand, DaemonResponse};
+use crate::modes::daemon::daemon_protocol::DaemonResponse;
 
 use super::args::is_valid_thinking_level;
 use super::daemon_list_format::format_session_list_table;
@@ -952,7 +952,7 @@ async fn run_start(parsed: ParsedDaemonClientCommand, io: &DaemonCommandIo<'_>) 
         .unwrap_or_else(|| io.cwd.clone());
     let env = current_process_env();
     let child = spawn_hidden_detached(&current_exec_path(), &daemon_args, &cwd, &env);
-    let child_pid = child.as_ref().and_then(|child| child.pid);
+    let child_pid = child.as_ref().map(|child| child.pid);
 
     let deadline = now_ms() + 10_000.0;
     while now_ms() < deadline {
@@ -1555,7 +1555,7 @@ fn run_help(io: &DaemonCommandIo<'_>) -> Result<(), String> {
 
 /// `client.request(command)` for a plain JSON command body.
 async fn request(client: &Arc<DaemonClient>, command: serde_json::Value) -> Result<DaemonResponse, String> {
-    let command = DaemonCommand::from_value(&command).ok_or_else(|| "Invalid daemon command".to_string())?;
+    let command = command.as_object().cloned().ok_or_else(|| "Invalid daemon command".to_string())?;
     client
         .request(command, None, DaemonClientRequestOptions::default())
         .await
@@ -1569,15 +1569,19 @@ fn require_active_session_id(args: &[String]) -> Result<String, String> {
     }
 }
 
-fn require_success(response: &serde_json::Value) -> Result<&serde_json::Value, String> {
-    if response.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
+/// Stands in for the TypeScript's absent `response.data` (`undefined`).
+static MISSING_DAEMON_DATA: serde_json::Value = serde_json::Value::Null;
+
+fn require_success(response: &DaemonResponse) -> Result<&serde_json::Value, String> {
+    if !response.success {
         return Err(response
-            .get("error")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("Daemon request failed")
-            .to_string());
+            .error
+            .clone()
+            .unwrap_or_else(|| "Daemon request failed".to_string()));
     }
-    Ok(response.get("data").unwrap_or(&serde_json::Value::Null))
+    // `"data" in response ? response.data : undefined`; the port carries an
+    // absent `data` as null.
+    Ok(response.data.as_ref().unwrap_or(&MISSING_DAEMON_DATA))
 }
 
 fn print_json(io: &DaemonCommandIo<'_>, value: &serde_json::Value) {
@@ -3042,13 +3046,24 @@ mod tests {
 
     #[test]
     fn require_success_surfaces_the_daemon_error() {
-        let ok = serde_json::json!({ "success": true, "data": { "a": 1 } });
+        fn response(value: serde_json::Value) -> DaemonResponse {
+            serde_json::from_value(value).expect("daemon response")
+        }
+        let ok = response(serde_json::json!({
+            "type": "response", "command": "list", "success": true, "data": { "a": 1 }
+        }));
         assert_eq!(require_success(&ok).unwrap()["a"], 1);
-        let failure = serde_json::json!({ "success": false, "error": "nope" });
+        let failure = response(serde_json::json!({
+            "type": "response", "command": "list", "success": false, "error": "nope"
+        }));
         assert_eq!(require_success(&failure).unwrap_err(), "nope");
-        let bare = serde_json::json!({ "success": false });
+        let bare = response(serde_json::json!({
+            "type": "response", "command": "list", "success": false
+        }));
         assert_eq!(require_success(&bare).unwrap_err(), "Daemon request failed");
-        let missing_data = serde_json::json!({ "success": true });
+        let missing_data = response(serde_json::json!({
+            "type": "response", "command": "list", "success": true
+        }));
         assert!(require_success(&missing_data).unwrap().is_null());
     }
 
