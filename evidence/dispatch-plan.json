@@ -1,0 +1,27 @@
+{
+ "generated": "post-crash recovery state",
+ "files_total": 412,
+ "files_written": 330,
+ "files_empty": 82,
+ "live_children": 14,
+ "cap_total_agents": 15,
+ "dispatcher": {
+  "rule": "keep <=13 live depth-1 children; never let TOTAL agents (all depths) exceed 15; sub-agents must never spawn children",
+  "model": "ollama-cloud/deepseek-v4.1-flash only, no fallback"
+ },
+ "orphan_empty_by_slice": {
+  "ca-modes-rest-b": 2,
+  "ca-cli-b": 2
+ },
+ "queue_order": [
+  "ca-cli-b",
+  "ca-modes-rest-b",
+  "ca-modes-telegram-b",
+  "ca-kernel-b",
+  "ca-settings-b",
+  "ca-extensions-b",
+  "ca-daemon-a",
+  "ca-session-core",
+  "ca-root"
+ ]
+}
