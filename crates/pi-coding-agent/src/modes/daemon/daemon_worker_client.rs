@@ -276,19 +276,14 @@ impl DaemonWorkerClient {
             let mut read_half = read_half;
             let mut decoder = PrivateFrameDecoder::new();
             let mut buffer = vec![0u8; 64 * 1024];
+            let mut eof_error: Option<String> = None;
             loop {
                 match read_half.read(&mut buffer).await {
                     Ok(0) => {
-                        // Mirror `daemon_server.rs` and `private-framing.ts`: a half-written
-                        // trailing frame is an error, not a silent EOF.
-                        if let Err(error) = decoder.finish() {
-                            if let Some(client) = weak.upgrade() {
-                                client
-                                    .log(&format!(
-                                        "Daemon worker private frame stream ended mid-frame: {error}"
-                                    ));
-                            }
-                        }
+                        // `daemon_server.rs` and `private-framing.ts` treat a half-written
+                        // trailing frame as an error, not a silent EOF, so the truncation
+                        // becomes the close cause instead of a generic socket-closed.
+                        eof_error = decoder.finish().err();
                         break;
                     }
                     Ok(read) => {
@@ -315,7 +310,7 @@ impl DaemonWorkerClient {
             }
             if let Some(client) = weak.upgrade() {
                 let error = client.direct_close_error(DaemonClientError::Message(
-                    "Daemon worker socket closed".to_string(),
+                    eof_error.unwrap_or_else(|| "Daemon worker socket closed".to_string()),
                 ));
                 client.close_with_error(error).await;
             }
