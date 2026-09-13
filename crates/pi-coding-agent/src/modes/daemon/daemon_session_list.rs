@@ -423,8 +423,15 @@ pub fn summary_for_active_session(
         session_file: session.session_file.clone(),
         session_name: session.session_name.clone(),
         cwd: String::new(),
-        model: None,
-        thinking_level: None,
+        // `daemon-session-list.ts:257-258` copies the live model and thinking level onto
+        // every summary; the `--print`/`--json` clients gate on `summary.model`
+        // (`main.ts:1628`), so leaving it unset made every attach fail with
+        // "No models available" even though the worker had resolved a model.
+        model: session
+            .model_identity
+            .as_ref()
+            .and_then(|model| serde_json::to_value(model).ok()),
+        thinking_level: session.thinking_level.clone(),
         is_streaming: session.is_streaming,
         is_compacting: session.is_compacting,
         is_bash_running: None,

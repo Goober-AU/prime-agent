@@ -7,9 +7,10 @@
 //! backed by real sessions instead of an empty stand-in.
 //!
 //! Every forwarded call mirrors the TypeScript member it replaces. Where the
-//! TypeScript reads a value the Rust port has no public owner for, the method is
-//! left out entirely (see `NOT IMPLEMENTED` below) instead of returning a
-//! placeholder, so the compiler reports the real gap.
+//! TypeScript reads a value the Rust port has no public owner for, the member
+//! still exists but returns an explicit `Err`/`None`/empty roster with a
+//! `blocked_on:` comment naming the owner to add, so the gap stays visible
+//! without breaking the crate build.
 
 use std::sync::{Arc, Mutex};
 
@@ -286,37 +287,38 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
     // Members whose canonical owner is missing return an explicit failure or an empty roster with a
     // `blocked_on:` note, rather than being omitted: the trait has no default bodies, so an omitted
     // member is a hard E0046 that stops the whole crate from compiling and keeps every test from
-    // running. An honest `Err`/`None` keeps the gap visible AND the crate buildable. Forwards that do
-    // have an owner are real, with no placeholders.
+    // running. An honest `Err`/`None` keeps the gap visible AND the crate buildable. Every member
+    // with a real owner forwards for real, with no placeholders.
     fn snapshot_source(&self) -> AgentSessionRuntimeSnapshotSource {
-        // Every field with a public `AgentSession` accessor is forwarded for real. The remaining
-        // fields are the ones the session slice does not expose; each is named in a `blocked_on`
-        // comment beside its placeholder so the gap stays visible without blocking the build. This
-        // member feeds `create_agent_connection_state` / `create_agent_connection_snapshot`
-        // (in_process_agent_connection.rs:370/375/438/883), so a wrong value here is observable.
+        // Every field `snapshot.ts:28-59` reads has a real owner in the port, so all of them except
+        // the child roster are forwarded. This member feeds `create_agent_connection_state` /
+        // `create_agent_connection_snapshot` (in_process_agent_connection.rs:370/375/438/883), so a
+        // wrong value here is observable.
         let session = self.session();
-        let (session_dir, leaf_id, compaction_count) = {
+        let (cwd, session_dir, leaf_id, compaction_count, persisted_recap) = {
             let manager = session.session_manager.lock().unwrap();
+            // `snapshot.ts:49`: `getEntries().filter((entry) => entry.type === "compaction").length`.
             let compaction_count = manager.get_entries().iter().filter(|entry| entry.get("type").and_then(Value::as_str) == Some("compaction")).count();
-            (manager.get_session_dir(), manager.get_leaf_id(), compaction_count)
+            // `persistedRecap(sessionManager)` (snapshot.ts:16-20): the baseline recap is the latest
+            // persisted agent-status summary, not the live session recap.
+            let persisted_recap = manager.get_latest_agent_status().map(|status| status.summary);
+            (manager.get_cwd(), manager.get_session_dir(), manager.get_leaf_id(), compaction_count, persisted_recap)
         };
         AgentSessionRuntimeSnapshotSource {
             session: crate::modes::agent_connection::snapshot::AgentSessionSnapshotSource {
                 session_id: session.session_id(),
-                // blocked_on: `AgentSession` has no `getCwd`; the cwd lives on the session file
-                // metadata / runtime, not on the session object.
-                cwd: self.runtime.cwd(),
-                // blocked_on: no `sessionDir` accessor on `AgentSession`.
+                // `cwd: sessionManager.getCwd()` (snapshot.ts:30).
+                cwd,
+                // `sessionDir: sessionManager.getSessionDir()` (snapshot.ts:44).
                 session_dir: Some(session_dir),
-                // blocked_on: `getLeafId` would come through the `SessionManager`, which the adapter
-                // reaches as `Arc<StdMutex<SessionManager>>`; no sync accessor is wired here.
+                // `leafId: sessionManager.getLeafId()` (snapshot.ts:45).
                 leaf_id,
                 session_file: session.session_file(),
                 session_name: session.session_name(),
                 model: session.model(),
                 thinking_level: session.thinking_level(),
                 service_tier: session.service_tier(),
-                // blocked_on: no `getAvailableThinkingLevels` accessor on `AgentSession`.
+                // `session.getAvailableThinkingLevels()` (snapshot.ts:34).
                 available_thinking_levels: session.get_available_thinking_levels(),
                 is_streaming: session.is_streaming(),
                 is_compacting: session.is_compacting(),
@@ -325,36 +327,34 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
                 steering_mode: session.steering_mode(),
                 follow_up_mode: session.follow_up_mode(),
                 auto_compaction_enabled: session.auto_compaction_enabled(),
-                // blocked_on: no `messageCount` accessor; the count is the messages length.
+                // `messageCount: session.messages.length` (snapshot.ts:47).
                 message_count: session.messages().len() as f64,
-                // blocked_on: no `sessionActions` accessor on `AgentSession`.
+                // `sessionActions: session.getSessionActionSnapshot()` (snapshot.ts:48).
                 session_actions: serde_json::to_value(session.get_session_action_snapshot()).unwrap(),
-                // blocked_on: no `compactionCount` accessor on `AgentSession`.
                 compaction_count: compaction_count as f64,
-                // blocked_on: no `goal` accessor on `AgentSession`.
+                // `goal: session.goalState` (snapshot.ts:50).
                 goal: serde_json::to_value(session.goal_state()).unwrap(),
-                // `SessionSummary` carries the `AgentConnectionScopedModel` projection; the canonical
-                // `ScopedModel` has the same fields (runtime_members.rs:703 builds the seam form).
+                // `session.scopedModels.map(...)` (snapshot.ts:51): the canonical `ScopedModel`
+                // already carries the two fields the connection layer reads.
                 scoped_models: session.scoped_models().into_iter().map(|entry| AgentConnectionScopedModel { model: entry.model, thinking_level: entry.thinking_level }).collect(),
-                // blocked_on: no `activeToolNames` accessor on `AgentSession`.
+                // `activeToolNames: session.getActiveToolNames()` (snapshot.ts:55).
                 active_tool_names: session.get_active_tool_names(),
-                // blocked_on: `getContextUsage` is a private session member; `get_session_stats`
-                // exposes its own shape.
+                // `contextUsage: session.getContextUsage()` (snapshot.ts:56).
                 context_usage: serde_json::to_value(session.get_context_usage()).unwrap(),
-                // blocked_on: `persistedRecap` is private session state.
-                persisted_recap: session.get_current_recap(),
+                persisted_recap,
                 messages: session.messages(),
-                // blocked_on: `streamingMessage` is private session state.
+                // `...(session.state?.streamingMessage ? { streamingMessage } : {})` (snapshot.ts:71).
                 streaming_message: session.state().streaming_message,
-                // blocked_on: `sessionContext` is produced by
-                // `create_agent_connection_state`, which consumes this struct - a cycle.
+                // `sessionContext: session.buildSessionContext()` (snapshot.ts:72).
                 session_context: Some(session_context_value(&session)),
-                // blocked_on: `sessionTree` is produced by `build_session_tree_from_flat_nodes`
-                // over `SessionManager` state, not read off `AgentSession`.
+                // `sessionTree: { tree: sessionManager.getTree(), leafId: sessionManager.getLeafId() }`
+                // (snapshot.ts:73-76).
                 session_tree: Some(session_tree_value(&session)),
-                // blocked_on: needs `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`
-                // (runtime_members.rs:1800/1850), which are `pub(super)` in
-                // `core::agent_session` and so unreachable from this module.
+                // blocked_on: `children: session.getRlmChildSnapshots()` (snapshot.ts:77) needs
+                // `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`
+                // (`core/agent_session/runtime_members.rs:1804/1854`), which are `pub(super)` and so
+                // unreachable from this module. Owner to add: drop `(super)` on both. Needs
+                // `runtime_members.rs` edited.
                 children: Vec::new(),
             },
         }
@@ -406,47 +406,109 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
         AgentConnectionModelCatalog { models: registry.get_all(), configured_providers }
     }
 
+    /// `this.session.getContextTree()` (`in-process-agent-connection.ts:182`,
+    /// `agent-session.ts:13028`).
+    ///
+    /// blocked_on: the assembly helpers are private - `rlm_session_dir_for_reading`
+    /// (`core/agent_session/runtime_members.rs:3115`), `context_window_resolver`
+    /// (:3122) and `subtract_unindexed_child_usage` (:3134) are `pub(super)`.
+    /// Owner to add: `core/agent_session/runtime_members.rs`, a
+    /// `pub fn get_context_tree(&self) -> ContextTreeNode` matching
+    /// `agent-session.ts:13028-13064`. Needs `runtime_members.rs` edited.
     fn session_context_tree(&self) -> Value {
-        // blocked_on: `AgentSession` has no `getContextTree` owner in the port.
         Value::Null
     }
 
+    /// `this.session.getRlmChildSnapshots()` (`in-process-agent-connection.ts:150`,
+    /// `agent-session.ts:11171`).
+    ///
+    /// blocked_on: `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`
+    /// (`core/agent_session/runtime_members.rs:1804/1854`) are `pub(super)`, and no
+    /// `impl From<RlmChildAgentSnapshot> for AgentConnectionRlmChildAgentSnapshot`
+    /// exists (`RlmChildAgentSnapshot` at `core/agent_session.rs:438` is already the
+    /// same camelCase shape the connection layer reads; `AgentConnectionRlmChildAgentSnapshot`
+    /// at `modes/agent_connection/types.rs:902` is the projection). Owner to add:
+    /// drop `(super)` on both builders. Needs `runtime_members.rs` edited.
     fn session_rlm_children(&self) -> Vec<AgentConnectionRlmChildAgentSnapshot> {
-        // blocked_on: needs the `AgentConnection*` roster projection of
-        // `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`, which are `pub(super)` in
-        // `core/agent_session/runtime_members.rs` and therefore not reachable from this module.
         Vec::new()
     }
 
+    /// `this.session.cancelRlmChildRun(childId)`
+    /// (`in-process-agent-connection.ts:427`, `agent-session.ts:11306`).
+    ///
+    /// blocked_on: owner `AgentSession::cancel_rlm_child_run(&self, run: &RlmChildRun,
+    /// reason: &str)` (`core/agent_session/runtime_members.rs:889`) takes the run and
+    /// is `pub(super)`; the by-id walk `rlm_subtree_sessions` (:1087) is
+    /// `pub(super)` too. Owner to add: `runtime_members.rs`, a
+    /// `pub fn cancel_rlm_child_run_by_id(&self, child_id: &str, reason: &str) -> bool`
+    /// matching `agent-session.ts:11306-11329`. Needs `runtime_members.rs` edited.
     fn session_cancel_rlm_child(&self, child_id: &str) -> bool {
-        // blocked_on: `AgentSession` has no `cancelRlmChild` owner.
         let _ = child_id;
         false
     }
 
+    /// `this.session.setScopedModels(scopedModels)`
+    /// (`in-process-agent-connection.ts:472`, `agent-session.ts:4964`).
+    ///
+    /// blocked_on: the only owner is `AgentSession::set_scoped_models(&mut self,
+    /// Vec<ScopedModel>)` (`core/agent_session.rs:6951`); `AgentSession` is held as
+    /// `Arc<AgentSession>` and the field is a plain `Vec`, so no `&self` caller can
+    /// write it. `AgentConnectionScopedModel` -> `ScopedModel`
+    /// (`core/model_resolver.rs:86`) is field-for-field. Needs
+    /// `core/agent_session.rs` edited (interior mutability or a runtime-level
+    /// rebuild path).
     fn session_set_scoped_models(&self, scoped_models: Vec<AgentConnectionScopedModel>) {
-        // blocked_on: `AgentSession::set_scoped_models` (core/agent_session.rs:6889) takes
-        // `&mut self` and canonical `ScopedModel`; the seam passes `&self` and
-        // `AgentConnectionScopedModel`. Needs a converter plus interior mutability.
         let _ = scoped_models;
     }
 
+    /// `this.session.settingsManager.setTransport(transport)` and
+    /// `this.session.agent.transport = transport`
+    /// (`in-process-agent-connection.ts:488-489`).
+    ///
+    /// The settings half is reachable (`AgentSession.settings_manager`,
+    /// `core/agent_session.rs:2136`). The live-agent half is not: `agent` is
+    /// `Arc<dyn AgentHandle>` (`core/agent_session.rs:2134`) and `AgentHandle`
+    /// (:243-274) has no transport setter, so
+    /// `pi_agent_core::agent::Agent.transport` (`crates/pi-agent-core/src/agent.rs:259`)
+    /// cannot be assigned through the seam.
+    /// blocked_on: add `fn set_transport(&self, transport: String)` to the
+    /// `AgentHandle` trait (`core/agent_session.rs:246`), implemented for `Arc<Agent>`
+    /// at `core/agent_session/agent_handle.rs:20`. Needs those two files edited.
     fn session_set_transport(&self, transport: Transport) {
-        // blocked_on: the owner is `SettingsManager::set_transport` (&mut self, TransportSetting),
-        // which the session seam does not reach from here.
-        let _ = transport;
+        self.session()
+            .settings_manager
+            .lock()
+            .expect("settings manager poisoned")
+            .set_transport(transport);
     }
 
+    /// `this.session.compact(customInstructions)`
+    /// (`in-process-agent-connection.ts:509`, `agent-session.ts:8077`).
+    ///
+    /// blocked_on: `compact_with_options` (`core/agent_session.rs:11121`) is public
+    /// but returns `Result<(), String>`; the `CompactionResult`
+    /// (`core/compaction/compaction.ts:124-131`) is only produced by the private
+    /// `AgentSession::compact` (`core/agent_session.rs:13139`) and
+    /// `perform_compaction_unmeasured_full` (:13290), and it has no serde impls.
+    /// Owner to add: `core/agent_session.rs`, a public
+    /// `async fn compact(...) -> Result<CompactionResult, String>`. Needs
+    /// `core/agent_session.rs` edited.
     fn session_compact(&self, custom_instructions: Option<&str>) -> BoxFuture<Result<Value, String>> {
-        // blocked_on: `compact_with_options` returns `()`, so the `CompactionResult` the seam's
-        // `Value` requires is not reachable on the public path.
         let _ = custom_instructions;
         Box::pin(async { Err("blocked_on: compact result not exposed on the public path".to_string()) })
     }
 
+    /// `this.session.refine(options)` (`in-process-agent-connection.ts:515`,
+    /// `agent-session.ts:8952`).
+    ///
+    /// blocked_on: `refine_with_options` (`core/agent_session.rs:12141`) is private;
+    /// the public paths are the `/refine` command (:9571) and
+    /// `handle_refine_host_request` (:4393), which only schedules the request and
+    /// returns a status object. Owner to add: `core/agent_session.rs`, a
+    /// `pub async fn refine(&self, options: RefineOptions) -> Result<RefinementResult, String>`
+    /// (`RefinementResult` already derives serde, `core/refinement/refinement.rs:280`).
+    /// Needs `core/agent_session.rs` edited.
     fn session_refine(&self, options: Value) -> BoxFuture<Result<Value, String>> {
-        // blocked_on: `refine_with_options` is private and returns `RefinementResult`, which the
-        // seam's `Value` requires a serializer for.
         let _ = options;
         Box::pin(async { Err("blocked_on: refine result not exposed on the public path".to_string()) })
     }
@@ -456,17 +518,21 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
         target_id: &str,
         options: Option<AgentConnectionNavigateTreeOptions>,
     ) -> BoxFuture<Result<AgentConnectionNavigateTreeResult, String>> {
-        // `navigate_tree` (runtime_members.rs:2770) is public but returns `()`, while the seam needs
-        // the `{editorText, cancelled, aborted}` result that `navigate_tree_inner` builds. The
-        // forward is real; the result projection is the blocked part.
+        // `navigate_tree` (`core/agent_session/runtime_members.rs:2774`) is public; it
+        // returns `Result<(), String>` where `agent-session.ts:12613-12625` returns
+        // `{ editorText?, cancelled, aborted?, summaryEntry? }`.
         let session = self.session();
         let target_id = target_id.to_string();
         let options = options;
         Box::pin(async move {
             let summarize = options.as_ref().and_then(|options| options.summarize);
             session.navigate_tree(&target_id, summarize, None).await?;
-            // blocked_on: `navigate_tree_inner` holds the editorText/cancelled/aborted result and is
-            // `pub(super)`; until it is exposed, the successful path reports not-cancelled.
+            // blocked_on: `navigate_tree_inner`
+            // (`core/agent_session/runtime_members.rs:2785`) is `pub(super)` and discards
+            // the editorText and the extension `cancel` branch; the seam needs it to
+            // return a result struct (`NavigateTreeResult` in
+            // `core/agent_session.rs`). Needs `core/agent_session.rs` and
+            // `runtime_members.rs` edited.
             Ok(AgentConnectionNavigateTreeResult {
                 editor_text: None,
                 cancelled: false,
@@ -490,95 +556,41 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
         })
     }
 
+    /// `this.session.exportToJsonl(outputPath)`
+    /// (`in-process-agent-connection.ts:568`, `agent-session.ts:13093`).
+    ///
+    /// blocked_on: no owner. The writer needs the session header
+    /// (`agent-session.ts:13100-13106`), the branch (`SessionManager::get_branch`,
+    /// `core/session_manager.rs:4238`), a parentId re-chain and an
+    /// ISO-8601-timestamped default path; `iso_now` (`core/session_manager.rs:892`)
+    /// is private and no function writes a branch as JSONL. Owner to add: a
+    /// `pub fn export_to_jsonl(&self, output_path: Option<&str>) -> Result<String, String>`
+    /// matching `agent-session.ts:13093-13121`.
     fn session_export_to_jsonl(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>> {
-        // blocked_on: no JSONL writer owner exists in the port.
         let _ = output_path;
         Box::pin(async { Err("blocked_on: no JSONL export owner".to_string()) })
     }
 
+    /// `this.session.getRlmChildSession(childId)` then the watcher built from the
+    /// child (`in-process-agent-connection.ts:604-628`).
+    ///
+    /// blocked_on: `AgentSession::get_rlm_child_session` does not exist. The
+    /// retained children live in `rlm_child_sessions`
+    /// (`core/agent_session.rs:2236`), whose only by-id accessors are the
+    /// `pub(super)` `rlm_child_snapshot_for_run`/`rlm_child_snapshot_for_session`
+    /// (`core/agent_session/runtime_members.rs:1804/1854`). Owner to add:
+    /// `core/agent_session/runtime_members.rs`, a
+    /// `pub fn get_rlm_child_session(&self, child_id: &str) -> Option<Arc<AgentSession>>`
+    /// matching `agent-session.ts:11289`. Needs `runtime_members.rs` edited.
     fn session_watch_child(&self, child_id: &str) -> Option<Box<dyn AgentConnectionSessionWatcher>> {
-        // blocked_on: needs `AgentSession::getRlmChildSession`, which has no owner.
         let _ = child_id;
         None
     }
-    //
-    // The trait has no default bodies, so an omitted member is a hard E0046 at
-    // `impl InProcessRuntimeHost for InProcessRuntimeHostAdapter`. Each member
-    // below is omitted because the real Rust owner it would forward to does not
-    // exist (or is not reachable from a sibling module) in the port today.
-    // Returning a placeholder here would be a false fix, so the compiler keeps
-    // reporting the gap instead.
-    //
-    // blocked_on: `snapshot_source` - requires `AgentSessionSnapshotSource`'s 28
-    // fields. `AgentSession` owns 22 of them publicly, but `streaming_message`,
-    // `session_context`, `session_tree` and the `children` roster are only
-    // produced inside `create_agent_connection_snapshot`/`AgentSession`'s private
-    // `_rlmChildSnapshot*` helpers. `children` also needs
-    // `rlm_child_snapshot_for_run`/`rlm_child_snapshot_for_session`, which are
-    // `pub(super)` in `core/agent_session/runtime_members.rs`. Fix: drop
-    // `(super)` on those two builders, or add `AgentSession::get_children`.
-    // blocked_on: `session_subscribe` - needs `AgentSessionEvent` ->
-    // `AgentConnectionSessionEvent`. `AgentSessionEvent` (core/agent_session.rs)
-    // derives only `Debug, Clone` and no converter exists in any slice.
-    // blocked_on: `session_wait_for_headless_completion` - needs an
-    // `impl HeadlessCompletionSession for AgentSession`. Only
-    // `get_autonomous_status`, `record_host_autonomous_continuation`,
-    // `refresh_autonomous_gates`, `wait_for_idle` and `state_messages` have
-    // public owners; `wait_for_rlm_quiescence`, `wait_for_headless_idle` and
-    // `prompt_headless_continuation` do not.
-    // blocked_on: `session_model_catalog` - the seam member is synchronous while
-    // the only owner, `ModelRegistry::refresh_model_catalog`, is `async` and
-    // `&mut self`. A sync member cannot await it, and the session holds the
-    // registry as `Arc<Mutex<ModelRegistry>>`.
-    // blocked_on: `session_context_tree` - needs `AgentSession::getContextTree`.
-    // `core/context_tree.rs` carries only the disk-loading helpers
-    // (`load_context_tree_child_from_disk`, `load_context_tree_children_from_disk`)
-    // and the parent-node assembly that consumes them is unported.
-    // blocked_on: `session_rlm_children` - needs the `AgentConnection*` roster
-    // projection of `RlmChildAgentSnapshot` (core/agent_session.rs). The two
-    // builders are `pub(super)` in `core/agent_session/runtime_members.rs` and no
-    // `impl From<RlmChildAgentSnapshot> for AgentConnectionRlmChildAgentSnapshot`
-    // exists, so `token_count`/`duration_ms`/`answer_preview`/`activity`/
-    // `replied_since_task` cannot be filled.
-    // blocked_on: `session_cancel_rlm_child` - the only owner is
-    // `pub(super) cancel_rlm_child_run(&self, run: &RlmChildRun, reason: &str)`.
-    // There is no by-child-id entry point, and the caller in
-    // `daemon_mode.rs:5056` drives it through the daemon view, not this seam.
-    // blocked_on: `session_set_scoped_models` - the owner
-    // `AgentSession::set_scoped_models` takes `&mut self`, but the session is
-    // held as `Arc<AgentSession>` (the field itself is a plain `Vec`, not a
-    // `Mutex`), so no `&self` caller can write it.
-    // blocked_on: `session_set_transport` - `SettingsManager::set_transport`
-    // persists the preference, but the TypeScript also assigns
-    // `session.agent.transport`; `AgentHandle` (core/agent_session.rs:238) has no
-    // transport setter, so the live `Agent::transport` (pi-agent-core agent.rs:259)
-    // cannot be reached through the seam.
-    // blocked_on: `session_compact` - needs `CompactionResult`
-    // (`core/compaction/compaction.rs`). `AgentSession::compact_with_options` is
-    // public but returns `Result<(), String>`; the result is only produced by the
-    // private `perform_compaction_unmeasured_full`.
-    // blocked_on: `session_refine` - needs `RefinementResult`
-    // (`core/refinement/refinement.rs`). `refine_with_options` is private and
-    // `handle_refine_host_request` only queues the request and returns a status
-    // object.
-    // blocked_on: `session_navigate_tree` - `navigate_tree` returns
-    // `Result<(), String>`; the TypeScript `{ editorText, cancelled, aborted }`
-    // result is never rebuilt by the Rust owner.
-    // blocked_on: `session_export_to_html` - no owner. `export_session_to_html`
-    // (`core/export_html/mod.rs`) exists but needs a `ToolHtmlRenderer` built from
-    // a `Theme`; the session has no public theme accessor, and
-    // `create_tool_html_renderer` has no caller outside its own tests.
-    // blocked_on: `session_export_to_jsonl` - no owner. The JSONL writer would
-    // need the private `iso_now()` plus a header/`parentId` re-chain; no function
-    // in the crate writes a session branch as JSONL.
-    // blocked_on: `session_watch_child` - needs `AgentSession::getRlmChildSession`,
-    // which does not exist.
-    //
-    // REPAIR CURSOR: the highest-value unblock is dropping `(super)` on
-    // `rlm_child_snapshot_for_run`/`rlm_child_snapshot_for_session` in
-    // `core/agent_session/runtime_members.rs` (another pack owns that file). That
-    // single change unblocks `session_rlm_children` and moves `snapshot_source`
-    // from 22/28 to 24/28 fields.
+    // Members whose canonical owner is missing keep an explicit failure or an empty roster with an
+    // accurate `blocked_on:` note naming the owner to add. They are not omitted: the trait has no
+    // default bodies, so an omitted member is a hard E0046 that stops the whole crate from compiling
+    // and keeps every test from running.
+
 
 
     fn session_header(&self) -> Option<AgentConnectionSessionHeader> {

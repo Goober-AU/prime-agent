@@ -36,7 +36,7 @@ const TRACE_UPLOAD_ALL_MIN_REQUEST_INTERVAL_MS: u64 =
     TRACE_UPLOAD_RATE_LIMIT_WINDOW_MS / TRACE_UPLOAD_RATE_LIMIT_REQUESTS + TRACE_UPLOAD_RATE_LIMIT_SAFETY_MS;
 
 /// `VERSION` from config.ts (package.json version).
-pub(crate) const VERSION: &str = "0.9.3";
+pub(crate) const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub type AgentTraceCredentialSource = &'static str;
 

@@ -45,6 +45,11 @@ pub struct ActiveSessionRuntimeSession {
     pub streaming_message: Option<pi_agent_core::types::AgentMessage>,
     pub model_registry: Option<Arc<tokio::sync::Mutex<crate::core::model_registry::ModelRegistry>>>,
     pub settings_manager: Option<Arc<crate::core::settings_manager::SettingsManager>>,
+    /// `session.model` (`daemon-session-list.ts:257`). Captured from the live
+    /// `DaemonSession` at bind time because the summary builder only sees this view.
+    pub model_identity: Option<crate::modes::daemon::daemon_mode::ModelIdentity>,
+    /// `session.thinkingLevel` (`daemon-session-list.ts:258`).
+    pub thinking_level: Option<String>,
     /// `sessionManager.getLeafId()`.
     pub leaf_id: Option<String>,
     /// `sessionManager.getLatestAgentStatus()`.

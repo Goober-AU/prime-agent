@@ -213,7 +213,7 @@ pub const MAX_HISTORY_RANGE_MESSAGES: usize = 400;
 const DAEMON_UPDATE_RESTART_FORMAT_VERSION: u32 = 1;
 
 // slice plumbing: `VERSION` from config.ts.
-const VERSION: &str = "0.9.3";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // slice plumbing: `getDaemonUpdateRestartManifestPath` from config.ts.
 fn get_daemon_update_restart_manifest_path(socket_path: &str) -> String {
@@ -6551,6 +6551,13 @@ impl AgentDaemon {
             is_compacting: session.is_compacting(),
             messages_len: session.messages().len(),
             has_running_rlm_children: session.has_running_rlm_children(),
+            // `daemon-session-list.ts:257-258` copies `session.model` and
+            // `session.thinkingLevel` onto every summary, and the `--print`/`--json`
+            // clients gate on `summary.model` (`main.ts:1628`). Capture them here, where
+            // the live `DaemonSession` is still in hand; the summary builder only sees the
+            // narrowed runtime view.
+            model_identity: session.model_identity(),
+            thinking_level: session.thinking_level(),
             ..ActiveSessionRuntimeSession::default()
         };
         {
@@ -8365,7 +8372,18 @@ impl AgentDaemon {
 
     /// `broadcastRosterFrame(message)`.
     fn broadcast_roster_frame(&self, message: &DaemonWorkerRosterOutbound) -> bool {
-        let payload = format!("{}\n", serde_json::to_string(message).unwrap_or_default());
+        // `broadcastRosterFrame` (daemon-mode.ts:7359-7373): every supervisor link is a
+        // private-framed socket, so the roster payload is wrapped in an
+        // `encodePrivateFrame({ kind: "outbound", outboundType: message.type })` envelope.
+        // Writing the bare line here desynchronizes the peer's frame decoder: it reads the
+        // first four bytes of `{"type"...` as a big-endian header length.
+        let payload = serde_json::to_vec(message).unwrap_or_default();
+        let outbound_type = serde_json::to_value(message)
+            .ok()
+            .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_string))
+            .unwrap_or_else(|| "roster_delta".to_string());
+        let header = serde_json::json!({ "kind": "outbound", "outboundType": outbound_type });
+        let framed = encode_private_frame(&header, &payload).ok();
         let mut delivered = false;
         for client in self.client_handles() {
             if self
@@ -8374,7 +8392,21 @@ impl AgentDaemon {
                 .expect("supervisor claims poisoned")
                 .contains_key(&(Arc::as_ptr(&client) as usize))
             {
-                delivered |= client.writer.write(payload.clone());
+                let private_framed = client
+                    .state
+                    .lock()
+                    .expect("daemon client poisoned")
+                    .transport
+                    .as_deref()
+                    == Some("private-framed");
+                if private_framed {
+                    if let Some(framed) = &framed {
+                        delivered |= client.writer.write_bytes(framed.clone());
+                    }
+                } else {
+                    let line = format!("{}\n", serde_json::to_string(message).unwrap_or_default());
+                    delivered |= client.writer.write(line);
+                }
             }
         }
         delivered

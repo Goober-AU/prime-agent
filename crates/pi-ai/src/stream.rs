@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::api_registry::{get_api_provider, ApiProviderInternal};
+use crate::api_registry::{get_api_provider, get_api_providers, ApiProviderInternal};
 use crate::compaction::{CompactionOptions, ProviderCompactionResult};
 use crate::types::{
     AssistantMessage, BoxFuture, Context, Model, ProviderStreamOptions, SimpleStreamOptions,
@@ -12,7 +12,24 @@ use crate::utils::event_stream::AssistantMessageEventStream;
 pub use crate::env_api_keys::get_env_api_key;
 
 /// `function resolveApiProvider(api)`.
+///
+/// `packages/ai/src/stream.ts:1` is `import "./providers/register-builtins.js";` - the
+/// built-ins are registered by that side effect before any `stream()` call can resolve an
+/// api. Rust has no import side effects, so the equivalent runs here, once per process.
+/// Without it `stream_simple("openai-completions")` panics with
+/// "No API provider registered for api: ..." the first time a real provider is used.
+fn ensure_builtin_api_providers() {
+    static REGISTERED: std::sync::Once = std::sync::Once::new();
+    REGISTERED.call_once(|| {
+        // Tests clear and re-register the registry themselves; only the first call is ours.
+        if get_api_providers().is_empty() {
+            crate::providers::register_builtins::register_built_in_api_providers();
+        }
+    });
+}
+
 fn resolve_api_provider(api: &str) -> ApiProviderInternal {
+    ensure_builtin_api_providers();
     match get_api_provider(api) {
         Some(provider) => provider,
         None => panic!("No API provider registered for api: {}", api),

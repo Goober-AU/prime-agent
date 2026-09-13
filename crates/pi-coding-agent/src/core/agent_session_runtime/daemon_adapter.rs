@@ -451,8 +451,10 @@ impl DaemonSession for AgentSessionDaemonAdapter {
 
 
     // ---------------------------------------------------------------------
-    // Members whose canonical owner is missing return an explicit failure or
-    // an empty value with a `blocked_on:` note. They are NOT omitted: the trait
+    // 34 of the 104 members below forward to a real owner. The rest either
+    // forward partially (a real call plus a `blocked_on:` note for the part the
+    // port cannot produce) or return an explicit failure / empty value with a
+    // `blocked_on:` note naming the owner to add. None are omitted: the trait
     // has no default bodies, so an omitted member is an E0046 that stops the
     // whole crate from compiling and keeps every test from running.
     // ---------------------------------------------------------------------
@@ -463,21 +465,64 @@ impl DaemonSession for AgentSessionDaemonAdapter {
 
     fn session_dir(&self) -> Option<String> { Some(self.session().session_manager.lock().unwrap().get_session_dir()) }
 
+    /// `session.setExecEnvProvider(() => execEnvForSession(state.clientEnv))`.
+    ///
+    /// `daemon-extension-binding.ts:55` passes the provider built from the
+    /// session's client env; `agent-session.ts:9739-9743` assigns it and then
+    /// sets `extensions.runtime.getExecEnv = provider`. The loader reads that
+    /// slot at exec time (`extensions/loader.rs:316`), which is why the provider
+    /// is installed on the loaded runtime's state here.
     fn set_exec_env_provider(&self, client_env: Option<HashMap<String, String>>) {
-        // blocked_on: no `setExecEnvProvider` owner on `AgentSession`; the daemon seam sets it on the
-        // binding/session-manager side.
-        let _ = client_env;
+        let provider: Arc<dyn Fn() -> Option<Map<String, Value>> + Send + Sync> = Arc::new(move || {
+            // `execEnvForSession` returns `undefined` for a key the client did not
+            // send; the loader maps `Value::Null` back to "unset in the child"
+            // (`extensions/loader.rs:431-434`), so `None` becomes `Null` here.
+            Some(
+                crate::modes::daemon::daemon_client_env::exec_env_for_session(client_env.as_ref())
+                    .into_iter()
+                    .map(|(key, value)| (key, value.map(Value::String).unwrap_or(Value::Null)))
+                    .collect::<Map<String, Value>>(),
+            )
+        });
+        let extensions = self.session().resource_loader().get_extensions();
+        extensions
+            .runtime
+            .state
+            .lock()
+            .unwrap()
+            .get_exec_env = Some(provider);
     }
 
+    /// `state.runtime.setRuntimeEnvScope((fn) => withClientEnv(state.clientEnv, fn))`.
+    ///
+    /// `daemon-extension-binding.ts:58` wraps every runtime rebuild so extension
+    /// load-time captures see the client env; `agent-session-runtime.ts:141`
+    /// stores the scope and `:145` `scopedBuild` applies it.
     fn set_runtime_env_scope(&self, client_env: Option<HashMap<String, String>>) {
-        // blocked_on: no `setRuntimeEnvScope` owner on `AgentSession`.
-        let _ = client_env;
+        let scope: super::RuntimeEnvScope = Arc::new(
+            move |build: BoxFuture<Result<super::CreateAgentSessionRuntimeResult, String>>| {
+                let client_env = client_env.clone();
+                Box::pin(async move {
+                    let mut build = Some(build);
+                    crate::modes::daemon::daemon_client_env::with_client_env(
+                        client_env.as_ref(),
+                        move || build.take().expect("the env scope wraps one build"),
+                    )
+                    .await
+                })
+            },
+        );
+        self.runtime.set_runtime_env_scope(Some(scope));
     }
 
+    /// `state.runtime.setSubagentRuntimeHost(callbacks.subagentRuntimeHost)`.
+    ///
+    /// `daemon-extension-binding.ts:61` always assigns, including `undefined`:
+    /// `agent-session-runtime.ts:149-152` then re-binds, and `:548-552` falls
+    /// back to the runtime hosting its own subagents. Skipping the `None` case
+    /// would leave the previous host installed.
     fn set_subagent_runtime_host(&self, host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>) {
-        if host.is_some() {
-            self.session().set_subagent_runtime_host(host);
-        }
+        self.runtime.set_subagent_runtime_host(host);
     }
 
     fn set_rebind_session(&self, rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>) {
@@ -542,8 +587,19 @@ impl DaemonSession for AgentSessionDaemonAdapter {
             .expect("connection state serializes")
     }
 
+    /// `session.registerRlmChildSession(childId, session)`.
+    ///
+    /// `daemon-mode.ts:3333` uses the boolean to abort a spawn whose child could
+    /// not be retained. The daemon seam carries the child as `Arc<dyn DaemonSession>`;
+    /// only this adapter's own children carry the `AgentSession` the owner needs,
+    /// and its `AgentSessionDaemonAdapter` wrapper does not expose it, so the
+    /// registration stays blocked:
+    /// blocked_on: `AgentSession::register_rlm_child_session(child_id, session)`
+    /// does not exist. Owner to add: `core/agent_session/runtime_members.rs`
+    /// (beside `rlm_child_snapshot_for_run` at :1804), a `pub fn` over
+    /// `rlm_child_sessions` + `rlm_child_unsubscribes` matching
+    /// `agent-session.ts:11068-11086`. Needs `runtime_members.rs` edited.
     fn register_rlm_child_session(&self, child_id: &str, session: Arc<dyn DaemonSession>) -> bool {
-        // blocked_on: no `registerRlmChildSession` owner on `AgentSession`.
         let _ = (child_id, session);
         false
     }
@@ -726,8 +782,17 @@ impl DaemonSession for AgentSessionDaemonAdapter {
             .collect()
     }
 
+    /// `session.cancelRlmChildRun(childId)` (`agent-session.ts:11306`).
+    ///
+    /// The owner walks `_rlmSubtreeSessions()` and cancels the matching live run.
+    /// blocked_on: `AgentSession::cancel_rlm_child_run(&self, run: &RlmChildRun,
+    /// reason: &str)` (`core/agent_session/runtime_members.rs:889`) takes the run
+    /// and is `pub(super)`, and the by-id walk (`rlm_subtree_sessions`, :1087) is
+    /// `pub(super)` too. Owner to add: `runtime_members.rs`, a
+    /// `pub fn cancel_rlm_child_run_by_id(&self, child_id: &str, reason: &str) -> bool`
+    /// matching `agent-session.ts:11306-11329`, plus `pub` on `rlm_subtree_sessions`.
+    /// Needs `runtime_members.rs` edited.
     fn cancel_rlm_child_run(&self, child_id: &str) -> bool {
-        // blocked_on: the owner is `pub(super)` in `core::agent_session`, so it is unreachable here.
         let _ = child_id;
         false
     }
@@ -794,34 +859,82 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         Box::pin(async move { session.cycle_model(Some(direction), ModelSelectOptions { wait_for_extensions: Some(wait_for_extensions) }).await.map(|result| Some(result.model)) })
     }
 
+    /// `session.setScopedModels(command.scopedModels)` (`daemon-mode.ts:5157`).
+    ///
+    /// blocked_on: the only owner is `AgentSession::set_scoped_models(&mut self,
+    /// Vec<ScopedModel>)` (`core/agent_session.rs:6951`), and the session field is
+    /// a plain `Vec` held behind `Arc<AgentSession>`, so no `&self` caller can
+    /// write it. Owner to add: `core/agent_session.rs`, a `&self` setter over
+    /// interior mutability (`Mutex<Vec<ScopedModel>>`), or a `set_scoped_models`
+    /// on `AgentSessionRuntime` that rebuilds through `scoped_build`. Needs
+    /// `core/agent_session.rs` edited.
     fn set_scoped_models(&self, scoped_models: &Value) {
-        // blocked_on: the owner takes `Vec<ScopedModel>` on `&mut self` (agent_session.rs:6889);
-        // this seam passes an opaque `Value` through `&self`.
         let _ = scoped_models;
     }
 
+    /// `state.runtime.session.settingsManager.setTransport(...)` and
+    /// `state.runtime.session.agent.transport = ...` (`daemon-mode.ts:5181-5182`).
+    ///
+    /// The settings half is reachable: this adapter exposes `settings_manager()`.
+    /// The live-agent half is not: `AgentSession.agent` is `Arc<dyn AgentHandle>`
+    /// (`core/agent_session.rs:2134`) and the `AgentHandle` trait
+    /// (`core/agent_session.rs:246-274`) has no transport setter, so
+    /// `pi_agent_core::agent::Agent.transport` (`crates/pi-agent-core/src/agent.rs:259`)
+    /// cannot be assigned through the seam.
+    /// blocked_on: add `fn set_transport(&self, transport: String)` to
+    /// `core/agent_session.rs:246` `AgentHandle` (implemented at
+    /// `core/agent_session/agent_handle.rs:20` for `Arc<Agent>`, matching
+    /// `agent.ts`'s `transport` field). Needs `core/agent_session.rs` and
+    /// `agent_handle.rs` edited.
     fn set_transport(&self, transport: &str) {
-        // blocked_on: `SettingsManager::set_transport` needs `&mut SettingsManager`; this adapter
-        // holds no settings handle.
-        let _ = transport;
+        if let Some(settings) = self.settings_manager() {
+            settings
+                .lock()
+                .expect("settings manager poisoned")
+                .set_transport(transport.to_string());
+        }
     }
 
+    /// `await session.compact(command.customInstructions)` (`daemon-mode.ts:5212`).
+    ///
+    /// The forward is real: `compact_with_options`
+    /// (`core/agent_session.rs:11121`) runs the same manual compaction.
+    /// blocked_on: the seam's `Value` is the `CompactionResult`
+    /// `{summary, firstKeptEntryId, tokensBefore, details?, usage?}`
+    /// (`core/compaction/compaction.ts:124-131`); `compact_with_options` returns
+    /// `Result<(), String>`, and the result is only produced by the private
+    /// `AgentSession::compact` (`core/agent_session.rs:13139`) /
+    /// `perform_compaction_unmeasured_full` (:13290). Owner to add:
+    /// `core/agent_session.rs`, a public `async fn compact(...) -> Result<CompactionResult, String>`
+    /// (the `compact` at :12748 minus the `skip_abort` internal, matching
+    /// `agent-session.ts:8077`). `CompactionResult`
+    /// (`core/compaction/compaction.rs:565`) has no serde impls, so the seam also
+    /// needs the serializer. Needs `core/agent_session.rs` edited.
     fn compact(&self, custom_instructions: Option<&str>) -> BoxFuture<'static, Result<Value, String>> {
         let session = Arc::clone(&self.runtime.session());
         let custom_instructions = custom_instructions.map(|value| value.to_string());
         Box::pin(async move {
             session
                 .compact_with_options(custom_instructions.as_deref(), false)
-                .await;
-            // blocked_on: `compact_with_options` returns `()`, so the `CompactionResult` this seam
-            // carries is not reachable on the public path.
+                .await?;
             Ok(Value::Null)
         })
     }
 
+    /// `await session.refine({ instructions, rollbackId, global })`
+    /// (`daemon-mode.ts:5218-5222`).
+    ///
+    /// blocked_on: the only owner is the private
+    /// `AgentSession::refine_with_options` (`core/agent_session.rs:12141`), whose
+    /// `skip_abort`/`source` internals the TypeScript `refine(options, internal)`
+    /// keeps private too; the public path in the port is the `/refine` slash
+    /// command (:9571) and `handle_refine_host_request` (:4393), which only
+    /// schedules. Owner to add: `core/agent_session.rs`, a
+    /// `pub async fn refine(&self, options: RefineOptions) -> Result<RefinementResult, String>`
+    /// matching `agent-session.ts:8952`. `RefinementResult`
+    /// (`core/refinement/refinement.rs:280`) already derives serde, so the seam
+    /// only needs the public path. Needs `core/agent_session.rs` edited.
     fn refine(&self, options: RefineOptions) -> BoxFuture<'static, Result<Value, String>> {
-        // blocked_on: `AgentSession::refine_with_options` is private and returns `RefinementResult`;
-        // this seam needs a public path plus a serializer for the result.
         let _ = options;
         Box::pin(async {
             Err("blocked_on: refine_with_options is private; no public refine path".to_string())
@@ -851,14 +964,30 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         })
     }
 
+    /// `session.getContextTree()` (`daemon-mode.ts:4909`, `agent-session.ts:13028`).
+    ///
+    /// blocked_on: every builder the TypeScript calls is private in the port -
+    /// `rlm_session_dir_for_reading` (`core/agent_session/runtime_members.rs:3115`),
+    /// `context_window_resolver` (:3122) and `subtract_unindexed_child_usage` (:3134)
+    /// are `pub(super)`, and `local_harness_state_dir` (`core/agent_session.rs:11168`)
+    /// is private. `load_context_tree_child_from_disk` /
+    /// `load_context_tree_children_from_disk` (`core/context_tree.rs:385/464`) and
+    /// `compute_own_and_total_usage` (:175) are already public, so the assembly is
+    /// all that is missing. Owner to add: `core/agent_session/runtime_members.rs`,
+    /// a `pub fn get_context_tree(&self) -> ContextTreeNode` matching
+    /// `agent-session.ts:13028-13064`. Needs `runtime_members.rs` edited.
     fn get_context_tree(&self) -> Value {
-        // blocked_on: `AgentSession` has no `getContextTree` owner in the port.
         Value::Null
     }
 
+    /// `session.getRlmChildSnapshots()` (`daemon-mode.ts:4896`).
+    ///
+    /// blocked_on: the two builders `rlm_child_snapshot_for_run` /
+    /// `rlm_child_snapshot_for_session` are `pub(super)` in
+    /// `core/agent_session/runtime_members.rs:1804/1854`, so no sibling module can
+    /// reach them. Owner to add: drop `(super)` on both (the walk itself is
+    /// `agent-session.ts:11171-11206`). Needs `runtime_members.rs` edited.
     fn get_rlm_child_snapshots(&self) -> Vec<Value> {
-        // blocked_on: needs `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`
-        // (runtime_members.rs:1800/1850), which are `pub(super)` in `core::agent_session`.
         Vec::new()
     }
 
@@ -877,8 +1006,18 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         })
     }
 
+    /// `state.runtime.session.exportToJsonl(command.outputPath)`
+    /// (`daemon-mode.ts:5303`, `agent-session.ts:13093`).
+    ///
+    /// blocked_on: no owner. The writer needs the session header
+    /// (`agent-session.ts:13100-13106`), the branch (`SessionManager::get_branch`,
+    /// `core/session_manager.rs:4238`), a parentId re-chain and an
+    /// ISO-8601-timestamped default path; `SessionManager::iso_now`
+    /// (`core/session_manager.rs:892`) is private and no public function writes a
+    /// branch as JSONL. Owner to add: `core/agent_session_runtime.rs` (or
+    /// `SessionManager`), a `pub fn export_to_jsonl(&self, output_path: Option<&str>) -> Result<String, String>`
+    /// matching `agent-session.ts:13093-13121`.
     fn export_to_jsonl(&self, output_path: Option<&str>) -> Result<String, String> {
-        // blocked_on: no JSONL writer owner exists in the port.
         let _ = output_path;
         Err("blocked_on: no JSONL export owner".to_string())
     }
@@ -914,36 +1053,75 @@ impl DaemonSession for AgentSessionDaemonAdapter {
                     options.custom_instructions.as_deref(),
                 )
                 .await?;
-            // blocked_on: `navigate_tree_inner` holds the {editorText, cancelled, aborted} result and
-            // is `pub(super)`; the successful path reports not-cancelled until it is exposed.
+            // `navigateTree` returns `{ editorText, cancelled, aborted, summaryEntry }`
+            // (`agent-session.ts:12621-12625`); the port's owner returns
+            // `Result<(), String>` (runtime_members.rs:2774) and the builder that
+            // holds the result, `navigate_tree_inner` (:2785), discards the
+            // editorText and the extension `cancel` branch.
+            // blocked_on: `navigate_tree_inner` is `pub(super)` and must return a
+            // result struct instead of `()`; owner to add in
+            // `core/agent_session.rs` (the `NavigateTreeResult` type) plus
+            // `runtime_members.rs:2785-2789` (the signature). Needs
+            // `core/agent_session.rs` and `runtime_members.rs` edited.
             Ok(json!({ "cancelled": false }))
         })
     }
 
+    /// `startSideQuestion(session.agent, id, question, onEvent, previousTurns, retry)`
+    /// (`daemon-mode.ts:4692-4708`).
+    ///
+    /// blocked_on: `core::side_question::start_side_question`
+    /// (`core/side_question.rs:148`) exists, but it needs a
+    /// `Arc<dyn SideQuestionParent>` (`side_question.rs:84`). Nothing in the crate
+    /// implements that trait for `AgentSession`, so `state.runtime.session.agent`
+    /// (`agent-session.ts:4693`) has no Rust equivalent; the daemon's own call
+    /// site (`modes/daemon/daemon_mode.rs:5057`) hits the same gap. Owner to add:
+    /// `core/agent_session.rs`, `impl SideQuestionParent for AgentSession`
+    /// (state/convertToLlm/transformContext/streamFn/getApiKey/onPayload/
+    /// onResponse/toolExecution/sessionId/thinkingBudgets) plus a
+    /// `pub fn start_side_question(...)` that calls it. Needs
+    /// `core/agent_session.rs` edited. (Note: the daemon adapter is constructed
+    /// once per runtime, not per connection, so a per-connection
+    /// `sideQuestionRuns` registry from `daemon-mode.ts:4686` has no home here.)
     fn start_side_question(
         &self,
         question: &str,
         options: SideQuestionOptions,
     ) -> BoxFuture<'static, Result<(), String>> {
-        // blocked_on: `core/side_question.rs` drives its own runs; `AgentSession` has no
-        // `startSideQuestion` owner that accepts these options.
         let _ = (question, options);
         Box::pin(async { Err("blocked_on: no startSideQuestion owner".to_string()) })
     }
 
+    /// `entry.run.abort()` (`daemon-mode.ts:4729`). The run lives in the daemon's
+    /// `sideQuestionRuns` map, which this per-runtime adapter does not own, so
+    /// there is nothing to abort here.
+    ///
+    /// blocked_on: an `AgentSession`-level owner for a started side-question run
+    /// (see `start_side_question` above); only `SideQuestionRun.abort`
+    /// (`core/side_question.rs:49`) exists, held by the caller.
     fn abort_side_question(&self, side_question_id: &str) {
-        // blocked_on: no `abortSideQuestion` owner on `AgentSession`.
         let _ = side_question_id;
     }
 
     fn new_session(&self, options: Option<NewSessionRuntimeOptions>) -> BoxFuture<'static, Result<Value, String>> { self.runtime().new_session(options) }
 
+    /// `session.releaseRlmChildSession(childId, session)`
+    /// (`daemon-mode.ts:3043`, `:3341`).
+    ///
+    /// blocked_on: the owner `AgentSession::release_rlm_child_session`
+    /// (`core/agent_session/runtime_members.rs:1787`) is public, but it takes
+    /// `&Arc<AgentSession>` and returns `Box<dyn Fn() + Send + Sync>` (a value
+    /// implementing `FnOnce`), while this seam passes the child as
+    /// `Arc<dyn DaemonSession>`, which cannot be narrowed to the canonical
+    /// `AgentSession`, and returns `Box<dyn FnOnce() + Send>`. Owner to add: a
+    /// `DaemonSession::release_rlm_child_session(child_id, session)` signature that
+    /// matches `agent-session.ts:11088`, or a downcast hook on `DaemonSession` for
+    /// the daemon-created children. Needs `modes/daemon/daemon_mode.rs` edited.
     fn release_rlm_child_session(
         &self,
         child_id: &str,
         session: Arc<dyn DaemonSession>,
     ) -> Option<Box<dyn FnOnce() + Send>> {
-        // blocked_on: the owner (runtime_members.rs:1783) has a different signature than this seam's.
         let _ = (child_id, session);
         None
     }
