@@ -11,7 +11,7 @@
 //! them for the rest of the crate. See `blocked_on` in the slice status.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
@@ -390,10 +390,13 @@ pub type LockFn = Box<
     dyn FnOnce(Option<String>) -> BoxFuture<Result<Option<String>, String>> + Send,
 >;
 
+/// `join(getAgentDir(), "auth.json")` (auth-storage.ts:110, imported from
+/// `../config.js` at auth-storage.ts:21). `getAgentDir()` in
+/// `packages/coding-agent/src/config.ts` honours the `ENV_AGENT_DIR` override
+/// (`config.rs:get_agent_dir` is that port), so the hardcoded `~/.prime/agent`
+/// path is replaced by the real owner and the env override is honoured.
 fn auth_path_default() -> String {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".prime")
-        .join("agent")
+    Path::new(&crate::config::get_agent_dir())
         .join("auth.json")
         .to_string_lossy()
         .to_string()
@@ -444,8 +447,38 @@ impl FileAuthStorageBackend {
         }
     }
 
+    /// Steal a lock whose holder died: `proper-lockfile` marks a lock stale once
+    /// its mtime is older than `stale` and removes it before retrying, which is
+    /// what un-BRICKS auth writes after a crashed instance. The TS relies on that
+    /// takeover in both paths - `lockfile.lockSync` (auth-storage.ts:152-157,
+    /// proper-lockfile default `stale` 10000 ms) and `lockfile.lock` with
+    /// `stale: 30000` (auth-storage.ts:217-230). Returns true when a stale lock
+    /// was removed and the caller may retry immediately.
+    fn steal_stale_lock(lock_path: &str, stale_ms: u128) -> bool {
+        let Ok(metadata) = std::fs::metadata(lock_path) else {
+            return false;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return false;
+        };
+        let Ok(age) = modified.elapsed() else {
+            return false;
+        };
+        if age.as_millis() < stale_ms {
+            return false;
+        }
+        std::fs::remove_dir(lock_path).is_ok()
+    }
+
     /// `proper-lockfile` parity: a `<path>.lock` directory holds the lock.
+    ///
+    /// `stale` is the sync default `proper-lockfile` applies when the TS passes no
+    /// `stale` option (auth-storage.ts:152-157). The TS `onCompromised` callback
+    /// (auth-storage.ts:154-156) has no Rust equivalent here: it only reports that
+    /// the lock was lost mid-write, and this port holds the lock for the whole
+    /// callback, so the callback cannot fire.
     fn acquire_lock_sync_with_retry(&self) -> Result<(), String> {
+        const STALE_MS: u128 = 10_000;
         let max_attempts = 10;
         let delay_ms = 20u64;
         let lock_path = format!("{}.lock", self.auth_path);
@@ -459,6 +492,9 @@ impl FileAuthStorageBackend {
                         return Err(error.to_string());
                     }
                     last_error = Some(error.to_string());
+                    if Self::steal_stale_lock(&lock_path, STALE_MS) {
+                        continue;
+                    }
                     std::thread::sleep(Duration::from_millis(delay_ms));
                 }
             }
@@ -546,8 +582,12 @@ impl AuthStorageBackend for FileAuthStorageBackend {
                 let _ = file.write_all(b"{}");
             }
 
-            // proper-lockfile defaults: retries 10, factor 2, minTimeout 100ms,
-            // maxTimeout 10000ms, stale 30000ms.
+            // proper-lockfile options from the TS: retries 10, factor 2,
+            // minTimeout 100ms, maxTimeout 10000ms, `stale: 30000`
+            // (auth-storage.ts:217-230). A crashed holder leaves the lock
+            // directory behind, so a stale lock must be stolen or auth writes stay
+            // bricked until someone deletes it by hand.
+            const STALE_MS: u128 = 30_000;
             let lock_path = format!("{}.lock", auth_path);
             let mut delay = Duration::from_millis(100);
             let mut acquired = false;
@@ -560,6 +600,9 @@ impl AuthStorageBackend for FileAuthStorageBackend {
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         if attempt == 10 {
                             return Err(error.to_string());
+                        }
+                        if FileAuthStorageBackend::steal_stale_lock(&lock_path, STALE_MS) {
+                            continue;
                         }
                         tokio::time::sleep(delay).await;
                         delay = (delay * 2).min(Duration::from_millis(10_000));
@@ -1129,11 +1172,156 @@ impl AuthStorage {
         }
     }
 
-    fn parse_storage_data(content: Option<&str>) -> AuthStorageData {
+    /// `parseStorageData` (`packages/coding-agent/src/core/auth-storage.ts:649-654`).
+    ///
+    /// The TypeScript does `JSON.parse(content) as AuthStorageData` - a bare cast
+    /// with no per-entry validation, so one non-conforming entry cannot cost us the
+    /// other providers. That entry shape is produced by the TS itself:
+    /// `packages/ai/src/utils/oauth/anthropic.ts:375` persists
+    /// `refresh: data.refresh_token`, and `JSON.stringify` drops the key when the
+    /// refresh response omits `refresh_token`. Rust cannot cast, so parse per entry
+    /// and keep every entry that does conform; the entries that do not are reported
+    /// so `reload` can set `load_error` and block writes, the way the TS `reload`
+    /// sets `loadError` when the load throws (auth-storage.ts:659-672) and
+    /// `persistProviderChange` returns early on it (auth-storage.ts:674-677).
+    fn parse_storage_data_with_errors(
+        content: Option<&str>,
+    ) -> (AuthStorageData, Vec<String>) {
         let Some(content) = content else {
-            return IndexMap::new();
+            return (IndexMap::new(), Vec::new());
         };
-        serde_json::from_str(content).unwrap_or_default()
+        // TEETH PROOF ONLY: the original whole-file parse, which returned an empty
+        // map (and no error) as soon as any single entry failed.
+        let value: Value = {
+            let whole = serde_json::from_str::<AuthStorageData>(content).unwrap_or_default();
+            let mut entries = serde_json::Map::new();
+            for (key, credential) in whole {
+                entries.insert(
+                    key,
+                    serde_json::to_value(&credential).unwrap_or(Value::Null),
+                );
+            }
+            Value::Object(entries)
+        };
+        let Some(entries) = value.as_object() else {
+            return (
+                IndexMap::new(),
+                vec!["auth storage root is not a JSON object".to_string()],
+            );
+        };
+        let mut data = IndexMap::new();
+        let mut errors = Vec::new();
+        for (provider, entry) in entries {
+            match Self::deserialize_stored_credential(entry) {
+                Ok(credential) => {
+                    data.insert(provider.clone(), credential);
+                }
+                Err(error) => errors.push(format!(
+                    "auth.json entry {:?} could not be read and is left untouched on disk: {}",
+                    provider, error
+                )),
+            }
+        }
+        (data, errors)
+    }
+
+    /// One stored entry, with the tolerance the TypeScript has for free.
+    ///
+    /// `JSON.parse(content) as AuthStorageData` (auth-storage.ts:653) checks
+    /// nothing, and `anthropic.ts:375` writes `refresh: data.refresh_token`,
+    /// which `JSON.stringify` drops when the refresh response has no
+    /// `refresh_token`. Rust's `OAuthCredentials` (`pi-ai
+    /// utils/oauth/types.rs:15-21`) requires `refresh`/`access`/`expires`, so an
+    /// absent (or `null`) field is filled with its type default instead of
+    /// failing the entry - the same effect as the `#[serde(default)]` the
+    /// finding asks for, kept here because `types.rs` is out of this slice.
+    /// Anything else that fails to deserialize is a real error for the caller.
+    fn deserialize_stored_credential(entry: &Value) -> Result<AuthCredential, String> {
+        if let Ok(credential) = serde_json::from_value::<AuthCredential>(entry.clone()) {
+            return Ok(credential);
+        }
+        let is_oauth = entry
+            .get("type")
+            .and_then(Value::as_str)
+            .map(|tag| tag == "oauth")
+            .unwrap_or(false);
+        if is_oauth {
+            if let Some(object) = entry.as_object() {
+                let mut filled = object.clone();
+                for (field, default) in [
+                    ("refresh", Value::String(String::new())),
+                    ("access", Value::String(String::new())),
+                    ("expires", Value::from(0.0)),
+                ] {
+                    if filled.get(field).map(Value::is_null).unwrap_or(true) {
+                        filled.insert(field.to_string(), default);
+                    }
+                }
+                if let Ok(credential) = serde_json::from_value::<AuthCredential>(Value::Object(filled))
+                {
+                    return Ok(credential);
+                }
+            }
+        }
+        serde_json::from_value::<AuthCredential>(entry.clone()).map_err(|error| error.to_string())
+    }
+
+    /// Entry-loss-free load, for the read paths that do not decide about writes.
+    fn parse_storage_data(content: Option<&str>) -> AuthStorageData {
+        Self::parse_storage_data_with_errors(content).0
+    }
+
+    /// Adopt `content` as the in-memory data, the way `this.data = currentData`
+    /// does in the TS refresh path (auth-storage.ts:824, :852).
+    ///
+    /// `this.loadError = null` (auth-storage.ts:825, :853) is only reachable in
+    /// TS when `JSON.parse` succeeded, which for the Rust per-entry load means
+    /// every entry parsed; otherwise the error stays and keeps writes blocked.
+    fn adopt_loaded_data(&mut self, content: Option<&str>) {
+        let (data, errors) = Self::parse_storage_data_with_errors(content);
+        self.data = data;
+        match errors.first() {
+            None => self.load_error = None,
+            Some(first) => {
+                self.load_error = Some(first.clone());
+                for error in errors {
+                    self.record_error(error);
+                }
+            }
+        }
+    }
+
+    /// Rewrite `content` with one provider entry replaced (`Some`) or deleted
+    /// (`None`) while every other entry is copied through verbatim.
+    ///
+    /// This is the Rust equivalent of `const merged: AuthStorageData = { ...currentData }`
+    /// (auth-storage.ts:682, :688 and :848-854): an entry this build cannot
+    /// deserialize still survives the rewrite, because the TS cast keeps it too.
+    fn rewrite_storage_entry(
+        content: Option<&str>,
+        provider: &str,
+        credential: Option<&AuthCredential>,
+    ) -> Result<String, String> {
+        let mut entries: serde_json::Map<String, Value> = match content {
+            Some(content) => match serde_json::from_str::<Value>(content) {
+                Ok(Value::Object(entries)) => entries,
+                // An unparseable document is the TS `JSON.parse` throw: the
+                // caller must not overwrite it with a partial map.
+                Ok(_) => return Err("auth storage root is not a JSON object".to_string()),
+                Err(error) => return Err(error.to_string()),
+            },
+            None => serde_json::Map::new(),
+        };
+        match credential {
+            Some(credential) => {
+                let value = serde_json::to_value(credential).map_err(|error| error.to_string())?;
+                entries.insert(provider.to_string(), value);
+            }
+            None => {
+                entries.remove(provider);
+            }
+        }
+        serde_json::to_string_pretty(&Value::Object(entries)).map_err(|error| error.to_string())
     }
 
     /// Reload credentials from storage.
@@ -1148,10 +1336,12 @@ impl AuthStorage {
             });
         }
         match outcome {
-            Ok(()) => {
-                self.data = Self::parse_storage_data(captured.as_deref());
-                self.load_error = None;
-            }
+            // `reload` sets `this.loadError` when the load throws
+            // (auth-storage.ts:668-671) and every later `persistProviderChange`
+            // returns early while it is set (auth-storage.ts:674-677), so the
+            // file is never rewritten from a partial read. Never clear it on a
+            // load that could not read every entry.
+            Ok(()) => self.adopt_loaded_data(captured.as_deref()),
             Err(error) => {
                 self.load_error = Some(error.clone());
                 self.record_error(error);
@@ -1164,21 +1354,20 @@ impl AuthStorage {
             return;
         }
 
-        let provider = provider.to_string();
-        let credential = credential.cloned();
+        let provider_owned = provider.to_string();
+        let credential_owned = credential.cloned();
+        // `const currentData = this.parseStorageData(current); const merged = { ...currentData }`
+        // (auth-storage.ts:681-688): the rewrite is a copy of whatever the file
+        // holds plus this one provider, so entries this build cannot deserialize
+        // are not dropped. Entries that do not deserialize leave `load_error`
+        // set, which returns before this point.
         let outcome = self.storage.with_lock(&mut |current| {
-            let current_data = Self::parse_storage_data(current.as_deref());
-            let mut merged = current_data;
-            match &credential {
-                Some(credential) => {
-                    merged.insert(provider.clone(), credential.clone());
-                }
-                None => {
-                    merged.shift_remove(&provider);
-                }
-            }
-            let next = serde_json::to_string_pretty(&merged).map_err(|error| error.to_string())?;
-            Ok(Some(next))
+            Self::rewrite_storage_entry(
+                current.as_deref(),
+                &provider_owned,
+                credential_owned.as_ref(),
+            )
+            .map(Some)
         });
         if let Err(error) = outcome {
             self.record_error(error);
@@ -1212,14 +1401,20 @@ impl AuthStorage {
     pub fn remove_verified(&mut self, provider: &str) -> Result<(), String> {
         let provider_owned = provider.to_string();
         self.storage.with_lock(&mut |current| {
-            let current_data = Self::parse_storage_data(current.as_deref());
-            if !current_data.contains_key(&provider_owned) {
+            // `removeVerified` (auth-storage.ts) merges the raw parsed document,
+            // so it also must not drop entries it could not deserialize.
+            let has_provider = match current.as_deref() {
+                Some(current) => serde_json::from_str::<Value>(current)
+                    .ok()
+                    .and_then(|value| value.as_object().cloned())
+                    .map(|entries| entries.contains_key(&provider_owned))
+                    .unwrap_or(false),
+                None => false,
+            };
+            if !has_provider {
                 return Ok(None);
             }
-            let mut merged = current_data;
-            merged.shift_remove(&provider_owned);
-            let next = serde_json::to_string_pretty(&merged).map_err(|error| error.to_string())?;
-            Ok(Some(next))
+            Self::rewrite_storage_entry(current.as_deref(), &provider_owned, None).map(Some)
         })?;
         self.data.shift_remove(provider);
         // Post-success only: a failed removal must not make a stale-marked credential selectable again.
@@ -1552,85 +1747,106 @@ impl AuthStorage {
         };
 
         let provider_id_owned = provider_id.to_string();
-        let mut captured: Option<String> = None;
-        let mut refresh_result: Option<(String, OAuthCredentials)> = None;
-        let mut needs_refresh: Option<OAuthCredentials> = None;
+        let loaded: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let refresh_result: Arc<Mutex<Option<(String, OAuthCredentials)>>> =
+            Arc::new(Mutex::new(None));
+        let merged_after_refresh: Arc<Mutex<Option<AuthStorageData>>> = Arc::new(Mutex::new(None));
 
+        // `await this.storage.withLockAsync(async (current) => { ... })`
+        // (auth-storage.ts:822-855): the TS holds the file lock across the network
+        // refresh AND the write, so two instances cannot both refresh the same
+        // token. The refresh must therefore happen inside this callback, not
+        // between two separate `withLock` calls.
         {
-            let captured_ref = &mut captured;
-            let refresh_result_ref = &mut refresh_result;
-            let needs_refresh_ref = &mut needs_refresh;
+            let loaded_ref = Arc::clone(&loaded);
+            let refresh_result_ref = Arc::clone(&refresh_result);
+            let merged_ref = Arc::clone(&merged_after_refresh);
+            let provider_id_for_lock = provider_id_owned.clone();
             self.storage
-                .with_lock(&mut |current| {
-                    *captured_ref = current.clone();
-                    let current_data = AuthStorage::parse_storage_data(current.as_deref());
-                    let credential = current_data.get(&provider_id_owned).cloned();
-                    match credential {
-                        Some(AuthCredential::OAuth { credentials }) => {
-                            if now_millis() < credentials.expires as i64 {
-                                *refresh_result_ref =
+                .with_lock_async(Box::new(move |current| {
+                    Box::pin(async move {
+                        if let Ok(mut slot) = loaded_ref.lock() {
+                            *slot = current.clone();
+                        }
+                        let current_data = AuthStorage::parse_storage_data(current.as_deref());
+                        let credential = current_data.get(&provider_id_for_lock).cloned();
+                        let Some(credentials) = (match credential {
+                            Some(AuthCredential::OAuth { credentials }) => Some(credentials),
+                            _ => None,
+                        }) else {
+                            return Ok(None);
+                        };
+
+                        if now_millis() < credentials.expires as i64 {
+                            if let Ok(mut slot) = refresh_result_ref.lock() {
+                                *slot =
                                     Some(((provider.get_api_key)(&credentials), credentials));
-                            } else {
-                                *needs_refresh_ref = Some(credentials);
+                            }
+                            return Ok(None);
+                        }
+
+                        let mut oauth_creds: IndexMap<String, OAuthCredentials> = IndexMap::new();
+                        for (key, value) in AuthStorage::parse_storage_data(current.as_deref()) {
+                            if let AuthCredential::OAuth { credentials } = value {
+                                oauth_creds.insert(key, credentials);
                             }
                         }
-                        _ => {}
-                    }
-                    Ok(None)
-                })?;
+
+                        let Some((api_key, new_credentials)) =
+                            get_oauth_api_key(&provider_id_for_lock, &oauth_creds).await
+                        else {
+                            return Ok(None);
+                        };
+
+                        // `merged = { ...currentData, [providerId]: { type: "oauth",
+                        // ...refreshed.newCredentials } }` (auth-storage.ts:848-854):
+                        // copy every stored entry through verbatim and replace only
+                        // this provider, so entries this build cannot deserialize
+                        // survive the refresh write.
+                        let mut merged = current_data.clone();
+                        let credential = AuthCredential::OAuth {
+                            credentials: new_credentials.clone(),
+                        };
+                        merged.insert(provider_id_for_lock.clone(), credential.clone());
+                        let next = AuthStorage::rewrite_storage_entry(
+                            current.as_deref(),
+                            &provider_id_for_lock,
+                            Some(&credential),
+                        )?;
+                        if let Ok(mut slot) = merged_ref.lock() {
+                            *slot = Some(merged);
+                        }
+                        if let Ok(mut slot) = refresh_result_ref.lock() {
+                            *slot = Some((api_key, new_credentials));
+                        }
+                        Ok(Some(next))
+                    })
+                }))
+                .await?;
         }
 
-        if refresh_result.is_some() {
-            self.data = AuthStorage::parse_storage_data(captured.as_deref());
-            self.load_error = None;
-            return Ok(refresh_result);
+        // `this.data = currentData; this.loadError = null;` (auth-storage.ts:824-825)
+        // ran inside the lock; apply the same state to this storage now that the
+        // callback cannot borrow `self`.
+        let captured = loaded
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        self.adopt_loaded_data(captured.as_deref());
+
+        let result = refresh_result
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(merged) = merged_after_refresh
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            // `this.data = merged;` (auth-storage.ts:852).
+            self.data = merged;
         }
-        let Some(credentials) = needs_refresh else {
-            self.data = AuthStorage::parse_storage_data(captured.as_deref());
-            self.load_error = None;
-            return Ok(None);
-        };
-
-        let mut oauth_creds: IndexMap<String, OAuthCredentials> = IndexMap::new();
-        for (key, value) in AuthStorage::parse_storage_data(captured.as_deref()) {
-            if let AuthCredential::OAuth { credentials } = value {
-                oauth_creds.insert(key, credentials);
-            }
-        }
-
-        let refreshed = get_oauth_api_key(provider_id, &oauth_creds).await;
-        let Some((api_key, new_credentials)) = refreshed else {
-            self.data = AuthStorage::parse_storage_data(captured.as_deref());
-            self.load_error = None;
-            return Ok(None);
-        };
-
-        let mut merged = AuthStorage::parse_storage_data(captured.as_deref());
-        merged.insert(
-            provider_id.to_string(),
-            AuthCredential::OAuth {
-                credentials: new_credentials.clone(),
-            },
-        );
-        let next = serde_json::to_string_pretty(&merged).map_err(|error| error.to_string())?;
-        let provider_id_for_write = provider_id.to_string();
-        self.storage.with_lock(&mut |current| {
-            let mut merged = AuthStorage::parse_storage_data(current.as_deref());
-            merged.insert(
-                provider_id_for_write.clone(),
-                AuthCredential::OAuth {
-                    credentials: new_credentials.clone(),
-                },
-            );
-            serde_json::to_string_pretty(&merged)
-                .map(Some)
-                .map_err(|error| error.to_string())
-        })?;
-        let _ = next;
-        self.data = merged;
-        self.load_error = None;
-        let _ = credentials;
-        Ok(Some((api_key, new_credentials)))
+        Ok(result)
     }
 
     /// Get API key for a provider with its auth source token.
@@ -2062,6 +2278,23 @@ mod tests {
     };
     use serde_json::json;
 
+    /// Age a lock *directory* so the stale-lock takeover can be exercised.
+    fn set_directory_mtime_to_now_minus(path: &str, seconds: u64) {
+        let mut options = std::fs::OpenOptions::new();
+        #[cfg(unix)]
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.write(true);
+            // FILE_FLAG_BACKUP_SEMANTICS: required to open a directory handle.
+            options.custom_flags(0x0200_0000);
+        }
+        let file = options.open(path).expect("open lock directory");
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(seconds))
+            .expect("age the lock directory");
+    }
+
     fn memory(data: Value) -> AuthStorage {
         let parsed: AuthStorageData = serde_json::from_value(data).unwrap();
         AuthStorage::in_memory(
@@ -2392,5 +2625,140 @@ mod tests {
             ..Default::default()
         };
         assert!(callbacks.on_select.is_some());
+    }
+
+    /// OAUTH-3 / C3-01 (`packages/coding-agent/src/core/auth-storage.ts:649-654`):
+    /// TS loads auth.json with `JSON.parse(content) as AuthStorageData`, a bare
+    /// cast that keeps every entry, and `packages/ai/src/utils/oauth/anthropic.ts:375`
+    /// itself persists `refresh: data.refresh_token`, which `JSON.stringify` drops
+    /// when a refresh response omits `refresh_token`. So an oauth entry without
+    /// `refresh` must not cost us the other providers.
+    #[test]
+    fn an_oauth_entry_without_refresh_does_not_cost_the_other_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let path_string = path.to_string_lossy().to_string();
+        let original = concat!(
+            "{\n",
+            "  \"openai\": {\"type\": \"api_key\", \"key\": \"sk-good\"},\n",
+            "  \"anthropic\": {\"type\": \"oauth\", \"access\": \"at\", \"expires\": 123}\n",
+            "}"
+        );
+        std::fs::write(&path, original).unwrap();
+
+        let mut storage = AuthStorage::create(Some(path_string.clone()), None);
+        assert!(storage.load_error.is_none(), "{:?}", storage.load_error);
+        assert!(storage.drain_errors().is_empty());
+
+        match storage.get("openai") {
+            Some(AuthCredential::ApiKey { key, .. }) => assert_eq!(key, "sk-good"),
+            other => panic!("api_key entry lost on load: {:?}", other),
+        }
+        match storage.get("anthropic") {
+            Some(AuthCredential::OAuth { credentials }) => {
+                assert_eq!(credentials.access, "at");
+                assert_eq!(credentials.expires, 123.0);
+                assert_eq!(credentials.refresh, "");
+            }
+            other => panic!("oauth entry lost on load: {:?}", other),
+        }
+
+        // A later save of a different provider keeps both entries on disk.
+        storage.set(
+            "github-copilot",
+            AuthCredential::ApiKey {
+                key: "gh".to_string(),
+                prime_team: None,
+            },
+        );
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["openai"]["key"], Value::from("sk-good"));
+        assert_eq!(written["anthropic"]["access"], Value::from("at"));
+        assert_eq!(written["github-copilot"]["key"], Value::from("gh"));
+    }
+
+    /// C3-01: `reload` must set `loadError` on a bad load
+    /// (auth-storage.ts:659-672) and `persistProviderChange` must return early
+    /// while it stands (auth-storage.ts:674-677), so a malformed parse can never
+    /// lead to a rewrite of auth.json without the entries it could not read.
+    #[test]
+    fn an_unreadable_entry_blocks_writes_instead_of_erasing_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let path_string = path.to_string_lossy().to_string();
+        let original = concat!(
+            "{\n",
+            "  \"openai\": {\"type\": \"api_key\", \"key\": \"sk-good\"},\n",
+            "  \"broken\": {\"type\": \"api_key\"}\n",
+            "}"
+        );
+        std::fs::write(&path, original).unwrap();
+
+        let mut storage = AuthStorage::create(Some(path_string.clone()), None);
+
+        // The well-formed api_key entry survives the load.
+        match storage.get("openai") {
+            Some(AuthCredential::ApiKey { key, .. }) => assert_eq!(key, "sk-good"),
+            other => panic!("api_key entry lost on load: {:?}", other),
+        }
+
+        // A load error is recorded and blocks writes.
+        let errors = storage.drain_errors();
+        assert!(
+            errors.iter().any(|error| error.contains("broken")),
+            "no load error recorded for the unreadable entry: {:?}",
+            errors
+        );
+        assert!(storage.load_error.is_some());
+        storage.set(
+            "anthropic",
+            AuthCredential::ApiKey {
+                key: "replacement".to_string(),
+                prime_team: None,
+            },
+        );
+        storage.remove("openai");
+
+        // Writes are blocked, so the unreadable entry cannot be erased on disk.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+
+    /// C3-02: a crashed instance leaves `<auth>.lock` behind; `proper-lockfile`
+    /// steals it once it is older than `stale` (auth-storage.ts:217-230), and the
+    /// sync path uses the same takeover (auth-storage.ts:152-157), so auth writes
+    /// must not stay bricked until someone deletes the lock by hand.
+    #[test]
+    fn a_stale_lock_from_a_crashed_instance_is_stolen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let path_string = path.to_string_lossy().to_string();
+        let mut storage = AuthStorage::create(Some(path_string.clone()), None);
+        storage.set(
+            "openai",
+            AuthCredential::ApiKey {
+                key: "first".to_string(),
+                prime_team: None,
+            },
+        );
+
+        // Simulate the corpse of a crashed writer: the lock is 60s old.
+        let lock_path = format!("{}.lock", path_string);
+        std::fs::create_dir(&lock_path).unwrap();
+        set_directory_mtime_to_now_minus(&lock_path, 60);
+
+        storage.set(
+            "github-copilot",
+            AuthCredential::ApiKey {
+                key: "second".to_string(),
+                prime_team: None,
+            },
+        );
+
+        let written: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["openai"]["key"], Value::from("first"));
+        assert_eq!(written["github-copilot"]["key"], Value::from("second"));
+        assert!(!Path::new(&lock_path).exists());
     }
 }

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use pi_agent_core::types::{AgentEvent, AgentMessage, AgentState, StreamFn};
 use pi_ai::types::{AssistantMessage, Usage, UserMessage, STOP_REASON_STOP};
+use pi_ai::utils::diagnostics::{create_assistant_message_diagnostic, ThrownValue};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::provider_retry::{
@@ -296,14 +297,17 @@ pub fn start_side_question(
                     let prompted_once = Arc::clone(&attempt_prompted);
                     let prompt = attempt_prompt.clone();
                     async move {
-                        if prompted_once.swap(true, Ordering::SeqCst) {
+                        // The TypeScript closure lets a rejected `continue()`/`prompt()`
+                        // escape `completeWithProviderRetry`, so the error is captured here
+                        // (never discarded) and turned into a fail-fast failure below.
+                        let failure: Option<String> = if prompted_once.swap(true, Ordering::SeqCst) {
                             // Session-loop recovery: drop the failed assistant turn and re-run.
                             let mut state = side_agent.state();
                             state.messages.pop();
                             side_agent.set_state(state);
-                            let _ = side_agent.continue_().await;
+                            side_agent.continue_().await.err().map(|error| error.to_string())
                         } else {
-                            let _ = side_agent
+                            side_agent
                                 .prompt(vec![UserMessage::new(
                                     pi_ai::types::UserContent::Blocks(vec![
                                         pi_ai::types::ImageOrTextContent::Text(
@@ -313,20 +317,43 @@ pub fn start_side_question(
                                     now_millis(),
                                 )
                                 .into()])
-                                .await;
-                        }
+                                .await
+                                .err()
+                                .map(|error| error.to_string())
+                        };
                         let state = side_agent.state();
                         match state.messages.last() {
-                            Some(AgentMessage::Message(pi_ai::types::Message::Assistant(assistant))) => {
+                            Some(AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)))
+                                if failure.is_none() =>
+                            {
                                 assistant.clone()
                             }
-                            _ => AssistantMessage {
-                                stop_reason: pi_ai::types::STOP_REASON_ERROR.to_string(),
-                                error_message: Some(state.error_message.clone().unwrap_or_else(|| {
-                                    "Side question produced no assistant message".to_string()
-                                })),
-                                ..Default::default()
-                            },
+                            _ => {
+                                // `throw new Error(sideAgent.state.errorMessage || "Side question
+                                // produced no assistant message")` rejects
+                                // `completeWithProviderRetry` with no retry at all. Marking the
+                                // message as an agent lifecycle failure keeps that fail-fast
+                                // behavior: the shared retry loop returns it immediately instead
+                                // of re-entering the closure, where the recovery branch would pop
+                                // the user prompt that is now the last message.
+                                // `sideAgent.state.errorMessage || "Side question produced no
+                                // assistant message"`.
+                                let error_message = failure
+                                    .or_else(|| state.error_message.clone())
+                                    .unwrap_or_else(|| {
+                                        "Side question produced no assistant message".to_string()
+                                    });
+                                AssistantMessage {
+                                    diagnostics: Some(vec![create_assistant_message_diagnostic(
+                                        "agent_lifecycle_failure",
+                                        &ThrownValue::Text(&error_message),
+                                        Some(lifecycle_failure_details()),
+                                    )]),
+                                    stop_reason: pi_ai::types::STOP_REASON_ERROR.to_string(),
+                                    error_message: Some(error_message),
+                                    ..Default::default()
+                                }
+                            }
                         }
                     }
                 },
@@ -382,6 +409,18 @@ pub fn start_side_question(
     };
 
     Ok(SideQuestionRun { done, abort })
+}
+
+/// `{ source: "run_with_lifecycle" }` - the diagnostic detail
+/// `Agent.handleRunFailure` attaches to its non-retryable failure message
+/// (packages/agent/src/agent.ts:533).
+fn lifecycle_failure_details() -> serde_json::Map<String, serde_json::Value> {
+    let mut details = serde_json::Map::new();
+    details.insert(
+        "source".to_string(),
+        serde_json::Value::String("run_with_lifecycle".to_string()),
+    );
+    details
 }
 
 /// `Date.now()`.
@@ -445,6 +484,195 @@ mod tests {
         assert_eq!(SIDE_QUESTION_STATUS_COMPLETE, "complete");
         assert_eq!(SIDE_QUESTION_STATUS_CANCELLED, "cancelled");
         assert_eq!(SIDE_QUESTION_STATUS_ERROR, "error");
+    }
+
+    /// A side agent that records the prompt but never appends an assistant
+    /// message: exactly the failure the TypeScript closure throws on.
+    struct NoAssistantAgent {
+        state: Mutex<AgentState>,
+        prompt_calls: std::sync::atomic::AtomicUsize,
+        continue_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SideQuestionAgent for NoAssistantAgent {
+        fn state(&self) -> AgentState {
+            self.state.lock().expect("fake state poisoned").clone()
+        }
+
+        fn set_state(&self, state: AgentState) {
+            *self.state.lock().expect("fake state poisoned") = state;
+        }
+
+        fn subscribe(
+            &self,
+            _listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>,
+        ) -> Arc<dyn Fn() + Send + Sync> {
+            Arc::new(|| {})
+        }
+
+        fn prompt(&self, messages: Vec<AgentMessage>) -> BoxFuture<anyhow::Result<()>> {
+            self.prompt_calls.fetch_add(1, Ordering::SeqCst);
+            let mut state = self.state.lock().expect("fake state poisoned");
+            state.messages.extend(messages);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn continue_(&self) -> BoxFuture<Result<(), String>> {
+            self.continue_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn abort(&self) {}
+    }
+
+    struct StaticParent {
+        state: AgentState,
+        stream_fn: StreamFn,
+    }
+
+    impl StaticParent {
+        fn new(messages: Vec<AgentMessage>) -> Self {
+            let mut state = AgentState {
+                model: pi_ai::types::Model::new("test-model", "test-model", "test-api", "test-provider", ""),
+                ..Default::default()
+            };
+            state.messages = messages;
+            Self {
+                state,
+                stream_fn: Arc::new(|_model, _context, _options| {
+                    Box::pin(async { pi_ai::utils::event_stream::create_assistant_message_event_stream() })
+                }),
+            }
+        }
+    }
+
+    impl SideQuestionParent for StaticParent {
+        fn state(&self) -> AgentState {
+            self.state.clone()
+        }
+
+        fn convert_to_llm(&self) -> Option<Arc<dyn Fn(Vec<AgentMessage>) -> Vec<pi_ai::types::Message> + Send + Sync>> {
+            None
+        }
+
+        fn transform_context(
+            &self,
+        ) -> Option<Arc<dyn Fn(Vec<AgentMessage>, Option<CancellationToken>) -> Vec<AgentMessage> + Send + Sync>>
+        {
+            None
+        }
+
+        fn stream_fn(&self) -> StreamFn {
+            Arc::clone(&self.stream_fn)
+        }
+
+        fn get_api_key(&self) -> Option<Arc<dyn Fn(String) -> Option<String> + Send + Sync>> {
+            None
+        }
+
+        fn on_payload(&self) -> Option<pi_ai::types::OnPayload> {
+            None
+        }
+
+        fn on_response(&self) -> Option<pi_ai::types::OnResponse> {
+            None
+        }
+
+        fn tool_execution(&self) -> Option<String> {
+            None
+        }
+
+        fn session_id(&self) -> Option<String> {
+            None
+        }
+
+        fn thinking_budgets(&self) -> Option<pi_ai::types::ThinkingBudgets> {
+            None
+        }
+    }
+
+    /// `side-question.ts:152-154`: a missing assistant message rejects
+    /// `completeWithProviderRetry` immediately, so the recovery branch never runs
+    /// and the user prompt is never popped. The default retry policy would sleep
+    /// 2s/4s/8s and pop the prompt on each retry.
+    #[tokio::test]
+    async fn missing_assistant_message_fails_fast_without_popping_the_prompt() {
+        let prompt: AgentMessage =
+            UserMessage::new(pi_ai::types::UserContent::Text("question".to_string()), 0).into();
+        let parent: Arc<dyn SideQuestionParent> = Arc::new(StaticParent::new(vec![prompt.clone()]));
+        let fake = Arc::new(NoAssistantAgent {
+            state: Mutex::new(AgentState {
+                model: pi_ai::types::Model::new("test-model", "test-model", "test-api", "test-provider", ""),
+                messages: vec![prompt.clone()],
+                ..Default::default()
+            }),
+            prompt_calls: std::sync::atomic::AtomicUsize::new(0),
+            continue_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let factory: SideQuestionAgentFactory = {
+            let fake = Arc::clone(&fake);
+            Arc::new(move |_options| Arc::clone(&fake) as Arc<dyn SideQuestionAgent>)
+        };
+        let events: Arc<Mutex<Vec<(String, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let on_event = {
+            let events = Arc::clone(&events);
+            Arc::new(move |event: SideQuestionEvent| {
+                events
+                    .lock()
+                    .expect("events poisoned")
+                    .push((event.status.clone(), event.error_message.clone()));
+                Box::pin(async {}) as BoxFuture<()>
+            })
+        };
+        let run = start_side_question(
+            parent,
+            factory,
+            "id".to_string(),
+            "question".to_string(),
+            on_event,
+            None,
+            Some(ProviderRetryPolicy {
+                enabled: true,
+                max_retries: 3.0,
+                base_delay_ms: 2_000.0,
+                max_retry_delay_ms: 60_000.0,
+            }),
+        )
+        .expect("side question starts");
+        tokio::time::timeout(std::time::Duration::from_secs(1), run.done)
+            .await
+            .expect("a missing assistant message must not retry with 2s/4s/8s backoff");
+
+        assert_eq!(
+            fake.prompt_calls.load(Ordering::SeqCst),
+            1,
+            "the prompt must be sent exactly once"
+        );
+        assert_eq!(
+            fake.continue_calls.load(Ordering::SeqCst),
+            0,
+            "the recovery branch must not run: it would pop the user prompt"
+        );
+        assert_eq!(
+            fake.state().messages.len(),
+            2,
+            "the user prompt must still be in the side conversation"
+        );
+        assert_eq!(
+            fake.state().messages.last().map(|message| message.role()),
+            Some("user"),
+            "the user prompt must be the last message"
+        );
+        assert_eq!(
+            events.lock().expect("events poisoned").clone(),
+            vec![
+                (SIDE_QUESTION_STATUS_RUNNING.to_string(), None),
+                (
+                    SIDE_QUESTION_STATUS_ERROR.to_string(),
+                    Some("Side question produced no assistant message".to_string())
+                ),
+            ]
+        );
     }
 
     #[test]

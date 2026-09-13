@@ -456,6 +456,48 @@ async fn register_client(registration_endpoint: &str, label: &str) -> Result<Str
     }
 }
 
+/// oauth.ts:445-446
+/// `const authorizationUrl = new URL(meta.authorization_endpoint);`
+/// `for (const [name, value] of authParams) authorizationUrl.searchParams.set(name, value);`
+///
+/// `searchParams.set` REPLACES the first occurrence of a same-name parameter and drops the
+/// later ones; `append_pair` duplicated them, so an advertised endpoint that already carries
+/// e.g. `response_type`, `state` or `redirect_uri` produced a URL many auth servers reject.
+fn authorization_url_with_params(
+    authorization_endpoint: &str,
+    auth_params: &[(String, String)],
+) -> Result<url::Url, String> {
+    let mut authorization_url = url::Url::parse(authorization_endpoint).map_err(|error| error.to_string())?;
+    let existing: Vec<(String, String)> = authorization_url
+        .query_pairs()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    let mut replaced: Vec<String> = Vec::new();
+    for (key, value) in &existing {
+        match auth_params.iter().find(|(name, _)| name == key) {
+            Some((name, replacement)) => {
+                if !replaced.iter().any(|seen| seen == name) {
+                    // `set` keeps the ORIGINAL position of an existing key.
+                    serializer.append_pair(name, replacement);
+                    replaced.push(name.clone());
+                }
+            }
+            None => {
+                serializer.append_pair(key, value);
+            }
+        }
+    }
+    for (name, value) in auth_params {
+        if !replaced.iter().any(|seen| seen == name) {
+            serializer.append_pair(name, value);
+        }
+    }
+    let query = serializer.finish();
+    authorization_url.set_query(if query.is_empty() { None } else { Some(query.as_str()) });
+    Ok(authorization_url)
+}
+
 pub type CallbackResult = Option<(String, String)>;
 
 pub struct CallbackServer {
@@ -467,10 +509,110 @@ pub struct CallbackServer {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
-impl CallbackServer {
-    pub fn cancel(&self) {
+/// Owns the callback waiter's cancel handle so the manual-paste branch can settle the waiter
+/// through `cb.cancel()` (oauth.ts:468 and oauth.ts:481) without borrowing the server.
+#[derive(Clone)]
+struct CallbackCanceller {
+    cancel: Arc<Mutex<bool>>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl CallbackCanceller {
+    fn cancel(&self) {
         *self.cancel.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         self.notify.notify_waiters();
+    }
+}
+
+/// oauth.ts:466-483 manual-paste outcome.
+struct ManualOutcome {
+    /// The parsed `{ code, state }` paste, or None.
+    result: CallbackResult,
+    /// `manualError` (oauth.ts:475-476): a real paste that failed validation.
+    error: Option<String>,
+    /// `manualCancelled` (oauth.ts:477-479): a UI cancellation, not a failure.
+    cancelled: bool,
+}
+
+/// oauth.ts:464-483. The paste prompt races the browser callback: a successful
+/// `parseRedirectInput` calls `cb.cancel()` immediately (oauth.ts:468); a cancellation or a
+/// validation error waits a 500 ms grace period so an in-flight redirect can still win, and
+/// then calls `cb.cancel()` too (oauth.ts:481) so login cannot hang with no redirect.
+fn manual_code_future(
+    on_manual_code_input: crate::utils::oauth::types::OnManualCodeInput,
+    state: String,
+    canceller: CallbackCanceller,
+) -> crate::types::BoxFuture<ManualOutcome> {
+    Box::pin(async move {
+        let mut outcome = ManualOutcome { result: None, error: None, cancelled: false };
+        let input = on_manual_code_input().await;
+        let parsed = match &input {
+            Ok(input) => parse_redirect_input(input, &state),
+            Err(error) => Err(error.clone()),
+        };
+        match parsed {
+            Ok(parsed) => {
+                outcome.result = Some(parsed);
+                canceller.cancel();
+            }
+            Err(error) => {
+                // A validation error on a real paste (bad state / no code) is a genuine
+                // failure to surface; a UI cancellation is not.
+                if error.contains("state mismatch") || error.contains("authorization code") {
+                    outcome.error = Some(error);
+                } else {
+                    outcome.cancelled = true;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                canceller.cancel();
+            }
+        }
+        outcome
+    })
+}
+
+/// oauth.ts:484-486
+/// `const fromCallback = await cb.waitForCode(); result = fromCallback ?? (await manual);`
+///
+/// Both sides are polled concurrently, so the paste prompt is shown while the redirect is
+/// awaited. Whichever completes first wins and the other is cancelled, not merely dropped: a
+/// real paste cancels the callback waiter immediately (oauth.ts:468), a UI cancellation or
+/// validation error cancels it after a 500 ms grace period (oauth.ts:480-481), and a winning
+/// browser redirect ends the race without waiting for the paste prompt (the biased branch
+/// order keeps `fromCallback ?? (await manual)` preferring the callback result).
+async fn race_callback_and_manual(
+    wait_for_code: impl std::future::Future<Output = CallbackResult>,
+    mut manual: crate::types::BoxFuture<ManualOutcome>,
+) -> ManualOutcome {
+    let from_callback = wait_for_code;
+    tokio::pin!(from_callback);
+    tokio::select! {
+        biased;
+        from_callback = &mut from_callback => {
+            if from_callback.is_some() {
+                // oauth.ts:485 short-circuits on `fromCallback`, so the paste prompt is left
+                // unresolved (and dropped here) instead of blocking the login.
+                return ManualOutcome { result: from_callback, error: None, cancelled: false };
+            }
+        }
+        outcome = &mut manual => return outcome,
+    }
+    // The callback waiter resolves as None only after the manual branch cancelled it and is
+    // about to return, so this await continues `await manual` (oauth.ts:485) and is bounded.
+    manual.await
+}
+
+impl CallbackServer {
+    /// `cb.cancel()` for the manual-paste future (oauth.ts:468 and oauth.ts:481).
+    fn canceller(&self) -> CallbackCanceller {
+        CallbackCanceller {
+            cancel: self.cancel.clone(),
+            notify: self.notify.clone(),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.canceller().cancel();
     }
 
     pub async fn wait_for_code(&self) -> CallbackResult {
@@ -857,14 +999,8 @@ pub fn create_mcp_oauth_provider(config: McpOAuthConfig) -> OAuthProviderInterfa
                 auth_params.push(("resource".to_string(), resource.to_string()));
             }
 
-            let mut authorization_url = url::Url::parse(&meta.authorization_endpoint)
-                .map_err(|error| error.to_string())?;
-            {
-                let mut pairs = authorization_url.query_pairs_mut();
-                for (name, value) in &auth_params {
-                    pairs.append_pair(name, value);
-                }
-            }
+            let authorization_url = authorization_url_with_params(&meta.authorization_endpoint, &auth_params)?;
+
             if let Some(on_auth) = callbacks.on_auth.as_ref() {
                 on_auth(crate::utils::oauth::types::OAuthAuthInfo {
                     url: authorization_url.to_string(),
@@ -875,53 +1011,31 @@ pub fn create_mcp_oauth_provider(config: McpOAuthConfig) -> OAuthProviderInterfa
                 });
             }
 
-            // Race the local callback server against a manual paste.
+            // Race the local callback server against a manual paste (oauth.ts:453-486). The
+            // callback waiter is awaited FIRST; a real paste cancels it, and a UI cancellation
+            // cancels it after a 500 ms grace period, so login always completes.
             let mut result: CallbackResult;
-            let mut manual_cancelled = false;
-            let mut manual_error: Option<String> = None;
+            let manual_cancelled: bool;
             if let Some(on_manual_code_input) = callbacks.on_manual_code_input.as_ref() {
-                let manual_future = {
-                    let on_manual_code_input = on_manual_code_input.clone();
-                    let state = state.clone();
-                    async move { (on_manual_code_input)().await }
-                };
-                let from_callback = callback.wait_for_code();
-                let manual = async {
-                    match manual_future.await {
-                        Ok(input) => match parse_redirect_input(&input, &state) {
-                            Ok(parsed) => Some(parsed),
-                            Err(error) => {
-                                // A validation error on a real paste (bad state / no code)
-                                // is a genuine failure to surface.
-                                if error.contains("state mismatch") || error.contains("authorization code") {
-                                    manual_error = Some(error);
-                                } else {
-                                    manual_cancelled = true;
-                                }
-                                tokio::time::sleep(Duration::from_millis(500)).await;
-                                None
-                            }
-                        },
-                        Err(error) => {
-                            if error.contains("state mismatch") || error.contains("authorization code") {
-                                manual_error = Some(error);
-                            } else {
-                                manual_cancelled = true;
-                            }
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            None
-                        }
-                    }
-                };
-                let (from_callback, from_manual) = tokio::join!(from_callback, manual);
-                callback.cancel();
-                result = from_callback.or(from_manual);
-                if result.is_none() {
-                    if let Some(error) = manual_error {
+                let outcome = race_callback_and_manual(
+                    callback.wait_for_code(),
+                    manual_code_future(
+                        on_manual_code_input.clone(),
+                        state.clone(),
+                        callback.canceller(),
+                    ),
+                )
+                .await;
+                if outcome.result.is_none() {
+                    // oauth.ts:486 `if (!result && manualError) throw manualError;`
+                    if let Some(error) = outcome.error {
                         return Err(error);
                     }
                 }
+                manual_cancelled = outcome.cancelled;
+                result = outcome.result;
             } else {
+                manual_cancelled = false;
                 result = callback.wait_for_code().await;
                 if result.is_none() {
                     let Some(on_prompt) = callbacks.on_prompt.as_ref() else {
@@ -1199,6 +1313,131 @@ mod tests {
         let bare = parse_redirect_input("plain-code", "xyz").unwrap();
         assert_eq!(bare.0, "plain-code");
         assert_eq!(bare.1, "xyz");
+    }
+
+    /// OAUTH-1: oauth.ts:464-486. The manual paste completes first and no browser redirect ever
+    /// arrives. With the old `tokio::join!` the flow waited for the callback waiter forever, so
+    /// the bounded timeout here FAILS the test on that code path.
+    #[test]
+    fn manual_paste_first_returns_promptly_without_a_redirect() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(async {
+            let server = start_callback_server("Test", "expected-state").await.unwrap();
+            let manual: crate::utils::oauth::types::OnManualCodeInput =
+                Arc::new(|| Box::pin(async { Ok("plain-code".to_string()) }));
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(5),
+                race_callback_and_manual(
+                    server.wait_for_code(),
+                    manual_code_future(manual.clone(), "expected-state".to_string(), server.canceller()),
+                ),
+            )
+            .await
+            .expect("manual paste must not wait for a browser redirect (OAUTH-1 hang)");
+            // oauth.ts:468 `cb.cancel()`: the successful paste settles the callback waiter, so a
+            // later wait returns at once instead of blocking on a redirect that never arrives.
+            let settled = tokio::time::timeout(Duration::from_millis(500), server.wait_for_code())
+                .await
+                .expect("the successful paste must cancel the callback waiter (oauth.ts:468)");
+            assert!(settled.is_none());
+            outcome
+        });
+        assert_eq!(
+            outcome.result,
+            Some(("plain-code".to_string(), "expected-state".to_string()))
+        );
+        assert!(outcome.error.is_none());
+        assert!(!outcome.cancelled);
+    }
+
+    /// OAUTH-1: oauth.ts:484-485 `const fromCallback = await cb.waitForCode(); result =
+    /// fromCallback ?? (await manual);` - the browser callback wins while the paste prompt stays
+    /// open, so the login must return the callback result instead of waiting for the paste.
+    #[test]
+    fn browser_callback_first_wins_over_an_open_paste_prompt() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let outcome = runtime.block_on(async {
+            let server = start_callback_server("Test", "expected-state").await.unwrap();
+            let (manual_sender, manual_receiver) = tokio::sync::oneshot::channel::<Result<String, String>>();
+            let shared_receiver = Arc::new(std::sync::Mutex::new(Some(manual_receiver)));
+            let manual: crate::utils::oauth::types::OnManualCodeInput = Arc::new(move || {
+                let shared_receiver = shared_receiver.clone();
+                Box::pin(async move {
+                    let receiver = shared_receiver
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take();
+                    match receiver {
+                        Some(receiver) => receiver
+                            .await
+                            .unwrap_or_else(|_| Err("Login cancelled".to_string())),
+                        None => Err("Login cancelled".to_string()),
+                    }
+                })
+            });
+            let port = server.port;
+            // Deliver the browser redirect without ever answering the paste prompt.
+            let deliver = async move {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let Ok(mut stream) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await else {
+                    return;
+                };
+                let request = "GET /callback?code=browser-code&state=expected-state HTTP/1.1\r\nHost: localhost\r\n\r\n";
+                if AsyncWriteExt::write_all(&mut stream, request.as_bytes()).await.is_ok() {
+                    let mut response = String::new();
+                    let _ = stream.read_to_string(&mut response).await;
+                }
+            };
+            let race = race_callback_and_manual(
+                server.wait_for_code(),
+                manual_code_future(manual.clone(), "expected-state".to_string(), server.canceller()),
+            );
+            let (outcome, ()) = tokio::time::timeout(Duration::from_secs(5), futures::future::join(race, deliver))
+                .await
+                .expect("callback win must not wait for the paste prompt (OAUTH-1 hang)");
+            drop(manual_sender);
+            outcome
+        });
+        assert_eq!(
+            outcome.result,
+            Some(("browser-code".to_string(), "expected-state".to_string()))
+        );
+    }
+
+
+    #[test]
+    fn authorization_url_replaces_existing_parameters() {
+        let params = vec![
+            ("client_id".to_string(), "cid".to_string()),
+            ("response_type".to_string(), "code".to_string()),
+            ("redirect_uri".to_string(), "http://localhost:1/callback".to_string()),
+            ("state".to_string(), "fresh-state".to_string()),
+        ];
+        let url = authorization_url_with_params(
+            "https://auth.example.com/authorize?response_type=token&state=stale&audience=api",
+            &params,
+        )
+        .unwrap();
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        // oauth.ts:446 `searchParams.set` replaces instead of appending.
+        assert_eq!(pairs.iter().filter(|(key, _)| key == "response_type").count(), 1);
+        assert_eq!(pairs.iter().filter(|(key, _)| key == "state").count(), 1);
+        assert!(pairs.contains(&("response_type".to_string(), "code".to_string())));
+        assert!(pairs.contains(&("state".to_string(), "fresh-state".to_string())));
+        assert!(!pairs.contains(&("state".to_string(), "stale".to_string())));
+        // A non-conflicting advertised parameter survives (TS `set` only touches sent names).
+        assert!(pairs.contains(&("audience".to_string(), "api".to_string())));
+        // `set` keeps the original position of a replaced key.
+        assert_eq!(url.query_pairs().next().map(|(key, _)| key.to_string()).as_deref(), Some("response_type"));
     }
 
     #[test]
