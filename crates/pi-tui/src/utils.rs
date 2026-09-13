@@ -1244,8 +1244,29 @@ fn strip_common_csi(s: &str) -> String {
 }
 
 /// Check if a character is whitespace.
+///
+/// Ports `isWhitespaceChar(char)` (packages/tui/src/utils.ts:935-937), which is literally
+/// `return /\s/.test(char)`. JS `\s` is not the same set as Rust's `char::is_whitespace`:
+/// it INCLUDES U+FEFF (zero-width no-break space) and EXCLUDES U+0085 (NEL).
 pub fn is_whitespace_char(ch: &str) -> bool {
-    ch.chars().any(|c| c.is_whitespace())
+    // JS `/\s/` is exactly this set: it INCLUDES U+FEFF (zero-width no-break space)
+    // and EXCLUDES U+0085 (NEL), the reverse of Rust's `char::is_whitespace`.
+    ch.chars().any(|c| {
+        matches!(
+            c,
+            '\u{0009}'..='\u{000d}'
+                | '\u{0020}'
+                | '\u{00a0}'
+                | '\u{1680}'
+                | '\u{2000}'..='\u{200a}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202f}'
+                | '\u{205f}'
+                | '\u{3000}'
+                | '\u{feff}'
+        )
+    })
 }
 
 /// Check if a character is punctuation.
@@ -1879,6 +1900,27 @@ pub fn extract_segments(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `isWhitespaceChar` is `/[[:space:]]/.test(char)` in TS (utils.ts:935-937), i.e. JS
+    /// `\s`. That set differs from Rust's `char::is_whitespace` in exactly two points:
+    /// it INCLUDES U+FEFF and EXCLUDES U+0085 (NEL).
+    #[test]
+    fn is_whitespace_char_matches_js_regex() {
+        for ch in [
+            "\t", "\n", "\u{000b}", "\u{000c}", "\r", " ", "\u{00a0}", "\u{1680}", "\u{2000}",
+            "\u{2005}", "\u{200a}", "\u{2028}", "\u{2029}", "\u{202f}", "\u{205f}", "\u{3000}",
+            // JS-only member of `\s`: Rust's `char::is_whitespace` says false.
+            "\u{feff}",
+        ] {
+            assert!(is_whitespace_char(ch), "{ch:?} must be whitespace under JS \\s");
+        }
+        for ch in [
+            // NEL: Rust's `char::is_whitespace` says true, JS `\s` says false.
+            "\u{0085}", "\u{180e}", "\u{200b}", "a", "", "\u{1f600}",
+        ] {
+            assert!(!is_whitespace_char(ch), "{ch:?} must NOT be whitespace under JS \\s");
+        }
+    }
 
     #[test]
     fn visible_width_ascii_and_wide() {
