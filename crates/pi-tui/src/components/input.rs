@@ -382,7 +382,11 @@ impl Component for Input {
         if data.contains("\x1b[200~") {
             self.is_in_paste = true;
             self.paste_buffer = String::new();
-            data = data.replace("\x1b[200~", "");
+            // `data.replace("\x1b[200~", "")` (input.ts:51) removes only the FIRST
+            // start marker; a second marker in the same chunk stays as pasted text.
+            if let Some(start_index) = data.find("\x1b[200~") {
+                data.replace_range(start_index..start_index + 6, ""); // 6 = length of \x1b[200~
+            }
         }
 
         if self.is_in_paste {
@@ -543,11 +547,19 @@ impl Component for Input {
         let available_width = available_width as usize;
 
         let visible_text;
+        // `cursorDisplay = this.cursor` (input.ts:413) is a UTF-16 index that is
+        // used directly as a slice offset (`visibleText.slice(cursorDisplay)`,
+        // input.ts:443-448). This port's cursor is a CHAR index, so the
+        // no-scroll branch below converts it to a byte offset of `visible_text`
+        // (== `self.value` there); the scroll branch instead derives it from
+        // `before_cursor.len()` (input.rs:578), which is already a byte offset,
+        // so the conversion must not be applied twice.
         let mut cursor_display = self.cursor;
         let total_width = visible_width(&self.value);
 
         if total_width < available_width {
             visible_text = self.value.clone();
+            cursor_display = self.char_index_to_byte(self.cursor);
         } else {
             let scroll_width = if self.cursor == self.value.chars().count() {
                 available_width.saturating_sub(1)
@@ -575,6 +587,8 @@ impl Component for Input {
                     cursor_col.saturating_sub(start_col),
                     true,
                 );
+                // `cursorDisplay = beforeCursor.length` (input.ts:436) keeps this a
+                // byte offset into `visible_text`, so no conversion is needed here.
                 cursor_display = before_cursor.len();
             } else {
                 visible_text = String::new();
@@ -650,6 +664,49 @@ mod tests {
         let mut input = Input::new();
         assert_eq!(input.render(2.0), vec!["> ".to_string()]);
         assert_eq!(input.render(1.0), vec!["> ".to_string()]);
+    }
+
+    #[test]
+    fn render_no_scroll_uses_byte_offset_for_multibyte_cursor() {
+        // TS slices `visibleText.slice(cursorDisplay)` with `cursorDisplay = this.cursor`
+        // (input.ts:413; `visibleText.slice(cursorDisplay)`, input.ts:443-448). Using the
+        // char-count cursor as a byte offset made text vanish off a char boundary
+        // (`str::get` returns None), so "\u{e9}\u{e9}a" with cursor 2 rendered "> " plus a cursor on space.
+        let mut input = Input::new();
+        input.set_value("\u{e9}\u{e9}a".to_string());
+        input.handle_input("\x05"); // ctrl+e = end of line -> char cursor 3 (byte 5)
+        assert_eq!(input.get_cursor(), 3);
+        assert_eq!(
+            input.render(8.0),
+            vec!["> \u{e9}\u{e9}a\x1b[7m \x1b[27m  ".to_string()]
+        );
+
+        input.handle_input("\x1b[D"); // left arrow -> char cursor 2 (byte 4)
+        assert_eq!(input.get_cursor(), 2);
+        assert_eq!(
+            input.render(8.0),
+            vec!["> \u{e9}\u{e9}\x1b[7ma\x1b[27m   ".to_string()]
+        );
+
+        // A single multi-byte char before the cursor: char cursor 1 == byte offset 2.
+        let mut input = Input::new();
+        input.set_value("\u{e9}a".to_string());
+        input.handle_input("\x05"); // end -> char cursor 2
+        input.handle_input("\x1b[D"); // left -> char cursor 1 (byte 2)
+        assert_eq!(input.get_cursor(), 1);
+        assert_eq!(
+            input.render(8.0),
+            vec!["> \u{e9}\x1b[7ma\x1b[27m    ".to_string()]
+        );
+    }
+
+    #[test]
+    fn paste_start_marker_is_stripped_only_once() {
+        // `data.replace("\x1b[200~", "")` (input.ts:51) strips only the FIRST marker;
+        // a second marker in the same chunk stays part of the pasted text.
+        let mut input = Input::new();
+        input.handle_input("\x1b[200~\x1b[200~ab\x1b[201~");
+        assert_eq!(input.get_value(), "\x1b[200~ab");
     }
 
     #[test]

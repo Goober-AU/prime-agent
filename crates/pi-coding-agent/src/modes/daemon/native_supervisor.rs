@@ -19,7 +19,7 @@ use crate::core::session_resolver::looks_like_session_path;
 use crate::utils::atomic_file::{write_file_atomic_sync, remove_file_durably, RemoveFileDurablyOptions, WriteFileAtomicOptions};
 use crate::utils::child_process::{signal_process_group_or_process, Signal};
 use super::super::active_session_state::create_active_session_id;
-use super::super::command_recovery_journal::{CommandRecoveryJournal, CommandJournalBeginResult};
+use super::super::command_recovery_journal::{create_command_idempotency_key, CommandRecoveryJournal, CommandJournalBeginResult};
 use super::super::compact_session_stream::{CompactAssistantStreamReconstructor, CompactAssistantDelta};
 use super::super::daemon_catalog_process::{DaemonCatalogClient, DAEMON_CATALOG_ROLE_ENV};
 use super::super::agent_roster::{
@@ -34,7 +34,11 @@ use super::super::daemon_protocol::{self, DaemonResponse};
 use super::super::daemon_session_id::matches_session_id_suffix;
 use super::super::daemon_session_list::{summary_for_inactive_session, SessionSummary};
 use crate::core::session_manager::SessionInfo;
-use crate::core::agent_messages::AgentFamilyCatalogEntry;
+use crate::core::agent_messages::{
+    assert_agent_session_name_available, format_agent_session_name_unavailable,
+    session_name_reservation_key, AgentFamilyCatalogEntry, AgentSessionNameAvailabilityInput,
+    AgentSessionNameScope,
+};
 use super::super::rlm_ledger::{create_rlm_ledger_registry_seed_source, RlmLedgerEdge, RlmSpawnLedger};
 use super::super::daemon_socket::*;
 use super::super::daemon_supervisor_ownership::*;
@@ -105,9 +109,58 @@ struct Worker {
     /// `worker.deferredRecovery` / `worker.deferredRecoveryRounds` (daemon-supervisor.ts:3960-3966).
     deferred_recovery: AtomicBool,
     deferred_recovery_rounds: AtomicU64,
+    /// `worker.promotedOwnerClientId` (daemon-supervisor.ts:3243, 3266): set once the promotion
+    /// of this registration completed, so a repeated `promoteOwnedWorker` is a no-op (:3244).
+    promoted_owner_client_id: Mutex<Option<String>>,
 }
 #[derive(Clone)]
 struct InputPause { connection_id: String, worker: Arc<Worker>, active: String, requested: String }
+/// `interface SupervisorPromptAdmission` (daemon-supervisor.ts:438-447) with
+/// `status: "waiting" | "owned" | "cancelled"` (:443).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PromptAdmissionStatus { Waiting, Owned, Cancelled }
+/// `this.promptAdmissions` (daemon-supervisor.ts:749) is a map per client; the port keys one
+/// flat map by `promptAdmissionKey(client, activeSessionId, admissionId)`, which is the TS outer
+/// key (`DaemonSocketClient`) plus the TS inner key `\`${activeSessionId}\0${publicAdmissionId}\``
+/// (:1822-1823). Record field names mirror the TS interface (:438-447).
+#[derive(Clone)]
+struct PromptAdmissionRecord {
+    /// `admission.client`.
+    connection_id: String,
+    /// `admission.activeSessionId`.
+    active_session_id: String,
+    /// `admission.publicAdmissionId`.
+    public_admission_id: String,
+    /// `admission.workerAdmissionId: \`supervisor-admission:${randomUUID()}\`` (:1914).
+    worker_admission_id: String,
+    /// `admission.status`.
+    status: PromptAdmissionStatus,
+    /// `admission.controller` (an `AbortController`; `CancellationToken` per PORT-RULES.md).
+    controller: CancellationToken,
+    /// `admission.worker` (:445).
+    worker: Option<Arc<Worker>>,
+    /// `admission.workerActiveSessionId` (:446).
+    worker_active_session_id: Option<String>,
+}
+/// `promptAdmissionKey(activeSessionId, publicAdmissionId)` (daemon-supervisor.ts:1822-1823)
+/// scoped by the owning socket, which is the TS map's outer key (:749).
+fn prompt_admission_key(connection_id: &str, active_session_id: &str, public_admission_id: &str) -> String {
+    format!("{connection_id}\u{0}{active_session_id}\u{0}{public_admission_id}")
+}
+/// One in-flight worker open, the analogue of a `this.openingWorkers` entry
+/// (daemon-supervisor.ts:747, 3101). A joiner awaits `done` and reads the same outcome the
+/// original caller received, which is what `await pending` does at :3153.
+struct OpeningWorker { done: CancellationToken, result: Mutex<Option<Result<Value, String>>> }
+/// The `finally { if (admission) this.deletePromptAdmission(admission); }` (daemon-supervisor.ts:2842)
+/// of `handleLine`: every exit path of a prompt command removes its registration.
+///
+/// TS re-checks object identity in `deletePromptAdmission` (:1846); the port cannot, because a
+/// duplicate `(activeSessionId, admissionId)` is rejected while the first is registered (:1907),
+/// so the key can only ever hold the registration this guard was created for.
+struct PromptAdmissionGuard { supervisor: Arc<Supervisor>, admission: PromptAdmissionRecord }
+impl Drop for PromptAdmissionGuard {
+    fn drop(&mut self) { self.supervisor.delete_prompt_admission(&self.admission); }
+}
 struct Supervisor {
     socket_path: String,
     descriptor_dir: PathBuf,
@@ -115,7 +168,15 @@ struct Supervisor {
     ownership: DaemonSupervisorOwnership,
     workers: Mutex<HashMap<String, Arc<Worker>>>,
     clients: Mutex<HashMap<String, Arc<PublicClient>>>,
+    /// The port's original global create/recover gate, held by `retry_worker` and by the
+    /// registered opener in `create_for_owner`. TS instead groups callers through
+    /// `this.openingWorkers` per key (daemon-supervisor.ts:747); the join map below adds that
+    /// per-key sharing, while this gate keeps the pre-existing serialization against `retry_worker`.
     opening: AsyncMutex<()>,
+    /// `this.openingWorkers` (daemon-supervisor.ts:747) keyed as at :3060-3062: the canonical
+    /// session path, or `new:<createCommandIdempotencyKey(clientId, command.id)>`. A second
+    /// identical create joins the in-flight one instead of double-launching a worker (:3063-3066).
+    opening_workers: Mutex<HashMap<String, Arc<OpeningWorker>>>,
     pauses: Mutex<HashMap<String, InputPause>>,
     journal: Mutex<CommandRecoveryJournal>,
     catalog: Arc<DaemonCatalogClient>,
@@ -136,6 +197,12 @@ struct Supervisor {
     scheduled_wake_recompute_queued: AtomicBool,
     /// `this.scheduledWakeFailures`: the failure floor per passive root.
     scheduled_wake_failures: Mutex<HashMap<String, f64>>,
+    /// `this.promptAdmissions` (daemon-supervisor.ts:749), keyed by
+    /// `prompt_admission_key(connection, activeSessionId, admissionId)`.
+    prompt_admissions: Mutex<HashMap<String, PromptAdmissionRecord>>,
+    /// `this.pendingSessionNames` (daemon-supervisor.ts:4545-4552): reservation keys held while a
+    /// create with a name is in flight, so two concurrent creates cannot both pass the check.
+    pending_session_names: Mutex<HashSet<String>>,
 }
 
 pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut config: AgentSessionRuntimeConfig) -> Result<(), String> {
@@ -176,6 +243,8 @@ pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut 
         ledger: Arc::new(tokio::sync::OnceCell::new()),
         scheduled_wake_timer: Mutex::new(None), scheduled_wake_recompute: AtomicBool::new(false),
         scheduled_wake_recompute_queued: AtomicBool::new(false), scheduled_wake_failures: Mutex::new(HashMap::new()),
+        prompt_admissions: Mutex::new(HashMap::new()), opening_workers: Mutex::new(HashMap::new()),
+        pending_session_names: Mutex::new(HashSet::new()),
     });
     // The TS store is installed lazily by `roster()`; the port installs it here
     // because its mutation sink needs a `Weak` to the finished `Arc`.
@@ -297,6 +366,7 @@ impl Supervisor {
             roster_stale: AtomicBool::new(false), last_frame_at: Mutex::new(None), pending_client: Mutex::new(None),
             connection: AsyncMutex::new(()), stream: Mutex::new(CompactAssistantStreamReconstructor::new()),
             recovery: AtomicBool::new(false), deferred_recovery: AtomicBool::new(false), deferred_recovery_rounds: AtomicU64::new(0),
+            promoted_owner_client_id: Mutex::new(None),
         });
         self.attach_worker_listeners(&worker, &client);
         self.workers.lock().unwrap().insert(worker.descriptor.lock().unwrap().worker_id.clone(), Arc::clone(&worker));
@@ -1025,7 +1095,107 @@ impl Supervisor {
     /// client identity string, so the scheduled wake can reuse the same path with
     /// `SCHEDULED_WAKE_CLIENT_ID` (:1075) instead of a live client connection.
     async fn create_for_owner(self: &Arc<Self>, owner: String, body: &Map<String, Value>) -> Result<Value, String> {
+        // `if (command.name !== undefined) { const normalizedName = command.name.trim(); if
+        // (!normalizedName) throw new Error("Session name cannot be empty"); createCommand = {...command,
+        // name: normalizedName}; }` (daemon-supervisor.ts:3035-3041). The normalization happens before
+        // the open key is derived, so a whitespace-padded name still collides with its trimmed form.
+        let mut create_command = body.clone();
+        if let Some(name) = body.get("name").and_then(Value::as_str) {
+            let normalized = name.trim();
+            if normalized.is_empty() { return Err("Session name cannot be empty".into()); }
+            create_command.insert("name".into(), json!(normalized));
+        }
+        let body = &create_command;
+        // `const key = createCommand.sessionPath ? canonicalSessionPath(createCommand.sessionPath)
+        // : \`new:${command.id ? createCommandIdempotencyKey(clientId, command.id) :
+        // createActiveSessionId()}\`;` (daemon-supervisor.ts:3060-3062).
+        let opening_key = match body.get("sessionPath").and_then(Value::as_str) {
+            Some(path) => canonical_session_path(path),
+            None => format!("new:{}", body.get("id").and_then(Value::as_str)
+                .map(|id| create_command_idempotency_key(&owner, id))
+                .unwrap_or_else(|| create_active_session_id(None))),
+        };
+        // `const pending = this.openingWorkers.get(key); const opened = this.openingWorkers.get(key);`
+        // (:3063, 3073): the map is the only gate, so the check and the registration are one
+        // critical section and a concurrent opener either joins or becomes the single opener.
+        let pending = {
+            let mut openings = self.opening_workers.lock().unwrap();
+            match openings.get(&opening_key).cloned() {
+                Some(pending) => Some(pending),
+                None => {
+                    let opening = Arc::new(OpeningWorker { done: CancellationToken::new(), result: Mutex::new(None) });
+                    openings.insert(opening_key.clone(), Arc::clone(&opening));
+                    None
+                }
+            }
+        };
+        if let Some(pending) = pending {
+            // `return this.joinOpeningWorker(pending, ownerClientId, createCommand.sessionPath ?? key);`
+            // (:3065): `await pending` (:3153) then reuse its outcome.
+            pending.done.cancelled().await;
+            let result = pending.result.lock().unwrap().clone();
+            return match result {
+                Some(Ok(value)) => Ok(value),
+                Some(Err(error)) => Err(error),
+                None => Err("Session worker open was interrupted; retry opening the session".into()),
+            };
+        }
+        let opening = self.opening_workers.lock().unwrap().get(&opening_key).cloned()
+            .ok_or("Session worker open was interrupted; retry opening the session")?;
+        // The registered opener still serializes against `retry_worker` on the port's global open
+        // gate (that gate predates the join map); a joiner never takes it, it joins above, so the
+        // two mechanisms cannot deadlock.
         let _opening = self.opening.lock().await;
+        // `if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId);`
+        // (daemon-supervisor.ts:3085): the name check only guards a named create. The target is the
+        // saved sibling when the path is known (:3086-3090), else the synthetic new-root summary.
+        let result = match body.get("name").and_then(Value::as_str) {
+            None => self.create_for_owner_inner(owner, body).await,
+            Some(name) => {
+                // `const savedSiblings = createCommand.sessionPath ? await
+                // this.rlmLedgerSiblings(createCommand.sessionPath) : [];` (:3086) and the
+                // `canonicalSessionPath(session.path) === canonicalSessionPath(...)` match (:3087-3089).
+                let siblings = match body.get("sessionPath").and_then(Value::as_str) {
+                    Some(path) => match self.rlm_spawn_ledger().await {
+                        Ok(ledger) => ledger.siblings(path).await,
+                        Err(error) => { eprintln!("Could not read spawn-ledger siblings for the session name check: {error}"); Vec::new() }
+                    },
+                    None => Vec::new(),
+                };
+                let target = body.get("sessionPath").and_then(Value::as_str)
+                    .and_then(|path| siblings.iter().find(|info| canonical_session_path(&info.path) == canonical_session_path(path)).cloned());
+                // `const targetSummary = target ? summaryForInactiveSession(target) : { sessionId:
+                // "new-root", rlmDepth: 0 };` (:3090).
+                let target_summary = target.as_ref()
+                    .map(|info| summary_for_inactive_session(info, false, false))
+                    .unwrap_or_else(|| SessionSummary { session_id: "new-root".to_string(), rlm_depth: Some(0), ..SessionSummary::default() });
+                let (scope, name) = Self::summary_name_reservation_input(&target_summary, name);
+                let supervisor = Arc::clone(self);
+                let reserved_name = name.clone();
+                self.with_session_name_reservation(&scope, &reserved_name, async move {
+                    // `if (target?.parentSessionPath && (target.rlmDepth ?? 0) > 0)
+                    // this.assertSavedSiblingNameAvailable(savedSiblings, target, createCommand.name!);
+                    // else await this.assertSupervisorSessionNameAvailable(targetSummary, ...)`
+                    // (:3093-3097), then `return this.launchWorker(...)` (:3098).
+                    match target.as_ref().filter(|info| info.parent_session_path.is_some() && info.rlm_depth > 0) {
+                        Some(target) => supervisor.assert_saved_sibling_name_available(&siblings, target, &name).await?,
+                        None => supervisor.assert_supervisor_session_name_available(&target_summary, &name).await?,
+                    }
+                    supervisor.create_for_owner_inner(owner, body).await
+                }).await
+            }
+        };
+        // The registered opener publishes its outcome before it wakes the joiners.
+        *opening.result.lock().unwrap() = Some(result.clone());
+        // `finally { if (this.openingWorkers.get(key) === opening) this.openingWorkers.delete(key); }`
+        // (:3104-3107).
+        self.opening_workers.lock().unwrap().remove(&opening_key);
+        opening.done.cancel();
+        result
+    }
+    /// The guarded body of `createOrReuseWorker` (daemon-supervisor.ts:3033) behind the
+    /// `openingWorkers` join.
+    async fn create_for_owner_inner(self: &Arc<Self>, owner: String, body: &Map<String, Value>) -> Result<Value, String> {
         if let Some(path) = body.get("sessionPath").and_then(Value::as_str) {
             // `matchWorkers(command.sessionPath)` (daemon-supervisor.ts:3044) is counted before
             // any reuse: when more than one worker claims the file the TS throws
@@ -1129,6 +1299,239 @@ impl Supervisor {
         }
         tokio::spawn(async move { let _ = child.wait().await; });
         result
+    }
+    /// The registration half of `parseCommandAndRegisterPromptAdmission` (daemon-supervisor.ts:1899-1919):
+    /// validates the admission and stores a `waiting` record before dispatch can await anything.
+    fn register_prompt_admission(&self, public: &PublicClient, body: &Map<String, Value>) -> Result<(), String> {
+        if !matches!(body.get("type").and_then(Value::as_str), Some("prompt" | "prompt_and_wait")) {
+            return Ok(());
+        }
+        let Some(admission_id) = body.get("admissionId") else { return Ok(()); };
+        // `if (typeof command.activeSessionId !== "string" || typeof command.admissionId !== "string")
+        // throw new Error("Prompt admission requires string activeSessionId and admissionId");`
+        // (:1901-1903): a JSON `null` admissionId is present-but-not-a-string, so it fails here.
+        let (Some(active_session_id), Some(public_admission_id)) =
+            (body.get("activeSessionId").and_then(Value::as_str), admission_id.as_str())
+        else {
+            return Err("Prompt admission requires string activeSessionId and admissionId".into());
+        };
+        // `if (command.admissionId === "") throw new Error("admissionId must not be empty");` (:1904).
+        if public_admission_id.is_empty() { return Err("admissionId must not be empty".into()); }
+        let key = prompt_admission_key(&public.connection_id, active_session_id, public_admission_id);
+        let mut admissions = self.prompt_admissions.lock().unwrap();
+        // `if (admissions.has(key)) throw new Error(\`Prompt admission id is already in use:
+        // ${command.admissionId}\`);` (:1907-1909).
+        if admissions.contains_key(&key) {
+            return Err(format!("Prompt admission id is already in use: {public_admission_id}"));
+        }
+        admissions.insert(key, PromptAdmissionRecord {
+            connection_id: public.connection_id.clone(),
+            active_session_id: active_session_id.to_string(),
+            public_admission_id: public_admission_id.to_string(),
+            // `workerAdmissionId: \`supervisor-admission:${randomUUID()}\`` (:1914): the id the
+            // worker registers for this prompt, minted at supervisor parse time.
+            worker_admission_id: format!("supervisor-admission:{}:{public_admission_id}", public.connection_id),
+            status: PromptAdmissionStatus::Waiting,
+            controller: CancellationToken::new(),
+            worker: None,
+            worker_active_session_id: None,
+        });
+        Ok(())
+    }
+    /// `familyCatalogEntries()` (daemon-supervisor.ts:4523-4538): every roster row, then the
+    /// on-disk root sessions that no row covers.
+    async fn family_catalog_entries(self: &Arc<Self>) -> Vec<AgentFamilyCatalogEntry> {
+        let roster_rows = self.roster().lock().unwrap().values();
+        let mut entries: Vec<AgentFamilyCatalogEntry> = roster_rows.iter()
+            .map(|entry| self.family_catalog_entry(&summary_from_entry(entry))).collect();
+        let known_files: HashSet<String> = roster_rows.iter()
+            .filter_map(|entry| entry.summary.session_file.as_ref()).map(|file| canonical_session_path(file)).collect();
+        let scanned = match self.catalog.list(None, self.config.session_dir.as_deref(), None).await {
+            Ok(scanned) => scanned,
+            // `const scanned = await this.catalog.list(undefined, ...)` (:4531) is awaited without a
+            // catch, so a catalog failure fails the check rather than silently passing it.
+            Err(error) => { eprintln!("Could not scan saved sessions for name availability: {error}"); Vec::new() }
+        };
+        for info in scanned {
+            if known_files.contains(&canonical_session_path(&info.path)) { continue; }
+            // `if ((info.rlmDepth ?? (info.parentSessionPath ? -1 : 0)) !== 0) continue;` (:4534).
+            let depth = if info.rlm_depth != 0 { info.rlm_depth } else if info.parent_session_path.is_some() { -1 } else { 0 };
+            if depth != 0 { continue; }
+            entries.push(self.family_catalog_entry(&summary_for_inactive_session(&info, false, false)));
+        }
+        entries
+    }
+    /// `summaryNameReservationInput(target, name)` (daemon-supervisor.ts:4991-5002).
+    fn summary_name_reservation_input(target: &SessionSummary, name: &str) -> (AgentSessionNameScope, String) {
+        let depth = target.rlm_depth.map(|depth| depth as f64).unwrap_or(if target.parent_session_path.is_some() { 1.0 } else { 0.0 });
+        let scope = AgentSessionNameScope {
+            parent_session_id: (depth > 0.0).then(|| target.parent_session_id.clone()).flatten(),
+            parent_session_path: (depth > 0.0).then(|| target.parent_session_path.clone()).flatten(),
+            depth,
+        };
+        (scope, name.to_string())
+    }
+    /// `withSessionNameReservation(input, action)` (daemon-supervisor.ts:4540-4554): hold the key
+    /// for the duration of the action and always release it.
+    async fn with_session_name_reservation<T, F>(self: &Arc<Self>, scope: &AgentSessionNameScope, name: &str, action: F) -> Result<T, String>
+    where F: std::future::Future<Output = Result<T, String>> {
+        let key = session_name_reservation_key(scope, name);
+        {
+            let mut pending = self.pending_session_names.lock().unwrap();
+            if pending.contains(&key) { return Err(format_agent_session_name_unavailable(name, scope.depth)); }
+            pending.insert(key.clone());
+        }
+        let result = action.await;
+        self.pending_session_names.lock().unwrap().remove(&key);
+        result
+    }
+    /// `assertSavedSiblingNameAvailable(siblings, target, name)` (daemon-supervisor.ts:5018-5041):
+    /// the sibling list is the catalog, all rows at the target's depth, and the roster row for each
+    /// path supplies its status and name when it has one (:5023, 5028).
+    async fn assert_saved_sibling_name_available(self: &Arc<Self>, siblings: &[SessionInfo], target: &SessionInfo, name: &str) -> Result<(), String> {
+        let set_depth = target.rlm_depth as f64;
+        let catalog: Vec<AgentFamilyCatalogEntry> = siblings.iter().map(|info| {
+            let summary = summary_for_inactive_session(info, false, false);
+            let path = canonical_session_path(&info.path);
+            let ledger_row = self.roster().lock().unwrap().by_session_file(&path);
+            AgentFamilyCatalogEntry {
+                id: summary.session_id.clone(),
+                name: summary.session_name.clone().or_else(|| ledger_row.as_ref().and_then(|row| row.summary.session_name.clone())),
+                depth: set_depth,
+                status: ledger_row.as_ref().map(|row| row.status.as_str().to_string())
+                    .unwrap_or_else(|| classify_session_roster_status(
+                        &RosterSummaryView { active_session_id: summary.active_session_id.clone(), activity: Some(summary.activity.clone()), is_session_active: Some(summary.is_session_active) }, false).as_str().to_string()),
+                replied_since_task: None,
+                parent_session_id: None,
+                parent_session_path: summary.parent_session_path.as_ref().map(|path| canonical_session_path(path)),
+                session_path: summary.session_file.as_ref().map(|file| canonical_session_path(file)),
+            }
+        }).collect();
+        assert_agent_session_name_available(&catalog, &AgentSessionNameAvailabilityInput {
+            parent_session_id: None,
+            // `parentSessionPath: target.parentSessionPath ? canonicalSessionPath(target.parentSessionPath)
+            // : undefined` (:5037).
+            parent_session_path: target.parent_session_path.as_ref().map(|path| canonical_session_path(path)),
+            depth: set_depth,
+            name: name.to_string(),
+            // `ignoreSessionId: target.id` (:5038).
+            ignore_session_id: Some(target.id.clone()),
+        })
+    }
+    /// `assertSupervisorSessionNameAvailable(target, name)` (daemon-supervisor.ts:4556-4567).
+    async fn assert_supervisor_session_name_available(self: &Arc<Self>, target: &SessionSummary, name: &str) -> Result<(), String> {
+        let catalog = self.family_catalog_entries().await;
+        assert_agent_session_name_available(&catalog, &AgentSessionNameAvailabilityInput {
+            parent_session_id: target.parent_session_id.clone(),
+            parent_session_path: target.parent_session_path.as_ref().map(|path| canonical_session_path(path)),
+            depth: target.rlm_depth.map(|depth| depth as f64).unwrap_or(0.0),
+            name: name.to_string(),
+            ignore_session_id: Some(target.session_id.clone()),
+        })
+    }
+    /// `getPromptAdmission(client, activeSessionId, publicAdmissionId)` (daemon-supervisor.ts:1835-1841).
+    fn get_prompt_admission(
+        &self,
+        connection_id: &str,
+        active_session_id: &str,
+        public_admission_id: &str,
+    ) -> Option<PromptAdmissionRecord> {
+        self.prompt_admissions
+            .lock()
+            .unwrap()
+            .get(&prompt_admission_key(connection_id, active_session_id, public_admission_id))
+            .cloned()
+    }
+    /// `deletePromptAdmission(admission)` (daemon-supervisor.ts:1843-1849).
+    fn delete_prompt_admission(&self, admission: &PromptAdmissionRecord) {
+        self.prompt_admissions.lock().unwrap().remove(&prompt_admission_key(
+            &admission.connection_id,
+            &admission.active_session_id,
+            &admission.public_admission_id,
+        ));
+    }
+    /// `cancelWaitingPromptAdmissionsForClient(client)` (daemon-supervisor.ts:1851-1881), called
+    /// from the socket-close cleanup (:1681). A still-queued admission is cancelled locally
+    /// (:1854-1857); one already attached to a worker is cancelled through that worker and its
+    /// status is only downgraded while it is still `waiting` (:1866-1874).
+    fn cancel_waiting_prompt_admissions_for_client(self: &Arc<Self>, public: &Arc<PublicClient>) {
+        let waiting: Vec<PromptAdmissionRecord> = self.prompt_admissions.lock().unwrap().values()
+            .filter(|admission| admission.connection_id == public.connection_id && admission.status == PromptAdmissionStatus::Waiting)
+            .cloned().collect();
+        for admission in waiting {
+            let (Some(worker), Some(active)) = (admission.worker.clone(), admission.worker_active_session_id.clone()) else {
+                // `if (!admission.worker || !admission.workerActiveSessionId) { admission.status =
+                // "cancelled"; admission.controller.abort(); }` (:1854-1857).
+                self.set_prompt_admission_status(&admission, PromptAdmissionStatus::Cancelled, true);
+                continue;
+            };
+            let supervisor = Arc::clone(self);
+            tokio::spawn(async move {
+                let mut forwarded = command("cancel_prompt_admission");
+                forwarded.insert("activeSessionId".into(), json!(active));
+                forwarded.insert("admissionId".into(), json!(admission.worker_admission_id));
+                let Ok(client) = supervisor.connected_client(&worker).await else { return; };
+                let Ok(response) = client.request_worker(forwarded, REQUEST_TIMEOUT).await else { return; };
+                // `if (admission.status !== "waiting") return;` (:1867).
+                if supervisor.prompt_admission_status(&admission) != Some(PromptAdmissionStatus::Waiting) { return; }
+                match response.data.as_ref().and_then(|data| data.get("status")).and_then(Value::as_str) {
+                    Some("owned") => supervisor.set_prompt_admission_status(&admission, PromptAdmissionStatus::Owned, false),
+                    Some("cancelled") => supervisor.set_prompt_admission_status(&admission, PromptAdmissionStatus::Cancelled, false),
+                    _ => {}
+                }
+            });
+        }
+    }
+    /// `admission.worker = match.worker; admission.workerActiveSessionId =
+    /// match.summary.activeSessionId ?? match.summary.id;` (daemon-supervisor.ts:2806-2808).
+    fn attach_prompt_admission_worker(&self, admission: &PromptAdmissionRecord, worker: &Arc<Worker>, active: &str) {
+        let key = prompt_admission_key(&admission.connection_id, &admission.active_session_id, &admission.public_admission_id);
+        if let Some(current) = self.prompt_admissions.lock().unwrap().get_mut(&key) {
+            current.worker = Some(Arc::clone(worker));
+            current.worker_active_session_id = Some(active.to_string());
+        }
+    }
+    /// The status of a record, matched by its own key.
+    fn prompt_admission_status(&self, admission: &PromptAdmissionRecord) -> Option<PromptAdmissionStatus> {
+        self.prompt_admissions.lock().unwrap()
+            .get(&prompt_admission_key(&admission.connection_id, &admission.active_session_id, &admission.public_admission_id))
+            .map(|current| current.status)
+    }
+    fn set_prompt_admission_status(&self, admission: &PromptAdmissionRecord, status: PromptAdmissionStatus, abort: bool) {
+        let key = prompt_admission_key(&admission.connection_id, &admission.active_session_id, &admission.public_admission_id);
+        if let Some(current) = self.prompt_admissions.lock().unwrap().get_mut(&key) { current.status = status; }
+        if abort { admission.controller.cancel(); }
+    }
+    /// `promoteOwnedWorker(client, worker)` (daemon-supervisor.ts:3241-3276).
+    ///
+    /// Clears `descriptor.ownerClientId` (:3250-3253) and persists the descriptor (:3255), then
+    /// records the promotion (:3266) and re-amends the worker's roster rows (:3267-3269) so the
+    /// previously private rows become visible to every client.
+    fn promote_owned_worker(&self, worker: &Arc<Worker>, client_id: &str) -> Result<(), String> {
+        // `if (worker.descriptor.ownerClientId === undefined && worker.promotedOwnerClientId ===
+        // clientId) return;` (:3243-3245).
+        if worker.descriptor.lock().unwrap().owner_client_id.is_none()
+            && worker.promoted_owner_client_id.lock().unwrap().as_deref() == Some(client_id)
+        {
+            return Ok(());
+        }
+        // `if (worker.descriptor.ownerClientId !== clientId) throw new Error("Session is not owned
+        // by this client");` (:3246-3248).
+        if worker.descriptor.lock().unwrap().owner_client_id.as_deref() != Some(client_id) {
+            return Err("Session is not owned by this client".into());
+        }
+        {
+            let mut descriptor = worker.descriptor.lock().unwrap();
+            descriptor.owner_client_id = None;
+            self.persist_worker(&descriptor)?;
+        }
+        *worker.promoted_owner_client_id.lock().unwrap() = Some(client_id.to_string());
+        // `for (const entry of this.workerRosterEntries(worker)) this.roster().amend(entry.agentId, {});`
+        // (:3267-3269): the empty marks still announce the row, so clients re-read it.
+        for entry in self.worker_roster_entries(worker) {
+            self.roster().lock().unwrap().amend(&entry.agent_id, RosterEntryMarks::default());
+        }
+        Ok(())
     }
     /// `matchWorkers(selector, includeWorker)` over the roster, then
     /// `collectedPassiveScheduledJob { rootSessionFile, job, info }` (daemon-supervisor.ts:962).
@@ -1777,26 +2180,117 @@ impl Supervisor {
             // a ticket this supervisor cannot mint, so the capability stays unadvertised and
             // the rejection stays explicit. `prepare_update_restart` / `restart` need the
             // update-restart transaction (2421-2423, 2415-2417).
+            // `case "cancel_prompt_admission"` (daemon-supervisor.ts:2098-2127): served entirely from
+            // the supervisor admission registry, so a cancel issued while the addressed worker is
+            // still being created fences the wait locally instead of failing a worker lookup.
+            "cancel_prompt_admission" => {
+                let active_session_id = body.get("activeSessionId").and_then(Value::as_str).unwrap_or("");
+                let admission_id = body.get("admissionId").and_then(Value::as_str).unwrap_or("");
+                let admission = self.get_prompt_admission(&public.connection_id, active_session_id, admission_id);
+                // `if (!admission) return success(command.id, command.type, { status: "unknown" });` (:2101).
+                let Some(admission) = admission else { return Ok(success(Some(json!({"status": "unknown"})))); };
+                // `if (admission.status === "owned") return success(..., { status: "owned" });` (:2102)
+                // and the definitive-cancellation rule at :2103-2106.
+                if admission.status == PromptAdmissionStatus::Owned { return Ok(success(Some(json!({"status": "owned"})))); }
+                if admission.status == PromptAdmissionStatus::Cancelled { return Ok(success(Some(json!({"status": "cancelled"})))); }
+                let (Some(worker), Some(worker_active)) = (admission.worker.clone(), admission.worker_active_session_id.clone()) else {
+                    // `if (!admission.worker || !admission.workerActiveSessionId) { admission.status =
+                    // "cancelled"; admission.controller.abort(); return success(..., "cancelled"); }`
+                    // (:2107-2111).
+                    self.set_prompt_admission_status(&admission, PromptAdmissionStatus::Cancelled, true);
+                    return Ok(success(Some(json!({"status": "cancelled"}))));
+                };
+                let mut forwarded = body.clone();
+                forwarded.insert("type".into(), json!("cancel_prompt_admission"));
+                forwarded.insert("activeSessionId".into(), json!(worker_active));
+                forwarded.insert("admissionId".into(), json!(admission.worker_admission_id));
+                let client = self.connected_client(&worker).await?;
+                let mut response = client.request(forwarded, REQUEST_TIMEOUT, DaemonClientRequestOptions::default()).await.map_err(|error| error.to_string())?;
+                let status = response.data.as_ref().and_then(|data| data.get("status")).and_then(Value::as_str).unwrap_or("unknown").to_string();
+                // `const current = (admission as SupervisorPromptAdmission).status;` (:2122):
+                // re-read after the round-trip, then `owned`/`cancelled` win and anything else
+                // returns a still-running admission to `waiting` unless it is already cancelled (:2123-2125).
+                let current = self.prompt_admission_status(&admission);
+                match status.as_str() {
+                    "owned" => self.set_prompt_admission_status(&admission, PromptAdmissionStatus::Owned, false),
+                    "cancelled" => self.set_prompt_admission_status(&admission, PromptAdmissionStatus::Cancelled, false),
+                    _ => if current != Some(PromptAdmissionStatus::Cancelled) { self.set_prompt_admission_status(&admission, PromptAdmissionStatus::Waiting, false); },
+                }
+                response.id = id; response.command = kind.clone();
+                return Ok(Some(response));
+            }
             "get_direct_worker_transport" | "prepare_update_restart" | "restart" => return Err(format!("Daemon supervisor command is not implemented: {kind}")),
             _ => {}
         }
         let previous_active = body.get("activeSessionId").and_then(Value::as_str).map(str::to_string);
         let requested = if kind == "reattach" { body.get("targetActiveSessionId") } else { body.get("activeSessionId") }.and_then(Value::as_str).ok_or("Daemon command requires activeSessionId")?.to_string();
+        // `const admission = (command.type === "prompt" || command.type ===
+        // "prompt_and_wait") && command.admissionId ? this.getPromptAdmission(...) : undefined;`
+        // (daemon-supervisor.ts:2785-2788) and `throwIfAdmissionCancelled(admission)` (:2790).
+        let prompt_admission = if matches!(kind.as_str(), "prompt" | "prompt_and_wait") {
+            body.get("admissionId").and_then(Value::as_str)
+                .and_then(|admission| self.get_prompt_admission(&public.connection_id, &requested, admission))
+        } else {
+            None
+        };
+        if prompt_admission.as_ref().is_some_and(|admission| admission.status == PromptAdmissionStatus::Cancelled) {
+            // `throw new PromptAdmissionCancelledError()` (:459-460, 2790).
+            return Err(crate::core::prompt_admission::PROMPT_ADMISSION_CANCELLED_MESSAGE.to_string());
+        }
         let (worker, active) = self.find(&public.identity(), &requested).await?;
+        // `if (admission) { admission.worker = match.worker; admission.workerActiveSessionId =
+        // match.summary.activeSessionId ?? match.summary.id; }` (daemon-supervisor.ts:2806-2808):
+        // a cancel that lands while this prompt is in flight is routed to the same worker.
+        if let Some(admission) = prompt_admission.as_ref() { self.attach_prompt_admission_worker(admission, &worker, &active); }
+        // `throwIfAdmissionCancelled(admission);` again after the lookup (:2800): a cancel that
+        // landed while this prompt was still resolving the worker stops it before the forward.
+        // `fenced_prompt_admission` re-reads the live record, exactly as TS reads the live
+        // `admission` object; the `cancellationAdmission` fence at :1952-1955 mutates the registry.
+        let fenced_prompt_admission = prompt_admission.as_ref().map(|admission| {
+            self.get_prompt_admission(&admission.connection_id, &admission.active_session_id, &admission.public_admission_id)
+                .unwrap_or_else(|| admission.clone())
+        });
+        if fenced_prompt_admission.as_ref().is_some_and(|admission| admission.status == PromptAdmissionStatus::Cancelled) {
+            return Err(crate::core::prompt_admission::PROMPT_ADMISSION_CANCELLED_MESSAGE.to_string());
+        }
         body.insert("activeSessionId".into(), json!(active));
         if matches!(kind.as_str(), "complete_owned_session" | "promote_owned_session") {
             if worker.descriptor.lock().unwrap().owner_client_id.as_deref() != Some(&public.identity()) { return Err("Session is not owned by this client".into()); }
             if kind == "promote_owned_session" {
-                { let mut descriptor = worker.descriptor.lock().unwrap(); descriptor.owner_client_id = None; self.persist_worker(&descriptor)?; }
+                // `await this.promoteOwnedWorker(client, match.worker)` (daemon-supervisor.ts:2394);
+                // the summary is re-read after the promotion, as TS's `this.publicSummary(...)`
+                // is evaluated after the await (:2395).
+                self.promote_owned_worker(&worker, &public.identity())?;
                 let summary = self.refresh(&worker).await?.into_iter().find(|summary| summary.get("activeSessionId").or_else(|| summary.get("id")).and_then(Value::as_str) == Some(&active));
                 return Ok(success(summary));
             }
             self.stop_worker(&worker, true, false).await?;
             return Ok(success(None));
         }
-        if kind == "kill" && worker.descriptor.lock().unwrap().root_active_session_id == active {
-            self.stop_worker(&worker, true, false).await?;
-            return Ok(success(None));
+        // `const isRootKill = command.type === "kill" && (match.summary.activeSessionId ??
+        // match.summary.id) === match.worker.descriptor.rootActiveSessionId` (daemon-supervisor.ts:2810-2812).
+        // A root kill still forwards into the worker and answers with the worker's response
+        // (:2832, 2840); only the stop is supervisor-side, and it runs in the `finally` (:2833-2839).
+        let root_kill = kind == "kill" && worker.descriptor.lock().unwrap().root_active_session_id == active;
+        if root_kill {
+            // `await this.persistWorkerStopTombstone(match.worker, true);` (:2828) persists
+            // `stopRequestedAt` / `archiveOnStop`, which `stop_worker` writes before it signals
+            // the worker (native_supervisor.rs `stop_worker` = daemon-supervisor.ts:6689).
+            let forwarded_body = body.clone();
+            let forwarded = async {
+                let client = self.connected_client(&worker).await?;
+                client.request(forwarded_body, REQUEST_TIMEOUT, DaemonClientRequestOptions::default()).await.map_err(|error| error.to_string())
+            }.await;
+            // `finally { await this.stopWorker(match.worker, true, false, true); }` (:2835): the
+            // stop runs even when the forward failed, and `archiveSession: true` selects the
+            // archive path; a stop failure never replaces the worker's response (:2840).
+            if let Err(error) = self.stop_worker(&worker, true, false).await {
+                eprintln!("Session worker {} root kill cleanup failed: {error}", worker.descriptor.lock().unwrap().worker_id);
+            }
+            let mut response = forwarded?;
+            response.id = id;
+            response.command = kind.clone();
+            return Ok(Some(response));
         }
         let pause_epoch = public.pause_epoch.load(std::sync::atomic::Ordering::SeqCst);
         if kind == "acquire_session_input_pause" {
@@ -1829,6 +2323,8 @@ impl Supervisor {
             body.remove("clientId");
             public.subscriptions.lock().unwrap().insert(active.clone());
         }
+        // `command.promoteOwnedSession` (:2586, :2640) must be read before `body` is forwarded.
+        let promote_owned_session = body.get("promoteOwnedSession").and_then(Value::as_bool) == Some(true);
         let client = self.connected_client(&worker).await?;
         let mut response = client.request(body, REQUEST_TIMEOUT, DaemonClientRequestOptions::default()).await.map_err(|error| error.to_string())?;
         response.id = id; response.command = kind.clone();
@@ -1846,6 +2342,22 @@ impl Supervisor {
                     data["snapshot"]["summary"] = serde_json::to_value(self.public_summary(&worker, session_summary_from_roster_row(&summary, None, None, None))).unwrap_or(Value::Null);
                 }
             }
+        }
+        // `const forward = async () => { const response = await this.forwardToWorker(match.worker,
+        // resolvedCommand); if (admission && response.success) admission.status = "owned"; return
+        // response; };` (daemon-supervisor.ts:2814-2818): a successful forward owns the admission.
+        if response.success {
+            if let Some(admission) = fenced_prompt_admission.as_ref() {
+                self.set_prompt_admission_status(admission, PromptAdmissionStatus::Owned, false);
+            }
+        }
+        // `case "cron_add"` (daemon-supervisor.ts:2583-2589) and `case "heartbeat_set"` (:2637-2644):
+        // the forward is unchanged, but `if (response.success && command.promoteOwnedSession)
+        // await this.promoteOwnedWorker(client, match.worker);` runs before the response is
+        // returned, so a schedule created from a client-owned session survives the owner's
+        // disconnect (`disconnected()` stops owner-bound workers after the 30s grace).
+        if response.success && promote_owned_session && matches!(kind.as_str(), "cron_add" | "heartbeat_set") {
+            self.promote_owned_worker(&worker, &public.identity())?;
         }
         if kind == "acquire_session_input_pause" && response.success {
             let pause_id = response.data.as_ref().and_then(|data| data.get("pauseId")).and_then(Value::as_str).ok_or("Worker returned an invalid session input pause id")?.to_string();
@@ -1877,10 +2389,51 @@ impl Supervisor {
         let parsed = parse_command(&line);
         let (body, envelope_client) = match parsed {
             Ok(parsed) => parsed,
-            Err(error) => { public.write(&json!(DaemonResponse::failure(None, "parse", &error, None))); return; }
+            // `this.write(client, failure(salvageDaemonCommandId(line), "parse", error));`
+            // (daemon-supervisor.ts:1939): the id survives the parse failure, so the sender can
+            // settle its pending request instead of waiting out the 30s request timeout.
+            Err(error) => {
+                let salvaged = daemon_protocol::salvage_daemon_command_id(&String::from_utf8_lossy(&line));
+                public.write(&json!(DaemonResponse::failure(salvaged.as_deref(), "parse", &error, None)));
+                return;
+            }
         };
         let id = body.get("id").and_then(Value::as_str).map(str::to_string);
         let kind = body.get("type").and_then(Value::as_str).unwrap_or("dispatch").to_string();
+        // `parseCommandAndRegisterPromptAdmission(client, line)` (daemon-supervisor.ts:1884-1919):
+        // the admission is registered before `handleLine`'s first await, so a `cancel_prompt_admission`
+        // that arrives later in the same read can fence it (:1952-1955). Registration failures are
+        // parse-phase failures and are answered with the salvaged id (:1939).
+        // Bound to `_prompt_admission_guard` (not `_`): a named binding drops at the end of the
+        // function, which is exactly the `finally` the TypeScript runs (daemon-supervisor.ts:2842).
+        let mut _prompt_admission_guard: Option<PromptAdmissionGuard> = None;
+        if matches!(kind.as_str(), "prompt" | "prompt_and_wait") && body.get("admissionId").is_some() {
+            if let Err(error) = self.register_prompt_admission(&public, &body) {
+                let salvaged = daemon_protocol::salvage_daemon_command_id(&String::from_utf8_lossy(&line));
+                public.write(&json!(DaemonResponse::failure(salvaged.as_deref(), &kind, &error, None)));
+                return;
+            }
+            _prompt_admission_guard = self.get_prompt_admission(
+                &public.connection_id,
+                body.get("activeSessionId").and_then(Value::as_str).unwrap_or(""),
+                body.get("admissionId").and_then(Value::as_str).unwrap_or(""),
+            ).map(|admission| PromptAdmissionGuard { supervisor: Arc::clone(&self), admission });
+        }
+        // `const cancellationAdmission = command.type === "cancel_prompt_admission" ?
+        // this.getPromptAdmission(client, command.activeSessionId, command.admissionId) : undefined;`
+        // (daemon-supervisor.ts:1948-1951) and the still-queued fence at :1952-1955.
+        if kind == "cancel_prompt_admission" {
+            if let (Some(active_session_id), Some(admission_id)) =
+                (body.get("activeSessionId").and_then(Value::as_str), body.get("admissionId").and_then(Value::as_str))
+            {
+                let cancellation = self.get_prompt_admission(&public.connection_id, active_session_id, admission_id);
+                if let Some(admission) = cancellation.filter(|admission| {
+                    admission.status == PromptAdmissionStatus::Waiting && admission.worker.is_none()
+                }) {
+                    self.set_prompt_admission_status(&admission, PromptAdmissionStatus::Cancelled, true);
+                }
+            }
+        }
         if let Some(identity) = envelope_client.as_ref().filter(|identity| !identity.is_empty()) { *public.protocol_id.lock().unwrap() = Some(identity.clone()); }
         let journal_identity = envelope_client.map(|identity| if identity.is_empty() { public.identity() } else { identity }).filter(|_| daemon_protocol::is_daemon_mutating_command(&kind) && kind != "ack_result").zip(id.clone());
         if let Err(error) = self.ownership.assert_current().await {
@@ -1911,6 +2464,10 @@ impl Supervisor {
         public.roster_subscribed.store(false, Ordering::SeqCst);
         public.roster_resync_pending.store(false, Ordering::SeqCst);
         let owner = public.identity();
+        // `this.cancelWaitingPromptAdmissionsForClient(client);` (daemon-supervisor.ts:1681): a
+        // disconnected sender's still-queued admissions are cancelled so their in-flight prompts
+        // fail with `PromptAdmissionCancelledError` instead of running on behalf of a gone client.
+        self.cancel_waiting_prompt_admissions_for_client(public);
         let supervisor = self.clone();
         let public = public.clone();
         tokio::spawn(async move {
@@ -2365,5 +2922,24 @@ mod tests {
         let wire = json!({"type":"command", "id":"request-1", "clientId":"client-1", "protocol":daemon_protocol::daemon_protocol_info(), "command":{"type":"list"}});
         let (body, client) = parse_command(&serde_json::to_vec(&wire).unwrap()).unwrap();
         assert_eq!(body["id"], "request-1"); assert_eq!(client.as_deref(), Some("client-1"));
+    }
+    /// `failure(salvageDaemonCommandId(line), "parse", error)` (daemon-supervisor.ts:1939): a
+    /// malformed line still yields the sender's id, and a line with no string id yields none.
+    #[test]
+    fn parse_failures_salvage_the_command_id() {
+        assert_eq!(daemon_protocol::salvage_daemon_command_id(r#"{"id":"request-9","command":{}}"#).as_deref(), Some("request-9"));
+        assert_eq!(daemon_protocol::salvage_daemon_command_id(r#"{"id":7}"#), None);
+        assert_eq!(daemon_protocol::salvage_daemon_command_id("not json"), None);
+    }
+    /// `promptAdmissionKey(activeSessionId, publicAdmissionId)` (daemon-supervisor.ts:1822-1823) is
+    /// `\`${activeSessionId}\0${publicAdmissionId}\``, scoped by the owning socket (:749).
+    #[test]
+    fn prompt_admission_keys_are_socket_and_session_scoped() {
+        let first = prompt_admission_key("conn-1", "active-1", "admission-1");
+        let second = prompt_admission_key("conn-2", "active-1", "admission-1");
+        let third = prompt_admission_key("conn-1", "active-2", "admission-1");
+        assert_eq!(first, "conn-1\u{0}active-1\u{0}admission-1");
+        assert_ne!(first, second);
+        assert_ne!(first, third);
     }
 }

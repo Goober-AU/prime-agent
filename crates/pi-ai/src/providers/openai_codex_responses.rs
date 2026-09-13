@@ -2752,7 +2752,9 @@ mod tests {
             reasoning_effort: Some("none".to_string()),
             ..Default::default()
         };
-        let mut plain = model();
+        // NOTE: `model` is already shadowed by the local binding above, so the helper must be
+        // reached through its path-qualified name here.
+        let mut plain = self::model();
         plain.thinking_level_map = None;
         let body = build_request_body(&plain, &context(), Some(&options));
         assert_eq!(body["reasoning"], json!({ "effort": "none", "summary": "auto" }));

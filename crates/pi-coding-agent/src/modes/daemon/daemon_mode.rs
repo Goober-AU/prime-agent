@@ -3476,45 +3476,48 @@ impl AgentDaemon {
         };
         let type_ = parsed.get("type").and_then(Value::as_str).unwrap_or("");
         if type_ == "prompt" || type_ == "prompt_and_wait" {
+            // `if (parsed.admissionId !== undefined)` (`daemon-mode.ts:3645`): the branch
+            // is entered for any present key, including JSON `null`. `typeof null !==
+            // "string"` then fails the check below (`:3646-3648`), so `admissionId: null`
+            // must be rejected, not treated as absent.
             if let Some(admission_id) = parsed.get("admissionId") {
-                if !admission_id.is_null() {
-                    let active_session_id = parsed.get("activeSessionId").and_then(Value::as_str);
-                    let admission_id = admission_id.as_str();
-                    let (Some(active_session_id), Some(admission_id)) =
-                        (active_session_id, admission_id)
-                    else {
-                        return Err(
-                            "Prompt admission requires string activeSessionId and admissionId"
-                                .to_string(),
-                        );
-                    };
-                    if admission_id.is_empty() {
-                        return Err("admissionId must not be empty".to_string());
-                    }
-                    let key = self.prompt_admission_key(active_session_id, admission_id);
-                    if self
-                        .prompt_admissions
-                        .lock()
-                        .expect("prompt admissions poisoned")
-                        .contains_key(&key)
-                    {
-                        return Err(format!(
-                            "Prompt admission id is already in use: {admission_id}"
-                        ));
-                    }
-                    self.prompt_admissions
-                        .lock()
-                        .expect("prompt admissions poisoned")
-                        .insert(
-                            key,
-                            PromptAdmission {
-                                active_session_id: active_session_id.to_string(),
-                                admission_id: admission_id.to_string(),
-                                controller: Some(tokio_util::sync::CancellationToken::new()),
-                                status: "waiting".to_string(),
-                            },
-                        );
+                let active_session_id = parsed.get("activeSessionId").and_then(Value::as_str);
+                // `typeof parsed.activeSessionId !== "string" || typeof parsed.admissionId
+                // !== "string"` (`daemon-mode.ts:3646-3648`).
+                let (Some(active_session_id), Some(admission_id)) =
+                    (active_session_id, admission_id.as_str())
+                else {
+                    return Err(
+                        "Prompt admission requires string activeSessionId and admissionId"
+                            .to_string(),
+                    );
+                };
+                if admission_id.is_empty() {
+                    return Err("admissionId must not be empty".to_string());
                 }
+                let key = self.prompt_admission_key(active_session_id, admission_id);
+                if self
+                    .prompt_admissions
+                    .lock()
+                    .expect("prompt admissions poisoned")
+                    .contains_key(&key)
+                {
+                    return Err(format!(
+                        "Prompt admission id is already in use: {admission_id}"
+                    ));
+                }
+                self.prompt_admissions
+                    .lock()
+                    .expect("prompt admissions poisoned")
+                    .insert(
+                        key,
+                        PromptAdmission {
+                            active_session_id: active_session_id.to_string(),
+                            admission_id: admission_id.to_string(),
+                            controller: Some(tokio_util::sync::CancellationToken::new()),
+                            status: "waiting".to_string(),
+                        },
+                    );
             }
         }
         Ok(parsed)
@@ -8615,44 +8618,59 @@ impl AgentDaemon {
         })
     }
 
-    /// `broadcastRosterFrame(message)`.
+    /// `broadcastRosterFrame(message)` (`daemon-mode.ts:7359-7373`).
+    ///
+    /// The TypeScript has no transport test: every client carrying a supervisor
+    /// claim gets `encodePrivateFrame({ kind: "outbound", outboundType:
+    /// message.type }, payload)` (`:7367-7369`), and the bare JSONL line does not
+    /// exist there. Reachability of the former Rust `transport == "private-framed"`
+    /// branch was checked and it is unreachable:
+    /// - `client.state.transport` has exactly one producer, `daemon_server.rs:72`
+    ///   (`Some(if daemon.is_worker() { "private-framed" } else { "jsonl" })`),
+    ///   mirroring TS `transport: this.options.worker ? "private-framed" : "jsonl"`
+    ///   (`daemon-mode.ts:3540`);
+    /// - `supervisorClaims`/`supervisor_claims` is only ever inserted in the
+    ///   worker-only `worker_auth` handler (`daemon_mode.rs:3770`, inside
+    ///   `if self.is_worker() && !client.authenticated()` at `:3594`; TS
+    ///   `daemon-mode.ts:3787`), and `options.worker` is never reassigned.
+    /// So claim => worker daemon => `"private-framed"`. Writing the bare line here
+    /// would desynchronize the peer's frame decoder: it reads the first four bytes
+    /// of `{"type"...` as a big-endian header length.
     fn broadcast_roster_frame(&self, message: &DaemonWorkerRosterOutbound) -> bool {
-        // `broadcastRosterFrame` (daemon-mode.ts:7359-7373): every supervisor link is a
-        // private-framed socket, so the roster payload is wrapped in an
-        // `encodePrivateFrame({ kind: "outbound", outboundType: message.type })` envelope.
-        // Writing the bare line here desynchronizes the peer's frame decoder: it reads the
-        // first four bytes of `{"type"...` as a big-endian header length.
         let payload = serde_json::to_vec(message).unwrap_or_default();
         let outbound_type = serde_json::to_value(message)
             .ok()
             .and_then(|value| value.get("type").and_then(Value::as_str).map(str::to_string))
             .unwrap_or_else(|| "roster_delta".to_string());
         let header = serde_json::json!({ "kind": "outbound", "outboundType": outbound_type });
-        let framed = encode_private_frame(&header, &payload).ok();
+        // TS `encodePrivateFrame` throws on an impossible header (empty or over the
+        // 1 MiB limit) and that throw escapes `broadcastRosterFrame`. The frame header
+        // here is a fixed two-field object, so encoding cannot fail; if it ever does,
+        // report no delivery rather than claim a frame that was never written.
+        let framed = match encode_private_frame(&header, &payload) {
+            Ok(framed) => framed,
+            Err(error) => {
+                self.log(&format!("Daemon roster frame encode failed: {error}"));
+                return false;
+            }
+        };
         let mut delivered = false;
         for client in self.client_handles() {
-            if self
+            // TS `daemon-mode.ts:7363-7370`: skip every client without a supervisor
+            // claim (or with a destroyed socket), then write the encoded frame and
+            // set `delivered = true` unconditionally - no transport test, no JSONL
+            // fallback, and no per-write result check.
+            if !self
                 .supervisor_claims
                 .lock()
                 .expect("supervisor claims poisoned")
                 .contains_key(&(Arc::as_ptr(&client) as usize))
+                || client.writer.destroyed()
             {
-                let private_framed = client
-                    .state
-                    .lock()
-                    .expect("daemon client poisoned")
-                    .transport
-                    .as_deref()
-                    == Some("private-framed");
-                if private_framed {
-                    if let Some(framed) = &framed {
-                        delivered |= client.writer.write_bytes(framed.clone());
-                    }
-                } else {
-                    let line = format!("{}\n", serde_json::to_string(message).unwrap_or_default());
-                    delivered |= client.writer.write(line);
-                }
+                continue;
             }
+            client.writer.write_bytes(framed.clone());
+            delivered = true;
         }
         delivered
     }
@@ -9531,6 +9549,21 @@ impl AgentDaemon {
                 .lock()
                 .expect("roster reporter poisoned");
             reporter.snapshot_pending = false;
+        }
+        // `shutdown(exitCode)` (`daemon-mode.ts:7722-7725`): every client - not only a
+        // direct peer transport - gets `abortClientSnapshotStreaming(client)` and then
+        // `write(client, { type: "daemon_closing", reason: closingReason })` before any
+        // session closes. Closing the clients without that frame leaves the peer to
+        // report a bare transport loss instead of a `daemon_closing` reason.
+        let closing_clients = self.client_handles();
+        for client in &closing_clients {
+            abort_client_snapshot_streaming(client, None);
+            self.write(
+                client,
+                &DaemonOutbound::DaemonClosing {
+                    reason: closing_reason.clone(),
+                },
+            );
         }
         let states = self.session_states();
         for entry in states {

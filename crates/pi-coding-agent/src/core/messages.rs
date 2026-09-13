@@ -972,8 +972,11 @@ pub fn is_session_slash_command(value: &Value) -> bool {
 }
 
 fn is_valid_command_entry_id(value: Option<&Value>) -> bool {
+    // `value === undefined || (typeof value === "string" && value.length > 0)`
+    // (`core/messages.ts:504-506`): a missing key passes, a non-empty string passes,
+    // and JSON `null` must NOT - `null !== undefined` and `typeof null !== "string"`.
     match value {
-        None | Some(Value::Null) => true,
+        None => true,
         Some(Value::String(text)) => !text.is_empty(),
         Some(_) => false,
     }

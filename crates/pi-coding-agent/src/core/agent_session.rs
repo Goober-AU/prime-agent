@@ -894,6 +894,8 @@ struct RlmChildTurnOutcome {
 const DEFERRED_SESSION_INPUT_ERROR_MESSAGE: &str = "Session input paused before handoff";
 const COMPACTION_CANCELLED_ERROR_MESSAGE: &str = "Compaction cancelled";
 const COMPACTION_SKIPPED_ERROR_MESSAGE: &str = "Session is too short to compact — try again once it grows";
+/// `CompactionSkippedError("Already compacted")` (agent-session.ts:8245).
+const COMPACTION_ALREADY_COMPACTED_ERROR_MESSAGE: &str = "Already compacted";
 
 
 /// `turnExecutionPoliciesEqual`.
@@ -5196,7 +5198,8 @@ impl AgentSession {
                 ..Default::default()
             }),
         );
-        self.admit_session_input(action, true);
+        // TS 3648-3655: the recovery is fronted so it precedes a later follow-up.
+        self.admit_session_input_with_options(action, true, false, true, true);
         if let Some(pending) = self.rlm_continuation.lock().unwrap().pending_continuation.as_mut() {
             pending.phase = "queued".to_string();
         }
@@ -7527,6 +7530,7 @@ impl AgentSession {
         };
         let mut prompt_options = options.clone();
         prompt_options.agent_message_id = Some(agent_message_id.clone());
+        let signal = options.signal.clone();
         let result = self
             .prompt_until_accepted(text, Some(prompt_options))
             .await;
@@ -7534,10 +7538,42 @@ impl AgentSession {
             self.settle_agent_message(Some(&agent_message_id), "completion", Some(&error));
             return Err(error);
         }
-        completion
+        // TS 5200-5213: an abort on the caller's signal cancels the still-queued
+        // prompt before it starts and settles this wait.
+        let cancel_queued_prompt = signal.as_ref().map(|signal| {
+            let session = self.clone();
+            let agent_message_id = agent_message_id.clone();
+            let signal = signal.clone();
+            tokio::spawn(async move {
+                signal.cancelled().await;
+                let error = "Prompt was cancelled before it started.";
+                let cancelled = session.cancel_session_actions(
+                    &|action: &QueuedSessionAction| {
+                        action.agent_message_id.as_deref() == Some(agent_message_id.as_str())
+                            && matches!(action.payload, QueuedActionPayload::Turn(_))
+                    },
+                    error,
+                    None,
+                );
+                if !cancelled.is_empty() {
+                    session.settle_agent_message(
+                        Some(&agent_message_id),
+                        "completion",
+                        Some(error),
+                    );
+                }
+            })
+        });
+        let result = completion
             .wait()
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        // TS 5218-5221 `finally`: the queued-cancel listener is detached. The Rust
+        // watcher is a task, so it is aborted instead of removed from a listener list.
+        if let Some(cancel_queued_prompt) = cancel_queued_prompt {
+            cancel_queued_prompt.abort();
+        }
+        result
     }
 
     /// `acceptAgentMessagePrompt`.
@@ -7758,7 +7794,8 @@ impl AgentSession {
             .lock()
             .unwrap()
             .insert(action.id.clone());
-        let result = self.admit_session_input(action.clone(), true);
+        // TS 5323: the durable RLM terminal notice admits with `{ wake: false }`.
+        let result = self.admit_session_input_with_options(action.clone(), true, false, false, false);
         if let Err(error) = result {
             self.durable_rlm_terminal_notice_action_ids
                 .lock()
@@ -8158,7 +8195,17 @@ impl AgentSession {
                 if !accepted || ticket.is_none() {
                     return Ok(());
                 }
+                // TS 5568-5571: a session command with `returnAfterAccepted` waits for
+                // delivery only when it starts immediately.
                 if return_after_accepted == Some(true) {
+                    if disposition == "starts_when_admitted" {
+                        if let Some(ticket) = &ticket {
+                            // TS 5569 `await result.ticket.delivered`; a rejection
+                            // propagates to the caller like the TS `run` rejection.
+                            let delivered = ticket.ticket.delivered.clone();
+                            delivered.await?;
+                        }
+                    }
                     return Ok(());
                 }
                 if disposition == "queued" {
@@ -8194,6 +8241,19 @@ impl AgentSession {
                     Some(self.take_pending_next_turn_messages())
                 } else {
                     None
+                };
+                // TS 5632: a failed or rejected admission puts the taken prefix back.
+                let restore_prefix = {
+                    let prefix_messages = prefix_messages.clone();
+                    let session = self.clone();
+                    move || {
+                        if let Some(prefix_messages) = prefix_messages.clone() {
+                            let mut pending = session.pending_next_turn_messages.lock().unwrap();
+                            for message in prefix_messages.into_iter().rev() {
+                                pending.insert(0, message);
+                            }
+                        }
+                    }
                 };
                 let content = options
                     .content
@@ -8269,11 +8329,13 @@ impl AgentSession {
                 let (accepted, ticket, disposition) = match admission {
                     Ok(admission) => admission,
                     Err(error) => {
+                        restore_prefix();
                         report_preflight(false, false);
                         return Err(error);
                     }
                 };
                 if !accepted || ticket.is_none() {
+                    restore_prefix();
                     report_preflight(false, false);
                     return Ok(());
                 }
@@ -8282,11 +8344,32 @@ impl AgentSession {
                 } else {
                     report_preflight(true, false);
                 }
+                // TS 5673-5677: with `returnAfterAccepted` a direct prompt resolves at
+                // delivery, not admission.
                 if return_after_accepted == Some(true) {
+                    if let Some(ticket) = &ticket {
+                        if disposition == "starts_when_admitted"
+                            || (accepted_agent_message && !visible_queued)
+                        {
+                            // TS 5675 `await result.ticket.delivered`: a rejection is
+                            // the caller's error, exactly as the TS try/catch rethrows it.
+                            let delivered = ticket.ticket.delivered.clone();
+                            if let Err(error) = delivered.await {
+                                report_preflight(false, false);
+                                return Err(error);
+                            }
+                        }
+                    }
                     return Ok(());
                 }
                 if visible_queued {
                     return Ok(());
+                }
+                // TS 5680-5681: without `returnAfterAccepted` the prompt waits for the
+                // ticket to complete, and a failed turn rejects the caller.
+                if let Some(ticket) = &ticket {
+                    let completed = ticket.ticket.completed.clone();
+                    completed.await?;
                 }
                 self.wait_for_session_input_idle().await;
                 Ok(())
@@ -8568,7 +8651,8 @@ impl AgentSession {
             let mut restored_action = restored_action;
             restored_action.wake = action.wake;
             restored_action.source = action.source;
-            match self.admit_session_input(restored_action, false) {
+            // TS 5898: restored actions are admitted with `{ restore: true }`.
+            match self.admit_session_input_with_options(restored_action, false, true, false, true) {
                 Ok(_) => restored += 1,
                 Err(error) => return Err(error),
             }
@@ -8586,7 +8670,9 @@ impl AgentSession {
             snapshot.agent_message_id.clone(),
             Some("internal".to_string()),
         );
-        self.admit_session_input(action, false).is_ok()
+        // TS 5917-5923: `{ restore: true }`.
+        self.admit_session_input_with_options(action, false, true, false, true)
+            .is_ok()
     }
 
     /// `_restorePromptInput`.
@@ -8609,7 +8695,7 @@ impl AgentSession {
                 ..Default::default()
             }),
         );
-        match self.admit_session_input(action, false) {
+        match self.admit_session_input_with_options(action, false, true, false, true) {
             Ok(_) => Ok(true),
             Err(error) => Err(error),
         }
@@ -8881,26 +8967,126 @@ impl AgentSession {
         Ok(())
     }
 
-    /// `_admitSessionInput`.
+    /// `_admitSessionInput(action, options)`.
+    ///
+    /// `restore` maps to TS `options.restore` (agent-session.ts:6214), and `front`
+    /// to `options.front` (:6255). The TypeScript also has `wake`/`immediatelyEligible`;
+    /// `immediately_eligible` carries the latter and `wake: false` callers pass
+    /// `false` for it.
     fn admit_session_input(
         self: &Arc<Self>,
         action: QueuedSessionAction,
         immediately_eligible: bool,
     ) -> Result<(bool, Option<Arc<crate::core::session_action_store::ActionTicketController>>, String), String> {
-        self.assert_session_action_admission_available()?;
+        self.admit_session_input_with_options(action, immediately_eligible, false, false, true)
+    }
+
+    /// `_admitSessionInput(action, { restore, front, wake, immediatelyEligible })`.
+    fn admit_session_input_with_options(
+        self: &Arc<Self>,
+        action: QueuedSessionAction,
+        immediately_eligible: bool,
+        restore: bool,
+        front: bool,
+        wake: bool,
+    ) -> Result<(bool, Option<Arc<crate::core::session_action_store::ActionTicketController>>, String), String> {
+        // TS 6224-6231: dispose and admission-pause checks run before anything else.
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            return Err(
+                "Cannot admit a session action because the session is disposing or disposed."
+                    .to_string(),
+            );
+        }
+        if !self.session_input_admission_pauses.lock().unwrap().is_empty() {
+            return Err(SessionInputAdmissionPausedError {
+                message: "Cannot admit a session action while session input admission is paused."
+                    .to_string(),
+            }
+            .to_string());
+        }
+        // TS 6232-6241: the 20-pending-per-session cap applies to non-restored
+        // agent-session-message turns.
+        if !restore {
+            let is_agent_session_turn = match &action.payload {
+                QueuedActionPayload::Turn(_) => primary_delivery_record(&action)
+                    .map(|record| {
+                        is_agent_session_message(&agent_message_from_delivery(&record.message))
+                    })
+                    .unwrap_or(false),
+                QueuedActionPayload::SessionCommand(_) => false,
+            };
+            if is_agent_session_turn {
+                let unfinished = self.action_store.lock().unwrap().unfinished_actions(None).len();
+                assert_agent_message_queue_capacity(
+                    unfinished as f64,
+                    DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
+                )?;
+            }
+        }
+        // TS 6242-6251: a restored action skips coalescing; a duplicate follow-up
+        // is rejected and reported as `{ accepted: false, disposition: "queued" }`.
+        if !restore {
+            if let Some(owner) = self.coalesced_follow_up_owner(&action) {
+                if action.agent_message_id != owner.agent_message_id {
+                    self.reject_agent_message(
+                        action.agent_message_id.as_deref(),
+                        "Prompt was not queued because an equivalent follow-up is already pending.",
+                    );
+                }
+                return Ok((false, None, "queued".to_string()));
+            }
+        }
+        // TS 6252-6254: the unfinished count is read before the enqueue.
+        let had_no_unfinished = self.action_store.lock().unwrap().unfinished_actions(None).is_empty();
         let mut store = self.action_store.lock().unwrap();
-        store.enqueue(action.clone())?;
-        let ticket = store.ticket_for(&action).ok();
+        if front {
+            store.enqueue_front(action.clone())?;
+        } else {
+            store.enqueue(action.clone())?;
+        }
         drop(store);
-        let disposition = if immediately_eligible {
+        // TS 6252-6258: `immediatelyEligible` alone does not decide the disposition;
+        // the store must also have had no unfinished action (or the action is fronted).
+        // DEVIATION (named): TS 6258 also requires `selectFirst() === action`; the
+        // Rust pump owns selection (`pump_session_inputs`, agent_session.rs:9113), so
+        // admission does not select and the disposition matches the same condition.
+        let can_start_immediately = immediately_eligible && (had_no_unfinished || front);
+        let disposition = if can_start_immediately {
             "starts_when_admitted"
         } else {
             "queued"
         };
+        // TS 6259-6264.
+        let ticket = self.action_store.lock().unwrap().ticket_for(&action).ok();
+        if let Some(ticket) = &ticket {
+            ticket.settle_accepted(crate::core::session_action_store::SubmissionOutcome::Accepted {
+                action_id: action.id.clone(),
+                disposition: if can_start_immediately {
+                    crate::core::session_action_store::AdmissionDisposition::StartsWhenAdmitted
+                } else {
+                    crate::core::session_action_store::AdmissionDisposition::Queued
+                },
+            });
+        }
+        // TS 6265-6279: a restored or non-waking admission records the arrival but
+        // does not wake the pump.
         self.session_input_arrival_epoch.fetch_add(1, Ordering::SeqCst);
         self.notify_session_input_checkpoint_change();
-        self.schedule_session_input_pump();
         self.emit_queue_update();
+        if !restore && wake {
+            let should_wake = disposition == "starts_when_admitted"
+                || (action.delivery == DeliveryPolicy::NextTurnBoundary && self.is_streaming())
+                || matches!(action.payload, QueuedActionPayload::SessionCommand(_))
+                || action.wake == WakePolicy::Immediate;
+            if should_wake {
+                if matches!(action.payload, QueuedActionPayload::Turn(_))
+                    && action.wake == WakePolicy::Immediate
+                {
+                    self.resume_session_input_admission();
+                }
+                self.schedule_session_input_pump();
+            }
+        }
         Ok((true, ticket, disposition.to_string()))
     }
 
@@ -9798,7 +9984,10 @@ impl AgentSession {
         input: &PreparedCommandPayload,
         error: &str,
     ) -> Result<(), String> {
-        if error == COMPACTION_SKIPPED_ERROR_MESSAGE {
+        // TS 6802: `error instanceof CompactionSkippedError`, both messages.
+        if error == COMPACTION_SKIPPED_ERROR_MESSAGE
+            || error == COMPACTION_ALREADY_COMPACTED_ERROR_MESSAGE
+        {
             return Ok(());
         }
         let command_error = self.as_error(error);
@@ -10696,22 +10885,40 @@ impl AgentSession {
         })
     }
 
-    /// `_resumeSessionInputAdmission()`.
+    /// `_resumeSessionInputAdmission()` (agent-session.ts:7505-7512).
     fn resume_session_input_admission(&self) {
+        // TS 7506: a pump that is not suspended is left untouched.
+        if !self.session_input_pump_suspended.load(Ordering::SeqCst) {
+            return;
+        }
         self.session_input_pump_suspended.store(false, Ordering::SeqCst);
         self.session_input_suspended_for_update_restart
             .store(false, Ordering::SeqCst);
+        // TS 7509-7511.
+        self.session_input_pump_epoch.fetch_add(1, Ordering::SeqCst);
+        self.notify_session_input_checkpoint_change();
         if let Some(session) = self.session_arc() {
+            session.flush_deferred_rlm_terminal_notices();
             session.schedule_session_input_pump();
         }
     }
 
-    /// `resumeQueuedWork()`.
-    pub fn resume_queued_work(&self) {
+    /// `resumeQueuedWork()` (agent-session.ts:7515-7521).
+    ///
+    /// The daemon `resume_queue` RPC reads this boolean, so resuming the suspended
+    /// admission is the only way the queue can dispatch again after an abort.
+    pub fn resume_queued_work(&self) -> bool {
+        self.resume_session_input_admission();
+        if let Some(session) = self.session_arc() {
+            session.queue_pending_rlm_continuation();
+            session.maybe_resume_goal_continuation_after_rlm_work();
+        }
         self.session_action_activity_notify.notify_waiters();
         if let Some(session) = self.session_arc() {
             session.schedule_session_input_pump();
         }
+        // TS 7520: the caller must see the state after resuming, not before.
+        self.has_selectable_session_input()
     }
 
     /// `waitForSessionInputIdle()`.
@@ -11244,16 +11451,100 @@ impl AgentSession {
         }
     }
 
-    /// `_syncKernelStateAfterCompaction()`.
+    /// `_syncKernelStateAfterCompaction()` (agent-session.ts:7990-8037).
     async fn sync_kernel_state_after_compaction(self: &Arc<Self>) -> Result<(), String> {
         let provisioner = self.ipython_kernel_provisioner.lock().unwrap().clone();
-        match provisioner {
-            Some(provisioner) => {
-                let _ = provisioner;
-                Ok(())
-            }
-            None => Ok(()),
+        // TS 7992: no running kernel means nothing to report.
+        let Some(provisioner) = provisioner
+            .filter(|provisioner| provisioner.has_running_kernel())
+        else {
+            return Ok(());
+        };
+        // TS 7993: a failed prune is swallowed (`catch(() => null)`).
+        let pruned = provisioner.prune_oversized_variables().await;
+        // TS 7994-8002: the namespace listing is bounded by
+        // KERNEL_STATE_LISTING_TIMEOUT_MS and failures resolve to null.
+        let abort = crate::core::kernel::shared::AbortSignal::new();
+        let timer_abort = abort.clone();
+        let timer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(KERNEL_STATE_LISTING_TIMEOUT_MS)).await;
+            timer_abort.abort(None);
+        });
+        let names = provisioner.list_namespace_names(Some(abort)).await;
+        timer.abort();
+        // TS 8003: a listing that failed after the kernel went away changes nothing.
+        if names.is_none() && !provisioner.has_running_kernel() {
+            return Ok(());
         }
+        // TS 8004-8013.
+        let detail = match &names {
+            None => String::new(),
+            Some(names) if !names.is_empty() => {
+                format!(" These names are still defined: {}.", names.join(", "))
+            }
+            Some(_) => " You have not defined any names yet.".to_string(),
+        };
+        let pruned_detail = match &pruned {
+            Some(pruned) if !pruned.is_empty() => format!(
+                " Variables above the per-variable snapshot limit were removed: {}.",
+                pruned.join(", ")
+            ),
+            _ => String::new(),
+        };
+        let content = format!(
+            "<ipython_state>\nYour Python kernel persisted through compaction; its remaining variables, imports, and helpers are still available.{pruned_detail}{detail}\n</ipython_state>"
+        );
+        // TS 8019-8025.
+        let message = CustomMessage {
+            role: "custom".to_string(),
+            custom_type: "ipython_state".to_string(),
+            content: CustomMessageContent::Text(content),
+            display: false,
+            details: None,
+            timestamp: now_ms_i64(),
+        };
+        let agent_message = AgentMessage::Custom(CustomAgentMessage::Custom {
+            custom_type: message.custom_type.clone(),
+            content: message.content.clone(),
+            display: message.display,
+            details: message.details.clone(),
+            timestamp: message.timestamp,
+        });
+        // TS 8026-8033: insert before a trailing error assistant message.
+        {
+            let mut state = self.agent.state();
+            let insert_before_error = state
+                .messages
+                .last()
+                .map(|last| match last {
+                    AgentMessage::Message(Message::Assistant(assistant)) => {
+                        assistant.stop_reason == STOP_REASON_ERROR
+                    }
+                    _ => false,
+                })
+                .unwrap_or(false);
+            if insert_before_error {
+                let index = state.messages.len() - 1;
+                state.messages.insert(index, agent_message.clone());
+            } else {
+                state.messages.push(agent_message.clone());
+            }
+            self.agent.set_state(state);
+        }
+        // TS 8034-8036.
+        let _ = self.session_manager.lock().unwrap().append_custom_message_entry(
+            &message.custom_type,
+            &custom_message_entry_content(&message.content),
+            message.display,
+            message.details.clone(),
+        );
+        self.emit(AgentSessionEvent::MessageStart {
+            message: agent_message.clone(),
+        });
+        self.emit(AgentSessionEvent::MessageEnd {
+            message: agent_message,
+        });
+        Ok(())
     }
 
     /// `_onIpythonStateRestored(result)`.
@@ -13236,7 +13527,9 @@ impl AgentSession {
             }
             return;
         }
-        if error == COMPACTION_SKIPPED_ERROR_MESSAGE {
+        if error == COMPACTION_SKIPPED_ERROR_MESSAGE
+            || error == COMPACTION_ALREADY_COMPACTED_ERROR_MESSAGE
+        {
             // TS 9691-9702.
             self.end_compaction_unsuccessfully(
                 reason,
@@ -13842,7 +14135,9 @@ impl AgentSession {
             Err(error) => {
                 let message = self.as_error(&error);
                 let aborted = message == "Compaction cancelled" || error == COMPACTION_CANCELLED_ERROR_MESSAGE;
-                let skipped = error == COMPACTION_SKIPPED_ERROR_MESSAGE;
+                // TS 8129: `error instanceof CompactionSkippedError`, both messages.
+                let skipped = error == COMPACTION_SKIPPED_ERROR_MESSAGE
+                    || error == COMPACTION_ALREADY_COMPACTED_ERROR_MESSAGE;
                 self.emit(AgentSessionEvent::CompactionEnd {
                     reason: COMPACTION_REASON_MANUAL.to_string(),
                     result: None,
@@ -13932,6 +14227,99 @@ impl AgentSession {
             .map(|_| ())
     }
 
+    /// TS 8324-8334 `context` for the compaction summary call: the session's system
+    /// prompt, the `transformContext`-transformed conversation converted with
+    /// `convertToLlm`, and the active tools.
+    ///
+    /// UNRESOLVED in this file (part of that one member): `this.agent.onPayload` and
+    /// `this.agent.onResponse` (agent-session.ts:8339-8340) have no getter on the
+    /// `AgentHandle` trait declared here; both are stored only inside
+    /// `impl AgentHandle for Arc<Agent>` (`core/agent_session/agent_handle.rs:149-155`),
+    /// which this file does not own. The summary call therefore runs without those
+    /// two hooks.
+    async fn compaction_provider_context(
+        &self,
+        messages: &[AgentMessage],
+        signal: &CancellationToken,
+    ) -> pi_ai::types::Context {
+        let state = self.agent.state();
+        // `this.agent.transformContext` (agent-session.ts:8328) is the session's own
+        // extension-context transform, wired in `core/sdk.rs:596-617`; re-running the
+        // same `emitContext` pass here reproduces it without a getter.
+        let transformed = match self.extension_runner() {
+            Some(runner) => {
+                let values: Vec<Value> = messages
+                    .iter()
+                    .map(|message| serde_json::to_value(message).unwrap_or(Value::Null))
+                    .collect();
+                runner
+                    .emit_context(values)
+                    .await
+                    .into_iter()
+                    .filter_map(|message| serde_json::from_value::<AgentMessage>(message).ok())
+                    .collect()
+            }
+            None => messages.to_vec(),
+        };
+        // `signal` stays unused because `emitContext` (runner.rs:1124) takes no
+        // signal, unlike `transformContext(messages, signal)` (TS 8329).
+        let _ = signal;
+        // `this.agent.convertToLlm` is `convertToLlmWithBlockImages` (core/sdk.rs:454):
+        // the model-tool-output policy plus the session scope, then image blocking.
+        // The `blockImages` half is not reproducible here because
+        // `block_images_in_message` is private to `core/sdk.rs`.
+        let (policy, scope) = {
+            let settings = self.settings_manager.lock().unwrap();
+            let manager = self.session_manager.lock().unwrap();
+            let policy = crate::core::model_tool_output_policy::resolve_model_tool_output_policy(
+                Some(&settings.get_model_tool_output_policy()),
+            );
+            let scope = manager.get_session_artifact_dir().map(|dir| ModelToolOutputScope {
+                session_id: manager.get_session_id(),
+                session_artifact_dir: dir,
+            });
+            (policy, scope)
+        };
+        let converted = crate::core::messages::convert_to_llm(
+            &transformed,
+            &ModelToolOutputPolicyOptions {
+                policy: Some(policy),
+                scope,
+            },
+        );
+        pi_ai::types::Context {
+            system_prompt: Some(state.system_prompt.clone()),
+            messages: converted,
+            tools: state.tools.as_ref().map(|tools| {
+                tools
+                    .iter()
+                    .map(|tool| pi_ai::types::Tool {
+                        name: tool.name.clone(),
+                        description: tool.description.clone(),
+                        parameters: tool.parameters.clone(),
+                    })
+                    .collect()
+            }),
+        }
+    }
+
+    /// TS 8335-8342 `options` for the compaction summary call.
+    fn compaction_request_options(&self) -> pi_ai::compaction::CompactionOptions {
+        let mut options = pi_ai::compaction::CompactionOptions::default();
+        // TS 8336: `sessionId: this.sessionId`.
+        options.simple.stream.session_id = Some(self.session_id());
+        // TS 8337: `serviceTier: this.serviceTier`.
+        options.simple.stream.service_tier = self.service_tier();
+        // TS 8338: `reasoning: this.thinkingLevel`.
+        let thinking_level = self.thinking_level();
+        if thinking_level != ThinkingLevel::Off {
+            options.simple.reasoning = Some(thinking_level.as_str().to_string());
+        }
+        // TS 8341: `timeoutMs: 1_200_000`.
+        options.simple.stream.timeout_ms = Some(1_200_000.0);
+        options
+    }
+
     /// The shared compaction body.
     async fn perform_compaction_unmeasured_full(
         self: &Arc<Self>,
@@ -13954,7 +14342,8 @@ impl AgentSession {
             .iter()
             .filter_map(compaction_session_entry_from)
             .collect();
-        let messages = self.messages();
+        // TS 8312: the summarizer never sees harness digests.
+        let messages = without_harness_digests_for_compaction(&self.messages());
         let preparation = prepare_compaction(
             &path_entries,
             &settings,
@@ -13962,8 +14351,54 @@ impl AgentSession {
         );
         let preparation = match preparation {
             Some(preparation) => preparation,
-            None => return Err(COMPACTION_SKIPPED_ERROR_MESSAGE.to_string()),
+            None => {
+                // TS 8243-8247 distinguishes an already-compacted branch from a
+                // session that is simply too short.
+                let last_entry = path_entries.last();
+                if matches!(last_entry, Some(CompactionSessionEntry::Compaction { .. })) {
+                    return Err(COMPACTION_ALREADY_COMPACTED_ERROR_MESSAGE.to_string());
+                }
+                return Err(COMPACTION_SKIPPED_ERROR_MESSAGE.to_string());
+            }
         };
+        // TS 8263-8280: `session_before_compact` may cancel the compaction or supply
+        // its own compaction result. TS 8250-8251 declares the same two locals.
+        let mut extension_compaction: Option<crate::core::extensions::types::CompactionResult> = None;
+        let mut from_extension = false;
+        if let Some(runner) = self.extension_runner() {
+            if runner.has_handlers("session_before_compact") {
+                let result = runner
+                    .emit(ExtensionEvent::SessionBeforeCompact(
+                        crate::core::extensions::types::SessionBeforeCompactPayload {
+                            preparation: extension_compaction_preparation(&preparation),
+                            // `branchEntries: pathEntries` (TS 8267).
+                            branch_entries: entries
+                                .iter()
+                                .filter_map(|entry| {
+                                    serde_json::from_value(Value::Object(entry.clone())).ok()
+                                })
+                                .collect(),
+                            custom_instructions: custom_instructions.clone(),
+                        },
+                    ))
+                    .await;
+                let parsed = result
+                    .and_then(|value| {
+                        serde_json::from_value::<
+                            crate::core::extensions::types::SessionBeforeCompactResult,
+                        >(value)
+                        .ok()
+                    })
+                    .unwrap_or_default();
+                if parsed.cancel == Some(true) {
+                    return Err(COMPACTION_CANCELLED_ERROR_MESSAGE.to_string());
+                }
+                if let Some(compaction) = parsed.compaction {
+                    extension_compaction = Some(compaction);
+                    from_extension = true;
+                }
+            }
+        }
         let headers: Option<serde_json::Map<String, Value>> = if auth.headers.is_empty() {
             None
         } else {
@@ -13974,18 +14409,53 @@ impl AgentSession {
                     .collect(),
             )
         };
-        let result = crate::core::compaction::compaction::compact(
-            &preparation,
-            &model,
-            &auth.api_key,
-            custom_instructions.as_deref(),
-            Some(&signal),
-            Some(&self.thinking_level()),
-            crate::core::compaction::compaction::default_summary_call_runner(headers),
-            None,
-            None,
-        )
-        .await?;
+        // TS 8322/8323-8343: the summary call carries the provider retry policy, the
+        // transformed provider context and the request options (20-minute timeout,
+        // session id, service tier and reasoning). `onPayload`/`onResponse`
+        // (TS 8339-8340) are UNRESOLVED: the `AgentHandle` trait declared in this
+        // file exposes `set_on_payload`/`set_on_response` but no getter, and the
+        // stored hooks live in `impl AgentHandle for Arc<Agent>`
+        // (`core/agent_session/agent_handle.rs:149-155`), which this file does not own.
+        let result = match extension_compaction {
+            // TS 8282-8283: an extension compaction replaces the summary call, the
+            // context and the options entirely.
+            Some(compaction) => crate::core::compaction::compaction::CompactionResult {
+                summary: compaction.summary,
+                first_kept_entry_id: compaction.first_kept_entry_id,
+                tokens_before: compaction.tokens_before,
+                details: compaction
+                    .details
+                    .clone()
+                    .and_then(|details| serde_json::from_value(details).ok()),
+                usage: compaction
+                    .usage
+                    .clone()
+                    .and_then(|usage| serde_json::from_value(usage).ok()),
+            },
+            None => {
+                let provider_context = self.compaction_provider_context(&messages, &signal).await;
+                let request_options = self.compaction_request_options();
+                // TS 8322: `providerRetryPolicy(this.settingsManager)`.
+                let retry = self.provider_retry_policy();
+                crate::core::compaction::compaction::compact(
+                    &preparation,
+                    &model,
+                    &auth.api_key,
+                    custom_instructions.as_deref(),
+                    Some(&signal),
+                    Some(&self.thinking_level()),
+                    crate::core::compaction::compaction::default_summary_call_runner(headers.clone()),
+                    Some(&crate::core::compaction::compaction::ProviderRetryPolicy {
+                        enabled: retry.enabled,
+                        max_retries: retry.max_retries,
+                        base_delay_ms: retry.base_delay_ms,
+                        max_retry_delay_ms: retry.max_retry_delay_ms,
+                    }),
+                    Some((&provider_context, Some(&request_options))),
+                )
+                .await?
+            }
+        };
         if signal.is_cancelled() {
             return Err(COMPACTION_CANCELLED_ERROR_MESSAGE.to_string());
         }
@@ -13997,10 +14467,12 @@ impl AgentSession {
                 .details
                 .as_ref()
                 .and_then(|details| serde_json::to_value(details).ok()),
-            None,
+            // TS 8366: `fromExtension`.
+            Some(from_extension),
             custom_instructions.as_deref(),
             result.usage.as_ref(),
-            None,
+            // TS 8369: `this._harnessDigest()`.
+            Some(&self.harness_digest()),
         )?;
         self.sync_kernel_state_after_compaction().await?;
         self.restore_provider_context_for_model();
@@ -14105,6 +14577,29 @@ fn rlm_heartbeat_host_response(job: &AgentCronJob) -> Value {
 }
 
 /// `pathEntries` -> the compaction module's entry shapes.
+/// `session_before_compact` payload `preparation` (agent-session.ts:8267): the
+/// extension shape of `CompactionPreparation`.
+fn extension_compaction_preparation(
+    preparation: &CompactionPreparation,
+) -> crate::core::extensions::types::CompactionPreparation {
+    crate::core::extensions::types::CompactionPreparation {
+        first_kept_entry_id: preparation.first_kept_entry_id.clone(),
+        messages_to_summarize: preparation
+            .messages_to_summarize
+            .iter()
+            .map(|message| serde_json::to_value(message).unwrap_or(Value::Null))
+            .collect(),
+        turn_prefix_messages: preparation
+            .turn_prefix_messages
+            .iter()
+            .map(|message| serde_json::to_value(message).unwrap_or(Value::Null))
+            .collect(),
+        is_split_turn: preparation.is_split_turn,
+        tokens_before: preparation.tokens_before,
+        previous_summary: preparation.previous_summary.clone(),
+    }
+}
+
 fn compaction_session_entry_from(entry: &SessionEntry) -> Option<CompactionSessionEntry> {
     let entry_type = entry.get("type").and_then(Value::as_str)?;
     let id = entry.get("id").and_then(Value::as_str)?.to_string();
