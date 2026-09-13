@@ -404,6 +404,27 @@ async fn run_openai_responses(
     Ok(())
 }
 
+/// Terminal `error` stream for a synchronous-configuration failure.
+///
+/// The TypeScript throws out of `streamSimple` here; a Rust `StreamFunction` returns a stream,
+/// so the caller-visible contract of an `AssistantMessageEventStream` (openai-completions.ts:504
+/// and azure-openai-responses.ts:140 do the same) is an `error` event carrying the thrown
+/// message plus `recordStreamFailure`, never a panic that aborts the whole process.
+fn api_key_error_stream(model: &Model, message: &str) -> AssistantMessageEventStream {
+    let stream = create_assistant_message_event_stream();
+    let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), now_ms());
+    output.usage = Usage::zero();
+    output.stop_reason = "error".to_string();
+    output.error_message = Some(message.to_string());
+    record_stream_failure(model, &mut output, &ThrownStreamError::Message(message));
+    stream.push(AssistantMessageEvent::Error {
+        reason: output.stop_reason.clone(),
+        error: output,
+    });
+    stream.end(None);
+    stream
+}
+
 /// `streamSimpleOpenAIResponses: StreamFunction<"openai-responses", SimpleStreamOptions>`.
 pub fn stream_simple_openai_responses(
     model: &Model,
@@ -415,8 +436,11 @@ pub fn stream_simple_openai_responses(
         .and_then(|options| options.stream.api_key.clone())
         .or_else(|| get_env_api_key(&model.provider));
     let Some(api_key) = api_key else {
-        // The TypeScript throws synchronously here.
-        panic!("No API key for provider: {}", model.provider);
+        // openai-responses.ts:184-186 `if (!apiKey) { throw new Error(...) }` - a catchable
+        // error carrying this exact text, never a process abort. The port cannot throw out of a
+        // `StreamFunction`, so it terminates the stream with the same message, like
+        // `streamSimpleOpenAICompletions` (openai-completions.ts:504) and azure-openai-responses.ts:140.
+        return api_key_error_stream(model, &format!("No API key for provider: {}", model.provider));
     };
 
     let base = build_base_options(model, options.as_ref(), Some(&api_key));
@@ -545,13 +569,12 @@ pub fn build_params(model: &Model, context: &Context, options: Option<&OpenAIRes
             params.insert("prompt_cache_key".to_string(), Value::String(session_id));
         }
     }
-    match get_prompt_cache_retention(supports_long_cache_retention, &cache_retention) {
-        Some(retention) => {
-            params.insert("prompt_cache_retention".to_string(), Value::String(retention));
-        }
-        None => {
-            params.insert("prompt_cache_retention".to_string(), Value::Null);
-        }
+    // openai-responses.ts:265 `prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention)`
+    // where getPromptCacheRetention (openai-responses.ts:87-92) returns `"24h" | undefined`.
+    // JSON.stringify drops undefined keys, so when the retention is not long-lived TS omits the
+    // field entirely; sending an explicit `null` is a wire shape TS never produces.
+    if let Some(retention) = get_prompt_cache_retention(supports_long_cache_retention, &cache_retention) {
+        params.insert("prompt_cache_retention".to_string(), Value::String(retention));
     }
     params.insert("store".to_string(), Value::Bool(false));
 

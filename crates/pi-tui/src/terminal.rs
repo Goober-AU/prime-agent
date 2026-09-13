@@ -43,6 +43,12 @@ fn begin_input_handoff(token: u64, was_raw: bool) {
         token,
         was_raw: inherited_was_raw,
     });
+    drop(slot);
+    // Keep stdin flowing while the handoff is pending so the gap data is
+    // delivered and drained instead of staying buffered in the tty until the
+    // next TUI reads it. Mirrors the non-blocking read pump that keeps stdin
+    // flowing while the handoff record is armed (terminal.ts:51 `stdin.resume()`).
+    let _ = read_available_input();
 }
 
 fn consume_input_handoff() -> Option<bool> {
@@ -59,6 +65,25 @@ fn cancel_input_handoff(token: u64) {
         slot.take().unwrap()
     };
     let _ = set_raw_mode(handoff.was_raw);
+}
+
+/// Port of the `discardHandler` installed by `beginInputHandoff()`
+/// (packages/tui/src/terminal.ts:48-51) and removed by `consumeInputHandoff()`
+/// (terminal.ts:59): while a preserved fullscreen frame waits for the next
+/// in-process TUI, keys typed in the handoff gap are received and thrown away
+/// instead of being replayed into the next TUI's first `pollInput()` calls.
+///
+/// The pending record existing is the token match: `beginInputHandoff()` sets it
+/// and only `consumeInputHandoff()` or `cancelInputHandoff(token)` clear it.
+/// Returns true when handoff data was drained.
+fn drain_pending_handoff_input() -> bool {
+    if PENDING_INPUT_HANDOFF.lock().unwrap().is_none() {
+        return false;
+    }
+    match read_available_input() {
+        Ok(NativeInput::Bytes(_)) => true,
+        _ => false,
+    }
 }
 
 pub(crate) fn stdout_write(data: &str) {
@@ -203,6 +228,11 @@ pub struct ProcessTerminal {
     stdin_buffer: Option<Rc<RefCell<StdinBuffer>>>,
     stdin_dispatcher: Option<Rc<dyn Fn(String)>>,
     progress_interval: Option<u64>,
+    /// Next re-emit deadline for the armed OSC 9;4 keepalive. The reference uses
+    /// `setInterval(..., TERMINAL_PROGRESS_KEEPALIVE_MS)` (terminal.ts:596-600);
+    /// this port drives the same period from the input pump, like the other
+    /// timers (`setTimeout` -> `pollInput` checkpoints).
+    progress_keepalive_at: Option<std::time::Instant>,
     write_log_path: String,
     started_at: Option<std::time::Instant>,
     last_input_at: Option<std::time::Instant>,
@@ -248,6 +278,7 @@ impl ProcessTerminal {
             stdin_buffer: None,
             stdin_dispatcher: None,
             progress_interval: None,
+            progress_keepalive_at: None,
             write_log_path: compute_write_log_path(),
             started_at: None,
             last_input_at: None,
@@ -425,11 +456,29 @@ impl ProcessTerminal {
     }
 
     fn clear_progress_interval(&mut self) -> bool {
+        self.progress_keepalive_at = None;
         if self.progress_interval.is_none() {
             return false;
         }
         self.progress_interval = None;
         true
+    }
+
+    /// Port of the `setInterval` body in `setProgress(true)`
+    /// (packages/tui/src/terminal.ts:596-600): re-write OSC 9;4;3 every
+    /// TERMINAL_PROGRESS_KEEPALIVE_MS while progress stays active, so terminals
+    /// that clear unrefreshed OSC 9;4 state keep showing the indicator.
+    fn apply_progress_keepalive(&mut self) {
+        if self.progress_interval.is_none() {
+            self.progress_keepalive_at = None;
+            return;
+        }
+        if self.progress_keepalive_at.is_some_and(|deadline| std::time::Instant::now() < deadline) {
+            return;
+        }
+        self.progress_keepalive_at =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(TERMINAL_PROGRESS_KEEPALIVE_MS));
+        stdout_write(TERMINAL_PROGRESS_ACTIVE_SEQUENCE);
     }
 
     fn release_alt_screen(&mut self) {
@@ -500,7 +549,14 @@ fn handle_default_color_probe_response(shared: &mut Shared, sequence: &str) -> b
 
 impl Terminal for ProcessTerminal {
     fn poll_input(&mut self) -> std::io::Result<bool> {
-        if !self.started { return Ok(true); }
+        if !self.started {
+            // The preserved-fullscreen handoff gap: `beginInputHandoff()` keeps
+            // stdin attached to a discard handler (terminal.ts:48-51) so gap keys
+            // are consumed and dropped here instead of staying buffered for the
+            // next TUI's first `pollInput()` calls.
+            while drain_pending_handoff_input() {}
+            return Ok(true);
+        }
         // Bound each poll so a large paste cannot starve rendering or events.
         for _ in 0..64 {
             match read_available_input()? {
@@ -520,6 +576,7 @@ impl Terminal for ProcessTerminal {
             if start.elapsed().as_millis() >= 100 { self.apply_default_color_probe_timeout(); }
             if start.elapsed().as_millis() >= 150 { self.apply_keyboard_protocol_fallback(); }
         }
+        self.apply_progress_keepalive();
         let size = (self.columns(), self.rows());
         if self.last_size != Some(size) {
             self.last_size = Some(size);
@@ -533,6 +590,13 @@ impl Terminal for ProcessTerminal {
         self.started = true;
         self.started_at = Some(std::time::Instant::now());
         self.last_size = Some((self.columns(), self.rows()));
+
+        // Adopt the handoff before installing the handlers: the discardHandler is
+        // removed by `consumeInputHandoff()` (terminal.ts:54-62), so keys typed
+        // during the gap can never reach this TUI's `onInput`.
+        self.was_raw = consume_input_handoff()
+            .unwrap_or_else(|| crossterm::terminal::is_raw_mode_enabled().unwrap_or(false));
+
         {
             let mut s = self.shared.borrow_mut();
             s.input_handler = Some(on_input);
@@ -540,7 +604,6 @@ impl Terminal for ProcessTerminal {
         }
 
         // Save previous state and enable raw mode
-        self.was_raw = consume_input_handoff().unwrap_or_else(|| crossterm::terminal::is_raw_mode_enabled().unwrap_or(false));
         let _ = set_raw_mode(true);
 
         // Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
@@ -771,6 +834,8 @@ impl Terminal for ProcessTerminal {
             if self.progress_interval.is_none() {
                 self.progress_interval = Some(TERMINAL_PROGRESS_KEEPALIVE_MS);
             }
+            self.progress_keepalive_at =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(TERMINAL_PROGRESS_KEEPALIVE_MS));
         } else {
             self.clear_progress_interval();
             // OSC 9;4;0 - clear progress
@@ -789,6 +854,39 @@ mod tests {
         assert!(is_kitty_protocol_response("\x1b[?7u"));
         assert!(!is_kitty_protocol_response("\x1b[?u"));
         assert!(!is_kitty_protocol_response("\x1b[A"));
+    }
+
+    #[test]
+    fn handoff_drain_requires_a_pending_token() {
+        // Only the handoff gap drains stdin (terminal.ts:48-51); once
+        // consumeInputHandoff() runs (terminal.ts:54-62) the discard handler is
+        // gone and the next TUI receives user input normally.
+        let _ = consume_input_handoff();
+        begin_input_handoff(7, true);
+        // The handoff record is armed: data arriving in the gap is discarded.
+        assert!(PENDING_INPUT_HANDOFF.lock().unwrap().is_some());
+        assert!(!drain_pending_handoff_input()); // nothing available right now
+        assert_eq!(consume_input_handoff(), Some(true));
+        // consumeInputHandoff() removed the discard handler (terminal.ts:59).
+        assert!(!drain_pending_handoff_input());
+    }
+
+    #[test]
+    fn progress_keepalive_rearms_after_the_interval() {
+        let mut terminal = ProcessTerminal::new();
+        terminal.set_progress(true);
+        assert_eq!(terminal.progress_interval, Some(TERMINAL_PROGRESS_KEEPALIVE_MS));
+        let armed = terminal.progress_keepalive_at.expect("keepalive armed after set_progress(true)");
+        // Not due yet: no re-emit, deadline unchanged.
+        terminal.apply_progress_keepalive();
+        assert_eq!(terminal.progress_keepalive_at, Some(armed));
+        // Deadline reached: re-emit and arm the next 1000ms window.
+        terminal.progress_keepalive_at = Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        terminal.apply_progress_keepalive();
+        assert!(terminal.progress_keepalive_at.expect("re-armed") > std::time::Instant::now());
+        terminal.set_progress(false);
+        assert_eq!(terminal.progress_interval, None);
+        assert_eq!(terminal.progress_keepalive_at, None);
     }
 
     #[test]

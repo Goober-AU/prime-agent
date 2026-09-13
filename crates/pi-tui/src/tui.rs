@@ -3045,6 +3045,13 @@ mod tests {
             OverlayOptions {
                 above_marker: Some("anchor".to_string()),
                 non_capturing: true,
+                // Narrow overlay: TS `resolveOverlayLayout` defaults the width to
+                // `Math.min(80, availWidth)` (packages/tui/src/tui.ts:1073), and a
+                // full-width overlay would be placed at `col = Math.max(0,
+                // Math.min(aboveMarker.col, termWidth - w))` = 0 (tui.ts:1274) and
+                // legitimately cover the whole line. Keep the overlay narrow so the
+                // `aboveMarker.col` value (4, after "你好") is actually observable.
+                width: Some(SizeValue::Number(8.0)),
                 ..OverlayOptions::default()
             },
         );

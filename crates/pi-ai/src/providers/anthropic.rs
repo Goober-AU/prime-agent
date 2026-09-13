@@ -1333,6 +1333,34 @@ fn map_thinking_level_to_effort(model: &Model, level: Option<&String>) -> Anthro
 	}
 }
 
+/// Terminal `error` stream carrying a synchronous-configuration failure's thrown message.
+///
+/// anthropic.ts:818-821 throws out of `streamSimpleAnthropic`; a Rust `StreamFunction` returns a
+/// stream, so the failure is reported the same way the other ports report it
+/// (`streamSimpleOpenAICompletions`, openai-completions.ts:504) instead of aborting the process.
+fn api_key_error_stream(model: &Model, message: &str) -> AssistantMessageEventStream {
+	let stream = create_assistant_message_event_stream();
+	let mut output = AssistantMessage {
+		role: "assistant".to_string(),
+		content: Vec::new(),
+		api: model.api.clone(),
+		provider: model.provider.clone(),
+		model: model.id.clone(),
+		usage: crate::types::Usage::zero(),
+		stop_reason: "error".to_string(),
+		timestamp: now_ms(),
+		..Default::default()
+	};
+	output.error_message = Some(message.to_string());
+	record_stream_failure(model, &mut output, &ThrownStreamError::Message(message));
+	stream.push(AssistantMessageEvent::Error {
+		reason: output.stop_reason.clone(),
+		error: output,
+	});
+	stream.end(None);
+	stream
+}
+
 /// TS: `streamSimpleAnthropic`.
 pub fn stream_simple_anthropic(
 	model: &Model,
@@ -1346,8 +1374,8 @@ pub fn stream_simple_anthropic(
 		.clone()
 		.or_else(|| get_env_api_key(&model.provider));
 	let Some(api_key) = api_key else {
-		// The TypeScript throws synchronously out of `streamSimpleAnthropic`.
-		panic!("No API key for provider: {}", model.provider);
+		// anthropic.ts:818-821 `if (!apiKey) { throw new Error(...) }`.
+		return api_key_error_stream(model, &format!("No API key for provider: {}", model.provider));
 	};
 
 	let base = build_base_options(model, Some(&options), Some(&api_key));
@@ -2218,7 +2246,7 @@ fn finite_non_negative(value: f64) -> Option<f64> {
 	}
 }
 
-/// TS: `parseRetryAfterMs(headers)`.
+/// TS: `parseRetryAfterMs(headers)` (stream-failure.ts:202-211).
 fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<f64> {
 	let header_value = |name: &str| -> Option<String> {
 		headers
@@ -2239,11 +2267,17 @@ fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<f64> {
 			return Some(seconds * 1000.0);
 		}
 	}
-	None
+	// stream-failure.ts:209-210 `const date = Date.parse(raw); return
+	// Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());`
+	let date = crate::utils::stream_failure::parse_http_date_ms(&raw)?;
+	Some((date - now_ms() as f64).max(0.0))
 }
 
 /// TS: `APIError.makeMessage(status, error, message)`.
-fn api_error_message(status: u16, body: Option<&Value>, raw_text: &str) -> String {
+///
+/// Shared with the other OpenAI-shaped ports (openai-completions.ts uses the same SDK
+/// `APIError.makeMessage`, so openai_completions.rs reuses this helper).
+pub(crate) fn api_error_message(status: u16, body: Option<&Value>, raw_text: &str) -> String {
 	let message = match body {
 		Some(Value::Object(object)) => match object.get("message") {
 			Some(Value::String(text)) => text.clone(),
@@ -3284,6 +3318,16 @@ mod tests {
 		headers.insert("retry-after", "2".parse().unwrap());
 		assert_eq!(parse_retry_after_ms(&headers), Some(2000.0));
 		headers.insert("retry-after", "-1".parse().unwrap());
+		assert_eq!(parse_retry_after_ms(&headers), None);
+		// stream-failure.ts:209-210: an HTTP-date Retry-After yields the wait until
+		// that date (never negative); a non-date falls back to undefined.
+		headers.insert(
+			"retry-after",
+			"Wed, 21 Oct 2099 07:28:00 GMT".parse().unwrap(),
+		);
+		let date_ms = parse_retry_after_ms(&headers).expect("HTTP-date Retry-After must parse");
+		assert!(date_ms > 0.0);
+		headers.insert("retry-after", "Wed, 21 Oct".parse().unwrap());
 		assert_eq!(parse_retry_after_ms(&headers), None);
 	}
 

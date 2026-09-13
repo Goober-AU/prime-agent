@@ -12,8 +12,8 @@ use serde_json::{Map, Value};
 use crate::log::get_logger;
 use crate::types::AssistantMessage;
 use crate::utils::diagnostics::{
-    append_assistant_message_diagnostic, create_assistant_message_diagnostic_from_value,
-    now_millis, AssistantMessageDiagnostic,
+    append_assistant_message_diagnostic, now_millis, AssistantMessageDiagnostic,
+    DiagnosticErrorInfo,
 };
 
 pub type StreamFailureKind = &'static str;
@@ -414,7 +414,7 @@ pub fn parse_retry_after_ms(headers: Option<&Value>) -> Option<f64> {
 }
 
 /// `Date.parse(raw)` for RFC 7231 HTTP dates.
-fn parse_http_date_ms(raw: &str) -> Option<f64> {
+pub fn parse_http_date_ms(raw: &str) -> Option<f64> {
     let formats = [
         "%a, %d %b %Y %H:%M:%S GMT",
         "%A, %d-%b-%y %H:%M:%S GMT",
@@ -450,6 +450,51 @@ pub fn format_stream_failure_message(error: &ThrownStreamError<'_>) -> String {
     stream_failure_message(&parts.info, parts.detail.as_deref())
 }
 
+/// The TS `recordStreamFailure` persists `error: extractDiagnosticError(error)`
+/// on the `provider_stream_failure` diagnostic (stream-failure.ts:255),
+/// which diagnostics.ts:17-30 resolves to `error.name` / `error.message` for an
+/// `Error` and to `{name: "ThrownValue", message: formatThrownValue(error)}` for
+/// anything else. `ThrownStreamError` is the Rust counterpart of the thrown
+/// value, so map it back onto that shape instead of persisting a fake `null`.
+fn diagnostic_error_from_thrown(error: &ThrownStreamError<'_>) -> DiagnosticErrorInfo {
+    use crate::utils::diagnostics::{extract_diagnostic_error, ThrownValue};
+    match error {
+        // `class StreamFailureError extends Error`, so diagnostics.ts:18-24 reads
+        // `error.name` / `error.message` back off the instance.
+        ThrownStreamError::Failure(failure) => DiagnosticErrorInfo {
+            name: Some(failure.name.to_string()),
+            message: if failure.message.is_empty() {
+                failure.name.to_string()
+            } else {
+                failure.message.clone()
+            },
+            stack: None,
+            code: None,
+        },
+        ThrownStreamError::Error(err) => extract_diagnostic_error(&ThrownValue::Error(*err)),
+        ThrownStreamError::Message(message) => extract_diagnostic_error(&ThrownValue::Text(message)),
+        // A JSON-shaped SDK error object is an `Error` instance in the TS, which is
+        // why diagnostics.ts:18-24 prefers its own `name`/`message` fields.
+        ThrownStreamError::Value(value) => {
+            let name = value.get("name").and_then(Value::as_str);
+            let message = value
+                .get("message")
+                .and_then(Value::as_str)
+                .filter(|message| !message.is_empty())
+                .or(name);
+            match (name, message) {
+                (None, _) | (_, None) => extract_diagnostic_error(&ThrownValue::Json(value)),
+                (Some(name), Some(message)) => DiagnosticErrorInfo {
+                    name: Some(name.to_string()),
+                    message: message.to_string(),
+                    stack: None,
+                    code: None,
+                },
+            }
+        }
+    }
+}
+
 /// Record a terminal stream failure on the message (structured diagnostic that
 /// persists to session JSONL) and emit one structured log line. No-op for
 /// user-initiated aborts.
@@ -482,11 +527,12 @@ pub fn record_stream_failure(
         }
     }
 
-    let diagnostic: AssistantMessageDiagnostic = create_assistant_message_diagnostic_from_value(
-        "provider_stream_failure",
-        &Value::Null,
-        Some(details),
-    );
+    let diagnostic = AssistantMessageDiagnostic {
+        type_: "provider_stream_failure".to_string(),
+        timestamp: now_millis(),
+        error: Some(diagnostic_error_from_thrown(error)),
+        details: Some(details),
+    };
     append_assistant_message_diagnostic(output, diagnostic);
 
     let raw_message = match error {

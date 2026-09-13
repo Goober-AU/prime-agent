@@ -449,7 +449,16 @@ pub fn build_request_body(
 
     if let Some(reasoning_effort) = options.and_then(|options| options.reasoning_effort.clone()) {
         let mapped = if reasoning_effort == "none" {
-            model.thinking_level_map_get("off").flatten()
+            // openai-codex-responses.ts:400-402: `model.thinkingLevelMap?.off ?? "none"`.
+            // `??` falls through on both null and undefined, so the result is ALWAYS the string
+            // "none" at minimum and `if (effort !== null)` (codex-responses.ts:403) is always
+            // true here - `body.reasoning` must never be dropped.
+            Some(
+                model
+                    .thinking_level_map_get("off")
+                    .flatten()
+                    .unwrap_or_else(|| "none".to_string()),
+            )
         } else {
             model
                 .thinking_level_map_get(&reasoning_effort)
@@ -527,7 +536,14 @@ pub async fn try_compact_openai_codex_responses(
         stream: options.map(|options| options.simple.stream.clone()).unwrap_or_default(),
         reasoning_effort,
         reasoning_summary: None,
-        service_tier: None,
+        // openai-codex-responses.ts:75-85 spreads `{...options}` into buildRequestBody,
+        // and buildRequestBody (openai-codex-responses.ts:390-392) emits
+        // `if (options?.serviceTier !== undefined) body.service_tier = options.serviceTier;`.
+        // CompactionOptions extends SimpleStreamOptions, so the caller's tier must survive here;
+        // the pricing below (openai-codex-responses.ts) already prices that tier.
+        service_tier: options
+            .and_then(|options| options.simple.stream.service_tier.clone())
+            .flatten(),
         text_verbosity: None,
         on_output_item_done: None,
     };
@@ -948,8 +964,10 @@ pub fn stream_simple_openai_codex_responses(
         .and_then(|options| options.stream.api_key.clone())
         .or_else(|| get_env_api_key(&model.provider));
     let Some(api_key) = api_key else {
-        // The TypeScript throws synchronously here.
-        panic!("No API key for provider: {}", model.provider);
+        // openai-codex-responses.ts:350-352 `if (!apiKey) { throw new Error(...) }` - the caller
+        // gets a catchable error with this text, not a process abort. A Rust `StreamFunction`
+        // returns a stream, so the failure is delivered as the terminal `error` event instead.
+        return api_key_error_stream(model, &format!("No API key for provider: {}", model.provider));
     };
 
     let base = build_base_options(model, options.as_ref(), Some(&api_key));
@@ -962,6 +980,28 @@ pub fn stream_simple_openai_codex_responses(
     let mut typed = OpenAICodexResponsesOptions::from_base(&base);
     typed.reasoning_effort = reasoning_effort;
     stream_openai_codex_responses(model, context, Some(typed))
+}
+
+/// The `error` event openai-codex-responses.ts:351 gets from throwing
+/// "No API key for provider: ..." out of `streamSimpleOpenAICodexResponses`.
+fn api_key_error_stream(model: &Model, message: &str) -> AssistantMessageEventStream {
+    let stream = create_assistant_message_event_stream();
+    let mut output = AssistantMessage::new(
+        "openai-codex-responses".to_string(),
+        model.provider.clone(),
+        model.id.clone(),
+        now_ms(),
+    );
+    output.usage = Usage::zero();
+    output.stop_reason = "error".to_string();
+    output.error_message = Some(message.to_string());
+    record_stream_failure(model, &mut output, &ThrownStreamError::Message(message));
+    stream.push(AssistantMessageEvent::Error {
+        reason: output.stop_reason.clone(),
+        error: output,
+    });
+    stream.end(None);
+    stream
 }
 
 /// `processStream(response, output, stream, model, options?)`.
@@ -1383,15 +1423,34 @@ pub fn build_base_codex_headers(
     headers.insert("Authorization".to_string(), format!("Bearer {}", token));
     headers.insert("chatgpt-account-id".to_string(), account_id.to_string());
     headers.insert("originator".to_string(), "pi".to_string());
-    // `_os` is loaded lazily in the TypeScript; the Rust port links `node:os` at build time.
-    let user_agent = format!("pi ({} {}; {})", std::env::consts::OS, os_release(), std::env::consts::ARCH);
+    // openai-codex-responses.ts:1347 `pi (${_os.platform()} ${_os.release()}; ${_os.arch()})`.
+    // `_os` is loaded lazily in the TypeScript; the Rust port resolves the same values from
+    // `std::env::consts` and `sysinfo` instead.
+    let user_agent = format!("pi ({} {}; {})", os_platform(), os_release(), std::env::consts::ARCH);
     headers.insert("User-Agent".to_string(), user_agent);
     headers
 }
 
-/// `_os.release()`.
+/// `_os.platform()`.
+///
+/// The Node values are the `process.platform` names: "darwin", "win32", "linux", ... while
+/// `std::env::consts::OS` yields "macos" and "windows" for the first two.
+fn os_platform() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "win32",
+        other => other,
+    }
+}
+
+/// `_os.release()` - the `uname.release` string on POSIX (sysinfo reads the same kernel
+/// fields), falling back to the OS version and finally "unknown" when the platform exposes
+/// neither.
 fn os_release() -> String {
-    std::env::var("OS_VERSION").unwrap_or_else(|_| "unknown".to_string())
+    sysinfo::System::kernel_version()
+        .or_else(sysinfo::System::os_version)
+        .filter(|release| !release.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// `buildSSEHeaders(initHeaders, additionalHeaders, accountId, token, sessionId?)`.
@@ -1747,8 +1806,14 @@ async fn connect_web_socket(
         ));
     };
 
-    let mut ws_headers = headers.clone();
-    remove_header(&mut ws_headers, "OpenAI-Beta");
+    // openai-codex-responses.ts:812-813 does `const wsHeaders = headersToRecord(headers);
+    // delete wsHeaders["OpenAI-Beta"];`. `headersToRecord` (utils/headers.ts:1-6) copies
+    // `Headers.entries()`, whose names the Fetch spec lowercases, and JS object `delete` is
+    // case-sensitive - so the mixed-case key never matches the stored `openai-beta` entry and
+    // the `OPENAI_BETA_RESPONSES_WEBSOCKETS` header set by `buildWebSocketHeaders`
+    // (openai-codex-responses.ts:1384) DOES reach the WebSocket handshake. The port must keep
+    // the same header, not strip it.
+    let ws_headers = headers.clone();
 
     // The constructor throws synchronously when the runtime rejects the request.
     let socket = web_socket_constructor(url, ws_headers);
@@ -2668,7 +2733,11 @@ mod tests {
     }
 
     #[test]
-    fn build_request_body_omits_reasoning_when_off_is_null() {
+    fn build_request_body_always_emits_reasoning_for_the_none_effort() {
+        // openai-codex-responses.ts:400-403: `model.thinkingLevelMap?.off ?? "none"` can never be
+        // null when the effort is "none" (`??` falls through on null AND undefined), so
+        // `if (effort !== null)` is always true and `body.reasoning` is always emitted - even
+        // when the model has no thinkingLevelMap or maps "off" to null.
         let mut model = model();
         model.thinking_level_map = Some([("off".to_string(), None)].into_iter().collect());
         let options = OpenAICodexResponsesOptions {
@@ -2676,7 +2745,17 @@ mod tests {
             ..Default::default()
         };
         let body = build_request_body(&model, &context(), Some(&options));
-        assert!(!body.contains_key("reasoning"));
+        assert_eq!(body["reasoning"], json!({ "effort": "none", "summary": "auto" }));
+
+        // No thinkingLevelMap at all: `?.off` is undefined and `?? "none"` still yields "none".
+        let options = OpenAICodexResponsesOptions {
+            reasoning_effort: Some("none".to_string()),
+            ..Default::default()
+        };
+        let mut plain = model();
+        plain.thinking_level_map = None;
+        let body = build_request_body(&plain, &context(), Some(&options));
+        assert_eq!(body["reasoning"], json!({ "effort": "none", "summary": "auto" }));
     }
 
     #[test]
@@ -2776,7 +2855,16 @@ mod tests {
         assert_eq!(headers.get("Authorization").map(String::as_str), Some("Bearer token"));
         assert_eq!(headers.get("chatgpt-account-id").map(String::as_str), Some("acc_1"));
         assert_eq!(headers.get("originator").map(String::as_str), Some("pi"));
+        // openai-codex-responses.ts:1347 shape: `pi (<platform> <release>; <arch>)`.
         assert!(headers.get("User-Agent").map(|agent| agent.starts_with("pi (")).unwrap_or(false));
+        let user_agent = headers.get("User-Agent").expect("User-Agent is always set");
+        assert_eq!(
+            user_agent,
+            &format!("pi ({} {}; {})", os_platform(), os_release(), std::env::consts::ARCH)
+        );
+        // `os.release()` is the kernel release on POSIX; it must not degrade to "unknown"
+        // on a supported host (the previous port always sent OS_VERSION, which nothing sets).
+        assert_ne!(os_release(), "unknown");
 
         let mut additional = IndexMap::new();
         additional.insert("X-Extra".to_string(), "1".to_string());
@@ -3287,6 +3375,48 @@ mod tests {
     }
 
     #[test]
+    fn web_socket_handshake_keeps_the_responses_websockets_beta_header() {
+        // openai-codex-responses.ts:812-813 deletes the mixed-case "OpenAI-Beta" key from the
+        // lowercase record produced by `headersToRecord`, which is a no-op, so the handshake
+        // carries the `OPENAI_BETA_RESPONSES_WEBSOCKETS` value set at
+        // openai-codex-responses.ts:1384.
+        let _guard = WEB_SOCKET_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let captured: Arc<Mutex<Vec<IndexMap<String, String>>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = captured.clone();
+        let constructor: WebSocketConstructor = Arc::new(move |_url: &str, headers: IndexMap<String, String>| {
+            recorded
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(headers);
+            let socket = fake_socket();
+            socket.ready_state.store(1, std::sync::atomic::Ordering::SeqCst);
+            let opener = socket.clone();
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                opener.emit(WebSocketEventType::Open, json!({}));
+            });
+            let socket_like: Arc<dyn WebSocketLike> = socket;
+            socket_like
+        });
+        set_web_socket_constructor(Some(constructor));
+
+        let headers = build_web_socket_headers(None, None, "acc_1", "token", "handshake-unit");
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let socket = runtime
+            .block_on(connect_web_socket("wss://example.test", &headers, None))
+            .unwrap();
+        socket.close(Some(1000), Some("done"));
+        set_web_socket_constructor(None);
+
+        let seen = captured.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].get("OpenAI-Beta").map(String::as_str),
+            Some(OPENAI_BETA_RESPONSES_WEBSOCKETS)
+        );
+    }
+
+    #[test]
     fn acquire_web_socket_reuses_and_releases_cached_connections() {
         let _guard = WEB_SOCKET_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let sockets: Arc<Mutex<Vec<Arc<FakeSocket>>>> = Arc::new(Mutex::new(Vec::new()));
@@ -3360,13 +3490,20 @@ mod tests {
     }
 
     #[test]
-    fn stream_simple_panics_without_an_api_key() {
+    fn stream_simple_reports_a_missing_api_key_in_the_stream() {
         std::env::remove_var("OPENAI_API_KEY");
         let model = model();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = stream_simple_openai_codex_responses(&model, &context(), None);
-        }));
-        assert!(result.is_err());
+        // openai-codex-responses.ts:350-352 throws "No API key for provider: ..." before the
+        // stream starts; the port delivers that message through the stream's terminal error
+        // instead of aborting the process.
+        let stream = stream_simple_openai_codex_responses(&model, &context(), None);
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(stream.result());
+        assert_eq!(result.stop_reason, "error");
+        assert_eq!(
+            result.error_message.as_deref(),
+            Some("No API key for provider: openai-codex")
+        );
     }
 
     #[test]
