@@ -122,10 +122,16 @@ pub struct McpManager {
     acp_owner_id: Option<String>,
     /// Provider ids we registered for user servers, so refresh can drop removed ones.
     registered_user_provider_ids: Vec<String>,
+    host_view: Arc<std::sync::RwLock<McpManagerView>>,
 }
 
 impl McpManager {
     pub fn new(options: McpManagerOptions) -> Self {
+        let host_view = Arc::new(std::sync::RwLock::new(McpManagerView {
+            auth_storage: options.auth_storage.clone(),
+            integrations: IndexMap::new(),
+            acp_servers: IndexMap::new(),
+        }));
         let mut manager = Self {
             auth_storage: options.auth_storage,
             get_user_servers: options.get_user_servers.unwrap_or_else(|| Arc::new(|| None)),
@@ -134,6 +140,7 @@ impl McpManager {
             acp_servers: IndexMap::new(),
             acp_owner_id: None,
             registered_user_provider_ids: Vec::new(),
+            host_view,
         };
         manager.resolve_integrations();
         manager.register_providers();
@@ -201,6 +208,7 @@ impl McpManager {
         } else {
             Some(owner_id.to_string())
         };
+        self.update_host_view();
         Ok(true)
     }
 
@@ -241,6 +249,7 @@ impl McpManager {
             );
         }
         self.integrations = integrations;
+        self.update_host_view();
     }
 
     fn register_providers(&mut self) {
@@ -347,7 +356,7 @@ impl McpManager {
 
         let refresh_manager = self.shared_view();
         let refresh: HostRequestHandler = Arc::new(move |payload: Value| {
-            let manager = refresh_manager.clone();
+            let manager = refresh_manager.read().unwrap_or_else(|p| p.into_inner()).clone();
             Box::pin(async move {
                 let server = server_from_payload(&payload, "mcp.refresh requires a server")?;
                 if manager.acp_servers.contains_key(&server) {
@@ -379,7 +388,7 @@ impl McpManager {
         // registered/authenticated (honors a user's mcpServers `url` override).
         let config_manager = self.shared_view();
         let config: HostRequestHandler = Arc::new(move |payload: Value| {
-            let manager = config_manager.clone();
+            let manager = config_manager.read().unwrap_or_else(|p| p.into_inner()).clone();
             Box::pin(async move {
                 let server = server_from_payload(&payload, "mcp.config requires a server")?;
                 if let Some(acp_server) = manager.acp_servers.get(&server) {
@@ -459,12 +468,18 @@ impl McpManager {
     }
 
     /// The manager state the host handlers read after construction.
-    fn shared_view(&self) -> Arc<McpManagerView> {
-        Arc::new(McpManagerView {
+    fn shared_view(&self) -> Arc<std::sync::RwLock<McpManagerView>> {
+        self.host_view.clone()
+    }
+
+    fn update_host_view(&self) {
+        // Handlers outlive their creation call and read the current session
+        // configuration. Never hold this lock during OAuth/network awaits.
+        *self.host_view.write().unwrap_or_else(|p| p.into_inner()) = McpManagerView {
             auth_storage: self.auth_storage.clone(),
             integrations: self.integrations.clone(),
             acp_servers: self.acp_servers.clone(),
-        })
+        };
     }
 }
 
@@ -514,6 +529,7 @@ pub struct McpStatusEntry {
 }
 
 /// Read-only manager state captured by the host-request closures.
+#[derive(Clone)]
 struct McpManagerView {
     auth_storage: Arc<tokio::sync::Mutex<AuthStorage>>,
     integrations: IndexMap<String, ResolvedIntegration>,

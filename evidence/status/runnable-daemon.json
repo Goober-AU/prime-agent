@@ -1,0 +1,84 @@
+{
+  "slice": "runnable-daemon",
+  "status": "implemented-awaiting-coordinated-validation",
+  "worktree": "/home/anthony/optimus-rust-pr13",
+  "branch": "fix/rust-cli-runtime",
+  "edited_paths": [
+    "crates/pi-ai/src/providers/openai_compaction.rs",
+    "crates/pi-ai/src/providers/openai_completions.rs",
+    "crates/pi-ai/src/providers/openai_responses_shared.rs",
+    "crates/pi-ai/src/providers/transform_messages.rs",
+    "crates/pi-ai/src/utils/oauth/anthropic.rs",
+    "crates/pi-ai/src/utils/oauth/github_copilot.rs",
+    "crates/pi-coding-agent/src/modes/agents_view/agents_view_state.rs",
+    "crates/pi-coding-agent/src/modes/agents_view/roster_store.rs",
+    "crates/pi-coding-agent/src/modes/daemon/active_session_state.rs",
+    "crates/pi-coding-agent/src/modes/daemon/command_recovery_journal.rs",
+    "crates/pi-coding-agent/src/modes/daemon/compact_session_stream.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_extension_binding.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_runtime_identity.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_server.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_session_id.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_worker_protocol.rs",
+    "crates/pi-coding-agent/src/modes/rpc/mod.rs",
+    "crates/pi-coding-agent/src/modes/rpc/native_host.rs",
+    "crates/pi-coding-agent/src/modes/rpc/rpc_client.rs",
+    "crates/pi-coding-agent/src/modes/rpc/rpc_extension_ui_context.rs",
+    "crates/pi-coding-agent/src/modes/rpc/rpc_mode.rs",
+    "crates/pi-coding-agent/src/modes/rpc/rpc_types.rs"
+  ],
+  "verification": {
+    "coordinated_cargo_check": "Passed in lead check-3.log; no errors in owned daemon/RPC/roster sources.",
+    "coordinated_test_build": "Passed in lead test-build.log before new OpenAI fixture repairs; all test executables compiled.",
+    "tests": "Daemon/RPC/roster and revised OpenAI/message-transform/OAuth regressions await lead coordinated run. Agent did not run Cargo.",
+    "git_diff_check": "Passed for all owned Rust sources, including follow-up message-transform and OAuth repairs.",
+    "typescript_hash_vectors": "Executed read-only packages/ai/src/utils/hash.ts function in Node after removing its type annotations in memory: empty=k4n83c7h0j2b, fc_abc=1qaoofs1vxahbg, hello world=n7rb4n1m39uz8, emoji U+1F600=13wj7r7usi372."
+  },
+  "runtime_fixes": [
+    "Native daemon binds Unix sockets or Windows named pipes, serves public JSONL/private worker binary frames, dispatches commands, detaches connections, handles termination signals and drains writes on shutdown.",
+    "Worker protocol dispatch includes subscription, unsubscription, peer transport registration, archive/shutdown, idle child passivation and message delivery; public and private event routing preserve nested metadata and compact worker frames.",
+    "Daemon runtime creation forwards canonical session config, agent directory and scoped client environment; canonical runtime owns the session lease and real subagent host.",
+    "Daemon extension UI implements canonical interface, discovers current attached clients, uses live response resolvers, cleans cancelled/dropped dialogs and rebinds fresh sessions without holding state locks through callbacks.",
+    "Recovery journal admission, result recording and acknowledgement propagate durable append failures before changing in-memory state.",
+    "RPC launches Rust executable, has native stdin/stdout/signal host, preserves command admission and EOF ordering, and uses camelCase command/observed-session fields.",
+    "RPC dialogs register and emit synchronously, then resolve through response, timeout or cancellation; unsupported headless custom component resolves None.",
+    "Roster transport can provide fresh independent connections, and ordered updates now continue after initial attachment.",
+    "Non-Unix worker startup gate supports piped stdin commit marker with exact validation; native runtime identity uses current executable.",
+    "Anthropic OAuth authorization, token exchange and refresh use decoded public client ID, matching TypeScript atob result.",
+    "Anthropic manual input and browser callback complete independently; manual completion or rejection cancels callback wait instead of joining both forever."
+  ],
+  "regressions_added": [
+    "public_socket_serves_handshake_and_commands",
+    "private_socket_uses_binary_frames_for_hello_and_auth_errors",
+    "sequenced_worker_events_keep_nested_metadata_and_routing_headers",
+    "failed_append_does_not_admit_or_complete_a_command",
+    "canonical_dialog_uses_live_clients_and_response_registry",
+    "attached_store_applies_live_updates_in_order_and_detaches",
+    "manual_input_settles_without_a_browser_callback",
+    "browser_callback_does_not_wait_for_pending_manual_input",
+    "manual_input_rejection_cancels_callback_wait"
+  ],
+  "test_corrections": [
+    "Session suffix fixtures and agents view preview/depth expectations follow pinned TypeScript rules.",
+    "Responses shared processor deliberately leaves output stream terminal ownership with provider; the two draining tests now assert stream remains open, then close their test-owned producer before draining.",
+    "Responses disallowed-provider fixture verifies whole-ID normalization and matching call/result IDs.",
+    "Completions image-only fixture now uses image-capable model and exact image payload. Tool ID fixture now exercises cross-provider normalization and pre-pipe sanitization/truncation.",
+    "Compaction hash test now uses four independently evaluated TypeScript vectors, replacing incorrect empty value and self-comparisons.",
+    "Message transform matching compaction fixture includes model base URL and verifies entire message unchanged; adjacent user images coalesce into one placeholder as TypeScript specifies.",
+    "Anthropic fixed callback-port tests share a mutex and await listener task teardown before releasing it; production redirect port is preserved.",
+    "GitHub Copilot client-ID fixture uses Iv1.b507a08c87ecfe98, decoded from the exact read-only TypeScript base64 literal in Node."
+  ],
+  "shared_dependencies": [
+    "Root owns shared StreamOptions camelCase serde fix, resolving OpenAI Responses options round-trip failure; provider already has serde flatten.",
+    "Root owns utils/hash.rs missing XOR terms in finalizers, required for corrected compaction reference vectors.",
+    "Supervisor orchestration belongs to foundation agent; runtime adapters to runtime agent; agents view native terminal/mode hooks to UI agent."
+  ],
+  "limitations": [
+    "No claim of complete TypeScript behavior parity or completed live CLI smoke before coordinated tests finish.",
+    "Native daemon writer queue is unbounded; full TypeScript backpressure/drain behavior remains unverified.",
+    "Preserves the canonical runtime real subagent host; daemon-specific RLM child roster/passivation host integration is not fully ported.",
+    "Windows named-pipe serving and stdin worker gate are implemented but not exercised on Windows by this Linux validation.",
+    "Broad extension error propagation and all terminal UI lifecycle cases were not audited in this targeted runnable integration repair."
+  ]
+}

@@ -1318,10 +1318,13 @@ mod tests {
 
     #[test]
     fn is_disabled_unless_the_coding_agent_opt_in_is_explicit() {
+        let temp = tempfile::tempdir().unwrap();
+        let agent_dir = temp.path().join("agent");
+        let metrics_dir = temp.path().join("metrics");
         let io: Arc<dyn PerformanceMetricFileIo> = Arc::new(MemoryFileIo::new());
         let disabled = create_local_performance_metric_recorder_from_environment(
             EnvironmentPerformanceMetricRecorderOptions {
-                agent_dir: "C:/isolated/agent".to_string(),
+                agent_dir: agent_dir.to_string_lossy().to_string(),
                 session_id: "session-disabled".to_string(),
                 env: Some(HashMap::new()),
                 max_buffered_records: None,
@@ -1343,7 +1346,7 @@ mod tests {
         env.insert("PRIME_AGENT_PERFORMANCE_METRICS".to_string(), "true".to_string());
         let enabled = create_local_performance_metric_recorder_from_environment(
             EnvironmentPerformanceMetricRecorderOptions {
-                agent_dir: "C:/isolated/agent".to_string(),
+                agent_dir: agent_dir.to_string_lossy().to_string(),
                 session_id: "session-enabled".to_string(),
                 env: Some(env.clone()),
                 max_buffered_records: None,
@@ -1361,7 +1364,7 @@ mod tests {
         );
         let enabled = enabled.expect("opt-in recorder");
         // `join(agentDir, "performance-metrics")` when no directory is configured.
-        let expected = Path::new("C:/isolated/agent")
+        let expected = agent_dir
             .join("performance-metrics")
             .to_string_lossy()
             .to_string();
@@ -1369,11 +1372,11 @@ mod tests {
 
         env.insert(
             "PRIME_AGENT_PERFORMANCE_METRICS_DIR".to_string(),
-            "C:/isolated/metrics".to_string(),
+            metrics_dir.to_string_lossy().to_string(),
         );
         let configured = create_local_performance_metric_recorder_from_environment(
             EnvironmentPerformanceMetricRecorderOptions {
-                agent_dir: "C:/isolated/agent".to_string(),
+                agent_dir: agent_dir.to_string_lossy().to_string(),
                 session_id: "session-configured".to_string(),
                 env: Some(env),
                 max_buffered_records: None,
@@ -1390,7 +1393,7 @@ mod tests {
             },
         )
         .expect("configured recorder");
-        assert!(configured.log_path().starts_with("C:/isolated/metrics"));
+        assert!(configured.log_path().starts_with(metrics_dir.to_string_lossy().as_ref()));
     }
 
     #[test]

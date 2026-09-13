@@ -760,7 +760,11 @@ mod tests {
         let rendered = splash.render_cells(&cells);
         assert_eq!(
             rendered,
-            format!("{}ab{}", "\x1b[39m", "\x1b[0m").replace("ab", "ab")
+            format!(
+                "{}{}",
+                theme().fg("text", "a"),
+                theme().bold(&theme().fg("text", "b"))
+            )
         );
     }
 

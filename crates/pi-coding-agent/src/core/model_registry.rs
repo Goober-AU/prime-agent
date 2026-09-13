@@ -978,7 +978,7 @@ const OPENAI_CODEX_CLIENT_VERSION: &str = "0.153.4";
 fn openai_codex_models_url(base_url: &str) -> String {
     let normalized = base_url.trim_end_matches('/');
     let path = if let Some(prefix) = normalized.strip_suffix("/codex/responses") {
-        format!("{}/models", prefix)
+        format!("{}/codex/models", prefix)
     } else if normalized.ends_with("/codex") {
         format!("{}/models", normalized)
     } else {
@@ -1752,6 +1752,21 @@ impl ModelRegistry {
         previous_team_id: Option<String>,
         previous_private_models: Vec<Model>,
     ) {
+        self.refresh_private_prime_inference_authorization_with_offline(
+            previous_private_model_ids,
+            previous_team_id,
+            previous_private_models,
+            is_offline_mode_enabled(),
+        ).await;
+    }
+
+    async fn refresh_private_prime_inference_authorization_with_offline(
+        &mut self,
+        previous_private_model_ids: HashSet<String>,
+        previous_team_id: Option<String>,
+        previous_private_models: Vec<Model>,
+        offline: bool,
+    ) {
         let api_key = self
             .auth_storage
             .get_api_key(PRIME_INFERENCE_PROVIDER_ID, false)
@@ -1796,7 +1811,7 @@ impl ModelRegistry {
             self.authorized_private_prime_inference_team_id = Some(team_id.clone());
             self.reload_models_after_catalog_change();
             let cache_is_fresh = now_millis() - cached.refreshed_at < PRIVATE_PRIME_AUTHORIZATION_CACHE_TTL_MS;
-            if is_offline_mode_enabled() || cache_is_fresh {
+            if offline || cache_is_fresh {
                 return;
             }
             self.start_background_private_prime_authorization_refresh(
@@ -1808,7 +1823,7 @@ impl ModelRegistry {
             .await;
             return;
         }
-        if is_offline_mode_enabled() {
+        if offline {
             self.authorized_private_prime_inference_model_ids.clear();
             self.authorized_private_prime_inference_models = Vec::new();
             self.authorized_private_prime_inference_team_id = None;
@@ -3849,7 +3864,6 @@ mod tests {
         let path = dir.path().join("models.json");
         std::fs::write(&path, "{}").unwrap();
         let mut storage = in_memory_auth();
-        storage.set_runtime_api_key(PRIME_INFERENCE_PROVIDER_ID, "prime-key");
         storage.set(
             PRIME_INFERENCE_PROVIDER_ID,
             AuthCredential::ApiKey {
@@ -3865,17 +3879,14 @@ mod tests {
         );
         let mut registry = ModelRegistry::create(storage, Some(path.to_string_lossy().to_string()));
         registry.set_fetch_fn(Some(Arc::new(|request: HttpRequest| {
+            assert_eq!(request.url, format!("{}/models", crate::core::prime_inference_models::PRIME_INFERENCE_BASE_URL));
+            assert!(request.headers.iter().any(|(key, value)| key == "X-Prime-Team-ID" && value == "team-1"));
             Box::pin(async move {
                 Ok(crate::core::prime_inference_auth::HttpResponse {
                     status: 200,
                     status_text: "OK".to_string(),
                     headers: Vec::new(),
-                    text: if request.url.contains("/teams/team-1/models") {
-                        serde_json::json!({"data": [{"id": "internal/glm-5.2-fast", "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0}}]})
-                            .to_string()
-                    } else {
-                        serde_json::json!({"data": []}).to_string()
-                    },
+                    text: serde_json::json!({"data": [{"id": "internal/glm-5.2-fast", "pricing": {"input_usd_per_mtok": 1.0, "output_usd_per_mtok": 2.0}}]}).to_string(),
                 })
             }) as pi_ai::types::BoxFuture<Result<crate::core::prime_inference_auth::HttpResponse, String>>
         })));
@@ -3884,7 +3895,7 @@ mod tests {
         let previous_team = registry.authorized_private_prime_inference_team_id.clone();
         let previous_models = registry.authorized_private_prime_inference_models.clone();
         registry
-            .refresh_private_prime_inference_authorization(previous_ids, previous_team, previous_models)
+            .refresh_private_prime_inference_authorization_with_offline(previous_ids, previous_team, previous_models, false)
             .await;
         assert_eq!(
             registry.authorized_private_prime_inference_team_id.as_deref(),

@@ -923,10 +923,12 @@ mod tests {
 
     #[test]
     fn completed_compaction_flushes_pending_to_the_last_slice() {
-        let ledger = vec![
+        let mut ledger = vec![
             registered("s", None),
             started("r1", "s", None),
             finished("r1"),
+            started("failed-turn", "s", None),
+            failed("failed-turn"),
             SemanticEdgeLedgerEvent::CompactionBegun {
                 compaction_id: "c1".to_string(),
                 session_id: "s".to_string(),
@@ -940,7 +942,7 @@ mod tests {
                 status: "completed".to_string(),
             },
         ];
-        let edges = derive_semantic_edges(&[ledger]).edges;
+        let edges = derive_semantic_edges(&[ledger.clone()]).edges;
         // r1 -> summary-a (continuation), summary-a -> summary-b (continuation),
         // then the completed compaction flushes the deferred pending r1 edge onto
         // summary-b and replaces it with the compaction edge.
@@ -962,9 +964,15 @@ mod tests {
                 ("r1", "summary-b", "continuation"),
             ]
         );
-        assert!(edges
-            .iter()
-            .any(|edge| edge.source_request_id == "summary-b" && edge.type_ == "compaction"));
+        // The outbound compaction edge is pending until its target commits.
+        assert!(!edges.iter().any(|edge| edge.type_ == "compaction"));
+        ledger.extend([started("next-turn", "s", None), finished("next-turn")]);
+        let edges = derive_semantic_edges(&[ledger]).edges;
+        assert_eq!(edges.last(), Some(&SemanticEdge {
+            source_request_id: "summary-b".to_string(),
+            target_request_id: "next-turn".to_string(),
+            type_: "compaction".to_string(),
+        }));
     }
 
     #[test]

@@ -197,17 +197,17 @@ mod tests {
         let context = context(false, vec![]);
         let mut deck = FeatureHintDeck::new(Box::new(|| 0.0));
         let mut ids = Vec::new();
-        while let Some(hint) = deck.next(&context) {
-            ids.push(hint.id);
-            if ids.len() > FEATURE_HINTS.len() {
-                break;
-            }
+        // A deck refills automatically; inspect exactly one complete deal.
+        let eligible = FEATURE_HINTS.len() - 4;
+        for _ in 0..eligible {
+            ids.push(deck.next(&context).expect("eligible hint").id);
         }
         assert!(!ids.contains(&"prompt-stash".to_string()));
         assert!(!ids.contains(&"agents-view".to_string()));
         assert!(!ids.contains(&"background-running".to_string()));
         assert!(ids.contains(&"side-question".to_string()));
-        assert_eq!(ids.len(), FEATURE_HINTS.len() - 3);
+        assert_eq!(ids.len(), eligible);
+        assert_eq!(ids.iter().collect::<std::collections::HashSet<_>>().len(), eligible);
     }
 
     #[test]

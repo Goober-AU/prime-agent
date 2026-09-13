@@ -95,7 +95,8 @@ impl PartialEq for ActiveSessionRuntimeSession {
 }
 
 /// Runtime metadata (`AgentSessionRuntimeMetadata` in core/agent-session-runtime.ts).
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", default)]
 pub struct AgentSessionRuntimeMetadata {
     pub kind: Option<String>,
     pub prompt: Option<String>,
@@ -405,9 +406,10 @@ mod tests {
             &one
         ));
         assert!(Arc::ptr_eq(
-            &resolve_active_session_state(&sessions, "cdef").expect("suffix"),
+            &resolve_active_session_state(&sessions, "eeff").expect("suffix"),
             &one
         ));
+        assert!(resolve_active_session_state(&sessions, "aabb").is_err());
         // `expect_err` would require `ActiveSessionState: Debug`; the TypeScript
         // asserts on the thrown message only.
         let error = resolve_active_session_state(&sessions, "zzz")
@@ -419,8 +421,8 @@ mod tests {
     #[test]
     fn ambiguous_suffixes_are_reported() {
         let mut sessions: HashMap<String, Arc<StdMutex<ActiveSessionState>>> = HashMap::new();
-        sessions.insert("aa11".to_string(), state("aa11", "s1", None));
-        sessions.insert("aa22".to_string(), state("aa22", "s2", None));
+        sessions.insert("11aa".to_string(), state("11aa", "s1", None));
+        sessions.insert("22aa".to_string(), state("22aa", "s2", None));
         let error = resolve_active_session_state(&sessions, "aa")
             .err()
             .expect("ambiguous");

@@ -1065,11 +1065,13 @@ mod tests {
     }
 
     #[test]
-    fn parseInt_matches_javascript() {
+    fn parse_int_matches_javascript() {
         assert_eq!(js_string_to_number("10"), 10.0);
         assert_eq!(js_string_to_number("  -3abc"), -3.0);
         assert!(js_string_to_number("abc").is_nan());
-        assert_eq!(js_string_to_number(""), 0.0);
+        assert!(js_string_to_number("").is_nan());
+        assert!(js_string_to_number("+").is_nan());
+        assert_eq!(js_string_to_number("12.5"), 12.0);
     }
 
     #[test]
@@ -1101,8 +1103,11 @@ mod tests {
     fn borders_and_list_are_rendered_in_order() {
         let mut selector = SettingsSelectorComponent::new(config(), callbacks());
         let lines = selector.render(60.0);
-        assert_eq!(lines[0], "\u{2500}".repeat(60));
-        assert_eq!(lines[lines.len() - 1], "\u{2500}".repeat(60));
+        assert_eq!(pi_tui::utils::strip_ansi(&lines[0]), "\u{2500}".repeat(60));
+        assert_eq!(
+            pi_tui::utils::strip_ansi(&lines[lines.len() - 1]),
+            "\u{2500}".repeat(60)
+        );
         assert!(lines.len() > 3);
     }
 

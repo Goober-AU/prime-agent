@@ -45,10 +45,12 @@ mod tests {
 
     #[test]
     fn left_arrow_is_back_only_at_column_zero() {
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
         // `tui.editor.cursorLeft` and `app.modal.back` share the left arrow key.
         let keys = get_keybindings().get_keys("app.modal.back");
         assert!(!keys.is_empty(), "app.modal.back must have a default key");
-        let left = keys[0].clone();
+        assert_eq!(keys[0], "left");
+        let left = "\x1b[D";
         assert!(should_treat_as_back(&left, None));
         assert!(should_treat_as_back(&left, Some(&FixedCursor(0))));
         assert!(!should_treat_as_back(&left, Some(&FixedCursor(1))));

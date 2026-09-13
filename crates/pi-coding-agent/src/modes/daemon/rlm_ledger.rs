@@ -4,16 +4,18 @@
 //! written at spawn admission, rename, and deletion, and replayed for topology.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex as StdMutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::core::event_log::{EventLog, EventLogOptions, ReplayOptions};
 use crate::core::session_lease::canonical_session_path;
-use crate::core::session_manager::{get_session_artifact_path_for_file, read_session_info, SessionInfo};
+use crate::core::session_manager::{
+    get_session_artifact_path_for_file, read_session_info, SessionInfo,
+};
 use crate::utils::file_lines::read_first_line_sync;
 
 pub const RLM_LEDGER_DIR: &str = "rlm-ledger";
@@ -163,13 +165,25 @@ pub struct LegacyRlmSubagentRegistryEntry {
     pub session_file: String,
     #[serde(rename = "parentSessionId")]
     pub parent_session_id: String,
-    #[serde(rename = "parentSessionFile", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "parentSessionFile",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub parent_session_file: Option<String>,
     #[serde(rename = "rlmDepth", skip_serializing_if = "Option::is_none", default)]
     pub rlm_depth: Option<i64>,
-    #[serde(rename = "rlmMaxDepth", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "rlmMaxDepth",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub rlm_max_depth: Option<i64>,
-    #[serde(rename = "rlmParentNodeId", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "rlmParentNodeId",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub rlm_parent_node_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub prompt: Option<String>,
@@ -194,7 +208,10 @@ pub struct ReadLegacyRlmSubagentRegistryOptions {
 
 #[async_trait::async_trait]
 pub trait RlmLedgerSeedSource: Send + Sync {
-    async fn read_registry_for_session_file(&self, session_file: &str) -> Vec<RlmLedgerSeedRegistryEntry>;
+    async fn read_registry_for_session_file(
+        &self,
+        session_file: &str,
+    ) -> Vec<RlmLedgerSeedRegistryEntry>;
 }
 
 /// Latest entry per childId from the legacy per-parent registry; tolerant reads.
@@ -219,7 +236,8 @@ pub async fn read_legacy_rlm_subagent_registry(
             return Ok(Vec::new());
         }
     };
-    let mut latest: indexmap::IndexMap<String, LegacyRlmSubagentRegistryEntry> = indexmap::IndexMap::new();
+    let mut latest: indexmap::IndexMap<String, LegacyRlmSubagentRegistryEntry> =
+        indexmap::IndexMap::new();
     for line in contents.split('\n') {
         let trimmed = line.trim_end_matches('\r').trim();
         if trimmed.is_empty() {
@@ -241,35 +259,45 @@ pub async fn read_legacy_rlm_subagent_registry(
             continue;
         }
         let mut parsed_entry: LegacyRlmSubagentRegistryEntry =
-            serde_json::from_value(Value::Object(entry.clone())).unwrap_or_else(|_| LegacyRlmSubagentRegistryEntry {
-                type_: "rlm_subagent".to_string(),
-                child_id: entry.get("childId").and_then(Value::as_str).unwrap_or_default().to_string(),
-                session_name: entry
-                    .get("sessionName")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                session_dir: String::new(),
-                session_file: entry
-                    .get("sessionFile")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                parent_session_id: entry
-                    .get("parentSessionId")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                parent_session_file: None,
-                rlm_depth: None,
-                rlm_max_depth: None,
-                rlm_parent_node_id: None,
-                prompt: None,
-                spawn_code: None,
-                model: None,
-                created_at: 0.0,
-                updated_at: String::new(),
-                status: entry.get("status").and_then(Value::as_str).unwrap_or_default().to_string(),
+            serde_json::from_value(Value::Object(entry.clone())).unwrap_or_else(|_| {
+                LegacyRlmSubagentRegistryEntry {
+                    type_: "rlm_subagent".to_string(),
+                    child_id: entry
+                        .get("childId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    session_name: entry
+                        .get("sessionName")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    session_dir: String::new(),
+                    session_file: entry
+                        .get("sessionFile")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    parent_session_id: entry
+                        .get("parentSessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                    parent_session_file: None,
+                    rlm_depth: None,
+                    rlm_max_depth: None,
+                    rlm_parent_node_id: None,
+                    prompt: None,
+                    spawn_code: None,
+                    model: None,
+                    created_at: 0.0,
+                    updated_at: String::new(),
+                    status: entry
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                }
             });
         if parsed_entry.session_dir.is_empty() {
             parsed_entry.session_dir = dirname_of(&parsed_entry.session_file);
@@ -314,7 +342,10 @@ pub struct RegistrySeedSource;
 
 #[async_trait::async_trait]
 impl RlmLedgerSeedSource for RegistrySeedSource {
-    async fn read_registry_for_session_file(&self, session_file: &str) -> Vec<RlmLedgerSeedRegistryEntry> {
+    async fn read_registry_for_session_file(
+        &self,
+        session_file: &str,
+    ) -> Vec<RlmLedgerSeedRegistryEntry> {
         let first_line = read_first_line_sync(session_file, 1024 * 1024);
         let Some(first_line) = first_line else {
             return Vec::new();
@@ -325,13 +356,19 @@ impl RlmLedgerSeedSource for RegistrySeedSource {
         let Some(header_id) = header.get("id").and_then(Value::as_str) else {
             return Vec::new();
         };
-        let path = Path::new(&get_session_artifact_path_for_file(session_file, Some(header_id)))
-            .join("rlm-subagents.jsonl")
-            .to_string_lossy()
-            .to_string();
-        let entries = read_legacy_rlm_subagent_registry(&path, ReadLegacyRlmSubagentRegistryOptions::default())
-            .await
-            .unwrap_or_default();
+        let path = Path::new(&get_session_artifact_path_for_file(
+            session_file,
+            Some(header_id),
+        ))
+        .join("rlm-subagents.jsonl")
+        .to_string_lossy()
+        .to_string();
+        let entries = read_legacy_rlm_subagent_registry(
+            &path,
+            ReadLegacyRlmSubagentRegistryOptions::default(),
+        )
+        .await
+        .unwrap_or_default();
         entries
             .into_iter()
             .map(|entry| RlmLedgerSeedRegistryEntry {
@@ -364,7 +401,10 @@ pub fn rlm_ledger_path(agent_dir: &str, sessions_dir: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(canonical.as_bytes());
         let digest = hasher.finalize();
-        let hex = digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         hex.chars().take(16).collect::<String>()
     };
     Path::new(agent_dir)
@@ -408,12 +448,18 @@ pub fn parse_ledger_line(line: &str, index: usize) -> Result<Option<RlmLedgerRec
     let parsed: Value = serde_json::from_str(line)
         .map_err(|error| format!("Malformed RLM ledger line {}: {error}", index + 1))?;
     let Some(record) = parsed.as_object() else {
-        return Err(format!("Malformed RLM ledger line {}: missing v/at", index + 1));
+        return Err(format!(
+            "Malformed RLM ledger line {}: missing v/at",
+            index + 1
+        ));
     };
     let version = record.get("v").and_then(Value::as_i64);
     let at = record.get("at").and_then(Value::as_str);
     if version != Some(1) || at.is_none() {
-        return Err(format!("Malformed RLM ledger line {}: missing v/at", index + 1));
+        return Err(format!(
+            "Malformed RLM ledger line {}: missing v/at",
+            index + 1
+        ));
     }
     let at = at.unwrap_or_default().to_string();
     let field = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_string);
@@ -434,9 +480,12 @@ pub fn parse_ledger_line(line: &str, index: usize) -> Result<Option<RlmLedgerRec
         }
         Some("spawn") => {
             let depth = record.get("depth").and_then(Value::as_i64);
-            let (Some(child_id), Some(parent), Some(child), Some(name)) =
-                (field("childId"), field("parent"), field("child"), field("name"))
-            else {
+            let (Some(child_id), Some(parent), Some(child), Some(name)) = (
+                field("childId"),
+                field("parent"),
+                field("child"),
+                field("name"),
+            ) else {
                 return Err(format!(
                     "Malformed RLM ledger line {}: invalid spawn record",
                     index + 1
@@ -463,7 +512,9 @@ pub fn parse_ledger_line(line: &str, index: usize) -> Result<Option<RlmLedgerRec
             })))
         }
         Some("rename") => {
-            let (Some(child_id), Some(child), Some(name)) = (field("childId"), field("child"), field("name")) else {
+            let (Some(child_id), Some(child), Some(name)) =
+                (field("childId"), field("child"), field("name"))
+            else {
                 return Err(format!(
                     "Malformed RLM ledger line {}: invalid rename record",
                     index + 1
@@ -483,7 +534,9 @@ pub fn parse_ledger_line(line: &str, index: usize) -> Result<Option<RlmLedgerRec
                 .get("reason")
                 .and_then(Value::as_str)
                 .and_then(RlmLedgerDeleteReason::from_str);
-            let (Some(child_id), Some(child), Some(reason)) = (field("childId"), field("child"), reason) else {
+            let (Some(child_id), Some(child), Some(reason)) =
+                (field("childId"), field("child"), reason)
+            else {
                 return Err(format!(
                     "Malformed RLM ledger line {}: invalid delete record",
                     index + 1
@@ -557,7 +610,7 @@ impl RlmSpawnLedger {
         &self.path
     }
 
-    async fn enqueue<T>(&self, run: impl FnOnce() -> T) -> T {
+    async fn enqueue<T, F: std::future::Future<Output = T>>(&self, run: impl FnOnce() -> F) -> T {
         let _guard = self.queue.lock().await;
         let already_attempted = {
             let mut attempted = self.seed_attempted.lock().expect("seed flag poisoned");
@@ -570,14 +623,20 @@ impl RlmSpawnLedger {
                 (self.log)(&format!("RLM ledger seeding failed: {error}"));
             }
         }
-        run()
+        run().await
     }
 
     pub async fn append_spawn(&self, input: RlmSpawnInput) -> Result<(), String> {
-        self.enqueue(move || self.append_spawn_unlocked(input)).await
+        self.enqueue(move || async move { self.append_spawn_unlocked(input) })
+            .await
     }
 
-    pub async fn append_rename(&self, child_id: &str, child: &str, name: &str) -> Result<(), String> {
+    pub async fn append_rename(
+        &self,
+        child_id: &str,
+        child: &str,
+        name: &str,
+    ) -> Result<(), String> {
         let record = RlmLedgerRecord::Rename(RlmLedgerRenameRecord {
             v: 1,
             op: "rename".to_string(),
@@ -586,14 +645,15 @@ impl RlmSpawnLedger {
             child: canonical_session_path(child),
             name: name.to_string(),
         });
-        self.enqueue(move || self.append_record(&record)).await
+        self.enqueue(move || async move { self.append_record(&record) })
+            .await
     }
 
     /// Rename by child session path alone (offline saved-session rename knows no childId).
     pub async fn append_rename_by_child_path(&self, child: &str, name: &str) -> Result<(), String> {
         let target = canonical_session_path(child);
         let name = name.to_string();
-        self.enqueue(move || {
+        self.enqueue(move || async move {
             let edges: Vec<RlmLedgerEdge> = self.replay_sync().into_values().collect();
             let mut first_error: Option<String> = None;
             for edge in edges {
@@ -633,7 +693,8 @@ impl RlmSpawnLedger {
             child: canonical_session_path(child),
             reason,
         });
-        self.enqueue(move || self.append_record(&record)).await
+        self.enqueue(move || async move { self.append_record(&record) })
+            .await
     }
 
     /// Resolves once every operation enqueued so far has completed.
@@ -644,7 +705,7 @@ impl RlmSpawnLedger {
     /// Replay edges without liveness reconciliation. Deleted edges are filtered
     /// by default; `include_deleted` keeps the tombstones.
     pub async fn edges(&self, include_deleted: bool) -> Vec<RlmLedgerEdge> {
-        self.enqueue(move || {
+        self.enqueue(move || async move {
             self.replay_sync()
                 .into_values()
                 .filter(|edge| include_deleted || edge.deleted.is_none())
@@ -661,12 +722,13 @@ impl RlmSpawnLedger {
     /// Same-parent rows for a child session path, including the child itself.
     pub async fn siblings(&self, session_path: &str) -> Vec<SessionInfo> {
         let session_path = session_path.to_string();
-        self.enqueue(move || self.siblings_unlocked(&session_path)).await
+        self.enqueue(move || async move { self.siblings_unlocked(&session_path).await })
+            .await
     }
 
-    fn siblings_unlocked(&self, session_path: &str) -> Vec<SessionInfo> {
+    async fn siblings_unlocked(&self, session_path: &str) -> Vec<SessionInfo> {
         let target = canonical_session_path(session_path);
-        let family = self.family_unlocked();
+        let family = self.family_unlocked().await;
         let edges: Vec<RlmLedgerEdge> = self
             .replay_sync()
             .into_values()
@@ -684,7 +746,9 @@ impl RlmSpawnLedger {
         if let Some(parent) = parent_by_child.get(&target) {
             let rows: Vec<SessionInfo> = family
                 .iter()
-                .filter(|row| parent_by_child.get(&canonical_session_path(&row.path)) == Some(parent))
+                .filter(|row| {
+                    parent_by_child.get(&canonical_session_path(&row.path)) == Some(parent)
+                })
                 .cloned()
                 .collect();
             if !rows
@@ -692,7 +756,7 @@ impl RlmSpawnLedger {
                 .any(|row| canonical_session_path(&row.path) == target)
                 && Path::new(&target).is_file()
             {
-                return vec![self.session_row(&target, 0, None, None)];
+                return vec![self.session_row(&target, 0, None, None).await];
             }
             return rows;
         }
@@ -711,12 +775,16 @@ impl RlmSpawnLedger {
         if !Path::new(&target).is_file() {
             return Vec::new();
         }
-        vec![self.session_row(&target, 0, None, None)]
+        vec![self.session_row(&target, 0, None, None).await]
     }
 
     fn append_spawn_unlocked(&self, input: RlmSpawnInput) -> Result<(), String> {
         // Enforce the same invariants parse_ledger_line checks.
-        if input.child_id.is_empty() || input.parent.is_empty() || input.child.is_empty() || input.depth < 1 {
+        if input.child_id.is_empty()
+            || input.parent.is_empty()
+            || input.child.is_empty()
+            || input.depth < 1
+        {
             return Err(format!(
                 "RLM ledger: invalid spawn for {} (depth {})",
                 if input.child_id.is_empty() {
@@ -755,7 +823,7 @@ impl RlmSpawnLedger {
 
     /// Live edges reconciled by stat, exactly like `family()`.
     pub async fn live_edges(&self) -> Vec<RlmLedgerEdge> {
-        self.enqueue(|| {
+        self.enqueue(|| async {
             let edges: Vec<RlmLedgerEdge> = self
                 .replay_sync()
                 .into_values()
@@ -779,7 +847,7 @@ impl RlmSpawnLedger {
         alive
     }
 
-    fn family_unlocked(&self) -> Vec<SessionInfo> {
+    async fn family_unlocked(&self) -> Vec<SessionInfo> {
         let candidates: Vec<RlmLedgerEdge> = self
             .replay_sync()
             .into_values()
@@ -837,23 +905,32 @@ impl RlmSpawnLedger {
 
         let mut rows: Vec<SessionInfo> = Vec::new();
         for root_path in root_paths {
-            rows.push(self.session_row(&root_path, 0, None, None));
+            rows.push(self.session_row(&root_path, 0, None, None).await);
         }
         for edge in alive {
-            rows.push(self.session_row(
-                &canonical_session_path(&edge.child),
-                edge.depth,
-                Some(&canonical_session_path(&edge.parent)),
-                Some(&edge.name),
-            ));
+            rows.push(
+                self.session_row(
+                    &canonical_session_path(&edge.child),
+                    edge.depth,
+                    Some(&canonical_session_path(&edge.parent)),
+                    Some(&edge.name),
+                )
+                .await,
+            );
         }
         rows
     }
 
-    fn session_row(&self, path: &str, depth: i64, parent_path: Option<&str>, name: Option<&str>) -> SessionInfo {
+    async fn session_row(
+        &self,
+        path: &str,
+        depth: i64,
+        parent_path: Option<&str>,
+        name: Option<&str>,
+    ) -> SessionInfo {
         // Display-grade fields are best-effort from the ordinary session-info
         // read; topology (path, depth, parent) comes EXCLUSIVELY from the ledger.
-        match read_session_info_blocking(path) {
+        match read_session_info(path).await {
             Some(mut info) => {
                 info.parent_session_path = parent_path.map(str::to_string);
                 info.rlm_depth = depth;
@@ -921,7 +998,10 @@ impl RlmSpawnLedger {
             .collect();
         let mut records: Vec<RlmLedgerSpawnRecord> = Vec::new();
         while let Some((session_file, depth)) = queue.pop_front() {
-            for entry in seed_source.read_registry_for_session_file(&session_file).await {
+            for entry in seed_source
+                .read_registry_for_session_file(&session_file)
+                .await
+            {
                 if entry.status == "deleted" {
                     continue;
                 }
@@ -932,7 +1012,10 @@ impl RlmSpawnLedger {
                 visited.insert(child_path.clone());
                 // A registry depth < 1 would be unwritable under the spawn
                 // invariants; treat it as absent and derive parent depth + 1.
-                let child_depth = entry.rlm_depth.filter(|depth| *depth >= 1).unwrap_or(depth + 1);
+                let child_depth = entry
+                    .rlm_depth
+                    .filter(|depth| *depth >= 1)
+                    .unwrap_or(depth + 1);
                 if entry.child_id.is_empty() {
                     (self.log)("RLM ledger: skipped seeding a registry entry without a childId");
                     continue;
@@ -972,7 +1055,8 @@ impl RlmSpawnLedger {
         // A seed beyond the read bounds would publish a ledger every replay
         // refuses to read; skip seeding entirely rather than publish partial
         // topology.
-        if records.len() + 1 > RLM_LEDGER_MAX_RECORDS || payload.len() as u64 > RLM_LEDGER_MAX_BYTES {
+        if records.len() + 1 > RLM_LEDGER_MAX_RECORDS || payload.len() as u64 > RLM_LEDGER_MAX_BYTES
+        {
             (self.log)(&format!(
                 "RLM ledger: seed exceeds read bounds ({} records, {} bytes); skipping seeding",
                 records.len(),
@@ -1061,12 +1145,16 @@ impl RlmSpawnLedger {
                     );
                 }
                 RlmLedgerRecord::Rename(record) => {
-                    if let Some(existing) = edges.get_mut(&edge_key(&record.child_id, &record.child)) {
+                    if let Some(existing) =
+                        edges.get_mut(&edge_key(&record.child_id, &record.child))
+                    {
                         existing.name = record.name;
                     }
                 }
                 RlmLedgerRecord::Delete(record) => {
-                    if let Some(existing) = edges.get_mut(&edge_key(&record.child_id, &record.child)) {
+                    if let Some(existing) =
+                        edges.get_mut(&edge_key(&record.child_id, &record.child))
+                    {
                         existing.deleted = Some(record.reason);
                     }
                 }
@@ -1109,19 +1197,6 @@ fn write_seed_file(path: &str, payload: &str) -> Result<(), String> {
         .write_all(payload.as_bytes())
         .map_err(|error| error.to_string())?;
     handle.sync_all().map_err(|error| error.to_string())
-}
-
-fn read_session_info_blocking(path: &str) -> Option<SessionInfo> {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(read_session_info(path))),
-        Err(_) => {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            runtime.block_on(read_session_info(path))
-        }
-    }
 }
 
 // The catalog scan never visits session-artifacts, where RLM children persist:
@@ -1281,7 +1356,9 @@ mod tests {
             "name": "child"
         })
         .to_string();
-        let record = parse_ledger_line(&spawn_line, 0).expect("parses").expect("record");
+        let record = parse_ledger_line(&spawn_line, 0)
+            .expect("parses")
+            .expect("record");
         match record {
             RlmLedgerRecord::Spawn(record) => {
                 assert_eq!(record.child_id, "c1");
@@ -1306,12 +1383,15 @@ mod tests {
             parse_ledger_line(&bad_depth, 3).expect_err("invalid"),
             "Malformed RLM ledger line 4: invalid spawn record"
         );
-        let missing_version = serde_json::json!({ "op": "meta", "at": "x", "sessionsDir": "/s" }).to_string();
+        let missing_version =
+            serde_json::json!({ "op": "meta", "at": "x", "sessionsDir": "/s" }).to_string();
         assert_eq!(
             parse_ledger_line(&missing_version, 0).expect_err("invalid"),
             "Malformed RLM ledger line 1: missing v/at"
         );
-        assert!(parse_ledger_line("{not json", 1).expect_err("invalid").starts_with("Malformed RLM ledger line 2: "));
+        assert!(parse_ledger_line("{not json", 1)
+            .expect_err("invalid")
+            .starts_with("Malformed RLM ledger line 2: "));
     }
 
     #[tokio::test]
@@ -1328,7 +1408,10 @@ mod tests {
             .await
             .expect("spawn");
         assert_eq!(ledger.edges(false).await.len(), 1);
-        ledger.append_rename("c1", &child, "renamed").await.expect("rename");
+        ledger
+            .append_rename("c1", &child, "renamed")
+            .await
+            .expect("rename");
         let edges = ledger.edges(false).await;
         assert_eq!(edges[0].name, "renamed");
         ledger
@@ -1337,10 +1420,7 @@ mod tests {
             .expect("delete");
         assert!(ledger.edges(false).await.is_empty());
         let with_deleted = ledger.edges(true).await;
-        assert_eq!(
-            with_deleted[0].deleted,
-            Some(RlmLedgerDeleteReason::User)
-        );
+        assert_eq!(with_deleted[0].deleted, Some(RlmLedgerDeleteReason::User));
         ledger
             .append_rename_by_child_path(&child, "again")
             .await
@@ -1413,7 +1493,9 @@ mod tests {
         assert!(siblings
             .iter()
             .any(|row| canonical_session_path(&row.path) == canonical_session_path(&other)));
-        assert!(ledger.siblings(&child).await.len() == 2);
+        // TypeScript siblings() includes rows sharing this child's parent,
+        // including itself; the two root sessions are a separate sibling set.
+        assert_eq!(ledger.siblings(&child).await.len(), 1);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1433,7 +1515,7 @@ mod tests {
         std::fs::remove_file(&parent).expect("remove parent");
         assert!(ledger.live_edges().await.is_empty());
 
-        let result = tombstone_saved_session_delete(&ledger, &child, None).await;
+        let result = tombstone_saved_session_delete(&ledger, &child, Some("subagent")).await;
         assert!(result.ledger_edge.is_some());
         assert!(result.deleted_info.is_some());
         let edges = ledger.edges(true).await;
@@ -1451,7 +1533,11 @@ mod tests {
         std::fs::create_dir_all(&sessions).expect("sessions dir");
         let agent_dir = root.to_string_lossy().to_string();
         let parent = write_session_file(&sessions, "parent.jsonl");
-        let child = write_session_file(&sessions, "child.jsonl");
+        // Registries seed descendants outside the root session directory;
+        // a file already in the root queue is deliberately visited once.
+        let children = sessions.join("children");
+        std::fs::create_dir_all(&children).expect("children dir");
+        let child = write_session_file(&children, "child.jsonl");
 
         struct Source {
             parent: String,
@@ -1460,7 +1546,10 @@ mod tests {
 
         #[async_trait::async_trait]
         impl RlmLedgerSeedSource for Source {
-            async fn read_registry_for_session_file(&self, session_file: &str) -> Vec<RlmLedgerSeedRegistryEntry> {
+            async fn read_registry_for_session_file(
+                &self,
+                session_file: &str,
+            ) -> Vec<RlmLedgerSeedRegistryEntry> {
                 if canonical_session_path(session_file) != canonical_session_path(&self.parent) {
                     return Vec::new();
                 }
@@ -1507,8 +1596,9 @@ mod tests {
             .append_spawn(spawn("c1", &parent, &child, 1, "child"))
             .await
             .expect("spawn");
-        let saved = vec![read_session_info_blocking(&parent).expect("parent info")];
-        let merged = with_passive_rlm_descendant_infos(saved.clone(), &ledger, Default::default()).await;
+        let saved = vec![read_session_info(&parent).await.expect("parent info")];
+        let merged =
+            with_passive_rlm_descendant_infos(saved.clone(), &ledger, Default::default()).await;
         assert_eq!(merged.len(), 2);
         let filtered = with_passive_rlm_descendant_infos(
             saved,
@@ -1542,7 +1632,11 @@ mod tests {
         };
         std::fs::write(
             &path,
-            format!("{}\nnot json\n{}\n", entry("first", "running"), entry("second", "deleted")),
+            format!(
+                "{}\nnot json\n{}\n",
+                entry("first", "running"),
+                entry("second", "deleted")
+            ),
         )
         .expect("write registry");
         let entries = read_legacy_rlm_subagent_registry(

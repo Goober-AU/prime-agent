@@ -2356,7 +2356,8 @@ mod tests {
     #[test]
     fn ready_check_embeds_the_harness_method_list() {
         let check = runtime_ready_check();
-        assert!(check.contains("_harness_methods = [\"create_memory\", \"update_memory\""));
+        let methods = check.split("_harness_methods = ").nth(1).unwrap().split(';').next().unwrap();
+        assert_eq!(serde_json::from_str::<Vec<String>>(methods).unwrap(), REQUIRED_HARNESS_METHODS);
         assert!(check.contains("assert _repl.PROTOCOL_VERSION == 3"));
     }
 }

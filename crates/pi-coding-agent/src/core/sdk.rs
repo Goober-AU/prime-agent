@@ -102,7 +102,7 @@ pub struct CreateAgentSessionAgentOptions {
     pub on_response: pi_ai::types::OnResponse,
     pub session_id: String,
     pub transform_context: Arc<
-        dyn Fn(Vec<AgentMessage>, Option<tokio_util::sync::CancellationToken>) -> Vec<AgentMessage>
+        dyn Fn(Vec<AgentMessage>, Option<tokio_util::sync::CancellationToken>) -> BoxFuture<Vec<AgentMessage>>
             + Send
             + Sync,
     >,
@@ -599,19 +599,18 @@ pub async fn create_agent_session_with_factories(
         Arc::new(
             move |messages: Vec<AgentMessage>, _signal: Option<tokio_util::sync::CancellationToken>| {
                 let runner = extension_runner_ref.current();
-                let Some(runner) = runner else {
-                    return messages;
-                };
-                runner.emit_context(
-                    messages
-                        .iter()
-                        .map(|message| serde_json::to_value(message).unwrap_or(Value::Null))
-                        .collect(),
-                );
-                messages
+                Box::pin(async move {
+                    let Some(runner) = runner else { return messages; };
+                    let values = messages.iter().map(|message| {
+                        serde_json::to_value(message).expect("agent message is serializable")
+                    }).collect();
+                    runner.emit_context(values).await.into_iter().map(|message| {
+                        serde_json::from_value(message).expect("context extension returned an invalid agent message")
+                    }).collect()
+                }) as BoxFuture<Vec<AgentMessage>>
             },
         ) as Arc<
-            dyn Fn(Vec<AgentMessage>, Option<tokio_util::sync::CancellationToken>) -> Vec<AgentMessage>
+            dyn Fn(Vec<AgentMessage>, Option<tokio_util::sync::CancellationToken>) -> BoxFuture<Vec<AgentMessage>>
                 + Send
                 + Sync,
         >
@@ -641,7 +640,7 @@ pub async fn create_agent_session_with_factories(
                       signal: Option<tokio_util::sync::CancellationToken>|
                       -> BoxFuture<Vec<AgentMessage>> {
                     let transform = Arc::clone(&transform);
-                    Box::pin(async move { (transform)(messages, signal) })
+                    Box::pin(async move { (transform)(messages, signal).await })
                 },
             )
         };
@@ -877,6 +876,71 @@ fn type_surface_markers(
 mod tests {
     use super::*;
     use pi_ai::types::{ImageContent, TextContent, ToolResultMessage};
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn real_session_prompts_the_faux_provider_and_delivers_events() {
+        use pi_ai::providers::faux::{register_faux_provider, RegisterFauxProviderOptions, FauxResponseStep, faux_assistant_message, FauxAssistantContent};
+        let root = tempfile::Builder::new().prefix("sdk-faux-").tempdir_in(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.port-env/tmp"),
+        ).unwrap();
+        let cwd = root.path().to_string_lossy().to_string();
+        let provider = register_faux_provider(Some(RegisterFauxProviderOptions {
+            provider: Some(format!("session-test-{}", uuid::Uuid::new_v4())),
+            tokens_per_second: Some(0.0), ..Default::default()
+        }));
+        let model = provider.get_model();
+        provider.set_responses(vec![FauxResponseStep::Factory(Arc::new(|context, _, _, model| {
+            Box::pin(async move {
+                assert!(context.messages.iter().any(|message| match message {
+                    Message::User(user) => match &user.content {
+                        UserContent::Text(text) => text == "Say hello",
+                        UserContent::Blocks(blocks) => blocks.iter().any(|block| {
+                            matches!(block, pi_ai::types::ImageOrTextContent::Text(text) if text.text == "Say hello")
+                        }),
+                    },
+                    _ => false,
+                }));
+                let mut response = faux_assistant_message(FauxAssistantContent::Text("Hello from faux session.".to_string()), None);
+                response.api = model.api.clone(); response.provider = model.provider.clone(); response.model = model.id.clone();
+                response
+            })
+        }))]);
+        let mut registry_auth = AuthStorage::in_memory(Default::default(), None);
+        registry_auth.set_runtime_api_key(&model.provider, "synthetic-faux-key");
+        let registry = Arc::new(Mutex::new(ModelRegistry::in_memory(registry_auth)));
+        let settings = Arc::new(Mutex::new(crate::core::settings_manager::SettingsManager::in_memory(
+            serde_json::json!({"autoRefine":{"enabled":false},"retry":{"enabled":false},"compaction":{"enabled":false},"telemetryEnabled":false,"agentTracesEnabled":false}).as_object().unwrap().clone(),
+        )));
+        let loader = Arc::new(DefaultResourceLoader::new(crate::core::resource_loader::DefaultResourceLoaderOptions {
+            cwd: cwd.clone(), agent_dir: cwd.clone(), settings_manager: Some(settings.clone()),
+            no_extensions: true, no_skills: true, no_prompt_templates: true, no_themes: true,
+            no_context_files: true, bundled_skills_dir: Some(None), ..Default::default()
+        }));
+        loader.reload().await;
+        let result = create_agent_session(CreateAgentSessionOptions {
+            cwd: Some(cwd.clone()), agent_dir: Some(cwd.clone()), model: Some(model),
+            auth_storage: Some(Arc::new(tokio::sync::Mutex::new(AuthStorage::in_memory(Default::default(), None)))),
+            model_registry: Some(registry), settings_manager: Some(settings), resource_loader: Some(loader),
+            session_manager: Some(Arc::new(Mutex::new(SessionManager::in_memory(Some(&cwd), Some(&cwd)).unwrap()))),
+            no_tools: Some("all".to_string()),
+            creation: AgentSessionCreationOptions { prewarm_ipython_kernel: Some(false), telemetry_disabled: Some(true), ..Default::default() },
+            ..Default::default()
+        }).await.unwrap();
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let unsubscribe = result.session.subscribe(Arc::new(move |event| captured.lock().unwrap().push(event.type_name().to_string())));
+        tokio::time::timeout(std::time::Duration::from_secs(20), result.session.prompt_and_wait("Say hello", None)).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), result.session.wait_for_headless_idle()).await.unwrap().unwrap();
+        assert_eq!(provider.call_count(), 1);
+        assert_eq!(provider.get_pending_response_count(), 0);
+        assert!(result.session.messages().iter().any(|message| crate::core::side_question::read_assistant_text(message) == "Hello from faux session."));
+        let captured = events.lock().unwrap().clone();
+        assert!(captured.iter().any(|event| event == "message_end"));
+        assert!(captured.iter().any(|event| event == "agent_end"));
+        unsubscribe();
+        result.session.dispose_async(Some(false)).await;
+        provider.unregister();
+    }
 
     #[test]
     fn thinking_level_name_round_trips_every_level() {

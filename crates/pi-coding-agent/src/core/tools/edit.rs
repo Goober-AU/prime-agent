@@ -942,7 +942,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(text, "Successfully replaced 1 block(s) in target.txt.");
         assert_eq!(written, "a\nB\nc\n");
-        assert_eq!(details.diff, "-2 b\n+2 B");
+        assert_eq!(details.diff, " 1 a\n-2 b\n+2 B\n 3 c");
         assert_eq!(details.first_changed_line, Some(2));
     }
 
@@ -1021,8 +1021,13 @@ mod tests {
             ..RenderableEditArgs::default()
         };
         let lines = render_edit_result(&mut state, &result, Some(&args), &PlainTheme, false, "/tmp", false);
-        assert_eq!(lines.len(), 2);
-        assert!(lines[1].contains("a.txt"));
+        // renderResult updates the call preview, then suppresses its duplicate.
+        assert!(lines.is_empty());
+        let call = state.call_component.as_ref().unwrap();
+        assert_eq!(call.preview, Some(EditPreview::Result {
+            diff: "-1 a\n+1 b".to_string(), first_changed_line: Some(1),
+        }));
+        assert!(call.children.iter().any(|line| line.contains("a.txt") && line.contains("+1 -1")));
 
         let error_result = EditToolResultLike {
             content: vec![RenderContentBlock::from_text("boom")],

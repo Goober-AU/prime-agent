@@ -601,6 +601,7 @@ pub fn registered_api_ids() -> Vec<String> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::api_registry::API_REGISTRY_TEST_LOCK;
 	use crate::types::{InputModality, Message, UserContent, UserMessage};
 
 	fn model(api: &str, provider: &str, id: &str) -> Model {
@@ -624,6 +625,7 @@ mod tests {
 
 	#[test]
 	fn registers_every_built_in_api_in_order() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		clear_api_providers();
 		register_built_in_api_providers();
 		assert_eq!(
@@ -646,6 +648,7 @@ mod tests {
 
 	#[test]
 	fn only_responses_apis_expose_compaction() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		clear_api_providers();
 		register_built_in_api_providers();
 		let providers = get_api_providers();
@@ -660,6 +663,7 @@ mod tests {
 
 	#[test]
 	fn supports_compaction_is_api_guarded() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		clear_api_providers();
 		register_built_in_api_providers();
 		let providers = get_api_providers();
@@ -673,14 +677,15 @@ mod tests {
 		clear_api_providers();
 	}
 
-	#[tokio::test]
-	async fn compaction_guard_reports_api_mismatch() {
+	#[test]
+	#[should_panic(expected = "Mismatched compaction api: openai-completions")]
+	fn compaction_guard_reports_api_mismatch() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		clear_api_providers();
+		register_built_in_api_providers();
 		let mismatched = model("openai-completions", "openai", "gpt-5");
-		// The guard is evaluated inside the future, so run it on the runtime.
-		let guard = compact_openai_responses_guarded();
-		let future = guard(&mismatched, &context(), None);
-		let joined = tokio::spawn(future).await;
-		assert!(joined.is_err(), "guard must panic with the mismatched api");
+		let guard = crate::api_registry::get_api_provider("openai-responses").unwrap().compact.unwrap();
+		let _ = guard(&mismatched, &context(), None);
 	}
 
 	#[tokio::test]
@@ -775,6 +780,7 @@ mod tests {
 
 	#[test]
 	fn reset_api_providers_rebuilds_registry() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		clear_api_providers();
 		assert_eq!(get_api_providers().len(), 0);
 		reset_api_providers();

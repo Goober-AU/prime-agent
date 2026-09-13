@@ -1575,12 +1575,9 @@ fn collapse_whitespace(value: &str) -> String {
 
 /// The ConverseStream endpoint the SDK derives: `POST /model/{modelId}/converse-stream`.
 pub fn converse_stream_path(model_id: &str) -> String {
-	format!("/model/{}/converse-stream", escape_uri_path(model_id))
-}
-
-/// `escapeUriPath`: escape each segment but keep the `/` separators.
-fn escape_uri_path(value: &str) -> String {
-	value.split('/').map(escape_uri).collect::<Vec<_>>().join("/")
+	// modelId is a non-greedy HTTP label, so an ARN's slash belongs inside
+	// the escaped label rather than introducing another path segment.
+	format!("/model/{}/converse-stream", escape_uri(model_id))
 }
 
 /// The host the SDK derives when no explicit endpoint is configured.
@@ -2509,7 +2506,7 @@ mod tests {
 
 	#[test]
 	fn explicit_endpoint_is_only_pinned_for_standard_hosts() {
-		assert!(!should_use_explicit_bedrock_endpoint(
+		assert!(should_use_explicit_bedrock_endpoint(
 			"https://bedrock-runtime.eu-central-1.amazonaws.com",
 			None,
 			false
@@ -2611,7 +2608,14 @@ mod tests {
 
 	#[test]
 	fn thinking_effort_clamps_to_supported_levels() {
-		let base = model("global.anthropic.claude-opus-4-7", "");
+		let mut base = model("global.anthropic.claude-opus-4-7", "");
+		// Extended levels require an explicit model map, even for adaptive models.
+		assert_eq!(map_thinking_level_to_effort(&base, Some("xhigh")), "high");
+		assert_eq!(map_thinking_level_to_effort(&base, Some("max")), "high");
+		base.thinking_level_map = Some(ThinkingLevelMap::from([
+			("xhigh".to_string(), Some("xhigh".to_string())),
+			("max".to_string(), Some("max".to_string())),
+		]));
 		assert_eq!(map_thinking_level_to_effort(&base, Some("low")), "low");
 		assert_eq!(map_thinking_level_to_effort(&base, Some("medium")), "medium");
 		assert_eq!(map_thinking_level_to_effort(&base, Some("high")), "high");
@@ -2638,7 +2642,10 @@ mod tests {
 	#[test]
 	fn thinking_payload_matches_the_typescript_shapes() {
 		// Adaptive: thinking + output_config, no anthropic_beta.
-		let adaptive = model("global.anthropic.claude-opus-4-7", "Claude Opus 4.7");
+		let mut adaptive = model("global.anthropic.claude-opus-4-7", "Claude Opus 4.7");
+		adaptive.thinking_level_map = Some(ThinkingLevelMap::from([
+			("xhigh".to_string(), Some("xhigh".to_string())),
+		]));
 		let options = BedrockOptions {
 			reasoning: Some("xhigh".to_string()),
 			..Default::default()
@@ -2668,7 +2675,7 @@ mod tests {
 			..Default::default()
 		};
 		let fields = build_additional_model_request_fields(&budget_model, &budget_options).unwrap();
-		assert_eq!(fields["thinking"], json!({ "type": "enabled", "budget_tokens": 16384, "display": "summarized" }));
+		assert_eq!(fields["thinking"], json!({ "type": "enabled", "budget_tokens": 16384.0, "display": "summarized" }));
 		assert_eq!(fields["anthropic_beta"], json!(["interleaved-thinking-2025-05-14"]));
 
 		// xhigh/max clamp to the high budget.
@@ -2677,7 +2684,7 @@ mod tests {
 			..Default::default()
 		};
 		let fields = build_additional_model_request_fields(&budget_model, &max_options).unwrap();
-		assert_eq!(fields["thinking"]["budget_tokens"], json!(16384));
+		assert_eq!(fields["thinking"]["budget_tokens"].as_f64(), Some(16384.0));
 
 		// Custom budgets win for the clamped level.
 		let custom_options = BedrockOptions {
@@ -2786,6 +2793,9 @@ mod tests {
 			"read",
 			Map::new(),
 		))];
+		assistant.content.push(ContentBlock::ToolCall(ToolCall::new(
+			"tool-2", "read", Map::new(),
+		)));
 		let context = Context::new(
 			None,
 			vec![
@@ -2837,7 +2847,7 @@ mod tests {
 		let claude = model("global.anthropic.claude-opus-4-6-v1", "");
 		let nova = model("amazon.nova-2-lite-v1:0", "Nova 2 Lite");
 
-		let mut assistant = AssistantMessage::new("bedrock-converse-stream", "amazon-bedrock", "m", 0);
+		let mut assistant = AssistantMessage::new("bedrock-converse-stream", "amazon-bedrock", &claude.id, 0);
 		let mut signed = ThinkingContent::new("reasoning");
 		signed.thinking_signature = Some("sig".to_string());
 		let mut unsigned = ThinkingContent::new("reasoning without signature");
@@ -2847,6 +2857,7 @@ mod tests {
 			ContentBlock::Thinking(unsigned),
 			ContentBlock::Text(TextContent::new("   ")),
 		];
+		let nova_assistant = AssistantMessage { model: nova.id.clone(), ..assistant.clone() };
 		let context = Context::new(None, vec![Message::assistant(assistant)], None);
 
 		let converted = convert_messages(&context, &claude, "none").unwrap();
@@ -2856,8 +2867,13 @@ mod tests {
 		assert_eq!(content[1]["text"], json!("reasoning without signature"));
 
 		let converted = convert_messages(&context, &nova, "none").unwrap();
+		assert_eq!(converted[0]["content"][0], json!({ "text": "reasoning" }));
+
+		let nova_context = Context::new(None, vec![Message::assistant(nova_assistant)], None);
+		let converted = convert_messages(&nova_context, &nova, "none").unwrap();
 		let content = converted[0]["content"].as_array().unwrap();
 		assert_eq!(content.len(), 2);
+		assert_eq!(content[0]["reasoningContent"]["reasoningText"]["text"], json!("reasoning"));
 		assert!(content[0]["reasoningContent"]["reasoningText"].get("signature").is_none());
 	}
 
@@ -2982,7 +2998,9 @@ mod tests {
 			"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 		);
 
-		// AWS SigV4 test suite: get-vanilla (IAM ListUsers).
+		// IAM ListUsers example with Smithy's default payload-checksum header.
+		// Its published 5d672d79... signature omits x-amz-content-sha256;
+		// including that signed header yields the independently computed value below.
 		let credentials = AwsCredentials {
 			access_key_id: "AKIDEXAMPLE".to_string(),
 			secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".to_string(),
@@ -3015,7 +3033,7 @@ mod tests {
 			concat!(
 				"AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/iam/aws4_request, ",
 				"SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date, ",
-				"Signature=5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7"
+				"Signature=dd479fa8a80364edf2119ec24bebde66712ee9c9cb2b0d92eb3ab9ccdc0c3947"
 			)
 		);
 		assert_eq!(
@@ -3245,6 +3263,8 @@ mod tests {
 		);
 		handle_content_block_delta(0, &json!({ "toolUse": { "input": "\"a.txt\"}" } }), &mut blocks, &mut output, &stream);
 		handle_content_block_stop(0, &mut blocks, &mut output, &stream);
+		// The response producer owns stream completion; a block stop does not end it.
+		stream.end(None);
 
 		let mut events: Vec<String> = Vec::new();
 		while let Some(event) = stream.next().await {
@@ -3280,6 +3300,7 @@ mod tests {
 			&stream,
 		);
 		handle_content_block_stop(1, &mut blocks, &mut output, &stream);
+		stream.end(None);
 
 		let mut events: Vec<String> = Vec::new();
 		while let Some(event) = stream.next().await {
@@ -3359,12 +3380,12 @@ mod tests {
 	#[test]
 	fn client_config_pins_standard_endpoints_only_without_region_or_profile() {
 		// Pure helpers used by resolve_bedrock_client_config.
-		assert!(!should_use_explicit_bedrock_endpoint(
+		assert!(should_use_explicit_bedrock_endpoint(
 			"https://bedrock-runtime.eu-central-1.amazonaws.com",
 			None,
 			false
 		));
-		assert!(should_use_explicit_bedrock_endpoint(
+		assert!(!should_use_explicit_bedrock_endpoint(
 			"https://bedrock-runtime.eu-central-1.amazonaws.com",
 			Some("us-east-2"),
 			false

@@ -2038,8 +2038,12 @@ pub fn parse_web_socket(
             wake: Arc::new(tokio::sync::Notify::new()),
             state: Arc::new(Mutex::new(WebSocketParseShared::default())),
             listeners: None,
+            finished: false,
         },
         |mut state| async move {
+            if state.finished {
+                return None;
+            }
             state.ensure_listeners();
             loop {
                 state.sync_from_shared();
@@ -2049,6 +2053,7 @@ pub fn parse_web_socket(
                     .map(|signal| signal.is_cancelled())
                     .unwrap_or(false)
                 {
+                    state.finished = true;
                     state.cleanup();
                     return Some((Err(CodexThrown::error("Request was aborted")), state));
                 }
@@ -2068,11 +2073,20 @@ pub fn parse_web_socket(
                     (!shared.queue.is_empty(), shared.done)
                 };
                 if !has_event && !done {
-                    notified.await;
+                    match &state.signal {
+                        Some(signal) => tokio::select! {
+                            _ = notified => {}
+                            _ = signal.cancelled() => {}
+                        },
+                        None => notified.await,
+                    }
                 }
             }
 
             state.sync_from_shared();
+            // A TypeScript generator throws once, then is exhausted. `done`
+            // tracks the socket; `finished` tracks this generator's final yield.
+            state.finished = true;
             state.cleanup();
             if let Some(failed) = state.failed.clone() {
                 return Some((Err(failed), state));
@@ -2100,6 +2114,14 @@ struct WebSocketParseState {
     wake: Arc<tokio::sync::Notify>,
     state: Arc<Mutex<WebSocketParseShared>>,
     listeners: Option<Vec<(WebSocketEventType, WebSocketListener)>>,
+    finished: bool,
+}
+
+impl Drop for WebSocketParseState {
+    fn drop(&mut self) {
+        // Async generator finally also runs when its consumer stops early.
+        self.cleanup();
+    }
 }
 
 impl WebSocketParseState {
@@ -2528,6 +2550,8 @@ async fn process_web_socket_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    static WEB_SOCKET_TEST_LOCK: Mutex<()> = Mutex::new(());
     use crate::types::{ContentBlock, Message, TextContent, UserContent, UserMessage};
     use serde_json::json;
 
@@ -2910,6 +2934,7 @@ mod tests {
 
     #[test]
     fn reset_and_close_web_socket_sessions_clear_state() {
+        let _guard = WEB_SOCKET_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         set_web_socket_constructor(None);
         get_or_create_web_socket_debug_stats("session-a");
         update_web_socket_debug_stats("session-a", |stats| stats.requests = 3);
@@ -2925,6 +2950,7 @@ mod tests {
 
     #[test]
     fn web_socket_transport_is_unavailable_without_a_constructor() {
+        let _guard = WEB_SOCKET_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         set_web_socket_constructor(None);
         let result = tokio::runtime::Runtime::new()
             .unwrap()
@@ -3000,6 +3026,17 @@ mod tests {
         Arc::new(FakeSocket::default())
     }
 
+    async fn next_socket_event(
+        stream: &mut Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>>,
+    ) -> Option<Result<Value, CodexThrown>> {
+        tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await.expect("socket event must settle")
+    }
+
+    fn assert_no_socket_listeners(socket: &FakeSocket) {
+        assert!(socket.listeners.lock().unwrap().values().all(Vec::is_empty));
+    }
+
     #[tokio::test]
     async fn parse_web_socket_yields_messages_until_completion() {
         let socket = fake_socket();
@@ -3036,10 +3073,13 @@ mod tests {
             socket_for_emitter.emit(WebSocketEventType::Close, json!({ "code": 1006, "wasClean": false }));
         });
 
-        let stream = parse_web_socket(socket, None);
-        let collected: Vec<Result<Value, CodexThrown>> = stream.collect().await;
-        let error = collected.last().unwrap().clone().unwrap_err();
+        let mut stream = parse_web_socket(socket.clone(), None);
+        let created = next_socket_event(&mut stream).await.unwrap().unwrap();
+        assert_eq!(created["type"], json!("response.created"));
+        let error = next_socket_event(&mut stream).await.unwrap().unwrap_err();
         assert_eq!(error.message, "WebSocket closed 1006");
+        assert!(next_socket_event(&mut stream).await.is_none());
+        assert_no_socket_listeners(&socket);
     }
 
     #[tokio::test]
@@ -3051,11 +3091,39 @@ mod tests {
             socket_for_emitter.emit(WebSocketEventType::Message, json!({ "data": "not json" }));
         });
 
-        let stream = parse_web_socket(socket, None);
-        let collected: Vec<Result<Value, CodexThrown>> = stream.collect().await;
-        let error = collected.last().unwrap().clone().unwrap_err();
+        let mut stream = parse_web_socket(socket.clone(), None);
+        let error = next_socket_event(&mut stream).await.unwrap().unwrap_err();
         assert!(error.message.starts_with("Invalid Codex WebSocket JSON:"));
         assert_eq!(error.name, "CodexProtocolError");
+        assert!(next_socket_event(&mut stream).await.is_none());
+        assert_no_socket_listeners(&socket);
+    }
+
+    #[tokio::test]
+    async fn parse_web_socket_abort_wakes_an_idle_stream_and_exhausts_it() {
+        let socket = fake_socket();
+        let signal = tokio_util::sync::CancellationToken::new();
+        let mut stream = parse_web_socket(socket.clone(), Some(signal.clone()));
+        let mut pending = Box::pin(stream.next());
+        assert!(futures::poll!(&mut pending).is_pending());
+        drop(pending);
+        signal.cancel();
+        let error = next_socket_event(&mut stream).await.unwrap().unwrap_err();
+        assert_eq!(error.message, "Request was aborted");
+        assert!(next_socket_event(&mut stream).await.is_none());
+        assert_no_socket_listeners(&socket);
+    }
+
+    #[tokio::test]
+    async fn dropping_a_pending_web_socket_stream_removes_its_listeners() {
+        let socket = fake_socket();
+        let mut stream = parse_web_socket(socket.clone(), None);
+        let mut pending = Box::pin(stream.next());
+        assert!(futures::poll!(&mut pending).is_pending());
+        assert_eq!(socket.listeners.lock().unwrap().values().map(Vec::len).sum::<usize>(), 3);
+        drop(pending);
+        drop(stream);
+        assert_no_socket_listeners(&socket);
     }
 
     fn map_events(events: Vec<Result<Value, CodexThrown>>) -> (Vec<Value>, Option<CodexThrown>) {
@@ -3100,7 +3168,7 @@ mod tests {
         assert!(mapped.is_empty());
         let error = error.unwrap();
         assert_eq!(error.name, "CodexApiError");
-        assert_eq!(error.message, "Rejected");
+        assert_eq!(error.message, "Codex error: Rejected");
         assert_eq!(error.code.as_deref(), Some("invalid_request"));
     }
 
@@ -3177,6 +3245,7 @@ mod tests {
 
     #[test]
     fn transport_failure_diagnostics_and_web_socket_state_machine() {
+        let _guard = WEB_SOCKET_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // The unreachable-host case of the WebSocket path is exercised through the
         // injectable constructor: one failure before any event, then an SSE fallback.
         set_web_socket_constructor(None);
@@ -3219,6 +3288,7 @@ mod tests {
 
     #[test]
     fn acquire_web_socket_reuses_and_releases_cached_connections() {
+        let _guard = WEB_SOCKET_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let sockets: Arc<Mutex<Vec<Arc<FakeSocket>>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = sockets.clone();
         let constructor: WebSocketConstructor = Arc::new(move |_url: &str, _headers: IndexMap<String, String>| {
@@ -3278,6 +3348,7 @@ mod tests {
 
     #[test]
     fn acquire_web_socket_without_a_session_closes_immediately() {
+        let _guard = WEB_SOCKET_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         set_web_socket_constructor(None);
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let result = runtime.block_on(acquire_web_socket("wss://example.test", &IndexMap::new(), None, None));

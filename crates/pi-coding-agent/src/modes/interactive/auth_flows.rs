@@ -1004,16 +1004,17 @@ mod tests {
 
     #[test]
     fn api_key_login_provider_rules() {
-        let oauth: HashSet<String> = ["anthropic".to_string()].into_iter().collect();
+        let oauth: HashSet<String> = ["oauth-only".to_string()].into_iter().collect();
         // A display-name provider is always an API-key login provider.
         assert!(is_api_key_login_provider("openai", &oauth, None));
         // A built-in model provider without a display name is not offered.
-        let builtins: HashSet<String> = ["deepseek".to_string()].into_iter().collect();
-        assert!(!is_api_key_login_provider("deepseek", &oauth, Some(&builtins)));
+        let builtins: HashSet<String> = ["unnamed-builtin".to_string()].into_iter().collect();
+        assert!(!is_api_key_login_provider("unnamed-builtin", &oauth, Some(&builtins)));
+        assert!(is_api_key_login_provider("deepseek", &oauth, Some(&builtins)));
         // A custom provider that has no OAuth flow is offered.
         assert!(is_api_key_login_provider("my-proxy", &oauth, Some(&builtins)));
         // A provider with an OAuth flow is not offered twice.
-        assert!(!is_api_key_login_provider("anthropic", &oauth, Some(&builtins)));
+        assert!(!is_api_key_login_provider("oauth-only", &oauth, Some(&builtins)));
     }
 
     #[test]

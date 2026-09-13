@@ -13,7 +13,7 @@ pub struct SpawnOptions {
     pub cwd: Option<String>,
     pub env: Option<Vec<(String, String)>>,
     pub detached: bool,
-    /// Run through the platform shell (`cmd /c`) as Node's `shell: true` does.
+    /// Run through the platform shell as Node's `shell: true` does.
     pub shell: bool,
     pub capture_stdout: bool,
     pub capture_stderr: bool,
@@ -137,6 +137,9 @@ fn build_std_command(command: &str, args: &[String], options: &SpawnOptions) -> 
         builder.arg("/c").arg(command);
         builder.args(args);
         builder
+    } else if options.shell {
+        // Node joins command and arguments before handing them to /bin/sh.
+        shell_command(&std::iter::once(command).chain(args.iter().map(String::as_str)).collect::<Vec<_>>().join(" "))
     } else {
         let mut builder = std::process::Command::new(command);
         builder.args(args);
@@ -155,6 +158,10 @@ fn build_tokio_command(command: &str, args: &[String], options: &SpawnOptions) -
         builder.arg("/c").arg(command);
         builder.args(args);
         builder
+    } else if options.shell {
+        tokio::process::Command::from(shell_command(
+            &std::iter::once(command).chain(args.iter().map(String::as_str)).collect::<Vec<_>>().join(" "),
+        ))
     } else {
         let mut builder = tokio::process::Command::new(command);
         builder.args(args);
@@ -512,6 +519,31 @@ pub fn wait_with_timeout(child: &mut std::process::Child, timeout_ms: u64) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_spawn_interprets_the_joined_command_and_arguments() {
+        let output = spawn_sync_hidden(
+            "printf '%s'",
+            &["'hello world'".to_string()],
+            SpawnOptions { shell: true, capture_stdout: true, ..Default::default() },
+        ).unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"hello world");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shell_spawn_reports_success_and_failure() {
+        for code in [0, 7] {
+            let handle = spawn_hidden(
+                &format!("exit {code}"),
+                &[],
+                SpawnOptions { shell: true, ..Default::default() },
+            ).unwrap();
+            assert_eq!(wait_for_child_process(handle.child).await.unwrap(), Some(code));
+        }
+    }
 
     #[test]
     fn windows_shell_detection_matches_the_typescript() {

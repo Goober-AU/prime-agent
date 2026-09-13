@@ -95,7 +95,7 @@ fn _assert_arc_used(_: Arc<()>) {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_registry::{clear_api_providers, register_api_provider, ApiProvider};
+    use crate::api_registry::{clear_api_providers, register_api_provider, ApiProvider, API_REGISTRY_TEST_LOCK};
     use crate::types::{AssistantMessageEvent, STOP_REASON_STOP};
 
     fn provider(api: &str) -> ApiProvider {
@@ -122,6 +122,7 @@ mod tests {
 
     #[test]
     fn stream_dispatches_to_the_registered_provider() {
+        let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_api_providers();
         register_api_provider(provider("anthropic-messages"), None);
         let model = Model::new("m", "M", "anthropic-messages", "anthropic", "https://example.test");
@@ -132,6 +133,7 @@ mod tests {
 
     #[test]
     fn supports_compaction_is_false_without_a_compact_function() {
+        let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_api_providers();
         register_api_provider(provider("mistral-conversations"), None);
         let model = Model::new("m", "M", "mistral-conversations", "mistral", "https://example.test");
@@ -142,6 +144,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "No API provider registered for api: unknown-api")]
     fn unregistered_api_panics_with_typescript_message() {
+        let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_api_providers();
         let model = Model::new("m", "M", "unknown-api", "p", "https://example.test");
         let _ = stream(&model, &Context::default(), None);

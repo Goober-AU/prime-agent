@@ -232,7 +232,7 @@ impl ExtensionUiContext for NoOpUiContext {
     fn set_title(&self, _title: String) {}
 
     fn custom(&self, _factory: Value, _options: Option<Value>) -> super::types::CustomComponentResult {
-        Box::pin(async { Arc::new(NoOpComponent) as Arc<dyn Component> })
+        Box::pin(async { None })
     }
 
     fn paste_to_editor(&self, _text: String) {}
@@ -1958,7 +1958,7 @@ mod tests {
             handlers: HashMap::new(),
             tools: HashMap::new(),
             message_renderers: HashMap::new(),
-            commands: HashMap::new(),
+            commands: indexmap::IndexMap::new(),
             flags: HashMap::new(),
             shortcuts: HashMap::new(),
         }));

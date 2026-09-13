@@ -67,10 +67,11 @@ fn get_env() -> Vec<(String, String)> {
 }
 
 pub fn is_offline_mode_enabled() -> bool {
-    let Some(value) = std::env::var("PI_OFFLINE").ok().filter(|value| !value.is_empty()) else {
-        return false;
-    };
-    value == "1" || value.to_lowercase() == "true" || value.to_lowercase() == "yes"
+    offline_mode_from_value(std::env::var("PI_OFFLINE").ok().as_deref())
+}
+
+fn offline_mode_from_value(value: Option<&str>) -> bool {
+    matches!(value, Some(value) if value == "1" || value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("yes"))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1557,7 +1558,11 @@ impl DefaultPackageManager {
     }
 
     pub async fn check_for_available_updates(&self) -> Vec<PackageUpdate> {
-        if is_offline_mode_enabled() {
+        self.check_for_available_updates_with_offline(is_offline_mode_enabled()).await
+    }
+
+    async fn check_for_available_updates_with_offline(&self, offline: bool) -> Vec<PackageUpdate> {
+        if offline {
             return Vec::new();
         }
 
@@ -3227,28 +3232,17 @@ fn add_resource(
 
 /// `spec.match(/^(@?[^@]+(?:\/[^@]+)?)(?:@(.+))?$/)`.
 fn parse_npm_spec(spec: &str) -> (String, Option<String>) {
-    let bytes: Vec<char> = spec.chars().collect();
-    let mut index = 0;
-    if index < bytes.len() && bytes[index] == '@' {
-        index += 1;
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(r"^(@?[^@]+(?:/[^@]+)?)(?:@(.+))?$").expect("npm spec pattern")
+    });
+    match pattern.captures(spec) {
+        Some(captures) => (
+            captures.get(1).map_or(spec, |name| name.as_str()).to_string(),
+            captures.get(2).map(|version| version.as_str().to_string()),
+        ),
+        None => (spec.to_string(), None),
     }
-    let start = index;
-    while index < bytes.len() && bytes[index] != '@' {
-        index += 1;
-    }
-    let mut name: String = bytes[start..index].iter().collect();
-    if index >= bytes.len() {
-        return (name, None);
-    }
-    // `(?:@(.+))?`: the remaining `@version` (or `@scope/name@version`) suffix.
-    let rest: String = bytes[index + 1..].iter().collect();
-    if rest.is_empty() {
-        return (name, None);
-    }
-    if name.is_empty() {
-        name = spec.to_string();
-    }
-    (name, Some(rest))
 }
 
 fn join_path(base: &str, name: &str) -> String {
@@ -3376,14 +3370,9 @@ mod tests {
     use crate::core::settings_manager::InMemorySettingsStorage;
 
     fn manager(cwd: &str, agent_dir: &str, settings: Value) -> DefaultPackageManager {
-        let mut settings_manager = SettingsManager::from_storage(Arc::new(InMemorySettingsStorage::new()));
-        if let Some(object) = settings.as_object() {
-            for (key, value) in object {
-                let mut global = settings_manager.get_global_settings();
-                global.insert(key.clone(), value.clone());
-                settings_manager.apply_overrides(&global);
-            }
-        }
+        let settings_manager = SettingsManager::in_memory(
+            settings.as_object().unwrap().iter().map(|(key, value)| (key.clone(), value.clone())).collect(),
+        );
         DefaultPackageManager::new(PackageManagerOptions {
             cwd: cwd.to_string(),
             agent_dir: agent_dir.to_string(),
@@ -3402,17 +3391,12 @@ mod tests {
 
     #[test]
     fn offline_mode_reads_the_env_flag() {
-        std::env::remove_var("PI_OFFLINE");
-        assert!(!is_offline_mode_enabled());
-        std::env::set_var("PI_OFFLINE", "1");
-        assert!(is_offline_mode_enabled());
-        std::env::set_var("PI_OFFLINE", "TRUE");
-        assert!(is_offline_mode_enabled());
-        std::env::set_var("PI_OFFLINE", "yes");
-        assert!(is_offline_mode_enabled());
-        std::env::set_var("PI_OFFLINE", "0");
-        assert!(!is_offline_mode_enabled());
-        std::env::remove_var("PI_OFFLINE");
+        assert!(!offline_mode_from_value(None));
+        assert!(!offline_mode_from_value(Some("")));
+        assert!(offline_mode_from_value(Some("1")));
+        assert!(offline_mode_from_value(Some("TRUE")));
+        assert!(offline_mode_from_value(Some("yes")));
+        assert!(!offline_mode_from_value(Some("0")));
     }
 
     #[test]
@@ -3443,6 +3427,8 @@ mod tests {
             ("@scope/pkg".to_string(), Some("next".to_string()))
         );
         assert_eq!(parse_npm_spec("@scope/pkg"), ("@scope/pkg".to_string(), None));
+        assert_eq!(parse_npm_spec("pkg@"), ("pkg@".to_string(), None));
+        assert_eq!(parse_npm_spec("@"), ("@".to_string(), None));
     }
 
     #[test]
@@ -3457,7 +3443,7 @@ mod tests {
             other => panic!("expected npm source, got {other:?}"),
         }
         assert!(matches!(
-            manager.parse_source("github.com/user/repo"),
+            manager.parse_source("git:github.com/user/repo"),
             ParsedSource::Git(_)
         ));
         match manager.parse_source("local:./ext") {
@@ -3605,7 +3591,7 @@ mod tests {
     fn resolves_local_resource_entries_with_patterns() {
         let cwd = temp_dir("resolve-local");
         let agent = temp_dir("resolve-agent");
-        let project_dir = Path::new(&cwd).join(CONFIG_DIR_NAME).join("prompts");
+        let project_dir = Path::new(&agent).join("prompts");
         std::fs::create_dir_all(&project_dir).unwrap();
         std::fs::write(project_dir.join("keep.md"), "k").unwrap();
         std::fs::write(project_dir.join("drop.md"), "d").unwrap();
@@ -3621,8 +3607,9 @@ mod tests {
             .unwrap();
         let paths: Vec<String> = resolved.prompts.iter().map(|entry| entry.path.clone()).collect();
         assert!(paths.iter().any(|path| path.ends_with("keep.md")));
-        assert!(!paths.iter().any(|path| path.ends_with("drop.md")));
-        assert!(resolved.prompts.iter().all(|entry| entry.enabled));
+        assert_eq!(resolved.prompts.len(), 2);
+        assert!(resolved.prompts.iter().find(|entry| entry.path.ends_with("keep.md")).unwrap().enabled);
+        assert!(!resolved.prompts.iter().find(|entry| entry.path.ends_with("drop.md")).unwrap().enabled);
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&agent);
     }
@@ -3744,7 +3731,7 @@ mod tests {
         let agent = temp_dir("identity-agent");
         let manager = manager(&cwd, &agent, serde_json::json!({}));
         let https = manager.get_package_identity("https://github.com/user/repo", None);
-        let ssh = manager.get_package_identity("git@github.com:user/repo.git", None);
+        let ssh = manager.get_package_identity("git:git@github.com:user/repo.git", None);
         assert_eq!(https, ssh);
         assert_eq!(https, "git:github.com/user/repo");
         let _ = std::fs::remove_dir_all(&cwd);
@@ -3793,13 +3780,11 @@ mod tests {
             .block_on(manager.update(Some("npm:missing")))
             .unwrap_err();
         assert_eq!(error, "No matching package found for npm:missing");
-        // Offline mode short-circuits the configured-source update path.
-        std::env::set_var("PI_OFFLINE", "1");
+        // Updating an empty configured source set is a no-op.
         assert!(tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(manager.update(None))
             .is_ok());
-        std::env::remove_var("PI_OFFLINE");
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&agent);
     }
@@ -3809,12 +3794,10 @@ mod tests {
         let cwd = temp_dir("update-check");
         let agent = temp_dir("update-check-agent");
         let manager = manager(&cwd, &agent, serde_json::json!({"packages": ["npm:pkg"]}));
-        std::env::set_var("PI_OFFLINE", "1");
         let updates = tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(manager.check_for_available_updates());
+            .block_on(manager.check_for_available_updates_with_offline(true));
         assert!(updates.is_empty());
-        std::env::remove_var("PI_OFFLINE");
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&agent);
     }
@@ -3823,7 +3806,7 @@ mod tests {
     fn relative_paths_use_posix_separators() {
         assert_eq!(relative_path("/a/b", "/a/b/c.md"), "c.md");
         assert_eq!(relative_path("/a/b", "/a/b"), "");
-        assert!(to_posix_path("a\\b").contains('/'));
+        assert_eq!(to_posix_path(&format!("a{}b", std::path::MAIN_SEPARATOR)), "a/b");
     }
 
     #[test]
@@ -3901,7 +3884,7 @@ mod tests {
     fn local_package_source_adds_extension_and_filtered_resources() {
         let cwd = temp_dir("local-package");
         let agent = temp_dir("local-package-agent");
-        let package_dir = Path::new(&cwd).join("pkg");
+        let package_dir = Path::new(&agent).join("pkg");
         let prompts = package_dir.join("prompts");
         std::fs::create_dir_all(&prompts).unwrap();
         std::fs::write(prompts.join("a.md"), "").unwrap();
@@ -3930,7 +3913,7 @@ mod tests {
     fn local_package_without_resource_dirs_is_an_extension() {
         let cwd = temp_dir("local-ext-only");
         let agent = temp_dir("local-ext-only-agent");
-        let package_dir = Path::new(&cwd).join("pkg");
+        let package_dir = Path::new(&agent).join("pkg");
         std::fs::create_dir_all(&package_dir).unwrap();
         std::fs::write(package_dir.join("index.ts"), "").unwrap();
 
@@ -3940,7 +3923,7 @@ mod tests {
             .block_on(manager.resolve(None))
             .unwrap();
         assert_eq!(resolved.extensions.len(), 1);
-        assert!(resolved.extensions[0].path.ends_with("index.ts"));
+        assert_eq!(Path::new(&resolved.extensions[0].path), package_dir.as_path());
         let _ = std::fs::remove_dir_all(&cwd);
         let _ = std::fs::remove_dir_all(&agent);
     }
@@ -3949,7 +3932,7 @@ mod tests {
     fn resolve_dedupes_canonical_paths() {
         let cwd = temp_dir("dedupe-paths");
         let agent = temp_dir("dedupe-paths-agent");
-        let prompts = Path::new(&cwd).join(CONFIG_DIR_NAME).join("prompts");
+        let prompts = Path::new(&agent).join("prompts");
         std::fs::create_dir_all(&prompts).unwrap();
         std::fs::write(prompts.join("p.md"), "").unwrap();
 
@@ -3979,6 +3962,7 @@ mod tests {
 
         let mut settings_manager = SettingsManager::from_storage(Arc::new(InMemorySettingsStorage::new()));
         settings_manager.set_enable_builtin_skills(true);
+        settings_manager.apply_overrides(&[("bundledSkills".to_string(), serde_json::json!({"websearch": false}))].into_iter().collect());
         let manager = DefaultPackageManager::new(PackageManagerOptions {
             cwd: cwd.clone(),
             agent_dir: agent.clone(),

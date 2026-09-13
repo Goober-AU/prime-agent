@@ -107,56 +107,69 @@ impl RpcExtensionUiState {
     }
 
     /// `createDialogPromise(opts, defaultValue, request, parseResponse)`.
-    async fn create_dialog_promise<T: Send + 'static>(
-        &self,
+    fn create_dialog_promise<T: Send + 'static>(
+        self: &Arc<Self>,
         opts: Option<&ExtensionUIDialogOptions>,
         default_value: T,
         method: &str,
         payload: Map<String, Value>,
         parse_response: impl FnOnce(RpcExtensionUiResponse) -> T + Send + 'static,
-    ) -> T {
-        if self.closed.load(Ordering::SeqCst)
-            || opts.and_then(|opts| opts.signal.clone()).map(|signal| signal.is_cancelled()).unwrap_or(false)
-        {
-            return default_value;
-        }
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>> {
+        let signal = opts.and_then(|opts| opts.signal.clone());
         let id = uuid::Uuid::new_v4().to_string();
         let (sender, receiver) = oneshot::channel();
-        self.pending
-            .lock()
-            .expect("pending dialogs poisoned")
-            .insert(id.clone(), sender);
-        self.emit(&id, method, payload);
-
-        let mut timeout_ms = opts.and_then(|opts| opts.timeout);
-        if let Some(timeout) = timeout_ms {
-            if timeout.is_nan() || timeout <= 0.0 {
-                timeout_ms = Some(0.0);
+        {
+            let mut pending = self.pending.lock().expect("pending dialogs poisoned");
+            if self.closed.load(Ordering::SeqCst)
+                || signal.as_ref().is_some_and(|signal| signal.is_cancelled())
+            {
+                return Box::pin(async move { default_value });
             }
+            pending.insert(id.clone(), sender);
         }
-        let signal = opts.and_then(|opts| opts.signal.clone());
-        let cancelled = async move {
-            match signal {
-                Some(signal) => signal.cancelled().await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-        let timed_out = async move {
-            match timeout_ms {
-                Some(timeout) => tokio::time::sleep(Duration::from_millis(timeout.max(0.0) as u64)).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-        tokio::select! {
-            response = receiver => {
-                match response {
+        let deadline = opts.and_then(|opts| opts.timeout)
+            .filter(|timeout| *timeout != 0.0 && !timeout.is_nan())
+            .map(|timeout| {
+                let millis = if !timeout.is_finite() || timeout < 1.0 || timeout > i32::MAX as f64 { 1 } else { timeout as u64 };
+                tokio::time::Instant::now() + Duration::from_millis(millis)
+            });
+        self.emit(&id, method, payload);
+        let cleanup = PendingDialogCleanup { state: self.clone(), id };
+        Box::pin(async move {
+            let _cleanup = cleanup;
+            let cancelled = async move {
+                match signal {
+                    Some(signal) => signal.cancelled().await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            let timed_out = async move {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+            tokio::select! {
+                response = receiver => match response {
                     Ok(response) => parse_response(response),
                     Err(_) => default_value,
-                }
+                },
+                _ = cancelled => default_value,
+                _ = timed_out => default_value,
             }
-            _ = cancelled => default_value,
-            _ = timed_out => default_value,
-        }
+        })
+    }
+
+}
+
+struct PendingDialogCleanup {
+    state: Arc<RpcExtensionUiState>,
+    id: String,
+}
+
+impl Drop for PendingDialogCleanup {
+    fn drop(&mut self) {
+        self.state.pending.lock().expect("pending dialogs poisoned").remove(&self.id);
     }
 }
 
@@ -183,7 +196,6 @@ impl ExtensionUiContext for RpcExtensionUiContext {
         opts: Option<ExtensionUIDialogOptions>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
         let state = self.state.clone();
-        Box::pin(async move {
             let mut payload = Map::new();
             payload.insert("title".to_string(), Value::String(title));
             payload.insert(
@@ -195,8 +207,6 @@ impl ExtensionUiContext for RpcExtensionUiContext {
             }
             state
                 .create_dialog_promise(opts.as_ref(), None, "select", payload, RpcExtensionUiContext::parse_value)
-                .await
-        })
     }
 
     fn confirm(
@@ -206,7 +216,6 @@ impl ExtensionUiContext for RpcExtensionUiContext {
         opts: Option<ExtensionUIDialogOptions>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
         let state = self.state.clone();
-        Box::pin(async move {
             let mut payload = Map::new();
             payload.insert("title".to_string(), Value::String(title));
             payload.insert("message".to_string(), Value::String(message));
@@ -225,8 +234,6 @@ impl ExtensionUiContext for RpcExtensionUiContext {
                     RpcExtensionUiResponse::Confirmed { confirmed, .. } => confirmed,
                     RpcExtensionUiResponse::Value { .. } => false,
                 })
-                .await
-        })
     }
 
     fn input(
@@ -236,7 +243,6 @@ impl ExtensionUiContext for RpcExtensionUiContext {
         opts: Option<ExtensionUIDialogOptions>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
         let state = self.state.clone();
-        Box::pin(async move {
             let mut payload = Map::new();
             payload.insert("title".to_string(), Value::String(title));
             if let Some(placeholder) = placeholder {
@@ -247,8 +253,6 @@ impl ExtensionUiContext for RpcExtensionUiContext {
             }
             state
                 .create_dialog_promise(opts.as_ref(), None, "input", payload, RpcExtensionUiContext::parse_value)
-                .await
-        })
     }
 
     fn notify(&self, message: String, kind: Option<String>) {
@@ -328,10 +332,7 @@ impl ExtensionUiContext for RpcExtensionUiContext {
     }
 
     fn custom(&self, _factory: Value, _options: Option<Value>) -> CustomComponentResult {
-        // `custom: async () => undefined as never` never settles.
-        Box::pin(async {
-            std::future::pending::<Arc<dyn crate::core::extensions::types::Component>>().await
-        })
+        Box::pin(async { None })
     }
 
     fn paste_to_editor(&self, text: String) {
@@ -354,7 +355,6 @@ impl ExtensionUiContext for RpcExtensionUiContext {
         prefill: Option<String>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<String>> + Send>> {
         let state = self.state.clone();
-        Box::pin(async move {
             let mut payload = Map::new();
             payload.insert("title".to_string(), Value::String(title));
             if let Some(prefill) = prefill {
@@ -362,8 +362,6 @@ impl ExtensionUiContext for RpcExtensionUiContext {
             }
             state
                 .create_dialog_promise(None, None, "editor", payload, RpcExtensionUiContext::parse_value)
-                .await
-        })
     }
 
     fn add_autocomplete_provider(&self, _factory: AutocompleteProviderFactory) {}

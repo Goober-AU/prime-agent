@@ -797,13 +797,19 @@ mod tests {
 		);
 		let context = Context::new(
 			None,
-			vec![Message::tool_result(result_one), Message::tool_result(result_two)],
+			vec![
+				assistant(&model, vec![
+					ContentBlock::ToolCall(ToolCall::new("call-1", "read", Map::new())),
+					ContentBlock::ToolCall(ToolCall::new("call-2", "read", Map::new())),
+				]),
+				Message::tool_result(result_one), Message::tool_result(result_two),
+			],
 			None,
 		);
 		let contents = convert_messages(&model, &context).unwrap();
-		assert_eq!(contents.len(), 1);
+		assert_eq!(contents.len(), 2);
 		assert_eq!(
-			contents[0],
+			contents[1],
 			json!({
 				"role": "user",
 				"parts": [
@@ -826,11 +832,14 @@ mod tests {
 		let gemini_three = model("gemini-3-pro", "google");
 		let contents = convert_messages(
 			&gemini_three,
-			&Context::new(None, vec![Message::tool_result(result.clone())], None),
+			&Context::new(None, vec![
+				assistant(&gemini_three, vec![ContentBlock::ToolCall(ToolCall::new("call-1", "read", Map::new()))]),
+				Message::tool_result(result.clone()),
+			], None),
 		)
 		.unwrap();
 		assert_eq!(
-			contents[0],
+			contents[1],
 			json!({
 				"role": "user",
 				"parts": [{
@@ -846,12 +855,15 @@ mod tests {
 		let gemini_two = model("gemini-2.5-flash", "google");
 		let contents = convert_messages(
 			&gemini_two,
-			&Context::new(None, vec![Message::tool_result(result)], None),
+			&Context::new(None, vec![
+				assistant(&gemini_two, vec![ContentBlock::ToolCall(ToolCall::new("call-1", "read", Map::new()))]),
+				Message::tool_result(result),
+			], None),
 		)
 		.unwrap();
-		assert_eq!(contents.len(), 2);
+		assert_eq!(contents.len(), 3);
 		assert_eq!(
-			contents[1],
+			contents[2],
 			json!({
 				"role": "user",
 				"parts": [
@@ -873,10 +885,23 @@ mod tests {
 			false,
 			0,
 		);
-		let contents = convert_messages(&model, &Context::new(None, vec![Message::tool_result(result)], None)).unwrap();
+		let contents = convert_messages(&model, &Context::new(None, vec![
+			assistant(&model, vec![ContentBlock::ToolCall(ToolCall::new("call-1", "read", Map::new()))]),
+			Message::tool_result(result),
+		], None)).unwrap();
 		assert_eq!(
-			contents[0],
-			json!({"role": "user", "parts": [{"functionResponse": {"name": "read", "response": {"output": "(see attached image)"}}}]})
+			contents[1],
+			json!({"role": "user", "parts": [{"functionResponse": {"name": "read", "response": {"output": "(tool image omitted: model does not support images)"}}}]})
 		);
+	}
+
+	#[test]
+	fn convert_messages_drops_orphan_tool_results() {
+		let model = model("gemini-3-pro", "google");
+		let result = crate::types::ToolResultMessage::new("orphan", "read", vec![
+			ImageOrTextContent::Text(TextContent::new("not replayable")),
+		], false, 0);
+		let contents = convert_messages(&model, &Context::new(None, vec![Message::tool_result(result)], None)).unwrap();
+		assert!(contents.is_empty());
 	}
 }

@@ -1,7 +1,6 @@
 //! Port of packages/coding-agent/src/cli.ts
 //!
-//! The Node 22+ module graph fails at link time on older Node, so it must load
-//! behind the dynamic import, after the dependency-free guard runs.
+//! Native process entry point. Runtime adapters preserve the CLI startup order.
 
 use crate::cli::node_version_check::{assert_node_version, NodeVersionGuardIo};
 use crate::cli_main_entry::{run_cli, CliMainHost};
@@ -19,9 +18,9 @@ pub fn node_version() -> String {
 /// `main_entry(args)`: the `cli.ts` flow, returning the process exit code.
 ///
 /// `runCli()` is async in the TypeScript; a synchronous process entry point has
-/// no runtime to await it, so the port builds a current-thread runtime, exactly
-/// like the `cli.ts` top-level await does.
-pub fn main_entry(_args: Vec<String>) -> i32 {
+/// no runtime to await it, so the port owns a Tokio runtime while the console future stays on
+/// its owner thread.
+pub fn main_entry(args: Vec<String>) -> i32 {
     let log = |message: &str| {
         eprintln!("{message}");
     };
@@ -40,12 +39,32 @@ pub fn main_entry(_args: Vec<String>) -> i32 {
     if !supported {
         return 0;
     }
-    exit_code.get()
+    let host = crate::native_main_host::NativeMainHost::new(args);
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("Could not start the Rust async runtime: {error}");
+            return 1;
+        }
+    };
+    let result = runtime.block_on(run_cli(&host));
+    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    if let Err(error) = result {
+        eprintln!("{error}");
+        return 1;
+    }
+    host.exit_code()
 }
 
 /// `runCli()` against an explicit host (the `await import("./cli-main.js")` path).
 pub async fn run_cli_with_host(host: &dyn CliMainHost) {
-    run_cli(host).await;
+    if let Err(error) = run_cli(host).await {
+        eprintln!("{error}");
+    }
 }
 
 #[cfg(test)]

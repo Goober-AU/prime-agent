@@ -90,7 +90,7 @@ impl MemorySharing {
         let store = self.store.clone();
         self.store
             .exclusive(move || {
-                if store.settings().shared.is_none() {
+                if store.settings().shared_config().is_none() {
                     return Err("Configure sharing for this project first".to_string());
                 }
                 let doc = store.read()?;
@@ -102,7 +102,7 @@ impl MemorySharing {
                         .and_then(|bucket| bucket.get(id))
                         .cloned()
                         .ok_or_else(|| format!("Only project memories can be shared: {id}"))?;
-                    if entry.metadata.contains_key("hostId") {
+                    if entry.metadata.get("hostId").and_then(Value::as_str).is_some_and(|host| !host.is_empty()) {
                         return Err(format!("Only project memories can be shared: {id}"));
                     }
                     entries.push(entry);
@@ -384,6 +384,9 @@ mod tests {
         assert_eq!(error, "Configure sharing for this project first");
         assert_eq!(sharing.cache().url, "");
         assert!(!sharing.cache().connected);
+        runtime.block_on(store.configure(&serde_json::json!({"shared": null}))).unwrap();
+        assert_eq!(runtime.block_on(sharing.queue(&["one".to_string()], Vec::new())).unwrap_err(),
+            "Configure sharing for this project first");
         std::fs::remove_dir_all(&root).ok();
     }
 

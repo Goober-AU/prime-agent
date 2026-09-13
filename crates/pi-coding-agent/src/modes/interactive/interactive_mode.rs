@@ -1,4 +1,5 @@
 //! Port of packages/coding-agent/src/modes/interactive/interactive-mode.ts
+
 //!
 //! This is the largest module of the slice (10,352 TypeScript lines, ~396
 //! methods). The port keeps every module-level free function, constant, type and
@@ -6,6 +7,9 @@
 //! private stand-ins in `interactive_mode_services.rs`. Methods whose whole body
 //! depends on UI components that other slices still own are marked `PARTIAL:`
 //! with the TypeScript method name; see evidence/status/ca-interactive-a.json.
+
+#[path = "native_host.rs"]
+pub(crate) mod native_host;
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -216,7 +220,7 @@ pub fn truncate_path_middle(value: &str, width: f64) -> String {
         return value.to_string();
     }
     if width <= 1.0 {
-        return truncate_to_width(value, width, "", true);
+        return truncate_to_width(value, width, "", false);
     }
 
     let ellipsis = "\u{2026}";
@@ -241,7 +245,7 @@ pub fn truncate_path_middle(value: &str, width: f64) -> String {
         return candidate;
     }
 
-    truncate_to_width(&candidate, width, "", true)
+    truncate_to_width(&candidate, width, "…", false)
 }
 
 /// `BrandSplashMetadataLine`
@@ -1341,9 +1345,9 @@ impl InteractiveMode {
     pub const ESCAPE_REPEAT_WINDOW_MS: f64 = 500.0;
 
     /// Port of the `InteractiveMode` constructor (TUI construction only).
-    pub fn new(options: InteractiveModeOptions) -> Result<Self, String> {
-        let ui_services = match &options.ui_services {
-            Some(services) => Some(clone_ui_services(services)),
+    pub fn new(mut options: InteractiveModeOptions) -> Result<Self, String> {
+        let ui_services = match options.ui_services.take() {
+            Some(services) => Some(services),
             None => options
                 .local_session_host
                 .as_ref()
@@ -2584,7 +2588,7 @@ impl InteractiveMode {
         if available_width < 8.0 {
             return String::new();
         }
-        format!(": {}", truncate_to_width(&detail, available_width, "", true))
+        format!(": {}", truncate_to_width(&detail, available_width, "…", false))
     }
 
     /// Port of `getPathCommandArgument`.
@@ -3806,8 +3810,8 @@ mod tests {
         assert_eq!(START_HINTS[0], "Try \"refactor @<filepath>\"");
         assert_eq!(get_random_start_hint(&|| 0.0), START_HINTS[0]);
         assert_eq!(get_random_start_hint(&|| 0.99), START_HINTS[4]);
-        // A random value of exactly 1 clamps to the last hint instead of panicking.
-        assert_eq!(get_random_start_hint(&|| 1.0), START_HINTS[4]);
+        // Out-of-range random values use the TypeScript nullish fallback.
+        assert_eq!(get_random_start_hint(&|| 1.0), START_HINTS[0]);
     }
 
     #[test]
@@ -3863,8 +3867,8 @@ mod tests {
     #[test]
     fn truncate_path_middle_keeps_the_tail() {
         assert_eq!(truncate_path_middle("src/a.rs", 100.0), "src/a.rs");
-        assert_eq!(truncate_path_middle("/very/long/path/file.rs", 12.0), "\u{2026}/path/file.rs");
-        assert_eq!(truncate_path_middle("/x/y.rs", 1.0), "\u{2026}");
+        assert_eq!(truncate_path_middle("/very/long/path/file.rs", 12.0), "/…/path/fil…");
+        assert_eq!(truncate_path_middle("/x/y.rs", 1.0), "/");
     }
 
     #[test]
@@ -3901,7 +3905,7 @@ mod tests {
         let args = |values: &[&str]| values.iter().map(|value| (*value).to_string()).collect::<Vec<String>>();
         assert!(update_args_include_self(&args(&[])));
         assert!(update_args_include_self(&args(&["--self"])));
-        assert!(!update_args_include_self(&args(&["--self", "--extensions"])));
+        assert!(update_args_include_self(&args(&["--self", "--extensions"])));
         assert!(!update_args_include_self(&args(&["--extension", "foo"])));
         assert!(update_args_include_self(&args(&["self"])));
         assert!(update_args_include_self(&args(&["pi"])));
@@ -3978,9 +3982,9 @@ mod tests {
         }
         messages.push(tool_result("old"));
         let rendered = initial_render_messages(messages);
-        assert_eq!(rendered.len(), INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT + 2);
+        assert_eq!(rendered.len(), INITIAL_TRANSCRIPT_RENDER_MESSAGE_LIMIT);
         assert_eq!(rendered[0].role(), "assistant");
-        assert_eq!(rendered[1].role(), "toolResult");
+        assert_eq!(rendered.last().unwrap().role(), "toolResult");
     }
 
     #[test]
@@ -4109,7 +4113,7 @@ mod tests {
             session_id: "s1".into(),
             cwd: "/repo".into(),
             message_count: 2.0,
-            model: Some(Model::new("glm-5.3", "GLM 5.3", "openai-completions", "anthropic", "https://x.invalid")),
+            model: Some(Model { reasoning: true, ..Model::new("glm-5.3", "GLM 5.3", "openai-completions", "anthropic", "https://x.invalid") }),
             thinking_level: ThinkingLevel::High,
             service_tier: Some(Some("priority".to_string())),
             ..Default::default()
@@ -4175,6 +4179,7 @@ mod tests {
     #[test]
     fn subagent_summary_seeding_and_removal_follow_the_status_rules() {
         let mut mode = test_mode();
+        mode.rlm_node_id = Some("p1".into());
         let child = AgentConnectionRlmChildAgentSnapshot {
             id: "c1".into(),
             parent_id: Some("p1".into()),
@@ -4391,7 +4396,7 @@ mod tests {
     fn heartbeat_argument_completions_filter_by_prefix() {
         let mode = test_mode();
         assert_eq!(mode.get_heartbeat_argument_completions("").expect("all").len(), 4);
-        assert_eq!(mode.get_heartbeat_argument_completions("st").expect("filtered").len(), 2);
+        assert_eq!(mode.get_heartbeat_argument_completions("st").expect("filtered").len(), 3);
         assert_eq!(mode.get_heartbeat_argument_completions("zzz"), None);
     }
 

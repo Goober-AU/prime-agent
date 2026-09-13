@@ -9,33 +9,14 @@ use crate::modes::interactive::theme::theme::{highlight_code, theme};
 /// Parse diff line to extract prefix, line number, and content.
 /// Format: "+123 content" or "-123 content" or " 123 content" or "     ..."
 fn parse_diff_line(line: &str) -> Option<(String, String, String)> {
-    // `^([+-\s])(\s*\d*)\s(.*)$`
-    let mut chars = line.chars();
-    let prefix = chars.next()?;
-    if prefix != '+' && prefix != '-' && !prefix.is_whitespace() {
-        return None;
-    }
-    let rest = &line[prefix.len_utf8()..];
-
-    let mut line_num_end = 0usize;
-    for ch in rest.chars() {
-        if ch.is_whitespace() || ch.is_ascii_digit() {
-            line_num_end += ch.len_utf8();
-        } else {
-            break;
-        }
-    }
-    let line_num = &rest[..line_num_end];
-    let after_line_num = &rest[line_num_end..];
-    let sep = after_line_num.chars().next()?;
-    if !sep.is_whitespace() {
-        return None;
-    }
-    let content = &after_line_num[sep.len_utf8()..];
+    static PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        Regex::new(r"^([+\-\s])(\s*[0-9]*)\s(.*)$").expect("valid diff line pattern")
+    });
+    let captures = PATTERN.captures(line)?;
     Some((
-        prefix.to_string(),
-        line_num.to_string(),
-        content.to_string(),
+        captures[1].to_string(),
+        captures[2].to_string(),
+        captures[3].to_string(),
     ))
 }
 

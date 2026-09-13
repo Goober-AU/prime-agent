@@ -203,9 +203,9 @@ mod tests {
     fn marks_the_default_socket_and_appends_the_legend() {
         let table = format_daemon_list_table(&[daemon("/tmp/daemon.sock", DaemonStatus::Current, true)]);
         let lines: Vec<&str> = table.lines().collect();
-        assert_eq!(lines[0], "socket             pid  version  status   sessions  uptime");
+        assert_eq!(lines[0], "socket              pid  version  status   sessions  uptime");
         assert!(lines[1].starts_with("/tmp/daemon.sock *"));
-        assert!(lines[1].contains("\u{1b}[32mcurrent  \u{1b}[39m"));
+        assert!(lines[1].contains("\u{1b}[32mcurrent\u{1b}[39m"));
         assert_eq!(lines[3], "\u{1b}[2m* default background service\u{1b}[22m");
     }
 

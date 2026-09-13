@@ -827,7 +827,14 @@ fn builtin_themes() -> &'static HashMap<String, ThemeJson> {
         let themes_dir = get_themes_dir();
         let load = |name: &str| -> ThemeJson {
             let path = Path::new(&themes_dir).join(format!("{name}.json"));
-            let content = std::fs::read_to_string(&path).unwrap_or_default();
+            // Native binaries need the same bundled presets as TS imports,
+            // including when launched outside a source/package installation.
+            let bundled = match name {
+                "prime" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/coding-agent/src/modes/interactive/theme/prime.json")),
+                "light" => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/coding-agent/src/modes/interactive/theme/light.json")),
+                _ => include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../packages/coding-agent/src/modes/interactive/theme/dark.json")),
+            };
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|_| bundled.to_string());
             parse_theme_json(name, &serde_json::from_str(&content).unwrap_or(serde_json::Value::Null))
                 .unwrap_or_default()
         };
@@ -1891,6 +1898,7 @@ mod tests {
     fn thinking_border_colors_fall_back_to_off_and_reuse_xhigh_for_max() {
         let mut fg = HashMap::new();
         fg.insert("thinkingOff".to_string(), ColorValue::Text("#000000".to_string()));
+        fg.insert("thinkingHigh".to_string(), ColorValue::Text(String::new()));
         fg.insert("thinkingXhigh".to_string(), ColorValue::Text("#ffffff".to_string()));
         let theme = Theme::new(&fg, &HashMap::new(), TerminalColorMode::Truecolor, None, None, None).expect("theme");
         assert_eq!(theme.get_thinking_border_color("max")("x"), "\u{1b}[38;2;255;255;255mx\u{1b}[39m");

@@ -590,13 +590,12 @@ mod tests {
 
 	#[test]
 	fn short_hash_matches_typescript_for_known_inputs() {
-		// `shortHash` is the port of utils/hash.ts.
-		assert_eq!(crate::utils::hash::short_hash(""), "0");
-		assert!(!crate::utils::hash::short_hash("fc_abc").is_empty());
-		assert_eq!(
-			crate::utils::hash::short_hash("fc_abc"),
-			crate::utils::hash::short_hash("fc_abc")
-		);
+		// Fixed vectors evaluated from packages/ai/src/utils/hash.ts, including
+		// UTF-16 surrogate-pair input used by JavaScript's charCodeAt.
+		assert_eq!(short_hash(""), "k4n83c7h0j2b");
+		assert_eq!(short_hash("fc_abc"), "1qaoofs1vxahbg");
+		assert_eq!(short_hash("hello world"), "n7rb4n1m39uz8");
+		assert_eq!(short_hash("😀"), "13wj7r7usi372");
 	}
 
 	#[tokio::test]

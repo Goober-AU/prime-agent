@@ -36,8 +36,6 @@ const GCP_VERTEX_CREDENTIALS_MARKER: &str = "gcp-vertex-credentials";
 /// The pinned `@google/genai` version, used for the SDK default headers.
 const GOOGLE_GENAI_SDK_VERSION: &str = "1.52.0";
 const LIBRARY_LABEL: &str = "google-genai-sdk/1.52.0";
-/// `VERTEX_AI_API_DEFAULT_VERSION`.
-const VERTEX_AI_API_DEFAULT_VERSION: &str = "v1beta1";
 const USER_AGENT_HEADER: &str = "User-Agent";
 const GOOGLE_API_CLIENT_HEADER: &str = "x-goog-api-client";
 const CONTENT_TYPE_HEADER: &str = "Content-Type";
@@ -584,7 +582,7 @@ fn build_vertex_client(
 
 	// `patchHttpOptions(initHttpOptions, opts.httpOptions)`.
 	let mut base_url = init_base_url.unwrap_or_default();
-	let mut api_version = VERTEX_AI_API_DEFAULT_VERSION.to_string();
+	let mut api_version = API_VERSION.to_string();
 	if let Some(custom) = &http_options.base_url {
 		base_url = custom.clone();
 	}
@@ -1451,6 +1449,7 @@ mod tests {
 		assert_eq!(client.project, None);
 		assert_eq!(client.location, None);
 		assert_eq!(client.api_key.as_deref(), Some("key"));
+		assert_eq!(client.api_version, "v1");
 		assert!(!should_prepend_project_location(&client));
 	}
 

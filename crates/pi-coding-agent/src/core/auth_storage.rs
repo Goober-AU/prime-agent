@@ -300,11 +300,10 @@ fn deserialize_optional_prime_team<'de, D>(deserializer: D) -> Result<OptionalPr
 where
     D: serde::Deserializer<'de>,
 {
-    let value = Option::<Value>::deserialize(deserializer)?;
+    let value = Value::deserialize(deserializer)?;
     match value {
-        None => Ok(None),
-        Some(Value::Null) => Ok(Some(None)),
-        Some(other) => serde_json::from_value(other)
+        Value::Null => Ok(Some(None)),
+        other => serde_json::from_value(other)
             .map(|team| Some(Some(team)))
             .map_err(serde::de::Error::custom),
     }
@@ -2366,21 +2365,21 @@ mod tests {
     #[test]
     fn env_keys_match_the_typescript_table() {
         assert_eq!(
-            find_env_keys("github-copilot"),
+            api_key_env_vars("github-copilot"),
             Some(vec![
-                "COPILOT_GITHUB_TOKEN".to_string(),
-                "GH_TOKEN".to_string(),
-                "GITHUB_TOKEN".to_string()
+                "COPILOT_GITHUB_TOKEN",
+                "GH_TOKEN",
+                "GITHUB_TOKEN"
             ])
         );
         assert_eq!(
-            find_env_keys("anthropic"),
+            api_key_env_vars("anthropic"),
             Some(vec![
-                "ANTHROPIC_OAUTH_TOKEN".to_string(),
-                "ANTHROPIC_API_KEY".to_string()
+                "ANTHROPIC_OAUTH_TOKEN",
+                "ANTHROPIC_API_KEY"
             ])
         );
-        assert!(find_env_keys("openai-codex").is_none());
+        assert!(api_key_env_vars("openai-codex").is_none());
     }
 
     #[test]

@@ -1782,13 +1782,16 @@ impl AgentMessageDeferred {
 
     pub async fn wait(&self) -> Result<(), String> {
         loop {
+            let notified = self.state.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             {
                 let settled = self.state.settled.lock().unwrap();
                 if let Some(result) = settled.as_ref() {
                     return result.clone();
                 }
             }
-            self.state.notify.notified().await;
+            notified.await;
         }
     }
 }
@@ -2079,9 +2082,9 @@ pub struct AgentSession {
     event_listeners: Mutex<Vec<AgentSessionEventListener>>,
     last_session_action_snapshot: Mutex<SessionActionSnapshot>,
     /// `_agentEventQueue` - the serialized tail of agent-event work.
-    agent_event_queue: Mutex<Option<BoxFuture<Result<(), String>>>>,
+    agent_event_queue: Mutex<futures::future::Shared<BoxFuture<Result<(), String>>>>,
     action_store: Mutex<ActionStore<QueuedSessionAction>>,
-    session_input_pump: Mutex<BoxFuture<Result<(), String>>>,
+    session_input_pump: Mutex<futures::future::Shared<BoxFuture<Result<(), String>>>>,
     session_input_pump_requested: AtomicBool,
     session_input_pump_epoch: AtomicU64,
     session_input_arrival_epoch: AtomicU64,
@@ -2375,9 +2378,9 @@ impl AgentSession {
                 follow_ups: Vec::new(),
                 active: None,
             }),
-            agent_event_queue: Mutex::new(Some(Box::pin(async { Ok(()) }))),
+            agent_event_queue: Mutex::new(async { Ok(()) }.boxed().shared()),
             action_store: Mutex::new(ActionStore::new()),
-            session_input_pump: Mutex::new(Box::pin(async { Ok(()) })),
+            session_input_pump: Mutex::new(async { Ok(()) }.boxed().shared()),
             session_input_pump_requested: AtomicBool::new(false),
             session_input_pump_epoch: AtomicU64::new(0),
             session_input_arrival_epoch: AtomicU64::new(0),
@@ -5631,7 +5634,8 @@ impl AgentSession {
             }
             AgentEvent::AgentEnd { messages } => {
                 let mut captured: HashSet<String> = HashSet::new();
-                for action in self.action_store.lock().unwrap().owned_actions() {
+                let owned = self.action_store.lock().unwrap().owned_actions();
+                for action in owned {
                     if let QueuedActionPayload::Turn(turn) = &action.payload {
                         if let Some(run_messages) = &turn.capture_run_messages {
                             captured.extend(run_messages.iter().cloned());
@@ -5664,7 +5668,6 @@ impl AgentSession {
                         .actions_for_message(&delivery_message_of(message));
                     for action in actions {
                         let key = agent_message_key_of(message);
-                        let mut store = self.action_store.lock().unwrap();
                         let mut next = action.clone();
                         let mut started_primary = false;
                         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
@@ -5677,7 +5680,7 @@ impl AgentSession {
                                 }
                             }
                         }
-                        let _ = store.update_action(&next);
+                        let _ = self.action_store.lock().unwrap().update_action(&next);
                         if started_primary {
                             if let Ok(ticket) = self.action_store.lock().unwrap().ticket_for(&action) {
                                 ticket.settle_delivered(DeliveryOutcome::Delivered);
@@ -5697,7 +5700,6 @@ impl AgentSession {
                         .actions_for_message(&delivery_message_of(message));
                     for action in actions {
                         let key = agent_message_key_of(message);
-                        let mut store = self.action_store.lock().unwrap();
                         let mut next = action.clone();
                         let mut started_primary = false;
                         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
@@ -5710,18 +5712,19 @@ impl AgentSession {
                                 }
                             }
                         }
-                        let _ = store.update_action(&next);
                         if started_primary && action.lifecycle.state() == ActionLifecycleState::Committing {
-                            let mut updated = action.clone();
                             let _ = transition_session_action(
-                                &mut updated,
+                                &mut next,
                                 ActionLifecycle::Running {
                                     execution: crate::core::session_action_store::ActionExecution::AgentTurn,
                                 },
                                 &crate::core::session_action_store::TransitionOptions::default(),
                             );
+                            let _ = self.action_store.lock().unwrap().update_action(&next);
                             self.notify_session_input_checkpoint_change();
                             self.emit_queue_update();
+                        } else {
+                            let _ = self.action_store.lock().unwrap().update_action(&next);
                         }
                     }
                 }
@@ -7116,12 +7119,11 @@ impl AgentSession {
         let active_turns = |session: &Arc<Self>| -> Vec<QueuedSessionAction> {
             actions
                 .iter()
+                .filter_map(|action| session.action_by_id(&action.id))
                 .filter(|action| {
                     matches!(action.payload, QueuedActionPayload::Turn(_))
-                        && session.action_state_of(&action.id)
-                            == Some(ActionLifecycleState::Preparing)
+                        && action.lifecycle.state() == ActionLifecycleState::Preparing
                 })
-                .cloned()
                 .collect()
         };
         if !execution_policy.run_before_agent_start {
@@ -8030,35 +8032,6 @@ impl AgentSession {
                     .content
                     .clone()
                     .unwrap_or_else(|| self.build_prompt_content(&text, images.as_deref()));
-                let primary_message = match options.custom_message.clone() {
-                    Some(message) => {
-                        if visible_queued {
-                            message
-                        } else {
-                            clone_custom_message(&message)
-                        }
-                    }
-                    None => CustomMessage {
-                        role: "user".to_string(),
-                        custom_type: String::new(),
-                        content: CustomMessageContent::Blocks(
-                            content
-                                .iter()
-                                .map(|block| match block {
-                                    pi_ai::types::ImageOrTextContent::Text(text) => {
-                                        pi_agent_core::types::ContentBlock::Text(text.clone())
-                                    }
-                                    pi_ai::types::ImageOrTextContent::Image(image) => {
-                                        pi_agent_core::types::ContentBlock::Image(image.clone())
-                                    }
-                                })
-                                .collect(),
-                        ),
-                        display: false,
-                        details: None,
-                        timestamp: now_ms() as i64,
-                    },
-                };
                 let accepted_agent_message =
                     skip_pre_prompt_work && return_after_accepted == Some(true);
                 let execution_policy = if visible_queued {
@@ -8080,7 +8053,7 @@ impl AgentSession {
                         agent_message_id: options.agent_message_id.clone(),
                         queue_key: options.follow_up_queue_key.clone(),
                         content: Some(content),
-                        custom_message: Some(primary_message),
+                        custom_message: options.custom_message.clone(),
                         prefix_messages,
                         suppress_autonomous_continuation: options.suppress_autonomous_continuation,
                         resume_if_idle: Some(
@@ -8629,16 +8602,17 @@ impl AgentSession {
                     ));
                 }
             }
-            let primary_message = match &options.custom_message {
-                Some(custom) => DeliveryMessage::Custom(custom.clone()),
-                None => DeliveryMessage::Custom(CustomMessage {
-                    role: "user".to_string(),
-                    custom_type: String::new(),
-                    content: CustomMessageContent::Text(text.to_string()),
-                    display: false,
-                    details: None,
-                    timestamp: now_ms() as i64,
-                }),
+            let primary_message = if let Some(message) = &options.message {
+                delivery_message_of(message)
+            } else if let Some(custom) = &options.custom_message {
+                DeliveryMessage::Custom(custom.clone())
+            } else {
+                DeliveryMessage::User(UserMessage::new(
+                    UserContent::Blocks(options.content.clone().unwrap_or_else(|| {
+                        self.build_prompt_content(text, images.as_deref())
+                    })),
+                    now_ms_i64(),
+                ))
             };
             records.push(self.create_delivery_record(
                 DeliveryRecordRole::Primary,
@@ -8794,19 +8768,27 @@ impl AgentSession {
         }
         if self.disposed.load(Ordering::SeqCst)
             || self.disposing.load(Ordering::SeqCst)
-            || self.session_input_pump_requested.swap(true, Ordering::SeqCst)
             || !self.has_selectable_session_input()
+            || self.session_input_pump_requested.swap(true, Ordering::SeqCst)
         {
             return;
         }
         let epoch = self.session_input_pump_epoch.load(Ordering::SeqCst);
         let session = self.clone();
-        tokio::spawn(async move {
-            session
-                .session_input_pump_requested
-                .store(false, Ordering::SeqCst);
-            session.pump_session_inputs(epoch).await;
-        });
+        let next = {
+            let mut pump = self.session_input_pump.lock().unwrap();
+            let previous = pump.clone();
+            let next = async move {
+                let _ = previous.await;
+                session.session_input_pump_requested.store(false, Ordering::SeqCst);
+                session.pump_session_inputs(epoch).await;
+                session.notify_session_input_checkpoint_change();
+                Ok(())
+            }.boxed().shared();
+            *pump = next.clone();
+            next
+        };
+        tokio::spawn(next);
     }
 
     /// `_pumpSessionInputs(epoch)`.
@@ -8952,7 +8934,7 @@ impl AgentSession {
                                 .unwrap_or(false);
                             if durable {
                                 self.mark_delivery_record_durable(action, &current_messages_of(self));
-                                let mut next = action.clone();
+                                let Some(mut next) = self.action_by_id(&action.id) else { continue; };
                                 let _ = transition_session_action(
                                     &mut next,
                                     ActionLifecycle::Running {
@@ -8964,7 +8946,7 @@ impl AgentSession {
                             }
                         }
                         if self.action_state_of(&action.id) == Some(ActionLifecycleState::Running) {
-                            let mut next = action.clone();
+                            let Some(mut next) = self.action_by_id(&action.id) else { continue; };
                             let _ = transition_session_action(
                                 &mut next,
                                 ActionLifecycle::Completed,
@@ -9039,7 +9021,7 @@ impl AgentSession {
                         }
                         let state = self.action_state_of(&action.id);
                         if state != Some(ActionLifecycleState::Completed) && state != Some(ActionLifecycleState::Failed) {
-                            let mut next = action.clone();
+                            let Some(mut next) = self.action_by_id(&action.id) else { continue; };
                             let _ = transition_session_action(
                                 &mut next,
                                 ActionLifecycle::Failed {
@@ -9089,7 +9071,9 @@ impl AgentSession {
                         .lock()
                         .unwrap()
                         .remove(&action.id);
-                    self.action_store.lock().unwrap().release_terminal(action);
+                    if let Some(current) = self.action_by_id(&action.id) {
+                        self.action_store.lock().unwrap().release_terminal(&current);
+                    }
                 }
             }
             self.notify_session_input_checkpoint_change();
@@ -9282,12 +9266,11 @@ impl AgentSession {
         let active_turns = |session: &Arc<Self>| -> Vec<QueuedSessionAction> {
             actions
                 .iter()
+                .filter_map(|action| session.action_by_id(&action.id))
                 .filter(|action| {
                     matches!(action.payload, QueuedActionPayload::Turn(_))
-                        && session.action_state_of(&action.id)
-                            == Some(ActionLifecycleState::Preparing)
+                        && action.lifecycle.state() == ActionLifecycleState::Preparing
                 })
-                .cloned()
                 .collect()
         };
         let first_turn = match active_turns(self).into_iter().next() {
@@ -9344,10 +9327,6 @@ impl AgentSession {
                 return Err(error);
             }
         };
-        if prepared_turn.is_none() {
-            park_next_turn_messages(self, next_turn_messages.clone());
-            return Ok(());
-        }
         let turns = active_turns(self);
         if turns.is_empty() {
             park_next_turn_messages(self, next_turn_messages.clone());
@@ -9491,6 +9470,7 @@ impl AgentSession {
             }
             let _ = store.update_action(&next);
         }
+        let turns: Vec<_> = turns.iter().filter_map(|action| self.action_by_id(&action.id)).collect();
         let prepared_messages: Vec<AgentMessage> = turns
             .iter()
             .flat_map(|action| match &action.payload {
@@ -10366,6 +10346,7 @@ impl AgentSession {
 
     /// `_notifySessionInputCheckpointChange()`.
     fn notify_session_input_checkpoint_change(&self) {
+        self.session_action_activity_notify.notify_waiters();
         let waiters: Vec<Arc<dyn Fn() + Send + Sync>> = {
             let mut waiters = self.session_input_checkpoint_waiters.lock().unwrap();
             std::mem::take(&mut *waiters)
@@ -10553,7 +10534,10 @@ impl AgentSession {
     /// `waitForSessionInputIdle()`.
     pub async fn wait_for_session_input_idle(self: &Arc<Self>) -> Result<(), String> {
         loop {
-            if !self.has_pending_session_work() {
+            let notified = self.session_action_activity_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.unfinished_action_count() == 0 && !self.is_streaming() {
                 return Ok(());
             }
             if self.is_streaming() {
@@ -10564,15 +10548,28 @@ impl AgentSession {
                 return Ok(());
             }
             self.schedule_session_input_pump();
-            let notify = Arc::clone(&self.session_action_activity_notify);
-            notify.notified().await;
+            notified.await;
         }
     }
 
     /// `waitForIdle()`.
     pub async fn wait_for_idle(self: &Arc<Self>) -> Result<(), String> {
-        let _ = self.agent.wait_for_idle().await;
-        self.wait_for_session_input_idle().await
+        loop {
+            let pump = self.session_input_pump.lock().unwrap().clone();
+            pump.clone().await?;
+            self.agent.wait_for_idle().await;
+            let events = self.agent_event_queue.lock().unwrap().clone();
+            events.clone().await?;
+            if pump.ptr_eq(&self.session_input_pump.lock().unwrap())
+                && events.ptr_eq(&self.agent_event_queue.lock().unwrap())
+                && !self.session_input_pump_requested.load(Ordering::SeqCst)
+                && !self.is_streaming()
+                && self.unfinished_action_count() == 0
+            {
+                return Ok(());
+            }
+            self.wait_for_session_input_idle().await?;
+        }
     }
 
     /// `_forgetConsumedPostCompactionContinuations(continuationMessages)`.
@@ -12164,21 +12161,20 @@ impl AgentSession {
     }
 
     /// `_checkCompaction(settings)`.
-    // REPAIR CURSOR: the TypeScript reads the settings from its own manager; the port
-    // receives them as an argument, so the parameter stays unused here.
-    async fn check_compaction(self: &Arc<Self>, _settings: &CompactionSettings) -> Result<bool, String> {
-        if !self.auto_compaction_enabled.load(Ordering::SeqCst) {
+    async fn check_compaction(self: &Arc<Self>, settings: &CompactionSettings) -> Result<bool, String> {
+        if !settings.enabled || !self.auto_compaction_enabled.load(Ordering::SeqCst) {
             return Ok(false);
         }
-        let context = self.build_session_context();
-        let tokens = estimate_context_tokens(&context.messages).tokens;
-        let Some(threshold) = self.get_threshold_context_tokens(
-            &pi_ai::types::AssistantMessage::default(),
-            None,
-        ) else {
+        let Some(model) = self.model() else {
             return Ok(false);
         };
-        if tokens < threshold {
+        let Some(assistant) = self.find_last_assistant_message() else {
+            return Ok(false);
+        };
+        let Some(tokens) = self.get_threshold_context_tokens(&assistant, self.active_compaction_timestamp()) else {
+            return Ok(false);
+        };
+        if !should_compact_for_model(tokens, &model, settings) {
             return Ok(false);
         }
         self.emit(AgentSessionEvent::CompactionUpdate {
@@ -12298,12 +12294,7 @@ fn agent_message_timestamp(message: &AgentMessage) -> i64 {
 
 /// `agentMessageKeyOf(record.message)`.
 fn delivery_message_key_of(message: &DeliveryMessage) -> String {
-    match message {
-        DeliveryMessage::User(user) => {
-            serde_json::to_string(&pi_ai::types::Message::User(user.clone())).unwrap_or_default()
-        }
-        DeliveryMessage::Custom(custom) => serde_json::to_string(custom).unwrap_or_default(),
-    }
+    agent_message_key_of(&agent_message_from_delivery(message))
 }
 
 /// Stable key for an `AssistantMessage`, mirroring the TypeScript `WeakSet`/
@@ -13239,6 +13230,11 @@ impl AgentSession {
 // PORT CURSOR: TS line 13194 (end of agent-session.ts; last member ported: extensionRunner). FILE COMPLETE.
 
 impl AgentSession {
+    fn action_by_id(&self, action_id: &str) -> Option<QueuedSessionAction> {
+        self.action_store.lock().unwrap().owned_actions().into_iter()
+            .find(|action| action.id == action_id)
+    }
+
     /// `_actionStore` action state lookup by id.
     fn action_state_of(&self, action_id: &str) -> Option<ActionLifecycleState> {
         self.action_store
@@ -13259,7 +13255,7 @@ impl AgentSession {
         if !transcript.contains(&agent_message_from_delivery(&primary.message)) {
             return;
         }
-        let mut next = action.clone();
+        let Some(mut next) = self.action_by_id(&action.id) else { return; };
         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
             for record in turn.base.records.iter_mut() {
                 if record.id == primary.id {
@@ -13276,7 +13272,7 @@ impl AgentSession {
         action: &QueuedSessionAction,
         delivered: &HashSet<String>,
     ) {
-        let mut next = action.clone();
+        let Some(mut next) = self.action_by_id(&action.id) else { return; };
         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
             for record in turn.base.records.iter_mut() {
                 if delivered.contains(&delivery_message_key_of(&record.message)) {
@@ -13291,7 +13287,7 @@ impl AgentSession {
     /// keep undelivered prefix records, keep delivered next-turn records,
     /// keep everything else.
     fn filter_records_after_dispatch_failure(&self, action: &QueuedSessionAction) {
-        let mut next = action.clone();
+        let Some(mut next) = self.action_by_id(&action.id) else { return; };
         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
             turn.base.records.retain(|record| match record.role {
                 DeliveryRecordRole::Prefix => !record.durable,
@@ -13325,18 +13321,10 @@ impl AgentSession {
 
     /// `await this._agentEventQueue`.
     ///
-    /// The queued future lives inside the mutex, so it is moved out, awaited and
-    /// then stored back; an empty slot uses the completed unit future.
+    /// Shared futures retain the same tail for concurrent waiters.
     async fn await_agent_event_queue(&self) {
-        let queued = { self.agent_event_queue.lock().unwrap().take() };
-        let Some(queued) = queued else {
-            return;
-        };
+        let queued = self.agent_event_queue.lock().unwrap().clone();
         let _ = queued.await;
-        let mut slot = self.agent_event_queue.lock().unwrap();
-        if slot.is_none() {
-            *slot = Some(Box::pin(async { Ok(()) }));
-        }
     }
 
     /// `this._agentEventQueue = this._agentEventQueue.then(task, task)`.
@@ -13344,15 +13332,18 @@ impl AgentSession {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let previous = self.agent_event_queue.lock().unwrap().take();
-        let next: BoxFuture<Result<(), String>> = Box::pin(async move {
-            if let Some(previous) = previous {
+        let next = {
+            let mut queue = self.agent_event_queue.lock().unwrap();
+            let previous = queue.clone();
+            let next = async move {
                 let _ = previous.await;
-            }
-            task.await;
-            Ok(())
-        });
-        *self.agent_event_queue.lock().unwrap() = Some(next);
+                task.await;
+                Ok(())
+            }.boxed().shared();
+            *queue = next.clone();
+            next
+        };
+        tokio::spawn(next);
     }
 
     /// `_maybeStartSerializedBackgroundPlan()`.
@@ -13558,4 +13549,3 @@ impl AgentSession {
         None
     }
 }
-

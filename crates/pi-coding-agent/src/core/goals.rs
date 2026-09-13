@@ -534,9 +534,10 @@ mod tests {
         assert!(response.completion_budget_report.is_none());
         let value = serde_json::to_value(&response).unwrap();
         assert_eq!(value["goal"]["objective"], serde_json::json!("ship it"));
-        assert_eq!(value["goal"]["tokens_used"], serde_json::json!(0));
-        assert_eq!(value["goal"]["time_used_seconds"], serde_json::json!(0));
-        assert_eq!(value["goal"]["token_budget"], serde_json::json!(10));
+        // JavaScript has one number type; JSON's 0 and 0.0 carry the same value.
+        assert_eq!(value["goal"]["tokens_used"].as_f64(), Some(0.0));
+        assert_eq!(value["goal"]["time_used_seconds"].as_f64(), Some(0.0));
+        assert_eq!(value["goal"]["token_budget"].as_f64(), Some(10.0));
         let idle = goal_host_response(&empty_goal_state(), true);
         assert_eq!(idle.goal, None);
         assert_eq!(idle.remaining_tokens, None);

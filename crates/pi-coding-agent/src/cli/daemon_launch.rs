@@ -28,9 +28,12 @@ pub const DAEMON_STARTUP_EXIT_GRACE_MS: f64 = 2_000.0;
 // TODO(slice): ca-daemon-b slice, modes/daemon/daemon-worker-protocol.ts.
 pub const DAEMON_WORKER_ROLE_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER";
 pub const DAEMON_WORKER_TOKEN_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_TOKEN";
-pub const DAEMON_WORKER_ACTIVE_SESSION_ID_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
-pub const DAEMON_WORKER_RECOVERY_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
-pub const DAEMON_WORKER_SUPERVISOR_SOCKET_ENV: &str = "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
+pub const DAEMON_WORKER_ACTIVE_SESSION_ID_ENV: &str =
+    "PRIME_AGENT_INTERNAL_DAEMON_WORKER_ACTIVE_SESSION_ID";
+pub const DAEMON_WORKER_RECOVERY_JOURNAL_ENV: &str =
+    "PRIME_AGENT_INTERNAL_DAEMON_WORKER_RECOVERY_JOURNAL";
+pub const DAEMON_WORKER_SUPERVISOR_SOCKET_ENV: &str =
+    "PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_SOCKET";
 // TODO(slice): ca-misc slice, core/orphan-process-journal.ts.
 pub const ORPHAN_PROCESS_JOURNAL_ENV: &str = "PRIME_AGENT_INTERNAL_ORPHAN_PROCESS_JOURNAL";
 // TODO(slice): ca-session slice, core/session-lease.ts.
@@ -56,8 +59,14 @@ pub fn is_daemon_session_summary(value: &serde_json::Value) -> bool {
         Some(object) => object,
         None => return false,
     };
-    object.get("activeSessionId").and_then(serde_json::Value::as_str).is_some()
-        || object.get("id").and_then(serde_json::Value::as_str).is_some()
+    object
+        .get("activeSessionId")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        || object
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
 }
 
 fn delay(ms: u64) -> tokio::time::Sleep {
@@ -97,9 +106,15 @@ impl DaemonHello {
             .and_then(serde_json::Value::as_f64)?;
         let runtime = object.get("runtime");
         Some(DaemonHello {
-            app_version: object.get("appVersion").and_then(serde_json::Value::as_str).map(str::to_string),
+            app_version: object
+                .get("appVersion")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
             protocol_version,
-            schema_id: object.get("schemaId").and_then(serde_json::Value::as_str).map(str::to_string),
+            schema_id: object
+                .get("schemaId")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
             build_id: runtime
                 .and_then(|runtime| runtime.get("buildId"))
                 .and_then(serde_json::Value::as_str)
@@ -116,7 +131,9 @@ impl DaemonHello {
                 .and_then(|runtime| runtime.get("executablePath"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string),
-            supervisor_pid: object.get("supervisorPid").and_then(serde_json::Value::as_i64),
+            supervisor_pid: object
+                .get("supervisorPid")
+                .and_then(serde_json::Value::as_i64),
             supervisor_process_start_id: object
                 .get("supervisorProcessStartId")
                 .and_then(serde_json::Value::as_str)
@@ -194,7 +211,11 @@ pub async fn list_active_daemon_session_summaries(
     socket_path: &str,
     include_client_owned: bool,
 ) -> Result<Vec<serde_json::Value>, String> {
-    Ok(query_active_daemon_sessions(socket_path, include_client_owned).await?.sessions)
+    Ok(
+        query_active_daemon_sessions(socket_path, include_client_owned)
+            .await?
+            .sessions,
+    )
 }
 
 async fn query_active_daemon_sessions(
@@ -233,7 +254,10 @@ async fn query_active_daemon_sessions(
             _ => return Err("Daemon returned an invalid client-owned session count".to_string()),
         },
     };
-    Ok(ActiveDaemonSessions { sessions, busy_client_owned_session_count })
+    Ok(ActiveDaemonSessions {
+        sessions,
+        busy_client_owned_session_count,
+    })
 }
 
 /// Thrown when a stale-version daemon can't be replaced. The message is user-facing.
@@ -297,7 +321,10 @@ pub struct DaemonProcessIdentity {
 
 pub const PROCESS_START_ID_POLL_INTERVAL_MS: f64 = 1000.0;
 
-fn has_process_identity_exited(identity: Option<&DaemonProcessIdentity>, verify_process_start_id: bool) -> bool {
+fn has_process_identity_exited(
+    identity: Option<&DaemonProcessIdentity>,
+    verify_process_start_id: bool,
+) -> bool {
     let identity = match identity {
         Some(identity) => identity,
         None => return true,
@@ -309,7 +336,8 @@ fn has_process_identity_exited(identity: Option<&DaemonProcessIdentity>, verify_
         return false;
     }
     let current_start_id = get_process_start_id(identity.pid);
-    current_start_id.is_some() && current_start_id.as_deref() != identity.process_start_id.as_deref()
+    current_start_id.is_some()
+        && current_start_id.as_deref() != identity.process_start_id.as_deref()
 }
 
 async fn wait_for_daemon_gone(
@@ -330,7 +358,9 @@ async fn wait_for_daemon_gone(
     };
     while now_ms() < deadline {
         if !can_connect_to_daemon(socket_path, 250.0).await
-            && (!require_socket_cleanup || process_platform() == "win32" || !Path::new(socket_path).exists())
+            && (!require_socket_cleanup
+                || process_platform() == "win32"
+                || !Path::new(socket_path).exists())
             && has_expected_process_exited(false)
         {
             return true;
@@ -340,10 +370,14 @@ async fn wait_for_daemon_gone(
     // A daemon can exit without removing its Unix socket (for example, after a crash
     // during shutdown). Once the cleanup grace has elapsed, a non-listening socket
     // is safe for the replacement daemon's guarded startup path to reclaim.
-    require_socket_cleanup && !can_connect_to_daemon(socket_path, 250.0).await && has_expected_process_exited(true)
+    require_socket_cleanup
+        && !can_connect_to_daemon(socket_path, 250.0).await
+        && has_expected_process_exited(true)
 }
 
-fn process_identity_from_daemon_hello(hello: Option<&DaemonHello>) -> Option<DaemonProcessIdentity> {
+fn process_identity_from_daemon_hello(
+    hello: Option<&DaemonHello>,
+) -> Option<DaemonProcessIdentity> {
     let pid = hello.and_then(|hello| hello.supervisor_pid)?;
     if pid <= 0 {
         return None;
@@ -351,7 +385,10 @@ fn process_identity_from_daemon_hello(hello: Option<&DaemonHello>) -> Option<Dae
     let process_start_id = hello
         .and_then(|hello| hello.supervisor_process_start_id.clone())
         .or_else(|| get_process_start_id(pid));
-    Some(DaemonProcessIdentity { pid, process_start_id })
+    Some(DaemonProcessIdentity {
+        pid,
+        process_start_id,
+    })
 }
 
 pub async fn shutdown_connected_daemon_and_wait(
@@ -363,10 +400,19 @@ pub async fn shutdown_connected_daemon_and_wait(
     let expected_identity = process_identity_from_daemon_hello(hello);
     // A connect failure isn't treated as "gone"; waitForDaemonGone is the source of truth.
     match daemon_request(socket_path, serde_json::json!({ "type": "shutdown" }), None).await {
-        Ok(response) => shutdown_accepted = response.get("success").and_then(serde_json::Value::as_bool) == Some(true),
+        Ok(response) => {
+            shutdown_accepted =
+                response.get("success").and_then(serde_json::Value::as_bool) == Some(true)
+        }
         Err(_) => {}
     }
-    wait_for_daemon_gone(socket_path, timeout_ms, shutdown_accepted, expected_identity.as_ref()).await
+    wait_for_daemon_gone(
+        socket_path,
+        timeout_ms,
+        shutdown_accepted,
+        expected_identity.as_ref(),
+    )
+    .await
 }
 
 pub async fn shutdown_daemon_and_wait(socket_path: &str, timeout_ms: f64) -> bool {
@@ -388,14 +434,23 @@ pub struct RunningDaemonProbe {
 
 pub async fn probe_running_daemon_sessions(socket_path: &str) -> RunningDaemonProbe {
     if daemon_connect(socket_path, 1000.0).await.is_err() {
-        return RunningDaemonProbe { reachable: false, active_sessions: None, busy_client_owned_session_count: None };
+        return RunningDaemonProbe {
+            reachable: false,
+            active_sessions: None,
+            busy_client_owned_session_count: None,
+        };
     }
     match query_active_daemon_sessions(socket_path, true).await {
         Ok(result) => {
             let active_sessions: Vec<SessionSummaryStub> = result
                 .sessions
                 .iter()
-                .filter(|summary| summary.get("activeSessionId").and_then(serde_json::Value::as_str).is_some())
+                .filter(|summary| {
+                    summary
+                        .get("activeSessionId")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                })
                 .map(session_summary_stub)
                 .collect();
             RunningDaemonProbe {
@@ -453,7 +508,10 @@ async fn shutdown_stale_daemon_if_not_busy(socket_path: &str) -> StaleDaemonDisp
     if let Ok(result) = query_active_daemon_sessions(socket_path, true).await {
         loaded_session_count = result.sessions.len();
         has_busy_sessions = result.busy_client_owned_session_count != 0
-            || result.sessions.iter().any(|summary| is_session_busy(&session_summary_stub(summary)));
+            || result
+                .sessions
+                .iter()
+                .any(|summary| is_session_busy(&session_summary_stub(summary)));
     }
 
     let hello = daemon_wait_for_hello(socket_path, 2000.0).await.ok();
@@ -488,7 +546,8 @@ async fn ensure_daemon_running(socket_path: &str, spawn_cwd: Option<&str>) -> Re
     let probe_started_at = now_ms();
     let mut probe = probe_daemon_version(socket_path, 2000.0).await;
     if probe == DaemonVersionProbe::Unresponsive {
-        let remaining_startup_ms = (DAEMON_STARTUP_TIMEOUT_MS - (now_ms() - probe_started_at)).max(1.0);
+        let remaining_startup_ms =
+            (DAEMON_STARTUP_TIMEOUT_MS - (now_ms() - probe_started_at)).max(1.0);
         probe = probe_daemon_version(socket_path, remaining_startup_ms).await;
     }
     match probe {
@@ -544,20 +603,29 @@ async fn ensure_daemon_running(socket_path: &str, spawn_cwd: Option<&str>) -> Re
     let spawn_cwd = spawn_cwd
         .map(str::to_string)
         .unwrap_or_else(|| current_cwd());
-    let mut args: Vec<String> = current_exec_args();
-    args.push(entrypoint);
-    args.push("--mode".to_string());
-    args.push("daemon".to_string());
-    args.push("--daemon-socket".to_string());
-    args.push(socket_path.to_string());
+    let launch = super::subprocess_launch::create_cli_subprocess_launch_spec(
+        &[
+            "--mode".to_string(),
+            "daemon".to_string(),
+            "--daemon-socket".to_string(),
+            socket_path.to_string(),
+        ],
+        None,
+        &[],
+        None,
+    );
     // A pipe would tie the daemon's stderr to this short-lived CLI
     // (EPIPE once it exits); crash details come from the daemon log,
     // which the supervisor writes to before rethrowing startup errors.
-    let child = spawn_hidden_detached(&current_exec_path(), &args, &spawn_cwd, &env);
+    let child = spawn_hidden_detached(&launch.command, &launch.args, &spawn_cwd, &env, socket_path);
 
     let mut child_failure: Option<ChildFailure> = None;
     if let Some(child) = &child {
-        child_failure = child.failure.lock().ok().and_then(|failure| failure.clone());
+        child_failure = child
+            .failure
+            .lock()
+            .ok()
+            .and_then(|failure| failure.clone());
     }
 
     // A child exit is not immediately fatal: it may have lost the socket to a
@@ -572,7 +640,11 @@ async fn ensure_daemon_running(socket_path: &str, spawn_cwd: Option<&str>) -> Re
         }
         if child_failure.is_none() {
             if let Some(child) = &child {
-                child_failure = child.failure.lock().ok().and_then(|failure| failure.clone());
+                child_failure = child
+                    .failure
+                    .lock()
+                    .ok()
+                    .and_then(|failure| failure.clone());
             }
         }
         if child_failure.is_some() && exit_deadline.is_none() {
@@ -585,7 +657,10 @@ async fn ensure_daemon_running(socket_path: &str, spawn_cwd: Option<&str>) -> Re
         let log_tail = read_daemon_log_tail(socket_path, log_offset);
         return Err(match failure {
             ChildFailure::Error(message) => {
-                format!("Failed to spawn Prime Agent daemon: {}.{}", message, log_tail)
+                format!(
+                    "Failed to spawn Prime Agent daemon: {}.{}",
+                    message, log_tail
+                )
             }
             ChildFailure::Exit { code, signal } => {
                 let signal = signal
@@ -593,7 +668,8 @@ async fn ensure_daemon_running(socket_path: &str, spawn_cwd: Option<&str>) -> Re
                     .unwrap_or_default();
                 format!(
                     "Prime Agent daemon exited during startup (code {}{}).{}",
-                    code.map(|code| code.to_string()).unwrap_or_else(|| "unknown".to_string()),
+                    code.map(|code| code.to_string())
+                        .unwrap_or_else(|| "unknown".to_string()),
                     signal,
                     log_tail
                 )
@@ -620,10 +696,16 @@ fn read_daemon_log_tail(socket_path: &str, offset: u64) -> String {
     let mut tail = String::new();
     if let Ok(content) = std::fs::read(&log_path) {
         // A rotation may have shrunk the file below the pre-spawn byte offset.
-        let start = if (content.len() as u64) < offset { 0 } else { offset as usize };
+        let start = if (content.len() as u64) < offset {
+            0
+        } else {
+            offset as usize
+        };
         let sliced = &content[start.min(content.len())..];
         let tail_start = sliced.len().saturating_sub(DAEMON_STARTUP_LOG_TAIL_BYTES);
-        tail = String::from_utf8_lossy(&sliced[tail_start..]).trim().to_string();
+        tail = String::from_utf8_lossy(&sliced[tail_start..])
+            .trim()
+            .to_string();
     }
     if tail.is_empty() {
         // Missing log means the daemon crashed before logging was set up.
@@ -641,7 +723,8 @@ struct SharedEnsure {
 }
 
 fn ensure_promises() -> &'static Mutex<HashMap<String, std::sync::Arc<SharedEnsure>>> {
-    static PROMISES: OnceLock<Mutex<HashMap<String, std::sync::Arc<SharedEnsure>>>> = OnceLock::new();
+    static PROMISES: OnceLock<Mutex<HashMap<String, std::sync::Arc<SharedEnsure>>>> =
+        OnceLock::new();
     PROMISES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -649,7 +732,10 @@ fn ensure_promises() -> &'static Mutex<HashMap<String, std::sync::Arc<SharedEnsu
 /// needed. Memoized per socket so the early kick from cli.ts and the await in
 /// main.ts share one probe/spawn; failed attempts are forgotten so a later call
 /// retries (and surfaces the real error at its await site).
-pub async fn ensure_interactive_daemon_running(socket_path: &str, spawn_cwd: Option<&str>) -> Result<(), String> {
+pub async fn ensure_interactive_daemon_running(
+    socket_path: &str,
+    spawn_cwd: Option<&str>,
+) -> Result<(), String> {
     let (shared, is_first) = {
         let mut promises = ensure_promises().lock().unwrap();
         match promises.get(socket_path) {
@@ -670,7 +756,11 @@ pub async fn ensure_interactive_daemon_running(socket_path: &str, spawn_cwd: Opt
         *shared.result.lock().unwrap() = Some(result.clone());
         shared.notify.notify_waiters();
         let mut promises = ensure_promises().lock().unwrap();
-        if promises.get(socket_path).map(|entry| std::sync::Arc::ptr_eq(entry, &shared)).unwrap_or(false) {
+        if promises
+            .get(socket_path)
+            .map(|entry| std::sync::Arc::ptr_eq(entry, &shared))
+            .unwrap_or(false)
+        {
             promises.remove(socket_path);
         }
         return result;
@@ -688,8 +778,14 @@ pub async fn ensure_interactive_daemon_running(socket_path: &str, spawn_cwd: Opt
     }
 }
 
-pub const EARLY_LAUNCH_EXCLUDED_FLAGS: [&str; 6] =
-    ["--help", "-h", "--version", "-v", "--list-models", "--export"];
+pub const EARLY_LAUNCH_EXCLUDED_FLAGS: [&str; 6] = [
+    "--help",
+    "-h",
+    "--version",
+    "-v",
+    "--list-models",
+    "--export",
+];
 pub const EARLY_LAUNCH_VALUE_FLAGS: [&str; 28] = [
     "--mode",
     "--daemon-socket",
@@ -733,7 +829,11 @@ fn find_first_early_launch_positional(args: &[String]) -> Option<(usize, String)
             continue;
         }
         if arg == "--resume" || arg == "-r" {
-            if args.get(index + 1).map(|next| !next.starts_with('-')).unwrap_or(false) {
+            if args
+                .get(index + 1)
+                .map(|next| !next.starts_with('-'))
+                .unwrap_or(false)
+            {
                 index += 2;
                 continue;
             }
@@ -757,7 +857,10 @@ pub fn should_start_daemon_early(args: &[String], startup_benchmark: bool) -> bo
             return false;
         }
     }
-    if args.iter().any(|arg| EARLY_LAUNCH_EXCLUDED_FLAGS.contains(&arg.as_str())) {
+    if args
+        .iter()
+        .any(|arg| EARLY_LAUNCH_EXCLUDED_FLAGS.contains(&arg.as_str()))
+    {
         return false;
     }
     if args.iter().any(|arg| arg == "--print" || arg == "-p") {
@@ -789,7 +892,8 @@ pub fn maybe_start_daemon_early(args: &[String]) {
     let benchmark_flag = std::env::var("PI_STARTUP_BENCHMARK")
         .unwrap_or_default()
         .to_lowercase();
-    let startup_benchmark = benchmark_flag == "1" || benchmark_flag == "true" || benchmark_flag == "yes";
+    let startup_benchmark =
+        benchmark_flag == "1" || benchmark_flag == "true" || benchmark_flag == "yes";
     if !should_start_daemon_early(args, startup_benchmark) {
         return;
     }
@@ -807,7 +911,15 @@ pub fn maybe_start_daemon_early(args: &[String]) {
         }
     }
     let socket_path = normalize_socket_path(&raw_socket_path, spawn_cwd.as_deref());
-    let _ = ensure_interactive_daemon_running(&socket_path, spawn_cwd.as_deref());
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        runtime.spawn(async move {
+            if let Err(error) =
+                ensure_interactive_daemon_running(&socket_path, spawn_cwd.as_deref()).await
+            {
+                log_daemon_launch(&error);
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -859,11 +971,17 @@ fn expand_tilde_path(path: &str) -> String {
         return home_dir();
     }
     if let Some(rest) = path.strip_prefix("~/") {
-        return Path::new(&home_dir()).join(rest).to_string_lossy().to_string();
+        return Path::new(&home_dir())
+            .join(rest)
+            .to_string_lossy()
+            .to_string();
     }
     if process_platform() == "win32" {
         if let Some(rest) = path.strip_prefix("~\\") {
-            return Path::new(&home_dir()).join(rest).to_string_lossy().to_string();
+            return Path::new(&home_dir())
+                .join(rest)
+                .to_string_lossy()
+                .to_string();
         }
     }
     path.to_string()
@@ -880,7 +998,9 @@ fn resolve_path(path: &str) -> String {
     let joined = if candidate.is_absolute() {
         candidate
     } else {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(candidate)
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(candidate)
     };
     normalize_lexically(&joined)
 }
@@ -891,7 +1011,9 @@ fn normalize_lexically(path: &Path) -> String {
     for component in path.components() {
         use std::path::Component;
         match component {
-            Component::Prefix(prefix_component) => prefix.push_str(&prefix_component.as_os_str().to_string_lossy()),
+            Component::Prefix(prefix_component) => {
+                prefix.push_str(&prefix_component.as_os_str().to_string_lossy())
+            }
             Component::RootDir => {
                 if prefix.is_empty() {
                     prefix.push('/');
@@ -924,28 +1046,12 @@ fn normalize_socket_path(socket_path: &str, base_dir: Option<&str>) -> String {
 
 /// Local stand-in for `defaultDaemonSocketDir`.
 fn default_daemon_socket_dir() -> String {
-    // Node's `process.getuid()` is undefined on Windows, which the TypeScript
-    // renders as the literal "user" suffix.
-    let suffix = if process_platform() == "win32" {
-        "user".to_string()
-    } else {
-        std::env::var("UID").unwrap_or_else(|_| "user".to_string())
-    };
-    Path::new(&std::env::temp_dir())
-        .join(format!("prime-agent-{}", suffix))
-        .to_string_lossy()
-        .to_string()
+    crate::modes::daemon::daemon_socket::default_daemon_socket_dir()
 }
 
 /// Local stand-in for `defaultDaemonSocketPath`.
 fn default_daemon_socket_path() -> String {
-    if process_platform() == "win32" {
-        return "\\\\.\\pipe\\prime-agent-daemon".to_string();
-    }
-    Path::new(&default_daemon_socket_dir())
-        .join("daemon.sock")
-        .to_string_lossy()
-        .to_string()
+    crate::modes::daemon::daemon_socket::default_daemon_socket_path()
 }
 
 /// Local stand-in for `getDaemonLogPath` from ../config.js.
@@ -965,7 +1071,10 @@ fn get_daemon_log_path(socket_path: &str) -> String {
 
 /// Local stand-in for `getLogsDir` from ../config.js.
 fn get_logs_dir() -> String {
-    Path::new(&get_agent_dir()).join("logs").to_string_lossy().to_string()
+    Path::new(&get_agent_dir())
+        .join("logs")
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Local stand-in for `getAgentDir` from ../config.js.
@@ -976,15 +1085,24 @@ fn get_agent_dir() -> String {
     if let Ok(env_dir) = std::env::var("PI_CODING_AGENT_DIR") {
         return expand_tilde_path(&env_dir);
     }
-    Path::new(&home_dir()).join(".prime/agent").to_string_lossy().to_string()
+    Path::new(&home_dir())
+        .join(".prime/agent")
+        .to_string_lossy()
+        .to_string()
 }
 
 /// Local stand-in for `appendRotatingLog(getClientErrorLogPath(), ...)`.
 fn log_daemon_launch(message: &str) {
     let log_path = std::env::var(CLIENT_ERROR_LOG_ENV).unwrap_or_else(|_| {
-        Path::new(&get_logs_dir()).join("client-errors.log").to_string_lossy().to_string()
+        Path::new(&get_logs_dir())
+            .join("client-errors.log")
+            .to_string_lossy()
+            .to_string()
     });
-    append_rotating_log(&log_path, &format!("[{}] daemon-launch: {}", now_iso8601(), message));
+    append_rotating_log(
+        &log_path,
+        &format!("[{}] daemon-launch: {}", now_iso8601(), message),
+    );
 }
 
 const MAX_LOG_BYTES: u64 = 5 * 1024 * 1024;
@@ -1002,7 +1120,11 @@ fn append_rotating_log(log_path: &str, message: &str) {
             let _ = std::fs::rename(path, &old_path);
         }
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         use std::io::Write;
         let _ = writeln!(file, "{}", message);
     }
@@ -1075,7 +1197,7 @@ fn kill_process(pid: i64, signal_number: i32) -> bool {
 
 #[cfg(windows)]
 fn kill_process(pid: i64, signal_number: i32) -> bool {
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
     let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid as u32) };
     if handle.is_null() {
         return false;
@@ -1097,7 +1219,10 @@ fn kill_process(pid: i64, signal_number: i32) -> bool {
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
-async fn daemon_connect(socket_path: &str, timeout_ms: f64) -> Result<tokio::net::UnixStream, String> {
+async fn daemon_connect(
+    socket_path: &str,
+    timeout_ms: f64,
+) -> Result<tokio::net::UnixStream, String> {
     match tokio::time::timeout(
         std::time::Duration::from_millis(timeout_ms.max(1.0) as u64),
         tokio::net::UnixStream::connect(socket_path),
@@ -1115,7 +1240,10 @@ async fn daemon_connect(socket_path: &str, timeout_ms: f64) -> Result<tokio::net
 }
 
 #[cfg(windows)]
-async fn daemon_connect(socket_path: &str, timeout_ms: f64) -> Result<tokio::net::TcpStream, String> {
+async fn daemon_connect(
+    socket_path: &str,
+    timeout_ms: f64,
+) -> Result<tokio::net::TcpStream, String> {
     let _ = (socket_path, timeout_ms);
     Err("Windows named-pipe daemon transport is not implemented in this slice".to_string())
 }
@@ -1142,7 +1270,11 @@ async fn daemon_exchange(
     let mut lines: Vec<serde_json::Value> = Vec::new();
 
     let mut buffer = String::new();
-    let read = tokio::time::timeout(std::time::Duration::from_millis(2000), reader.read_line(&mut buffer)).await;
+    let read = tokio::time::timeout(
+        std::time::Duration::from_millis(2000),
+        reader.read_line(&mut buffer),
+    )
+    .await;
     match read {
         Ok(Ok(0)) | Err(_) => {}
         Ok(Ok(_)) => {
@@ -1154,8 +1286,14 @@ async fn daemon_exchange(
     }
 
     if let Some(command) = command {
-        let line = format!("{}\n", serde_json::to_string(&command).map_err(|error| error.to_string())?);
-        write_half.write_all(line.as_bytes()).await.map_err(|error| error.to_string())?;
+        let line = format!(
+            "{}\n",
+            serde_json::to_string(&command).map_err(|error| error.to_string())?
+        );
+        write_half
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|error| error.to_string())?;
         let mut response_buffer = String::new();
         let read = tokio::time::timeout(
             std::time::Duration::from_millis(response_timeout_ms.max(1.0) as u64),
@@ -1165,7 +1303,8 @@ async fn daemon_exchange(
         match read {
             Ok(Ok(0)) | Err(_) => {}
             Ok(Ok(_)) => {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(response_buffer.trim()) {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(response_buffer.trim())
+                {
                     lines.push(value);
                 }
             }
@@ -1183,7 +1322,9 @@ async fn daemon_exchange(
     response_timeout_ms: f64,
 ) -> Result<Vec<serde_json::Value>, String> {
     let _ = (command, response_timeout_ms);
-    daemon_connect(socket_path, 1000.0).await.map(|_| Vec::new())
+    daemon_connect(socket_path, 1000.0)
+        .await
+        .map(|_| Vec::new())
 }
 
 async fn daemon_request(
@@ -1220,7 +1361,10 @@ async fn daemon_wait_for_hello(socket_path: &str, timeout_ms: f64) -> Result<Dae
 #[derive(Debug, Clone)]
 enum ChildFailure {
     Error(String),
-    Exit { code: Option<i32>, signal: Option<String> },
+    Exit {
+        code: Option<i32>,
+        signal: Option<String>,
+    },
 }
 
 struct SpawnedChild {
@@ -1234,6 +1378,7 @@ fn spawn_hidden_detached(
     args: &[String],
     cwd: &str,
     env: &ProcessEnv,
+    socket_path: &str,
 ) -> Option<SpawnedChild> {
     let mut process = std::process::Command::new(command);
     process
@@ -1243,10 +1388,31 @@ fn spawn_hidden_detached(
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .env_clear();
+    let log_path = get_daemon_log_path(socket_path);
+    if let Some(parent) = Path::new(&log_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut log_options = std::fs::OpenOptions::new();
+    log_options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::{fs::OpenOptionsExt, process::CommandExt};
+        log_options.mode(0o600);
+        process.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        process.creation_flags(0x0800_0000 | 0x0000_0200);
+    }
+    if let Ok(log) = log_options.open(&log_path) {
+        process.stderr(std::process::Stdio::from(log));
+    }
     for (key, value) in env {
         process.env(key, value);
     }
-    let failure: std::sync::Arc<Mutex<Option<ChildFailure>>> = std::sync::Arc::new(Mutex::new(None));
+    let failure: std::sync::Arc<Mutex<Option<ChildFailure>>> =
+        std::sync::Arc::new(Mutex::new(None));
     let failure_slot = failure.clone();
     match process.spawn() {
         Ok(mut child) => {
@@ -1276,7 +1442,9 @@ fn spawn_hidden_detached(
 #[cfg(unix)]
 fn status_signal(status: &std::process::ExitStatus) -> Option<String> {
     use std::os::unix::process::ExitStatusExt;
-    status.signal().map(|signal| signal_name(signal).to_string())
+    status
+        .signal()
+        .map(|signal| signal_name(signal).to_string())
 }
 
 #[cfg(windows)]
@@ -1337,7 +1505,9 @@ mod tests {
 
     #[test]
     fn session_summaries_are_detected_by_either_identity_field() {
-        assert!(is_daemon_session_summary(&serde_json::json!({"activeSessionId": "a"})));
+        assert!(is_daemon_session_summary(
+            &serde_json::json!({"activeSessionId": "a"})
+        ));
         assert!(is_daemon_session_summary(&serde_json::json!({"id": "a"})));
         assert!(!is_daemon_session_summary(&serde_json::json!({"id": 5})));
         assert!(!is_daemon_session_summary(&serde_json::json!(null)));
@@ -1366,24 +1536,42 @@ mod tests {
     #[test]
     fn process_identity_exit_detection_handles_missing_and_live_pids() {
         assert!(has_process_identity_exited(None, true));
-        assert!(has_process_identity_exited(Some(&DaemonProcessIdentity { pid: 2_000_000_000, process_start_id: None }), true));
+        assert!(has_process_identity_exited(
+            Some(&DaemonProcessIdentity {
+                pid: 2_000_000_000,
+                process_start_id: None
+            }),
+            true
+        ));
         let pid = std::process::id() as i64;
         assert!(!has_process_identity_exited(
-            Some(&DaemonProcessIdentity { pid, process_start_id: None }),
+            Some(&DaemonProcessIdentity {
+                pid,
+                process_start_id: None
+            }),
             true
         ));
         if let Some(start_id) = get_process_start_id(pid) {
             assert!(!has_process_identity_exited(
-                Some(&DaemonProcessIdentity { pid, process_start_id: Some(start_id.clone()) }),
+                Some(&DaemonProcessIdentity {
+                    pid,
+                    process_start_id: Some(start_id.clone())
+                }),
                 true
             ));
             assert!(has_process_identity_exited(
-                Some(&DaemonProcessIdentity { pid, process_start_id: Some("other".to_string()) }),
+                Some(&DaemonProcessIdentity {
+                    pid,
+                    process_start_id: Some("other".to_string())
+                }),
                 true
             ));
             // Start-id verification is skipped when the poll interval has not elapsed.
             assert!(!has_process_identity_exited(
-                Some(&DaemonProcessIdentity { pid, process_start_id: Some("other".to_string()) }),
+                Some(&DaemonProcessIdentity {
+                    pid,
+                    process_start_id: Some("other".to_string())
+                }),
                 false
             ));
         }
@@ -1403,17 +1591,24 @@ mod tests {
             supervisor_process_start_id: None,
         };
         let error = StaleDaemonError::new("/tmp/daemon.sock", Some(&hello));
-        assert!(error.message.starts_with("An incompatible Prime Agent daemon is running.\n\n"));
+        assert!(error
+            .message
+            .starts_with("An incompatible Prime Agent daemon is running.\n\n"));
         assert!(error.message.contains("Daemon: v0.1.0, protocol 6, schema legacy, build unknown, PID 4242, executable /usr/local/bin/prime-agent"));
         assert!(error.message.contains(&format!("Client: v{}", VERSION)));
         assert!(error.message.ends_with("Then retry the original command."));
         let error = StaleDaemonError::new("/tmp/daemon.sock", None);
-        assert!(error.message.contains("Daemon: unknown build on /tmp/daemon.sock"));
+        assert!(error
+            .message
+            .contains("Daemon: unknown build on /tmp/daemon.sock"));
     }
 
     #[test]
     fn early_launch_is_skipped_for_excluded_flags_and_daemon_mode() {
-        assert!(!should_start_daemon_early(&args(&["--mode", "daemon"]), false));
+        assert!(!should_start_daemon_early(
+            &args(&["--mode", "daemon"]),
+            false
+        ));
         assert!(!should_start_daemon_early(&args(&["--help"]), false));
         assert!(!should_start_daemon_early(&args(&["--version"]), false));
         assert!(!should_start_daemon_early(&args(&["--list-models"]), false));
@@ -1433,7 +1628,7 @@ mod tests {
         assert!(!should_start_daemon_early(&args(&["daemon"]), false));
         assert!(!should_start_daemon_early(&args(&["help", "list"]), false));
         assert!(should_start_daemon_early(&args(&["agents"]), false));
-        assert!(should_start_daemon_early(&args(&["help"]), false));
+        assert!(!should_start_daemon_early(&args(&["help"]), false));
         assert!(should_start_daemon_early(&args(&["hello world"]), false));
     }
 
@@ -1478,7 +1673,11 @@ mod tests {
     #[test]
     fn daemon_log_tail_reports_a_missing_log() {
         let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("missing.sock").to_string_lossy().to_string();
+        let socket_path = dir
+            .path()
+            .join("missing.sock")
+            .to_string_lossy()
+            .to_string();
         let tail = read_daemon_log_tail(&socket_path, 0);
         assert!(tail.starts_with(" The daemon wrote nothing to its log ("));
     }
@@ -1486,7 +1685,11 @@ mod tests {
     #[test]
     fn daemon_log_tail_handles_a_shrunk_file() {
         let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("rotated.sock").to_string_lossy().to_string();
+        let socket_path = dir
+            .path()
+            .join("rotated.sock")
+            .to_string_lossy()
+            .to_string();
         let log_path = get_daemon_log_path(&socket_path);
         if let Some(parent) = Path::new(&log_path).parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -1500,10 +1703,17 @@ mod tests {
     async fn probe_reports_absent_for_a_missing_socket() {
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("nope.sock").to_string_lossy().to_string();
-        assert_eq!(probe_daemon_version(&socket_path, 200.0).await, DaemonVersionProbe::Absent);
+        assert_eq!(
+            probe_daemon_version(&socket_path, 200.0).await,
+            DaemonVersionProbe::Absent
+        );
         assert_eq!(
             probe_running_daemon_sessions(&socket_path).await,
-            RunningDaemonProbe { reachable: false, active_sessions: None, busy_client_owned_session_count: None }
+            RunningDaemonProbe {
+                reachable: false,
+                active_sessions: None,
+                busy_client_owned_session_count: None
+            }
         );
     }
 
@@ -1518,7 +1728,10 @@ mod tests {
     async fn wait_for_daemon_gone_waits_for_a_live_expected_process() {
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("nope.sock").to_string_lossy().to_string();
-        let identity = DaemonProcessIdentity { pid: std::process::id() as i64, process_start_id: None };
+        let identity = DaemonProcessIdentity {
+            pid: std::process::id() as i64,
+            process_start_id: None,
+        };
         assert!(!wait_for_daemon_gone(&socket_path, 100.0, false, Some(&identity)).await);
     }
 }

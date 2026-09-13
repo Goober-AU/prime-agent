@@ -431,41 +431,56 @@ pub struct DaemonAgentConnectionOptions {
 pub fn build_session_tree_from_flat_nodes(
     flat_nodes: &[AgentConnectionSessionTreeFlatNode],
 ) -> Vec<AgentConnectionSessionTreeNode> {
-    let mut by_id: IndexMap<String, AgentConnectionSessionTreeNode> = IndexMap::new();
-    let mut roots: Vec<AgentConnectionSessionTreeNode> = Vec::new();
+    let mut by_id = IndexMap::new();
     for flat_node in flat_nodes {
-        by_id.insert(
-            flat_node.entry.id().to_string(),
-            AgentConnectionSessionTreeNode {
-                entry: flat_node.entry.clone(),
-                label: flat_node.label.clone(),
-                label_timestamp: flat_node.label_timestamp.clone(),
-                children: Vec::new(),
-            },
-        );
+        by_id.insert(flat_node.entry.id(), flat_node);
     }
+    let mut children = vec![Vec::new(); by_id.len()];
+    let mut roots = Vec::new();
     for flat_node in flat_nodes {
         let entry = &flat_node.entry;
-        let mut node = by_id.get(entry.id()).cloned().expect("flat node was indexed");
-        node.entry = entry.clone();
-        let parent_id = entry.parent_id();
-        let parent_key = match parent_id {
-            Some(parent_id) if parent_id != entry.id() => Some(parent_id.to_string()),
-            _ => None,
-        };
-        match parent_key.and_then(|key| by_id.get_mut(&key)) {
-            Some(parent) => parent.children.push(node),
-            None => roots.push(node),
+        let index = by_id.get_index_of(entry.id()).expect("flat node was indexed");
+        let parent = entry.parent_id()
+            .filter(|parent| *parent != entry.id())
+            .and_then(|parent| by_id.get_index_of(parent));
+        match parent {
+            Some(parent) => children[parent].push(index),
+            None => roots.push(index),
         }
     }
-    // Match SessionManager.getTree() ordering without recursively walking deep
-    // chains: every node is already indexed, so sort each sibling array directly.
-    for node in by_id.values_mut() {
-        node.children.sort_by(|left, right| {
-            timestamp_millis(left.entry.timestamp()).cmp(&timestamp_millis(right.entry.timestamp()))
+    for siblings in &mut children {
+        siblings.sort_by_key(|index| {
+            timestamp_millis(by_id.get_index(*index).unwrap().1.entry.timestamp())
         });
     }
-    roots
+    let make_node = |index| {
+        let flat_node = by_id.get_index(index).unwrap().1;
+        AgentConnectionSessionTreeNode {
+            entry: flat_node.entry.clone(),
+            label: flat_node.label.clone(),
+            label_timestamp: flat_node.label_timestamp.clone(),
+            children: Vec::new(),
+        }
+    };
+    // JS links shared objects; Rust must finish each owned child before moving it
+    // into its parent. Use explicit frames to preserve deep-chain behavior.
+    let mut tree = Vec::with_capacity(roots.len());
+    for root in roots {
+        let mut stack = vec![(root, 0, make_node(root))];
+        while let Some((index, next_child, _)) = stack.last_mut() {
+            if let Some(child) = children[*index].get(*next_child).copied() {
+                *next_child += 1;
+                stack.push((child, 0, make_node(child)));
+            } else {
+                let (_, _, node) = stack.pop().unwrap();
+                match stack.last_mut() {
+                    Some((_, _, parent)) => parent.children.push(node),
+                    None => tree.push(node),
+                }
+            }
+        }
+    }
+    tree
 }
 
 /// `new Date(timestamp).getTime()` for an ISO-8601 timestamp string.
@@ -957,16 +972,12 @@ impl DaemonAgentConnection {
             Some(sequence) => sequence,
             None => return,
         };
-        let current = *self.last_event_sequence.lock().unwrap();
-        *self.last_event_sequence.lock().unwrap() = match current {
-            None => Some(sequence),
-            Some(current) => Some(current.max(sequence)),
-        };
-        if let Some(cursor) = self.last_event_cursor.lock().unwrap().clone() {
-            *self.last_event_cursor.lock().unwrap() = Some(DaemonEventCursor {
-                generation: cursor.generation,
-                sequence: cursor.sequence.max(sequence),
-            });
+        {
+            let mut current = self.last_event_sequence.lock().unwrap();
+            *current = max_event_sequence(*current, Some(sequence));
+        }
+        if let Some(cursor) = self.last_event_cursor.lock().unwrap().as_mut() {
+            cursor.sequence = cursor.sequence.max(sequence);
         }
     }
 
@@ -1044,8 +1055,10 @@ impl DaemonAgentConnection {
         if let Some(cursor) = &snapshot.last_event_cursor {
             self.observe_event_cursor(cursor.clone());
         }
-        *self.last_event_sequence.lock().unwrap() =
-            max_event_sequence(*self.last_event_sequence.lock().unwrap(), snapshot.last_event_sequence);
+        {
+            let mut sequence = self.last_event_sequence.lock().unwrap();
+            *sequence = max_event_sequence(*sequence, snapshot.last_event_sequence);
+        }
         *self.attached_session_id.lock().unwrap() = Some(snapshot.state.session_id.clone());
         *self.attached_session_file.lock().unwrap() = snapshot.state.session_file.clone();
         if let Ok(mapped) = map_daemon_session_snapshot(snapshot, replay) {
@@ -1217,12 +1230,11 @@ impl DaemonAgentConnection {
         if let Some(cursor) = &attach_result.snapshot.last_event_cursor {
             self.observe_event_cursor(cursor.clone());
         }
-        *self.last_event_sequence.lock().unwrap() = max_event_sequence(
-            *self.last_event_sequence.lock().unwrap(),
-            summary
-                .last_event_sequence
-                .or(attach_result.snapshot.last_event_sequence),
-        );
+        {
+            let mut sequence = self.last_event_sequence.lock().unwrap();
+            *sequence = max_event_sequence(*sequence,
+                summary.last_event_sequence.or(attach_result.snapshot.last_event_sequence));
+        }
         let snapshot = match &attach_result.snapshot_stream {
             Some(stream) => self.wait_for_snapshot(&stream.id).await?,
             None => attach_result.snapshot.clone(),
@@ -1749,16 +1761,13 @@ impl DaemonAgentConnection {
 
     /// `waitForSnapshot(snapshotId)`.
     async fn wait_for_snapshot(&self, snapshot_id: &str) -> Result<DaemonSessionSnapshot, String> {
-        if let Some(index) = self
-            .completed_snapshots
-            .lock()
-            .unwrap()
-            .iter()
-            .position(|(id, _)| id == snapshot_id)
-        {
-            if let Some((_, snapshot)) = self.completed_snapshots.lock().unwrap().remove(index) {
-                return Ok(snapshot);
-            }
+        let completed = {
+            let mut snapshots = self.completed_snapshots.lock().unwrap();
+            snapshots.iter().position(|(id, _)| id == snapshot_id)
+                .and_then(|index| snapshots.remove(index))
+        };
+        if let Some((_, snapshot)) = completed {
+            return Ok(snapshot);
         }
         let assembly = self.get_snapshot_assembly(snapshot_id);
         let timeout_ms = self
@@ -1927,8 +1936,10 @@ impl DaemonAgentConnection {
         if let Some(cursor) = &last_event_cursor {
             self.observe_event_cursor(cursor.clone());
         }
-        *self.last_event_sequence.lock().unwrap() =
-            max_event_sequence(*self.last_event_sequence.lock().unwrap(), Some(last_event_sequence));
+        {
+            let mut sequence = self.last_event_sequence.lock().unwrap();
+            *sequence = max_event_sequence(*sequence, Some(last_event_sequence));
+        }
         *self.attached_session_id.lock().unwrap() = Some(snapshot.state.session_id.clone());
         *self.attached_session_file.lock().unwrap() = snapshot.state.session_file.clone();
         if let Ok(mapped) = map_daemon_session_snapshot(&snapshot, None) {
@@ -2066,14 +2077,17 @@ impl DaemonAgentConnection {
         }
         self.observe_daemon_event_sequence(&message);
 
+        let message_sequence = get_daemon_message_sequence(&message);
         match message {
             DaemonOutbound::SessionEvent { event, .. } => {
                 if event.type_name() != "refine_complete" && event.type_name() != "refine_failed" {
                     self.observe_streaming_message(&event);
                 }
                 if let AgentConnectionSessionEvent::RlmChildUpdate { child } = &event {
-                    *self.child_roster_sequence.lock().unwrap() =
-                        max_event_sequence(*self.child_roster_sequence.lock().unwrap(), None);
+                    {
+                        let mut sequence = self.child_roster_sequence.lock().unwrap();
+                        *sequence = max_event_sequence(*sequence, message_sequence);
+                    }
                     self.observe_rlm_child_update(child.clone());
                 }
                 *self.latest_snapshot_is_fresh.lock().unwrap() = false;
@@ -4021,11 +4035,52 @@ mod tests {
     }
 
     #[test]
+    fn builds_descendants_after_parents_and_preserves_root_order() {
+        let nodes = vec![
+            flat_node("root", None, "2026-01-01T00:00:03.000Z"),
+            flat_node("child", Some("root"), "2026-01-01T00:00:02.000Z"),
+            flat_node("grandchild", Some("child"), "2026-01-01T00:00:01.000Z"),
+            flat_node("orphan", Some("missing"), "2026-01-01T00:00:00.000Z"),
+        ];
+        let tree = build_session_tree_from_flat_nodes(&nodes);
+        assert_eq!(tree.iter().map(|node| node.entry.id()).collect::<Vec<_>>(), vec!["root", "orphan"]);
+        assert_eq!(tree[0].children[0].entry.id(), "child");
+        assert_eq!(tree[0].children[0].children[0].entry.id(), "grandchild");
+    }
+
+    #[test]
     fn max_event_sequence_keeps_the_larger_value() {
         assert_eq!(max_event_sequence(None, Some(3)), Some(3));
         assert_eq!(max_event_sequence(Some(5), None), Some(5));
         assert_eq!(max_event_sequence(Some(5), Some(3)), Some(5));
         assert_eq!(max_event_sequence(Some(5), Some(9)), Some(9));
+    }
+
+    #[test]
+    fn snapshot_and_cursor_updates_do_not_relock_their_state() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async move {
+                let client = crate::modes::daemon::daemon_client::DaemonClient::create("unused-test-socket");
+                let transport = Arc::new(crate::main_entry::MainEntryDaemonTransport::new(client));
+                let connection = DaemonAgentConnection::new(transport, "active".to_string(), Default::default());
+                connection.observe_event_cursor(DaemonEventCursor { generation: "generation".to_string(), sequence: 2 });
+                connection.observe_daemon_event_sequence(&DaemonOutbound::HeartbeatsChanged {
+                    active_session_id: Some("active".to_string()),
+                    meta: Some(DaemonEventMeta { sequence: Some(5), cursor: None }),
+                });
+                assert_eq!(connection.last_event_cursor.lock().unwrap().as_ref().unwrap().sequence, 5);
+                let snapshot = DaemonSessionSnapshot { last_event_sequence: Some(8), ..Default::default() };
+                connection.apply_replacement_snapshot(&snapshot, None);
+                assert_eq!(*connection.last_event_sequence.lock().unwrap(), Some(8));
+                connection.completed_snapshots.lock().unwrap().push_back(("cached".to_string(), snapshot.clone()));
+                assert_eq!(connection.wait_for_snapshot("cached").await.unwrap(), snapshot);
+                assert!(connection.completed_snapshots.lock().unwrap().is_empty());
+                sender.send(()).unwrap();
+            });
+        });
+        receiver.recv_timeout(Duration::from_secs(5)).expect("snapshot/cursor update deadlocked");
     }
 
     #[test]

@@ -826,9 +826,14 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = temp_agent_dir("sessions");
         let dir_string = dir.to_string_lossy().to_string();
+        let previous_agent_dir = std::env::var_os("PRIME_AGENT_CODING_AGENT_DIR");
+        let previous_session_dir = std::env::var_os("PRIME_AGENT_SESSION_DIR");
         std::env::set_var("PRIME_AGENT_CODING_AGENT_DIR", &dir_string);
 
         let sessions = join_path(&dir_string, "sessions");
+        // The configured session root takes precedence over the agent directory.
+        // Keep this fixture isolated when the test runner supplies that override.
+        std::env::set_var("PRIME_AGENT_SESSION_DIR", &sessions);
         let legacy = join_path(&sessions, "--tmp-cwd--");
         std::fs::create_dir_all(&legacy).unwrap();
         std::fs::write(
@@ -845,7 +850,14 @@ mod tests {
         assert!(!std::path::Path::new(&join_path(&legacy, "s.jsonl")).exists());
         assert!(std::path::Path::new(&join_path(&legacy, "other.jsonl")).exists());
 
-        std::env::remove_var("PRIME_AGENT_CODING_AGENT_DIR");
+        match previous_agent_dir {
+            Some(value) => std::env::set_var("PRIME_AGENT_CODING_AGENT_DIR", value),
+            None => std::env::remove_var("PRIME_AGENT_CODING_AGENT_DIR"),
+        }
+        match previous_session_dir {
+            Some(value) => std::env::set_var("PRIME_AGENT_SESSION_DIR", value),
+            None => std::env::remove_var("PRIME_AGENT_SESSION_DIR"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

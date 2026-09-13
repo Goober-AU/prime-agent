@@ -102,7 +102,8 @@ mod tests {
     #[test]
     fn cache_costs_use_duration_multipliers() {
         let five_minutes = get_anthropic_cache_costs(3.0, ANTHROPIC_CACHE_DURATION_5M);
-        assert_eq!(five_minutes.cache_read, 0.3);
+        // JavaScript numbers retain the IEEE-754 result of 3 * 0.1.
+        assert_eq!(five_minutes.cache_read, 0.30000000000000004);
         assert_eq!(five_minutes.cache_write, 3.75);
 
         let one_hour = get_anthropic_cache_costs(3.0, ANTHROPIC_CACHE_DURATION_1H);

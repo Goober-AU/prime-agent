@@ -1,19 +1,4 @@
-//! `DaemonSession` adapter over the real `AgentSession`.
-//!
-//! `modes/daemon/daemon_mode.rs` holds resident sessions as
-//! `Arc<dyn DaemonSession>` (the 97-method seam `DaemonSessionState.session` and
-//! `AgentSessionRuntimeHandle.session` both use). The only implementor today is
-//! the fail-loud `MissingSession` stand-in, so every real resident session falls
-//! back to "Active session is not resident".
-//!
-//! `add_runtime` builds `AgentSessionRuntimeHandle` from an
-//! `AgentSessionRuntime`, whose live session is a concrete `Arc<AgentSession>`.
-//! This module supplies the missing adapter so that handle can carry the real
-//! session instead of the stand-in.
-//!
-//! Only members with a real owner are implemented. The rest are omitted (see
-//! `NOT IMPLEMENTED` below) so the compiler reports the true gap instead of this
-//! file returning placeholders.
+//! Live daemon session and runtime adapters.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -30,6 +15,8 @@ use crate::core::agent_session::{
 use crate::core::cron_jobs::AgentCronJob;
 use crate::core::session_manager::SessionManager;
 use crate::core::settings_manager::SettingsManager;
+use crate::modes::agent_connection::in_process_agent_connection::InProcessRuntimeHost;
+use crate::modes::agent_connection::snapshot::{self, AgentsFileEntry, RegisteredCommandEntry, PromptTemplateEntry, SkillEntry, ResourceSkillEntry, ResourcePromptEntry, ResourceExtensionEntry, ResourceThemeEntry, ExtensionLoadError};
 use crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput;
 use crate::modes::daemon::daemon_mode::{
     DaemonConnectionView, DaemonRuntimeApi, DaemonSession, ForkOptions, HeadlessCompletionOptions,
@@ -44,17 +31,17 @@ use crate::modes::daemon::daemon_mode::{
 /// forward to the `AgentSession` methods the TypeScript reads off
 /// `state.runtime.session`.
 pub struct AgentSessionDaemonAdapter {
-    session: Arc<AgentSession>,
+    runtime: Arc<super::AgentSessionRuntime>,
 }
 
 impl AgentSessionDaemonAdapter {
-    pub fn new(session: Arc<AgentSession>) -> Self {
-        Self { session }
+    pub fn new(runtime: Arc<super::AgentSessionRuntime>) -> Self {
+        Self { runtime }
     }
 
     /// The wrapped session, for callers that already hold the adapter.
-    pub fn session(&self) -> &Arc<AgentSession> {
-        &self.session
+    pub fn session(&self) -> Arc<AgentSession> {
+        self.runtime.session()
     }
 }
 
@@ -193,205 +180,100 @@ fn tool_definition_value(definition: &crate::core::extensions::types::ToolDefini
 }
 
 impl DaemonSession for AgentSessionDaemonAdapter {
-    // NOT IMPLEMENTED (27 of the 97 trait members). The trait has no default
-    // bodies, so an omitted member is an E0046 at this impl.
-    //
-    // blocked_on: `settings_manager` - the trait returns `Option<Arc<SettingsManager>>`
-    // (no `Mutex`), so the daemon can call `set_transport` directly on the shared
-    // value; `AgentSession` holds `Arc<Mutex<SettingsManager>>`. `Arc<Mutex<T>>`
-    // cannot become `Arc<T>`, so the daemon seam's assumption that
-    // `SettingsManager` is internally synchronized is a design gap for the
-    // daemon slice, not something this adapter can bridge. (The daemon's own body
-    // at daemon_mode.rs:5640 fails with "no method named `lock`" for the same
-    // reason, so this member is already broken for `MissingSession` too.)
-    // blocked_on: `subscribe` - `AgentSessionEvent` (core/agent_session.rs)
-    // derives only `Debug, Clone`, and the daemon listener takes a serialized
-    // `&Value`; no `AgentSessionEvent` -> wire converter exists in any slice (the
-    // same blocker as the in-process adapter's `session_subscribe`).
-    // blocked_on: `runtime` - needs `Arc<dyn DaemonRuntimeApi>`. That trait
-    // (daemon_mode.rs:511) is implemented only by `MissingRuntime`; wrapping
-    // `AgentSessionRuntime::new_session/switch_session/fork/import_from_jsonl`
-    // is a separate runtime-level adapter, not a session-level one.
-    // blocked_on: `session_dir` - `AgentSession` has no `session_dir` accessor;
-    // `AgentSessionRuntime::runtime_config()` holds the session dir.
-    // blocked_on: `connection_view` - needs `DaemonConnectionView`, which the
-    // daemon builds itself (`connection_commands`/`connection_resource_snapshot`
-    // read registries the session owns via `ResourceLoader`); the view struct is
-    // declared in daemon_mode.rs and is not reachable from this module.
-    // blocked_on: `register_rlm_child_session` / `release_rlm_child_session` -
-    // these take `Arc<dyn DaemonSession>` and populate the daemon's own
-    // `rlm_child_sessions` map; `AgentSession` tracks children by
-    // `RlmChildRun`/`Arc<AgentSession>`, so the daemon-side registry is the owner.
-    // blocked_on: `prompt_until_accepted` / `prompt_and_wait` /
-    // `prompt_heartbeat` / `accept_agent_message_prompt` / `steer` / `follow_up` -
-    // the daemon passes `PromptInvocation`, whose `signal`, `admission_committed`,
-    // `preflight_result`, `prefix_messages` and `expand_prompt_templates` members
-    // have no matching `PromptOptions` member (see `prompt_options_from_invocation`
-    // in `agent_connection` for the same projection the connection layer makes);
-    // `prefix_messages` in particular is consumed by the daemon's admission pump,
-    // not by `AgentSession::prompt`.
-    // blocked_on: `restore_steering_message` / `restore_follow_up_message` -
-    // `AgentSession` takes `&RestoredPromptInput`; the daemon seam takes
-    // `(message, images, options)`, so the restore payload's `queueKey` and
-    // `customMessage` fields would have to be rebuilt here.
-    // blocked_on: `restore_pending_next_turn_messages` - `AgentSession` takes
-    // `&[CustomMessage]`; the daemon seam takes an untyped `&Value` whose shape is
-    // owned by the daemon's worker-recovery journal.
-    // blocked_on: `restore_session_actions` - `AgentSession` takes
-    // `&SessionActionRecoverySnapshot` and returns `usize`; the daemon seam takes
-    // `&Value` and returns `f64`, and the daemon's `restore_session_actions`
-    // already parses that value itself.
-    // blocked_on: `send_custom_message` - `AgentSession` takes an owned
-    // `CustomMessage` plus `trigger_turn`/`deliver_as`; the daemon seam takes
-    // `&Value` and the deserialization target is the daemon's wire type.
-    // blocked_on: `clear_queued_agent_messages` / `clear_queue` -
-    // `AgentSession` returns `ClearedQueue`; the daemon seam returns `Value` so
-    // the daemon's own `serialize_cleared_queue`-shaped projection is the owner.
-    // blocked_on: `mutate_queued_message` - the daemon's queue mutation body
-    // parses the lane/mutation from the wire (`QueuedMessageLane`,
-    // `QueuedMessageMutation`); `AgentSession` takes those already-parsed types,
-    // and the status-string projection back to `Value` belongs to the daemon.
-    // blocked_on: `resume_queued_work` - `AgentSession::resume_queued_work`
-    // returns `()`; the daemon seam returns `bool` ("did anything resume"), which
-    // only the daemon's `queued_action_count` bookkeeping can answer.
-    // blocked_on: `get_steering_message_previews` / `get_follow_up_message_previews`
-    // - `AgentSession` returns `Vec<String>`; the daemon seam returns `Vec<Value>`
-    // carrying the queue keys the daemon assigns.
-    // blocked_on: `wait_for_headless_completion` - needs an
-    // `impl HeadlessCompletionSession for AgentSession`; the same three missing
-    // members (`wait_for_rlm_quiescence`, `wait_for_headless_idle`,
-    // `prompt_headless_continuation`) block the in-process adapter.
-    // blocked_on: `refresh_available_models` / `refresh_model_catalog` - the
-    // daemon seam returns `Vec<ModelIdentity>` / `Value` from the async
-    // `ModelRegistry::refresh_available_models` / `refresh_model_catalog`; the
-    // session holds the registry as `Arc<Mutex<ModelRegistry>>` and a sync member
-    // cannot await the refresh (the same blocker as the in-process adapter's
-    // `session_model_catalog`).
-    // blocked_on: `set_transport` - `AgentHandle` has no transport setter, so the
-    // live `Agent::transport` cannot be written through the session.
-    // blocked_on: `compact` / `refine` - both need the private
-    // `perform_compaction_unmeasured_full` / `refine_with_options` to return their
-    // result types; `compact_with_options` returns `()`.
-    // blocked_on: `reload` - `AgentSession::reload_with_options` lives on
-    // `runtime_members.rs` and takes `Option<ExtensionBindings>`; the daemon seam
-    // passes no bindings, so this would be a thin forward, and it is omitted here
-    // because the same call is already reachable as `session_reload` through the
-    // in-process adapter.
-    // blocked_on: `get_context_tree` / `get_rlm_child_snapshots` - same missing
-    // owners as the in-process adapter's `session_context_tree` /
-    // `session_rlm_children`.
-    // blocked_on: `export_to_html` / `export_to_jsonl` - no owner; see the
-    // in-process adapter.
-    // blocked_on: `get_last_assistant_text` - `AgentSession` has no
-    // `lastAssistantText` accessor; the in-process adapter rebuilds it from
-    // `messages()`, and the daemon seam would need the same projection.
-    // blocked_on: `start_side_question` / `abort_side_question` - `AgentSession`
-    // has no side-question owner; `core/side_question.rs` drives its own runs.
-    // blocked_on: `new_session` / `switch_session` / `fork` / `import_from_jsonl`
-    // - these are `AgentSessionRuntime` members, not `AgentSession` members; the
-    // daemon reaches them through `AgentSessionRuntimeHandle`'s own closures.
-    // blocked_on: `dispose` - `AgentSession::dispose` is synchronous; the daemon
-    // seam returns a future. The async variant `dispose_async` exists but is the
-    // one that carries the non-`Send` `ipython_kernel_provisioner` guard bug.
-    //
-    // REPAIR CURSOR: after the three `HeadlessCompletionSession` members land on
-    // `AgentSession`, add `wait_for_headless_completion` (it is the last member
-    // that both adapters share as a blocker).
-
     /// `session.model` as the daemon's `ModelIdentity` carries it.
     fn model_identity(&self) -> Option<ModelIdentity> {
-        self.session.model().map(model_identity_of)
+        self.runtime.session().model().map(model_identity_of)
     }
 
     /// `session.modelRegistry.find(provider, modelId)`.
     fn find_model(&self, provider: &str, model_id: &str) -> Option<ModelIdentity> {
-        let registry = self.session.model_registry();
+        let registry = self.runtime.session().model_registry();
         let registry = registry.lock().unwrap();
         registry.find(provider, model_id).map(model_identity_of)
     }
 
     /// `session.modelRegistry.getProviderAuthStatus(provider).source`.
     fn get_provider_auth_status_source(&self, provider: &str) -> Option<String> {
-        let registry = self.session.model_registry();
+        let registry = self.runtime.session().model_registry();
         let registry = registry.lock().unwrap();
         registry.get_provider_auth_status(provider).source
     }
 
     fn session_manager(&self) -> Arc<StdMutex<SessionManager>> {
-        Arc::clone(&self.session.session_manager)
+        Arc::clone(&self.runtime.session().session_manager)
     }
 
     fn session_id(&self) -> String {
-        self.session.session_id()
+        self.runtime.session().session_id()
     }
 
     fn session_name(&self) -> Option<String> {
-        self.session.session_name()
+        self.runtime.session().session_name()
     }
 
     fn session_file(&self) -> Option<String> {
-        self.session.session_file()
+        self.runtime.session().session_file()
     }
 
     fn is_streaming(&self) -> bool {
-        self.session.is_streaming()
+        self.runtime.session().is_streaming()
     }
 
     fn is_compacting(&self) -> bool {
-        self.session.is_compacting()
+        self.runtime.session().is_compacting()
     }
 
     fn is_bash_running(&self) -> bool {
-        self.session.is_bash_running()
+        self.runtime.session().is_bash_running()
     }
 
     fn is_retrying(&self) -> bool {
-        self.session.is_retrying()
+        self.runtime.session().is_retrying()
     }
 
     fn is_session_active(&self) -> bool {
-        self.session.is_session_active()
+        self.runtime.session().is_session_active()
     }
 
     fn has_running_rlm_children(&self) -> bool {
-        self.session.has_running_rlm_children()
+        self.runtime.session().has_running_rlm_children()
     }
 
     /// `session.unfinishedActionCount` (`_queuedActionCount() + in-flight`).
     fn unfinished_action_count(&self) -> f64 {
-        self.session.unfinished_action_count() as f64
+        self.runtime.session().unfinished_action_count() as f64
     }
 
     fn messages(&self) -> Vec<AgentMessage> {
-        self.session.messages()
+        self.runtime.session().messages()
     }
 
     /// `session.rlmDepth ?? null` - `None` is `null` on the wire.
     fn rlm_depth(&self) -> Option<i64> {
-        Some(self.session.rlm_depth())
+        Some(self.runtime.session().rlm_depth())
     }
 
     fn thinking_level(&self) -> Option<String> {
-        Some(thinking_level_value(self.session.thinking_level()))
+        Some(thinking_level_value(self.runtime.session().thinking_level()))
     }
 
     fn service_tier(&self) -> Option<String> {
-        service_tier_value(&self.session.service_tier())
+        service_tier_value(&self.runtime.session().service_tier())
     }
 
     fn system_prompt(&self) -> Option<String> {
-        Some(self.session.system_prompt())
+        Some(self.runtime.session().system_prompt())
     }
 
     fn set_current_recap(&self, recap: Option<&str>) {
-        self.session
+        self.runtime.session()
             .set_current_recap(recap.map(|recap| recap.to_string()));
     }
 
     fn set_session_name(&self, name: &str) {
         // The daemon seam returns unit; `setSessionName` reports a failure, so the
         // error is logged rather than dropped silently.
-        if let Err(error) = self.session.set_session_name(name) {
+        if let Err(error) = self.runtime.session().set_session_name(name) {
             eprintln!("Warning: Could not set session name: {error}");
         }
     }
@@ -399,12 +281,12 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     /// `session.getRlmChildRunStatus(childId)` - `RlmChildAgentStatus` is already
     /// the wire string the daemon uses.
     fn get_rlm_child_run_status(&self, child_id: &str) -> Option<String> {
-        let status: RlmChildAgentStatus = self.session.get_rlm_child_run_status(child_id)?;
+        let status: RlmChildAgentStatus = self.runtime.session().get_rlm_child_run_status(child_id)?;
         Some(status)
     }
 
     fn remove_queued_follow_up(&self, key: &str) {
-        self.session.remove_queued_follow_up(key);
+        self.runtime.session().remove_queued_follow_up(key);
     }
 
     /// `session.runUserBash(command, options)`.
@@ -413,7 +295,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         command: &str,
         options: RunUserBashOptions,
     ) -> BoxFuture<'static, Result<Value, String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let command = command.to_string();
         // `transient`/`runId` are daemon-side bash-event identity fields; the
         // session's `runUserBash(command, excludeFromContext)` does not accept them.
@@ -427,7 +309,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
 
     /// `session.executeBash(command)`.
     fn execute_bash(&self, command: &str) -> BoxFuture<'static, Result<Value, String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let command = command.to_string();
         Box::pin(async move {
             let result = session.execute_bash(&command, None, None).await?;
@@ -436,71 +318,71 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn request_abort(&self) {
-        self.session.request_abort();
+        self.runtime.session().request_abort();
     }
 
     fn abort_bash(&self) {
-        self.session.abort_bash();
+        self.runtime.session().abort_bash();
     }
 
     /// The daemon seam carries the pause as a bare release closure; the session
     /// returns the `SessionInputPause` struct, so its `release` is wrapped.
     fn acquire_session_input_pause(&self) -> DaemonSessionInputPause {
-        let pause = self.session.acquire_session_input_pause();
+        let pause = self.runtime.session().acquire_session_input_pause();
         Arc::new(move || pause.release())
     }
 
     fn set_steering_mode(&self, mode: &str) {
-        self.session.set_steering_mode(mode);
+        self.runtime.session().set_steering_mode(mode);
     }
 
     fn set_follow_up_mode(&self, mode: &str) {
-        self.session.set_follow_up_mode(mode);
+        self.runtime.session().set_follow_up_mode(mode);
     }
 
     fn set_auto_compaction_enabled(&self, enabled: bool) {
-        self.session.set_auto_compaction_enabled(enabled);
+        self.runtime.session().set_auto_compaction_enabled(enabled);
     }
 
     fn set_auto_retry_enabled(&self, enabled: bool) {
-        self.session.set_auto_retry_enabled(enabled);
+        self.runtime.session().set_auto_retry_enabled(enabled);
     }
 
     fn abort_compaction(&self) {
-        self.session.abort_compaction();
+        self.runtime.session().abort_compaction();
     }
 
     fn abort_branch_summary(&self) {
-        self.session.abort_branch_summary();
+        self.runtime.session().abort_branch_summary();
     }
 
     fn abort_retry(&self) {
-        self.session.abort_retry();
+        self.runtime.session().abort_retry();
     }
 
     fn replied_to_parent_since_task(&self) -> Option<bool> {
-        self.session.replied_to_parent_since_task()
+        self.runtime.session().replied_to_parent_since_task()
     }
 
     fn cycle_thinking_level(&self) -> Option<String> {
-        self.session.cycle_thinking_level().map(thinking_level_value)
+        self.runtime.session().cycle_thinking_level().map(thinking_level_value)
     }
 
     fn get_rlm_max_depth_status(&self) -> Value {
-        let status: RlmMaxDepthStatus = self.session.get_rlm_max_depth_status();
+        let status: RlmMaxDepthStatus = self.runtime.session().get_rlm_max_depth_status();
         serde_json::to_value(status).unwrap_or(Value::Null)
     }
 
     fn build_session_context(&self) -> Value {
-        session_context_value(&self.session.build_session_context())
+        session_context_value(&self.runtime.session().build_session_context())
     }
 
     fn get_session_stats(&self) -> Value {
-        serde_json::to_value(self.session.get_session_stats()).unwrap_or(Value::Null)
+        serde_json::to_value(self.runtime.session().get_session_stats()).unwrap_or(Value::Null)
     }
 
     fn get_user_messages_for_forking(&self) -> Vec<Value> {
-        self.session
+        self.runtime.session()
             .get_user_messages_for_forking()
             .into_iter()
             .map(|entry| {
@@ -513,13 +395,13 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn get_tool_definition(&self, name: &str) -> Option<Value> {
-        self.session
+        self.runtime.session()
             .get_tool_definition(name)
             .map(|definition| tool_definition_value(&definition))
     }
 
     fn wait_for_idle(&self) -> BoxFuture<'static, ()> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         Box::pin(async move {
             // The daemon seam reports nothing; `waitForIdle` rejects on a session
             // failure, so the error is logged.
@@ -534,7 +416,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         owner_id: &str,
         server_names: &[String],
     ) -> BoxFuture<'static, Result<(), String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let owner_id = owner_id.to_string();
         let server_names = server_names.to_vec();
         Box::pin(async move { session.release_acp_mcp_servers(&owner_id, &server_names).await })
@@ -545,7 +427,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         servers: &[Value],
         owner_id: &str,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let owner_id = owner_id.to_string();
         let servers = servers
             .iter()
@@ -559,11 +441,11 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn set_thinking_level(&self, level: &str) {
-        self.session.set_thinking_level(parse_thinking_level(level));
+        self.runtime.session().set_thinking_level(parse_thinking_level(level));
     }
 
     fn set_service_tier(&self, service_tier: &str) {
-        self.session
+        self.runtime.session()
             .set_service_tier(parse_service_tier(service_tier));
     }
 
@@ -575,22 +457,11 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     // whole crate from compiling and keeps every test from running.
     // ---------------------------------------------------------------------
 
-    fn runtime(&self) -> Arc<dyn DaemonRuntimeApi> {
-        // blocked_on: needs an `impl DaemonRuntimeApi` over the runtime; this adapter wraps a
-        // session, and `AgentSessionRuntime` is held by the daemon, not by the session.
-        Arc::new(MissingDaemonRuntimeApi)
-    }
+    fn runtime(&self) -> Arc<dyn DaemonRuntimeApi> { Arc::new(DaemonRuntimeAdapter(self.runtime.clone())) }
 
-    fn settings_manager(&self) -> Option<Arc<StdMutex<SettingsManager>>> {
-        // blocked_on: `AgentSession` exposes no `settingsManager` accessor; the settings live on the
-        // runtime (`AgentSessionRuntime`), which this adapter does not hold.
-        None
-    }
+    fn settings_manager(&self) -> Option<Arc<StdMutex<SettingsManager>>> { Some(self.runtime.services().settings_manager.clone()) }
 
-    fn session_dir(&self) -> Option<String> {
-        // blocked_on: `AgentSession` has no `sessionDir` accessor.
-        None
-    }
+    fn session_dir(&self) -> Option<String> { Some(self.session().session_manager.lock().unwrap().get_session_dir()) }
 
     fn set_exec_env_provider(&self, client_env: Option<HashMap<String, String>>) {
         // blocked_on: no `setExecEnvProvider` owner on `AgentSession`; the daemon seam sets it on the
@@ -603,44 +474,72 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         let _ = client_env;
     }
 
-    fn set_subagent_runtime_host(&self, host: Option<Value>) {
-        // blocked_on: the owner takes `Option<Arc<dyn SubagentRuntimeHost>>` (runtime_members.rs:2829)
-        // while this seam carries an opaque `Value`; a converter does not exist.
-        let _ = host;
+    fn set_subagent_runtime_host(&self, host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>) {
+        if host.is_some() {
+            self.session().set_subagent_runtime_host(host);
+        }
     }
 
     fn set_rebind_session(&self, rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>) {
-        // blocked_on: no `setRebindSession` owner on `AgentSession`.
-        let _ = rebind;
+        self.runtime.set_rebind_session(Some(Arc::new(move |_| rebind())));
     }
 
-    fn bind_extensions(
-        &self,
-        binding: crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput,
-    ) -> BoxFuture<'static, Result<(), String>> {
-        // blocked_on: the owner takes the canonical `ExtensionBindings`
-        // (runtime_members.rs:492) while the daemon seam carries its own already-typed
-        // `ExtensionBindingInput`; the two need a shared owner.
-        let _ = binding;
-        Box::pin(async {
-            Err("blocked_on: ExtensionBindingInput and ExtensionBindings have no shared owner".to_string())
-        })
+    fn bind_extensions(&self, binding: ExtensionBindingInput) -> BoxFuture<'static, Result<(), String>> {
+        let session = self.session();
+        let bindings = crate::core::agent_session::ExtensionBindings {
+            ui_context: Some(binding.ui_context),
+            command_context_actions: None,
+            shutdown_handler: Some(binding.shutdown_handler),
+            on_error: Some(Arc::new(move |error| (binding.on_error)(&crate::modes::daemon::daemon_extension_binding::ExtensionBindingError {
+                extension_path: Some(error.extension_path), event: Some(error.event), error: error.error,
+            }))),
+        };
+        Box::pin(async move { session.bind_extensions(&bindings).await })
     }
 
     fn abort_for_update_restart(&self) {
-        self.session.abort_for_update_restart();
+        self.runtime.session().abort_for_update_restart();
     }
 
     fn connection_view(&self) -> DaemonConnectionView {
-        // blocked_on: needs `createAgentConnectionState` (agent-connection/snapshot.ts:55) over an
-        // `AgentSessionRuntimeSnapshotSource`, whose fields the session does not expose.
-        DaemonConnectionView::default()
+        let host = super::InProcessRuntimeHostAdapter::new(self.runtime.clone());
+        let mut view = DaemonConnectionView {
+            session_id: self.session().session_id(), cwd: self.runtime.cwd(), ..Default::default()
+        };
+        for command in host.session_commands() {
+            match command.source.as_str() {
+                "extension" => view.registered_commands.push(RegisteredCommandEntry {
+                    invocation_name: command.name.clone(), name: command.registered_name.unwrap_or(command.name),
+                    description: command.description, source_info: command.source_info,
+                }),
+                "prompt" => view.prompt_templates.push(PromptTemplateEntry {
+                    name: command.name, description: command.description, argument_hint: command.argument_hint,
+                    source_info: command.source_info,
+                }),
+                "skill" => view.skills.push(SkillEntry {
+                    name: command.name.strip_prefix("skill:").unwrap_or(&command.name).to_string(),
+                    description: command.description, source_info: command.source_info,
+                }),
+                _ => unreachable!("the canonical command projection has a closed source set"),
+            }
+        }
+        let resources = host.session_resource_snapshot();
+        view.agents_files = resources.context_files.into_iter().map(|entry| AgentsFileEntry { path: entry.path }).collect();
+        view.resource_skills = resources.skills.into_iter().map(|entry| ResourceSkillEntry { name: entry.name, description: entry.description, file_path: entry.file_path, source_info: entry.source_info }).collect();
+        view.resource_prompts = resources.prompts.into_iter().map(|entry| ResourcePromptEntry { name: entry.name, description: entry.description, argument_hint: entry.argument_hint, file_path: entry.file_path, source_info: entry.source_info }).collect();
+        view.resource_extensions = resources.extensions.into_iter().map(|entry| ResourceExtensionEntry { path: entry.path, source_info: entry.source_info }).collect();
+        view.resource_themes = resources.themes.into_iter().map(|entry| ResourceThemeEntry { name: entry.name, source_path: entry.source_path, source_info: entry.source_info }).collect();
+        view.skill_diagnostics = resources.diagnostics.skills;
+        view.prompt_diagnostics = resources.diagnostics.prompts;
+        view.theme_diagnostics = resources.diagnostics.themes;
+        view.extension_load_errors = resources.diagnostics.extensions.into_iter().map(|entry| ExtensionLoadError { error: entry.message, path: entry.path }).collect();
+        view
     }
 
     fn connection_state(&self, active_session_id: Option<String>) -> Value {
-        // blocked_on: same missing snapshot source as `connection_view`.
-        let _ = active_session_id;
-        Value::Null
+        let host = super::InProcessRuntimeHostAdapter::new(self.runtime.clone());
+        serde_json::to_value(snapshot::create_agent_connection_state(&host.snapshot_source(), active_session_id))
+            .expect("connection state serializes")
     }
 
     fn register_rlm_child_session(&self, child_id: &str, session: Arc<dyn DaemonSession>) -> bool {
@@ -650,10 +549,13 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn subscribe(&self, listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {
-        // blocked_on: the owner takes `AgentSessionEventListener` and returns `Arc<dyn Fn()>`
-        // (agent_session.rs:6294); this seam carries a `Value`-shaped listener.
-        let _ = listener;
-        Box::new(|| {})
+        let unsubscribe = self.session().subscribe(Arc::new(move |event| {
+            match serde_json::to_value(event) {
+                Ok(event) => listener(&event),
+                Err(error) => eprintln!("Could not serialize session event: {error}"),
+            }
+        }));
+        Box::new(move || unsubscribe())
     }
 
     fn prompt_until_accepted(
@@ -661,7 +563,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         message: &str,
         options: PromptInvocation,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let message = message.to_string();
         let options = prompt_options_from_invocation(options);
         Box::pin(async move { session.prompt_until_accepted(&message, Some(options)).await })
@@ -672,7 +574,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         message: &str,
         options: PromptInvocation,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let message = message.to_string();
         let options = prompt_options_from_invocation(options);
         Box::pin(async move { session.prompt_and_wait(&message, Some(options)).await })
@@ -683,7 +585,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         job: &AgentCronJob,
         options: PromptInvocation,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let job = job.clone();
         let options = prompt_options_from_invocation(options);
         Box::pin(async move { session.prompt_heartbeat(&job, Some(options)).await })
@@ -694,7 +596,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         message: &str,
         options: PromptInvocation,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let message = message.to_string();
         let options = prompt_options_from_invocation(options);
         Box::pin(async move {
@@ -710,7 +612,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         images: Option<Value>,
         options: PromptInvocation,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let message = message.to_string();
         let images = images.and_then(|images| serde_json::from_value(images).ok());
         let options = prompt_options_from_invocation(options);
@@ -733,7 +635,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         images: Option<Value>,
         options: PromptInvocation,
     ) -> BoxFuture<'static, Result<bool, String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let message = message.to_string();
         let images = images.and_then(|images| serde_json::from_value(images).ok());
         let options = prompt_options_from_invocation(options);
@@ -750,87 +652,66 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         })
     }
 
-    fn restore_steering_message(
-        &self,
-        message: &str,
-        images: Option<Value>,
-        options: PromptInvocation,
-    ) -> BoxFuture<'static, Result<(), String>> {
-        // blocked_on: no `restoreSteeringMessage` owner on `AgentSession`.
-        let _ = (message, images, options);
-        Box::pin(async { Err("blocked_on: no restoreSteeringMessage owner".to_string()) })
+    fn restore_steering_message(&self, message: &str, images: Option<Value>, options: PromptInvocation) -> BoxFuture<'static, Result<(), String>> {
+        let session = self.session();
+        let snapshot = restored_prompt(message, images, options);
+        Box::pin(async move { session.restore_steering_message(&snapshot?).await.map(|_| ()) })
     }
 
-    fn restore_follow_up_message(
-        &self,
-        message: &str,
-        images: Option<Value>,
-        options: PromptInvocation,
-    ) -> BoxFuture<'static, Result<bool, String>> {
-        // blocked_on: no `restoreFollowUpMessage` owner on `AgentSession`.
-        let _ = (message, images, options);
-        Box::pin(async { Err("blocked_on: no restoreFollowUpMessage owner".to_string()) })
+    fn restore_follow_up_message(&self, message: &str, images: Option<Value>, options: PromptInvocation) -> BoxFuture<'static, Result<bool, String>> {
+        let session = self.session();
+        let snapshot = restored_prompt(message, images, options);
+        Box::pin(async move { session.restore_follow_up_message(&snapshot?).await })
     }
 
     fn restore_pending_next_turn_messages(&self, messages: &Value) {
-        // blocked_on: the owner takes `&[CustomMessage]` (agent_session.rs:10602); this seam carries
-        // an opaque `Value`.
-        let _ = messages;
+        match serde_json::from_value::<Vec<crate::core::messages::CustomMessage>>(messages.clone()) {
+            Ok(messages) => self.session().restore_pending_next_turn_messages(&messages),
+            Err(error) => eprintln!("Could not restore pending messages: {error}"),
+        }
     }
 
     fn restore_session_actions(&self, snapshot: &Value) -> BoxFuture<'static, Result<f64, String>> {
-        // blocked_on: the owner takes `&SessionActionRecoverySnapshot` and returns `usize`
-        // (agent_session.rs:8340); this seam takes an untyped `&Value` and returns `f64`. The daemon
-        // already parses that value into the typed snapshot on its own path.
-        let _ = snapshot;
-        Box::pin(async {
-            Err("blocked_on: daemon seam carries an untyped snapshot".to_string())
-        })
+        let session = self.session();
+        let snapshot = serde_json::from_value(snapshot.clone()).map_err(|error| error.to_string());
+        Box::pin(async move { session.restore_session_actions(&snapshot?).await.map(|count| count as f64) })
     }
 
     fn send_custom_message(&self, message: &Value) -> BoxFuture<'static, Result<(), String>> {
-        // blocked_on: the owner takes an owned `CustomMessage` plus `trigger_turn` and `deliver_as`
-        // (agent_session.rs:9756); this seam carries an opaque `&Value`.
-        let _ = message;
-        Box::pin(async { Err("blocked_on: daemon seam carries an untyped message".to_string()) })
+        let session = self.session();
+        let message = serde_json::from_value(message.clone()).map_err(|error| error.to_string());
+        Box::pin(async move { session.send_custom_message(message?, None, None).await })
     }
 
     fn resume_queued_work(&self) -> bool {
-        self.session.resume_queued_work();
-        // blocked_on: the owner returns `()` (agent_session.rs:10546); this seam returns `bool`
-        // ("did anything resume"), which only the daemon's queued-action bookkeeping can answer.
-        true
+        let session = self.session();
+        let pending = session.has_pending_session_work();
+        session.resume_queued_work();
+        pending
     }
 
     fn clear_queued_agent_messages(&self) -> Value {
-        // blocked_on: no `clearQueuedAgentMessages` owner; `clear_queue` (agent_session.rs:9891)
-        // returns `ClearedQueue`, whose projection to this seam's `Value` is not defined.
-        Value::Null
+        let cleared = self.session().clear_queued_agent_messages();
+        json!({"steering":cleared.steering,"followUp":cleared.follow_up})
     }
 
     fn clear_queue(&self) -> Value {
-        // blocked_on: `clear_queue` (agent_session.rs:9891) returns `ClearedQueue`, which is not
-        // `Serialize`, so this seam's `Value` projection belongs to the daemon.
-        self.session.clear_queue();
-        Value::Null
+        let cleared = self.session().clear_queue();
+        json!({"steering":cleared.steering,"followUp":cleared.follow_up})
     }
 
-    fn mutate_queued_message(
-        &self,
-        lane: &str,
-        index: f64,
-        expected_text: &str,
-        mutation: &Value,
-    ) -> Value {
-        // blocked_on: the owner takes `QueuedMessageLane`, `i64` and `&QueuedMessageMutation`
-        // (agent_session.rs:10064); this seam carries wire-shaped `&str`/`f64`/`&Value`, and the
-        // status projection back to `Value` is the daemon's.
-        let _ = (lane, index, expected_text, mutation);
-        Value::Null
+    fn mutate_queued_message(&self, lane: &str, index: f64, expected_text: &str, mutation: &Value) -> Value {
+        let lane = serde_json::from_value(Value::String(lane.to_string()));
+        let mutation = serde_json::from_value(mutation.clone());
+        if !index.is_finite() || index.fract() != 0.0 || index < 0.0 || index > i64::MAX as f64 { return json!("invalid"); }
+        match (lane, mutation) {
+            (Ok(lane), Ok(mutation)) => json!(self.session().mutate_queued_message(lane, index as i64, expected_text, &mutation).as_str()),
+            _ => json!("invalid"),
+        }
     }
 
     fn get_steering_message_previews(&self) -> Vec<Value> {
-        self.session
+        self.runtime.session()
             .get_steering_message_previews()
             .into_iter()
             .map(Value::String)
@@ -838,7 +719,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn get_follow_up_message_previews(&self) -> Vec<Value> {
-        self.session
+        self.runtime.session()
             .get_follow_up_message_previews()
             .into_iter()
             .map(Value::String)
@@ -856,7 +737,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         child_id: &str,
         is_resident_child_running: Arc<dyn Fn() -> bool + Send + Sync>,
     ) -> BoxFuture<'static, Result<String, String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let child_id = child_id.to_string();
         Box::pin(async move {
             session
@@ -865,26 +746,26 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         })
     }
 
-    fn wait_for_headless_completion(
-        &self,
-        options: HeadlessCompletionOptions,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        // blocked_on: requires `impl HeadlessCompletionSession for AgentSession`.
-        let _ = options;
-        Box::pin(async {
-            Err("blocked_on: no `impl HeadlessCompletionSession for AgentSession`".to_string())
+    fn wait_for_headless_completion(&self, options: HeadlessCompletionOptions) -> BoxFuture<'static, Result<Value, String>> {
+        let session = self.session();
+        Box::pin(async move {
+            let status = crate::modes::headless_completion::wait_for_headless_completion(Arc::new(session),
+                crate::modes::headless_completion::HeadlessCompletionOptions { wait_for_rlm_quiescence: options.wait_for_rlm_quiescence }).await?;
+            serde_json::to_value(status).map_err(|error| error.to_string())
         })
     }
 
     fn refresh_available_models(&self) -> BoxFuture<'static, Result<Vec<pi_ai::types::Model>, String>> {
-        // blocked_on: registry refresh is async behind the session's `Arc<Mutex<ModelRegistry>>`,
-        // and this seam member is not async-capable without that handle.
-        Box::pin(async { Err("blocked_on: registry refresh is async behind the mutex".to_string()) })
+        let registry = self.session().model_registry();
+        Box::pin(async move { crate::core::sdk::with_model_registry(registry, |registry| Box::pin(registry.refresh_available_models())).await })
     }
 
     fn refresh_model_catalog(&self) -> BoxFuture<'static, Result<Value, String>> {
-        // blocked_on: same async-behind-mutex blocker as `refresh_available_models`.
-        Box::pin(async { Err("blocked_on: registry refresh is async behind the mutex".to_string()) })
+        let registry = self.session().model_registry();
+        Box::pin(async move {
+            let catalog = crate::core::sdk::with_model_registry(registry, |registry| Box::pin(registry.refresh_model_catalog())).await?;
+            Ok(json!({"models":catalog.models,"configuredProviders":catalog.configured_providers}))
+        })
     }
 
     fn set_model(
@@ -892,7 +773,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         model: &pi_ai::types::Model,
         wait_for_extensions: bool,
     ) -> BoxFuture<'static, Result<(), String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let model = model.clone();
         Box::pin(async move {
             session
@@ -907,14 +788,10 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         })
     }
 
-    fn cycle_model(
-        &self,
-        direction: &str,
-        wait_for_extensions: bool,
-    ) -> BoxFuture<'static, Result<Option<pi_ai::types::Model>, String>> {
-        // blocked_on: no `cycleModel` owner on `AgentSession`.
-        let _ = (direction, wait_for_extensions);
-        Box::pin(async { Err("blocked_on: no cycleModel owner".to_string()) })
+    fn cycle_model(&self, direction: &str, wait_for_extensions: bool) -> BoxFuture<'static, Result<Option<pi_ai::types::Model>, String>> {
+        let session = self.session();
+        let direction = if direction == "backward" { -1 } else { 1 };
+        Box::pin(async move { session.cycle_model(Some(direction), ModelSelectOptions { wait_for_extensions: Some(wait_for_extensions) }).await.map(|result| Some(result.model)) })
     }
 
     fn set_scoped_models(&self, scoped_models: &Value) {
@@ -930,7 +807,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn compact(&self, custom_instructions: Option<&str>) -> BoxFuture<'static, Result<Value, String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let custom_instructions = custom_instructions.map(|value| value.to_string());
         Box::pin(async move {
             session
@@ -952,8 +829,8 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn reload(&self) -> BoxFuture<'static, Result<(), String>> {
-        // blocked_on: no `reload` owner on `AgentSession`; it lives on `AgentSessionRuntime`.
-        Box::pin(async { Err("blocked_on: reload belongs to AgentSessionRuntime".to_string()) })
+        let session = self.session();
+        Box::pin(async move { session.reload_with_options(None).await })
     }
 
     fn set_rlm_max_depth(
@@ -961,7 +838,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         max_depth: Value,
         global: bool,
     ) -> BoxFuture<'static, Result<Value, String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let Some(max_depth) = max_depth.as_i64() else {
             // The daemon validates the wire value before it reaches this seam.
             return Box::pin(async { Err("rlmMaxDepth must be a non-negative integer".to_string()) });
@@ -986,7 +863,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn export_to_html(&self, output_path: Option<&str>) -> BoxFuture<'static, Result<String, String>> {
-        let session_file = self.session.session_file();
+        let session_file = self.runtime.session().session_file();
         let output_path = output_path.map(|path| path.to_string());
         Box::pin(async move {
             let Some(session_file) = session_file else {
@@ -1007,7 +884,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn get_last_assistant_text(&self) -> String {
-        self.session
+        self.runtime.session()
             .messages()
             .iter()
             .rev()
@@ -1027,7 +904,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         target_id: &str,
         options: NavigateTreeOptions,
     ) -> BoxFuture<'static, Result<Value, String>> {
-        let session = Arc::clone(&self.session);
+        let session = Arc::clone(&self.runtime.session());
         let target_id = target_id.to_string();
         Box::pin(async move {
             session
@@ -1059,14 +936,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         let _ = side_question_id;
     }
 
-    fn new_session(
-        &self,
-        options: Option<NewSessionRuntimeOptions>,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        // blocked_on: `newSession` is an `AgentSessionRuntime` member; this adapter wraps a session.
-        let _ = options;
-        Box::pin(async { Err("blocked_on: newSession belongs to AgentSessionRuntime".to_string()) })
-    }
+    fn new_session(&self, options: Option<NewSessionRuntimeOptions>) -> BoxFuture<'static, Result<Value, String>> { self.runtime().new_session(options) }
 
     fn release_rlm_child_session(
         &self,
@@ -1078,83 +948,118 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         None
     }
 
-    fn switch_session(
-        &self,
-        session_path: &str,
-        options: SessionPathOptions,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        // blocked_on: `switchSession` is an `AgentSessionRuntime` member.
-        let _ = (session_path, options);
-        Box::pin(async { Err("blocked_on: switchSession belongs to AgentSessionRuntime".to_string()) })
-    }
+    fn switch_session(&self, path: &str, options: SessionPathOptions) -> BoxFuture<'static, Result<Value, String>> { self.runtime().switch_session(path, options) }
 
-    fn fork(
-        &self,
-        entry_id: &str,
-        options: ForkOptions,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        // blocked_on: `fork` is an `AgentSessionRuntime` member.
-        let _ = (entry_id, options);
-        Box::pin(async { Err("blocked_on: fork belongs to AgentSessionRuntime".to_string()) })
-    }
+    fn fork(&self, entry: &str, options: ForkOptions) -> BoxFuture<'static, Result<Value, String>> { self.runtime().fork(entry, options) }
 
-    fn import_from_jsonl(
-        &self,
-        input_path: &str,
-        cwd_override: Option<&str>,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        // blocked_on: `importFromJsonl` is an `AgentSessionRuntime` member.
-        let _ = (input_path, cwd_override);
-        Box::pin(async { Err("blocked_on: importFromJsonl belongs to AgentSessionRuntime".to_string()) })
-    }
+    fn import_from_jsonl(&self, path: &str, cwd: Option<&str>) -> BoxFuture<'static, Result<Value, String>> { self.runtime().import_from_jsonl(path, cwd) }
 
     fn dispose(&self) -> BoxFuture<'static, ()> {
-        let session = Arc::clone(&self.session);
-        Box::pin(async move { session.dispose() })
+        let runtime = self.runtime.clone();
+        Box::pin(async move { if let Err(error) = runtime.dispose(None).await { eprintln!("Could not dispose runtime: {error}"); } })
     }
 }
 
-/// The `DaemonRuntimeApi` stand-in the `runtime` member returns when the adapter has no runtime.
-/// Every method is an explicit failure, so a caller that reaches the daemon through this adapter's
-/// missing runtime gets a real error rather than a silent empty value.
-struct MissingDaemonRuntimeApi;
 
-const MISSING_RUNTIME: &str =
-    "blocked_on: AgentSessionDaemonAdapter wraps a session, not an AgentSessionRuntime";
+fn restored_prompt(message: &str, images: Option<Value>, options: PromptInvocation) -> Result<crate::core::agent_session::RestoredPromptInput, String> {
+    Ok(crate::core::agent_session::RestoredPromptInput {
+        text: message.to_string(),
+        content: options.content.map(serde_json::from_value).transpose().map_err(|error| error.to_string())?,
+        images: images.or(options.images).map(serde_json::from_value).transpose().map_err(|error| error.to_string())?,
+        queue_key: options.queue_key,
+        agent_message_id: options.agent_message_id,
+        custom_message: options.custom_message.map(serde_json::from_value).transpose().map_err(|error| error.to_string())?,
+        prefix_messages: options.prefix_messages.map(serde_json::from_value).transpose().map_err(|error| error.to_string())?,
+    })
+}
 
-impl DaemonRuntimeApi for MissingDaemonRuntimeApi {
-    fn new_session(
-        &self,
-        options: Option<NewSessionRuntimeOptions>,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        let _ = options;
-        Box::pin(async { Err(MISSING_RUNTIME.to_string()) })
+struct DaemonRuntimeAdapter(Arc<super::AgentSessionRuntime>);
+
+impl DaemonRuntimeApi for DaemonRuntimeAdapter {
+    fn new_session(&self, options: Option<NewSessionRuntimeOptions>) -> BoxFuture<'static, Result<Value, String>> {
+        let runtime = self.0.clone();
+        Box::pin(async move {
+            let parent_session = options.and_then(|options| options.parent_session)
+                .map(|value| value.as_str().map(str::to_string).ok_or_else(|| "parentSession must be a string".to_string())).transpose()?;
+            let result = runtime.new_session(Some(super::NewSessionOptionsInput { parent_session, ..Default::default() })).await?;
+            serde_json::to_value(result).map_err(|error| error.to_string())
+        })
     }
-
-    fn switch_session(
-        &self,
-        session_path: &str,
-        options: SessionPathOptions,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        let _ = (session_path, options);
-        Box::pin(async { Err(MISSING_RUNTIME.to_string()) })
+    fn switch_session(&self, path: &str, options: SessionPathOptions) -> BoxFuture<'static, Result<Value, String>> {
+        let runtime = self.0.clone();
+        let path = path.to_string();
+        Box::pin(async move {
+            let result = runtime.switch_session(&path, Some(super::SwitchSessionOptions { cwd_override: options.cwd_override, with_session: None })).await?;
+            serde_json::to_value(result).map_err(|error| error.to_string())
+        })
     }
-
-    fn fork(
-        &self,
-        entry_id: &str,
-        options: ForkOptions,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        let _ = (entry_id, options);
-        Box::pin(async { Err(MISSING_RUNTIME.to_string()) })
+    fn fork(&self, entry: &str, options: ForkOptions) -> BoxFuture<'static, Result<Value, String>> {
+        let runtime = self.0.clone();
+        let entry = entry.to_string();
+        Box::pin(async move {
+            let result = runtime.fork(&entry, Some(super::ForkOptionsInput { position: options.position, with_session: None })).await?;
+            let mut result_value = json!({"cancelled":result.cancelled});
+            if let Some(text) = result.selected_text { result_value["selectedText"] = Value::String(text); }
+            Ok(result_value)
+        })
     }
-
-    fn import_from_jsonl(
-        &self,
-        input_path: &str,
-        cwd_override: Option<&str>,
-    ) -> BoxFuture<'static, Result<Value, String>> {
-        let _ = (input_path, cwd_override);
-        Box::pin(async { Err(MISSING_RUNTIME.to_string()) })
+    fn import_from_jsonl(&self, path: &str, cwd: Option<&str>) -> BoxFuture<'static, Result<Value, String>> {
+        let runtime = self.0.clone();
+        let path = path.to_string();
+        let cwd = cwd.map(str::to_string);
+        Box::pin(async move {
+            let result = runtime.import_from_jsonl(&path, cwd.as_deref()).await?;
+            serde_json::to_value(result).map_err(|error| error.to_string())
+        })
     }
+}
+
+pub(crate) async fn run_native_daemon_mode(options: crate::main_entry::DaemonModeSeamOptions) -> Result<(), String> {
+    use crate::modes::daemon::daemon_mode as daemon;
+    let default_config = options.default_session_config.clone();
+    let daemon_config = serde_json::from_value(serde_json::to_value(&default_config).map_err(|error| error.to_string())?)
+        .map_err(|error| error.to_string())?;
+    let factory = options.create_runtime;
+    let create_runtime: daemon::CreateAgentSessionRuntimeFactory = Arc::new(move |input| {
+        let factory = factory.clone();
+        let default_config = default_config.clone();
+        Box::pin(async move {
+            let metadata = input.runtime_metadata.map(serde_json::from_value).transpose().map_err(|error| error.to_string())?;
+            let model = input.session_options.model.map(serde_json::from_value).transpose().map_err(|error| error.to_string())?;
+            let runtime = super::create_agent_session_runtime(factory, super::CreateAgentSessionRuntimeInput {
+                cwd: input.cwd,
+                agent_dir: input.agent_dir.or(default_config.agent_dir.clone()).unwrap_or_else(crate::config::get_agent_dir),
+                session_manager: input.session_manager,
+                session_start_event: Some(json!({"type":"session_start","reason":"startup"})),
+                session_config: input.session_config.or(Some(default_config)),
+                session_options: Some(crate::core::agent_session_services::AgentSessionCreationOptions {
+                    model,
+                    agent_message_controller: input.session_options.agent_message_controller,
+                    agent_observe_controller: input.session_options.agent_observe_controller,
+                    rlm_heartbeat_controller: input.session_options.rlm_heartbeat_controller,
+                    ..Default::default()
+                }),
+                runtime_metadata: metadata,
+                session_lease: None,
+            }).await?;
+            let metadata = serde_json::from_value(serde_json::to_value(runtime.metadata()).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+            let adapter = Arc::new(AgentSessionDaemonAdapter::new(runtime.clone()));
+            Ok(daemon::AgentSessionRuntimeHandle {
+                session: adapter.clone(), metadata,
+                model_fallback_message: runtime.model_fallback_message(),
+                new_session: Some({ let adapter = adapter.clone(); Arc::new(move |options| adapter.new_session(options)) }),
+                switch_session: Some({ let adapter = adapter.clone(); Arc::new(move |path, options| adapter.switch_session(&path, options)) }),
+                fork: Some({ let adapter = adapter.clone(); Arc::new(move |entry, options| adapter.fork(&entry, options)) }),
+                import_from_jsonl: Some({ let adapter = adapter.clone(); Arc::new(move |path, cwd| adapter.import_from_jsonl(&path, cwd.as_deref())) }),
+            })
+        })
+    });
+    daemon::run_daemon_mode(daemon::DaemonModeOptions {
+        socket_path: options.socket_path, default_session_config: daemon_config, create_runtime,
+        worker: options.worker.map(|worker| daemon::DaemonWorkerOptions {
+            authentication_token: worker.authentication_token,
+            worker_instance_id: worker.worker_instance_id,
+            restore_active_session_id: worker.restore_active_session_id,
+        }),
+    }).await
 }

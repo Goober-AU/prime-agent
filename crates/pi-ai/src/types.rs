@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
-use crate::compaction::{CompactionOptions, ProviderCompactionCheckpoint, ProviderCompactionResult};
+use crate::compaction::{
+    CompactionOptions, ProviderCompactionCheckpoint, ProviderCompactionResult,
+};
 use crate::utils::diagnostics::AssistantMessageDiagnostic;
 use crate::utils::event_stream::AssistantMessageEventStream;
 
@@ -194,6 +196,14 @@ pub const TRANSPORT_AUTO: &str = "auto";
 /// `None` means the key is absent; `Some(None)` is an explicit JSON `null`.
 pub type ServiceTier = Option<Option<String>>;
 
+fn deserialize_optional_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 // ---------------------------------------------------------------------------
 // Stream options
 // ---------------------------------------------------------------------------
@@ -212,20 +222,27 @@ pub struct ProviderResponse {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderUsageObservation {
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub input_tokens: Option<Option<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub cached_input_tokens: Option<Option<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub output_tokens: Option<Option<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub reasoning_tokens: Option<Option<f64>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub total_tokens: Option<Option<f64>>,
     /// True when raw inputTokens already includes cachedInputTokens.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub cached_input_included_in_input: Option<Option<bool>>,
     /// True when raw outputTokens already includes reasoningTokens.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub reasoning_included_in_output: Option<Option<bool>>,
 }
 
@@ -238,6 +255,7 @@ pub type OnUsageObservation =
     Arc<dyn Fn(ProviderUsageObservation, &Model) -> BoxFuture<()> + Send + Sync>;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
@@ -253,6 +271,7 @@ pub struct StreamOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transport: Option<Transport>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_nullable")]
     pub service_tier: ServiceTier,
     /// Prompt cache retention preference. Providers map this to their supported
     /// values. Default: "short".
@@ -298,8 +317,14 @@ impl std::fmt::Debug for StreamOptions {
             .field("service_tier", &self.service_tier)
             .field("cache_retention", &self.cache_retention)
             .field("session_id", &self.session_id)
-            .field("on_payload", &self.on_payload.as_ref().map(|_| "<callback>"))
-            .field("on_response", &self.on_response.as_ref().map(|_| "<callback>"))
+            .field(
+                "on_payload",
+                &self.on_payload.as_ref().map(|_| "<callback>"),
+            )
+            .field(
+                "on_response",
+                &self.on_response.as_ref().map(|_| "<callback>"),
+            )
             .field(
                 "on_usage_observation",
                 &self.on_usage_observation.as_ref().map(|_| "<callback>"),
@@ -333,6 +358,7 @@ pub type ProviderStreamOptions = StreamOptions;
 
 /// Unified options with reasoning passed to streamSimple() and completeSimple().
 #[derive(Default, Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SimpleStreamOptions {
     #[serde(flatten)]
     pub stream: StreamOptions,
@@ -359,7 +385,11 @@ pub type StreamFunction = Arc<
 /// `CompactFunction<TApi>`: undefined means unsupported; failures must leave the
 /// caller's history intact.
 pub type CompactFunction = Arc<
-    dyn Fn(&Model, &Context, Option<&CompactionOptions>) -> BoxFuture<Option<ProviderCompactionResult>>
+    dyn Fn(
+            &Model,
+            &Context,
+            Option<&CompactionOptions>,
+        ) -> BoxFuture<Option<ProviderCompactionResult>>
         + Send
         + Sync,
 >;
@@ -410,6 +440,7 @@ fn tool_call_type() -> String {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TextContent {
     #[serde(rename = "type", default = "text_content_type")]
     pub type_: String,
@@ -437,6 +468,7 @@ impl Default for TextContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ThinkingContent {
     #[serde(rename = "type", default = "thinking_content_type")]
     pub type_: String,
@@ -490,6 +522,7 @@ impl ImageContent {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ToolCall {
     #[serde(rename = "type", default = "tool_call_type")]
     pub type_: String,
@@ -502,7 +535,11 @@ pub struct ToolCall {
 }
 
 impl ToolCall {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, arguments: Map<String, Value>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: Map<String, Value>,
+    ) -> Self {
         Self {
             type_: TOOL_CALL_TYPE.to_string(),
             id: id.into(),
@@ -750,7 +787,12 @@ impl Default for AssistantMessage {
 }
 
 impl AssistantMessage {
-    pub fn new(api: impl Into<String>, provider: impl Into<String>, model: impl Into<String>, timestamp: i64) -> Self {
+    pub fn new(
+        api: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        timestamp: i64,
+    ) -> Self {
         Self {
             api: api.into(),
             provider: provider.into(),
@@ -894,7 +936,11 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(system_prompt: Option<String>, messages: Vec<Message>, tools: Option<Vec<Tool>>) -> Self {
+    pub fn new(
+        system_prompt: Option<String>,
+        messages: Vec<Message>,
+        tools: Option<Vec<Tool>>,
+    ) -> Self {
         Self {
             system_prompt,
             messages,
@@ -1456,15 +1502,68 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn stream_options_round_trip_the_typescript_wire_keys_and_nullable_tier() {
+        let wire = json!({"maxTokens":128.0,"apiKey":"synthetic","sessionId":"session", "cacheRetention":"custom", "timeoutMs":500.0, "serviceTier":null, "reasoning":"high", "thinkingBudgets":{"high":64.0}, "providerSpecific":true});
+        let options: SimpleStreamOptions = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(options.stream.max_tokens, Some(128.0));
+        assert_eq!(options.stream.cache_retention.as_deref(), Some("custom"));
+        assert_eq!(options.stream.service_tier, Some(None));
+        assert_eq!(options.thinking_budgets.as_ref().unwrap().high, Some(64.0));
+        assert_eq!(serde_json::to_value(&options).unwrap(), wire);
+        let absent: StreamOptions = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(absent.service_tier, None);
+        assert!(serde_json::to_value(absent)
+            .unwrap()
+            .get("serviceTier")
+            .is_none());
+    }
+
+    #[test]
+    fn content_signatures_keep_the_typescript_field_names() {
+        let wire = json!({"role":"assistant", "api":"api", "provider":"provider", "model":"model", "content":[
+            {"type":"text","text":"text","textSignature":"text-sig"},
+            {"type":"thinking","thinking":"thought","thinkingSignature":"thinking-sig"},
+            {"type":"toolCall","id":"call","name":"tool","arguments":{},"thoughtSignature":"tool-sig"}
+        ],"usage":serde_json::to_value(Usage::default()).unwrap(),"stopReason":"stop","timestamp":1});
+        let message: AssistantMessage = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(
+            message.content[0]
+                .as_text()
+                .unwrap()
+                .text_signature
+                .as_deref(),
+            Some("text-sig")
+        );
+        assert_eq!(
+            message.content[1]
+                .as_thinking()
+                .unwrap()
+                .thinking_signature
+                .as_deref(),
+            Some("thinking-sig")
+        );
+        assert_eq!(
+            message.content[2]
+                .as_tool_call()
+                .unwrap()
+                .thought_signature
+                .as_deref(),
+            Some("tool-sig")
+        );
+        assert_eq!(serde_json::to_value(message).unwrap(), wire);
+    }
+
+    #[test]
     fn assistant_message_serialises_camel_case_fields() {
-        let message = AssistantMessage::new("anthropic-messages", "anthropic", "claude-sonnet-4", 1234);
+        let message =
+            AssistantMessage::new("anthropic-messages", "anthropic", "claude-sonnet-4", 1234);
         let value = serde_json::to_value(&message).unwrap();
         assert_eq!(value["role"], json!("assistant"));
         assert_eq!(value["api"], json!("anthropic-messages"));
         assert_eq!(value["stopReason"], json!("stop"));
         assert_eq!(value["timestamp"], json!(1234));
-        assert_eq!(value["usage"]["cacheRead"], json!(0));
-        assert_eq!(value["usage"]["totalTokens"], json!(0));
+        assert_eq!(value["usage"]["cacheRead"], json!(0.0));
+        assert_eq!(value["usage"]["totalTokens"], json!(0.0));
         assert!(value.get("responseModel").is_none());
         assert!(value.get("errorMessage").is_none());
     }
@@ -1489,7 +1588,13 @@ mod tests {
 
     #[test]
     fn message_enum_uses_role_tag() {
-        let message = Message::ToolResult(ToolResultMessage::new("call-1", "bash", Vec::new(), true, 5));
+        let message = Message::ToolResult(ToolResultMessage::new(
+            "call-1",
+            "bash",
+            Vec::new(),
+            true,
+            5,
+        ));
         let value = serde_json::to_value(&message).unwrap();
         assert_eq!(value["role"], json!("toolResult"));
         assert_eq!(value["toolCallId"], json!("call-1"));
@@ -1536,7 +1641,13 @@ mod tests {
 
     #[test]
     fn model_serialises_expected_field_names() {
-        let mut model = Model::new("gpt-5", "GPT-5", API_OPENAI_RESPONSES, PROVIDER_OPENAI, "https://api.openai.com/v1");
+        let mut model = Model::new(
+            "gpt-5",
+            "GPT-5",
+            API_OPENAI_RESPONSES,
+            PROVIDER_OPENAI,
+            "https://api.openai.com/v1",
+        );
         model.reasoning = true;
         model.input = vec![InputModality::Text, InputModality::Image];
         model.context_window = 400000.0;
@@ -1559,7 +1670,11 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            completions.as_completions().unwrap().thinking_format.as_deref(),
+            completions
+                .as_completions()
+                .unwrap()
+                .thinking_format
+                .as_deref(),
             Some("zai")
         );
 
@@ -1590,7 +1705,10 @@ mod tests {
         map.insert(THINKING_LEVEL_LOW.to_string(), Some("low".to_string()));
         let mut model = Model::default();
         model.thinking_level_map = Some(map);
-        assert_eq!(model.thinking_level_map_get(THINKING_LEVEL_HIGH), Some(None));
+        assert_eq!(
+            model.thinking_level_map_get(THINKING_LEVEL_HIGH),
+            Some(None)
+        );
         assert_eq!(
             model.thinking_level_map_get(THINKING_LEVEL_LOW),
             Some(Some("low".to_string()))

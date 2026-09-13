@@ -120,17 +120,17 @@ pub struct CommandRecoveryJournal {
 }
 
 impl CommandRecoveryJournal {
-    pub fn new(path: &str) -> Self {
+    pub fn new(path: &str) -> Result<Self, String> {
         if let Some(parent) = Path::new(path).parent() {
-            let _ = create_private_dir(parent);
+            create_private_dir(parent).map_err(|error| error.to_string())?;
         }
         let mut journal = Self {
             path: path.to_string(),
             entries: HashMap::new(),
             record_count: 0,
         };
-        journal.load();
-        journal
+        journal.load()?;
+        Ok(journal)
     }
 
     pub fn lookup(&self, client_id: &str, command_id: &str) -> Option<CommandJournalBeginResult> {
@@ -144,10 +144,10 @@ impl CommandRecoveryJournal {
         }
     }
 
-    pub fn begin(&mut self, client_id: &str, command_id: &str, command_type: &str) -> CommandJournalBeginResult {
+    pub fn begin(&mut self, client_id: &str, command_id: &str, command_type: &str) -> Result<CommandJournalBeginResult, String> {
         let key = create_command_idempotency_key(client_id, command_id);
         if let Some(existing) = self.lookup(client_id, command_id) {
-            return existing;
+            return Ok(existing);
         }
         let received = ReceivedRecord {
             version: 1,
@@ -158,7 +158,7 @@ impl CommandRecoveryJournal {
             command_type: command_type.to_string(),
             recorded_at: now_iso(),
         };
-        self.append(&JournalRecord::Received(received.clone()));
+        self.append(&JournalRecord::Received(received.clone()))?;
         self.entries.insert(
             key,
             JournalEntry {
@@ -166,15 +166,13 @@ impl CommandRecoveryJournal {
                 response: None,
             },
         );
-        CommandJournalBeginResult::New
+        Ok(CommandJournalBeginResult::New)
     }
 
-    pub fn record_result(&mut self, client_id: &str, command_id: &str, response: DaemonResponse) {
+    pub fn record_result(&mut self, client_id: &str, command_id: &str, response: DaemonResponse) -> Result<(), String> {
         let key = create_command_idempotency_key(client_id, command_id);
         if !self.entries.contains_key(&key) {
-            // TypeScript throws here; the Rust port surfaces the same condition
-            // through the returned error string on the `try_record_result` path.
-            return;
+            return Err(format!("Cannot record a result before command receipt: {key}"));
         }
         let record = ResultRecord {
             version: 1,
@@ -183,13 +181,14 @@ impl CommandRecoveryJournal {
             response: response.clone(),
             recorded_at: now_iso(),
         };
-        self.append(&JournalRecord::Result(record));
+        self.append(&JournalRecord::Result(record))?;
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.response = Some(response);
         }
         if self.record_count >= COMPACT_AFTER_RECORDS {
-            self.compact();
+            self.compact()?;
         }
+        Ok(())
     }
 
     /// Same as `record_result`, but reports the TypeScript error condition.
@@ -203,30 +202,32 @@ impl CommandRecoveryJournal {
         if !self.entries.contains_key(&key) {
             return Err(format!("Cannot record a result before command receipt: {key}"));
         }
-        self.record_result(client_id, command_id, response);
-        Ok(())
+        self.record_result(client_id, command_id, response)
     }
 
-    pub fn acknowledge(&mut self, client_id: &str, command_id: &str) {
+    pub fn acknowledge(&mut self, client_id: &str, command_id: &str) -> Result<(), String> {
         let key = create_command_idempotency_key(client_id, command_id);
         if !self.entries.contains_key(&key) {
-            return;
+            return Ok(());
         }
         self.append(&JournalRecord::Acknowledged(AcknowledgedRecord {
             version: 1,
             type_: "acknowledged".to_string(),
             key: key.clone(),
             recorded_at: now_iso(),
-        }));
+        }))?;
         self.entries.remove(&key);
         if self.entries.is_empty() || self.record_count >= COMPACT_AFTER_RECORDS {
-            self.compact();
+            self.compact()?;
         }
+        Ok(())
     }
 
-    fn load(&mut self) {
-        let Ok(contents) = std::fs::read_to_string(&self.path) else {
-            return;
+    fn load(&mut self) -> Result<(), String> {
+        let contents = match std::fs::read_to_string(&self.path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
         };
         for line in contents.split('\n') {
             if line.is_empty() {
@@ -281,24 +282,24 @@ impl CommandRecoveryJournal {
                 _ => {}
             }
         }
+            Ok(())
     }
 
-    fn append(&mut self, record: &JournalRecord) {
-        let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-        else {
-            return;
-        };
-        let line = serde_json::to_string(&record.to_value()).unwrap_or_default();
-        let _ = file.write_all(format!("{line}\n").as_bytes());
-        let _ = file.sync_all();
-        set_private_mode(&self.path);
+    fn append(&mut self, record: &JournalRecord) -> Result<(), String> {
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        let mut file = options.open(&self.path).map_err(|error| error.to_string())?;
+        let line = serde_json::to_string(&record.to_value()).map_err(|error| error.to_string())?;
+        file.write_all(format!("{line}\n").as_bytes()).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        set_private_mode(&self.path).map_err(|error| error.to_string())?;
         self.record_count += 1;
+        Ok(())
     }
 
-    fn compact(&mut self) {
+    fn compact(&mut self) -> Result<(), String> {
         let mut records: Vec<JournalRecord> = Vec::new();
         for (key, entry) in &self.entries {
             records.push(JournalRecord::Received(entry.received.clone()));
@@ -318,7 +319,7 @@ impl CommandRecoveryJournal {
             .collect::<Vec<String>>()
             .join("\n");
         let payload = format!("{payload}\n");
-        let _ = write_file_atomic_sync(
+        write_file_atomic_sync(
             &self.path,
             &payload,
             WriteFileAtomicOptions {
@@ -327,8 +328,9 @@ impl CommandRecoveryJournal {
                 fsync_dir: true,
                 before_rename: None,
             },
-        );
+        ).map_err(|error| error.to_string())?;
         self.record_count = records.len();
+        Ok(())
     }
 }
 
@@ -341,21 +343,22 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
 
-fn set_private_mode(path: &str) {
+fn set_private_mode(path: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     }
     #[cfg(not(unix))]
     {
         let _ = path;
     }
+    Ok(())
 }
 
 /// A saved-session row stored inside a journal result record.
@@ -380,16 +383,16 @@ mod tests {
     #[test]
     fn begin_lookup_and_complete_cycle() {
         let path = temp_path("journal.jsonl");
-        let mut journal = CommandRecoveryJournal::new(&path);
-        assert_eq!(journal.begin("client", "c1", "prompt"), CommandJournalBeginResult::New);
+        let mut journal = CommandRecoveryJournal::new(&path).unwrap();
+        assert_eq!(journal.begin("client", "c1", "prompt").unwrap(), CommandJournalBeginResult::New);
         assert_eq!(journal.lookup("client", "c1"), Some(CommandJournalBeginResult::Pending));
-        assert_eq!(journal.begin("client", "c1", "prompt"), CommandJournalBeginResult::Pending);
-        journal.record_result("client", "c1", response("c1"));
+        assert_eq!(journal.begin("client", "c1", "prompt").unwrap(), CommandJournalBeginResult::Pending);
+        journal.record_result("client", "c1", response("c1")).unwrap();
         assert_eq!(
             journal.lookup("client", "c1"),
             Some(CommandJournalBeginResult::Complete(response("c1")))
         );
-        journal.acknowledge("client", "c1");
+        journal.acknowledge("client", "c1").unwrap();
         assert_eq!(journal.lookup("client", "c1"), None);
         assert_eq!(std::fs::read_to_string(&path).expect("journal").trim(), "");
     }
@@ -398,11 +401,11 @@ mod tests {
     fn records_survive_a_reload() {
         let path = temp_path("journal.jsonl");
         {
-            let mut journal = CommandRecoveryJournal::new(&path);
-            journal.begin("client", "c2", "prompt");
-            journal.record_result("client", "c2", response("c2"));
+            let mut journal = CommandRecoveryJournal::new(&path).unwrap();
+            journal.begin("client", "c2", "prompt").unwrap();
+            journal.record_result("client", "c2", response("c2")).unwrap();
         }
-        let journal = CommandRecoveryJournal::new(&path);
+        let journal = CommandRecoveryJournal::new(&path).unwrap();
         assert_eq!(
             journal.lookup("client", "c2"),
             Some(CommandJournalBeginResult::Complete(response("c2")))
@@ -412,7 +415,7 @@ mod tests {
     #[test]
     fn recording_before_receipt_is_an_error() {
         let path = temp_path("journal.jsonl");
-        let mut journal = CommandRecoveryJournal::new(&path);
+        let mut journal = CommandRecoveryJournal::new(&path).unwrap();
         let error = journal
             .try_record_result("client", "missing", response("missing"))
             .expect_err("must fail");
@@ -422,17 +425,34 @@ mod tests {
     #[test]
     fn truncated_final_line_is_ignored() {
         let path = temp_path("journal.jsonl");
-        let mut journal = CommandRecoveryJournal::new(&path);
-        journal.begin("client", "c3", "prompt");
+        let mut journal = CommandRecoveryJournal::new(&path).unwrap();
+        journal.begin("client", "c3", "prompt").unwrap();
         let mut contents = std::fs::read_to_string(&path).expect("journal");
         contents.push_str("{\"version\":1,\"type\":\"resu");
         std::fs::write(&path, contents).expect("seed truncation");
-        let journal = CommandRecoveryJournal::new(&path);
+        let journal = CommandRecoveryJournal::new(&path).unwrap();
         assert_eq!(journal.lookup("client", "c3"), Some(CommandJournalBeginResult::Pending));
     }
 
     #[test]
     fn idempotency_key_is_a_two_element_json_array() {
         assert_eq!(create_command_idempotency_key("c", "1"), "[\"c\",\"1\"]");
+    }
+
+    #[test]
+    fn failed_append_does_not_admit_or_complete_a_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("journal.jsonl");
+        let mut journal = CommandRecoveryJournal::new(path.to_str().unwrap()).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(journal.begin("client", "new", "prompt").is_err());
+        assert_eq!(journal.lookup("client", "new"), None);
+        std::fs::remove_dir(&path).unwrap();
+        journal.begin("client", "pending", "prompt").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(journal.record_result("client", "pending", response("pending")).is_err());
+        assert!(journal.acknowledge("client", "pending").is_err());
+        assert_eq!(journal.lookup("client", "pending"), Some(CommandJournalBeginResult::Pending));
     }
 }

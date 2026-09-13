@@ -1439,10 +1439,14 @@ mod tests {
         let mut component = IPythonCellComponent::new(state("print(1)"));
         let queued = plain(&component.render(80.0));
         assert!(queued.contains("\u{25c7}"));
-        assert!(queued.contains("waiting for code"));
+        assert!(queued.contains("print(1)"));
+        assert!(!queued.contains("waiting for code"));
+        let mut empty = IPythonCellComponent::new(state(""));
+        assert!(plain(&empty.render(80.0)).contains("waiting for code"));
 
         let mut started = state("print(1)");
         started.execution_started = Some(true);
+        started.is_partial = Some(true);
         let mut component = IPythonCellComponent::new(started);
         let running = plain(&component.render(80.0));
         assert!(running.contains("to expand"));

@@ -11,6 +11,7 @@ pub mod daemon_update_restart;
 pub mod file_processor;
 pub mod initial_message;
 pub mod list_models;
+pub(crate) mod native_owned_worker;
 pub mod node_version_check;
 pub mod owned_session_worker;
 pub mod public_command;

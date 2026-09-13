@@ -530,8 +530,11 @@ fn errno_code(error: &io::Error) -> Option<String> {
     }
     #[cfg(unix)]
     {
-        let _ = raw;
-        None
+        match raw {
+            libc::ENOTEMPTY => Some("ENOTEMPTY".to_string()),
+            libc::EBUSY => Some("EBUSY".to_string()),
+            _ => None,
+        }
     }
 }
 
@@ -891,6 +894,8 @@ mod tests {
             "win32"
         ));
         assert!(!is_rename_target_contention(&dir, None, "win32"));
+        #[cfg(unix)]
+        assert_eq!(errno_code(&io::Error::from_raw_os_error(libc::ENOTEMPTY)).as_deref(), Some("ENOTEMPTY"));
     }
 
     #[test]

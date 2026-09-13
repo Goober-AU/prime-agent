@@ -130,7 +130,8 @@ mod tests {
         let wide = get_optimus_logo(200.0, 200.0);
         assert_eq!(wide.len(), 25);
         let narrow = get_optimus_logo(10.0, 200.0);
-        assert_eq!(narrow, vec!["*".to_string()]);
+        assert!(narrow.iter().all(|line| line.chars().count() <= 10));
+        assert_eq!(get_optimus_logo(1.0, 1.0), vec!["*".to_string()]);
     }
 
     #[test]

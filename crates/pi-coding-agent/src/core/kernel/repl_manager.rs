@@ -501,6 +501,8 @@ type LateSentAgentMessageHandler = (String, Arc<dyn Fn(KernelSentAgentMessage) +
 
 impl KernelState {
     fn new(options: KernelManagerOptions, client_weak: ClientWeak) -> KernelState {
+        let execution_queue = Arc::new(SharedPromise::new());
+        execution_queue.settle(Ok(()));
         KernelState {
             client_weak: Mutex::new(client_weak),
             options: ManagerOptions {
@@ -520,7 +522,7 @@ impl KernelState {
             next_child_id: std::sync::atomic::AtomicU64::new(1),
             ready_deferred: Mutex::new(None),
             kernel_stderr: Mutex::new(String::new()),
-            execution_queue: Mutex::new(Arc::new(SharedPromise::new())),
+            execution_queue: Mutex::new(execution_queue),
             execution_queue_tail_snapshot_metric: Mutex::new(None),
             runtime_snapshot_formats: Mutex::new(Vec::new()),
             active_execution: Mutex::new(None),
@@ -3844,6 +3846,25 @@ fn snapshot_format_field(format: Option<KernelSnapshotFormat>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn first_execution_and_followup_reach_the_kernel_write() {
+        let manager = new_repl_kernel_manager(KernelManagerOptions::default());
+        manager.state.set_state(State::Running);
+        let started = Arc::new(SharedPromise::new());
+        started.settle(Ok(()));
+        *manager.state.start_promise.lock().unwrap() = Some(started);
+
+        for code in ["1", "2"] {
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                manager.execute(code.to_string(), ExecuteOptions::default()),
+            )
+            .await
+            .expect("execution must not remain parked on the queue");
+            assert_eq!(result.unwrap_err().message, "Kernel stdin is not connected");
+        }
+    }
 
     #[test]
     fn invalid_protocol_frame_reason_accepts_known_kinds_only() {

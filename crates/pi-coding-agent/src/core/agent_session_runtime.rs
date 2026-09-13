@@ -33,6 +33,9 @@ pub type BoxFuture<T> = pi_ai::types::BoxFuture<T>;
 mod daemon_adapter;
 mod in_process_adapter;
 
+pub(crate) use daemon_adapter::{AgentSessionDaemonAdapter, run_native_daemon_mode};
+pub(crate) use in_process_adapter::InProcessRuntimeHostAdapter;
+
 
 // ---------------------------------------------------------------------------
 // Re-exports (`export { ... } from "./agent-session-services.js"`)

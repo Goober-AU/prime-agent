@@ -630,6 +630,7 @@ mod tests {
 
     fn init() {
         init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
     }
 
     fn editor(options: CustomEditorOptions) -> CustomEditor {
@@ -739,7 +740,8 @@ mod tests {
         );
         let key = pi_tui::keybindings::get_keybindings().get_keys("app.tools.expand");
         let key = key.first().cloned().expect("ctrl+o binding");
-        editor.handle_input(&key);
+        assert_eq!(key, "ctrl+o");
+        editor.handle_input("\x0f");
         assert!(fired.get());
     }
 
@@ -751,7 +753,8 @@ mod tests {
         let exited_for_handler = Rc::clone(&exited);
         editor.on_ctrl_d = Some(Box::new(move || exited_for_handler.set(true)));
         let keys = pi_tui::keybindings::get_keybindings().get_keys("app.exit");
-        editor.handle_input(&keys[0]);
+        assert_eq!(keys[0], "ctrl+d");
+        editor.handle_input("\x04");
         assert!(exited.get());
     }
 
@@ -760,7 +763,8 @@ mod tests {
         init();
         let editor = editor(CustomEditorOptions::default());
         let keys = pi_tui::keybindings::get_keybindings().get_keys("app.input.clear");
-        let single = keys.first().cloned().expect("escape binding");
+        assert_eq!(keys.first().map(String::as_str), Some("escape"));
+        let single = "\x1b".to_string();
         assert!(editor
             .split_repeated_keybinding(&single, "app.input.clear")
             .is_none());

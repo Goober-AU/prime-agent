@@ -273,9 +273,10 @@ mod tests {
         let duplicate = acp_mcp_tool_names(&[server("files"), server("files")]).expect_err("duplicate");
         assert_eq!(duplicate, "Duplicate ACP MCP server: files");
 
-        let too_long = acp_mcp_tool_names(&[server(&"a".repeat(49))]).expect_err("too long");
+        let too_long = acp_mcp_tool_names(&[server(&"a".repeat(50))]).expect_err("too long");
         assert!(too_long.starts_with("Invalid ACP MCP server name:"));
-        assert!(acp_mcp_tool_names(&[server(&"a".repeat(48))]).is_ok());
+        let longest = acp_mcp_tool_names(&[server(&"a".repeat(49))]).expect("64-character tool name");
+        assert_eq!(longest[0].len(), 64);
     }
 
     #[test]

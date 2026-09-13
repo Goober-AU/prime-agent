@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn counts_added_and_removed_lines() {
-        assert_eq!(count_changed_lines("+1 a\n-2 b\n 3 c\n---\n+++\n"), (3, 2));
+        assert_eq!(count_changed_lines("+1 a\n-2 b\n 3 c\n---\n+++\n"), (2, 2));
         assert_eq!(count_changed_lines(""), (0, 0));
     }
 

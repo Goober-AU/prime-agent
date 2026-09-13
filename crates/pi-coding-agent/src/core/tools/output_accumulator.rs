@@ -425,7 +425,9 @@ mod tests {
         accumulator.finish();
         let snapshot = accumulator.snapshot();
         assert!(snapshot.truncation.truncated);
-        assert_eq!(snapshot.content, "3\n4\n");
+        // split("\n") counts the terminal empty line against maxLines.
+        assert_eq!(snapshot.content, "4\n");
+        assert_eq!(snapshot.truncation.output_lines, 2);
         let path = snapshot.full_output_path.clone().expect("spill path");
         accumulator.close_temp_file();
         let final_path = accumulator.snapshot().full_output_path.expect("terminal path");

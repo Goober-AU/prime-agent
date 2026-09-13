@@ -1039,9 +1039,6 @@ pub enum AgentConnectionSessionEvent {
     RefineComplete { result: RefinementResultSummary },
     #[serde(rename = "refine_failed")]
     RefineFailed { error: String },
-    /// Any plain `AgentEvent` member of the union.
-    #[serde(rename = "agent_event")]
-    Agent(AgentEvent),
     /// `message_start` / `message_update` / `message_end` as emitted by the session.
     #[serde(rename = "message_start")]
     MessageStart { message: AgentMessage },
@@ -1071,11 +1068,59 @@ pub enum AgentConnectionSessionEvent {
         #[serde(rename = "isError")]
         is_error: bool,
     },
+    #[serde(rename = "model_select")]
+    ModelSelect { model: String, #[serde(rename = "previousModel")] previous_model: String, reason: String },
+    #[serde(rename = "thinking_level_change")]
+    ThinkingLevelChange { level: ThinkingLevel },
+    #[serde(rename = "service_tier_change")]
+    ServiceTierChange { #[serde(rename = "serviceTier")] service_tier: ServiceTier },
+    #[serde(rename = "compaction_update")]
+    CompactionUpdate { active: bool, #[serde(skip_serializing_if = "Option::is_none")] reason: Option<String> },
+    #[serde(rename = "auto_retry_update")]
+    RetryUpdate { active: bool, attempt: i64, #[serde(rename = "maxAttempts")] max_attempts: i64, #[serde(skip_serializing_if = "Option::is_none")] message: Option<String> },
+    #[serde(rename = "refinement_update")]
+    RefinementUpdate { active: bool, #[serde(skip_serializing_if = "Option::is_none")] reason: Option<String> },
+    #[serde(rename = "tree_navigated")]
+    TreeNavigated { #[serde(rename = "targetId")] target_id: String },
+    #[serde(rename = "rlm_subagent_removed")]
+    RlmSubagentRemoved { #[serde(rename = "childId")] child_id: String, #[serde(rename = "sessionName", skip_serializing_if = "Option::is_none")] session_name: Option<String> },
+    /// Plain Agent events retain their original discriminator and fields.
+    #[serde(untagged)]
+    Agent(AgentEvent),
+
+}
+
+/// The daemon omits the duplicated streaming partial on the wire. The sibling
+/// message is the same full assistant snapshot and supplies that typed field.
+pub fn parse_agent_connection_session_event(mut value: Value) -> Result<AgentConnectionSessionEvent, serde_json::Error> {
+    if value.get("type").and_then(Value::as_str) == Some("message_update") {
+        if let Some(message) = value.get("message").cloned() {
+            if let Some(event) = value.get_mut("assistantMessageEvent").and_then(Value::as_object_mut) {
+                if !event.contains_key("partial") {
+                    event.insert("partial".to_string(), message);
+                }
+            }
+        }
+    }
+    serde_json::from_value(value)
+}
+
+pub fn deserialize_agent_connection_session_event<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<AgentConnectionSessionEvent, D::Error> {
+    let value = Value::deserialize(deserializer)?;
+    parse_agent_connection_session_event(value).map_err(serde::de::Error::custom)
 }
 
 impl AgentConnectionSessionEvent {
     pub fn type_name(&self) -> &'static str {
         match self {
+            AgentConnectionSessionEvent::ModelSelect { .. } => "model_select",
+            AgentConnectionSessionEvent::ThinkingLevelChange { .. } => "thinking_level_change",
+            AgentConnectionSessionEvent::ServiceTierChange { .. } => "service_tier_change",
+            AgentConnectionSessionEvent::CompactionUpdate { .. } => "compaction_update",
+            AgentConnectionSessionEvent::RetryUpdate { .. } => "auto_retry_update",
+            AgentConnectionSessionEvent::RefinementUpdate { .. } => "refinement_update",
+            AgentConnectionSessionEvent::TreeNavigated { .. } => "tree_navigated",
+            AgentConnectionSessionEvent::RlmSubagentRemoved { .. } => "rlm_subagent_removed",
             AgentConnectionSessionEvent::IpythonSentAgentMessage { .. } => "ipython_sent_agent_message",
             AgentConnectionSessionEvent::SessionActionUpdate { .. } => "session_action_update",
             AgentConnectionSessionEvent::CompactionStart { .. } => "compaction_start",
@@ -1526,6 +1571,38 @@ pub type JsonObject = IndexMap<String, Value>;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_events_round_trip_without_an_agent_wrapper() {
+        let agent = AgentConnectionSessionEvent::Agent(AgentEvent::AgentStart);
+        let wire = serde_json::to_string(&agent).unwrap();
+        assert_eq!(wire, r#"{"type":"agent_start"}"#);
+        assert_eq!(serde_json::from_str::<AgentConnectionSessionEvent>(&wire).unwrap(), agent);
+        let event = AgentConnectionSessionEvent::TreeNavigated { target_id: "entry-1".to_string() };
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire, json!({"type":"tree_navigated","targetId":"entry-1"}));
+        assert_eq!(serde_json::from_value::<AgentConnectionSessionEvent>(wire).unwrap(), event);
+    }
+
+    #[test]
+    fn slim_stream_updates_restore_the_existing_full_message() {
+        use pi_ai::providers::faux::{faux_assistant_message, FauxAssistantContent};
+        let message = faux_assistant_message(FauxAssistantContent::Text("streamed text".to_string()), None);
+        let value = json!({
+            "type":"message_update", "message": message,
+            "assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"text"}
+        });
+        let parsed = parse_agent_connection_session_event(value).unwrap();
+        let AgentConnectionSessionEvent::MessageUpdate { assistant_message_event, .. } = parsed else {
+            panic!("expected streaming update");
+        };
+        let pi_ai::types::AssistantMessageEvent::TextDelta { partial, delta, content_index } = assistant_message_event else {
+            panic!("expected text delta");
+        };
+        assert_eq!(partial, message);
+        assert_eq!(delta, "text");
+        assert_eq!(content_index, 0);
+    }
 
     #[test]
     fn queue_modes_parse() {

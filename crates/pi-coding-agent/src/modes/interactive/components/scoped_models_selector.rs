@@ -658,9 +658,10 @@ mod tests {
         assert_eq!(enable_all(&None, &all, None), None);
         assert_eq!(enable_all(&Some(vec!["a".to_string()]), &all, None), None);
         let two = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(enable_all(&Some(vec!["a".to_string()]), &two, None), None);
         assert_eq!(
-            enable_all(&Some(vec!["a".to_string()]), &two, None),
-            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()])
+            enable_all(&Some(vec!["a".to_string()]), &two, Some(&["b".to_string()])),
+            Some(vec!["a".to_string(), "b".to_string()])
         );
     }
 

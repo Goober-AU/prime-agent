@@ -40,7 +40,7 @@ pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 /// `RpcClientOptions`.
 #[derive(Debug, Clone, Default)]
 pub struct RpcClientOptions {
-    /// Path to the CLI entry point (default: `dist/cli.js`).
+    /// Path to the native CLI executable (default: the current executable).
     pub cli_path: Option<String>,
     /// Working directory for the agent.
     pub cwd: Option<String>,
@@ -59,8 +59,17 @@ pub struct RpcClientOptions {
 pub struct ModelInfo {
     pub provider: String,
     pub id: String,
+    #[serde(serialize_with = "serialize_js_number")]
     pub context_window: f64,
     pub reasoning: bool,
+}
+
+fn serialize_js_number<S: serde::Serializer>(value: &f64, serializer: S) -> Result<S::Ok, S::Error> {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < 9_007_199_254_740_992.0 {
+        serializer.serialize_i64(*value as i64)
+    } else {
+        serializer.serialize_f64(*value)
+    }
 }
 
 /// `{ provider: string; id: string }`.
@@ -156,7 +165,9 @@ impl RpcClient {
             .options
             .cli_path
             .clone()
-            .unwrap_or_else(|| "dist/cli.js".to_string());
+            .map(Ok)
+            .unwrap_or_else(|| std::env::current_exe().map(|path| path.to_string_lossy().into_owned()))
+            .map_err(|error| format!("Cannot locate the RPC agent executable: {error}"))?;
         let mut args = vec!["--mode".to_string(), "rpc".to_string()];
         if let Some(provider) = &self.options.provider {
             args.push("--provider".to_string());
@@ -178,12 +189,9 @@ impl RpcClient {
             }
         }
 
-        let mut command_args = vec![cli_path];
-        command_args.extend(args);
-
         let mut handle = spawn_hidden(
-            "node",
-            &command_args,
+            &cli_path,
+            &args,
             SpawnOptions {
                 cwd: self.options.cwd.clone(),
                 env: Some(env),
@@ -1105,7 +1113,7 @@ fn handle_line(inner: &RpcClientInner, line: &str) {
         if let Ok(event) = serde_json::from_value::<RpcObservedSessionEvent>(data) {
             for listener in listeners {
                 // Listener failures must not block other RPC subscribers.
-                listener(event.clone());
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener(event.clone())));
             }
         }
         return;
@@ -1118,7 +1126,7 @@ fn handle_line(inner: &RpcClientInner, line: &str) {
         .clone();
     for listener in listeners {
         // Listener failures must not block other RPC subscribers.
-        listener(&data);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener(&data)));
     }
 }
 
@@ -1170,7 +1178,7 @@ mod tests {
 
         let (sender, mut receiver) = oneshot::channel();
         inner.pending_requests.lock().unwrap().insert("req_1".to_string(), sender);
-        handle_line(&inner, "{\"type\":\"response\",\"id\":\"req_1\",\"success\":true}");
+        handle_line(&inner, "{\"type\":\"response\",\"id\":\"req_1\",\"command\":\"get_state\",\"success\":true}");
         assert!(receiver.try_recv().is_ok());
         assert!(seen.lock().unwrap().is_empty());
 

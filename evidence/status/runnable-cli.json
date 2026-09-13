@@ -1,0 +1,31 @@
+{
+  "slice": "runnable-cli",
+  "status": "partial",
+  "files": [
+    "crates/pi-coding-agent/src/cli_entry.rs",
+    "crates/pi-coding-agent/src/cli_main_entry.rs",
+    "crates/pi-coding-agent/src/native_main_host.rs",
+    "crates/pi-coding-agent/src/lib.rs",
+    "crates/pi-coding-agent/src/cli/daemon_launch.rs",
+    "crates/pi-coding-agent/src/cli/subprocess_launch.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_catalog_entry.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_catalog_process.rs",
+    "crates/pi-coding-agent/src/modes/daemon/rlm_ledger.rs",
+    "crates/pi-coding-agent/src/modes/daemon/snapshot_transcript_cache.rs",
+    "evidence/slices/runnable-cli.json",
+    "evidence/status/runnable-cli.json",
+    "crates/pi-ai/src/types.rs",
+    "crates/pi-ai/src/utils/hash.rs",
+    "crates/pi-ai/src/utils/validation.rs",
+    "crates/pi-ai/src/utils/stream_failure.rs",
+    "docs/RUST_CLI_NEXT_STEPS.md",
+    "docs/HANDOFF.md",
+    "evidence/diagnostics/runnable-cli-handoff.json",
+    "evidence/status/runnable-runtime.json",
+    "evidence/status/runnable-interactive.json"
+  ],
+  "build": "Final source-stable workspace --tests check: 1 test compile error in repl_manager.rs; see global handoff. Earlier check and executable build passed before final fixes.",
+  "tests": "Final edits not rerun; exact prior results and blockers in evidence/diagnostics/runnable-cli-handoff.json.",
+  "blocked_on": "First-response/Python proof, roster service, remaining runtime parity; user requested checkpoint and PR handoff.",
+  "handoff": "docs/RUST_CLI_NEXT_STEPS.md"
+}

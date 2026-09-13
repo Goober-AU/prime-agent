@@ -1250,20 +1250,20 @@ mod tests {
     }
 
     #[test]
-    fn npm_self_update_command_orders_uninstall_first_for_direct_specs() {
+    fn npm_self_update_command_installs_before_uninstall_for_direct_specs() {
         let command =
-            get_self_update_command_for_method("npm", "old-pkg", "https://x/y.tgz", None, "old-pkg").unwrap();
+            get_self_update_command_for_method("npm", "old-pkg", "https://x/y.tgz", None, "new-pkg").unwrap();
         let steps = command.steps.unwrap();
         assert_eq!(steps[0].command, "npm");
-        assert_eq!(steps[0].args, vec!["uninstall", "-g", "old-pkg"]);
-        assert_eq!(steps[1].args, vec!["install", "-g", "https://x/y.tgz"]);
-        assert_eq!(command.display, "npm uninstall -g old-pkg && npm install -g https://x/y.tgz");
+        assert_eq!(steps[0].args, vec!["install", "-g", "https://x/y.tgz"]);
+        assert_eq!(steps[1].args, vec!["uninstall", "-g", "old-pkg"]);
+        assert_eq!(command.display, "npm install -g https://x/y.tgz && npm uninstall -g old-pkg");
     }
 
     #[test]
     fn pnpm_self_update_command_replaces_the_package_name() {
         let command = get_self_update_command_for_method("pnpm", "old-pkg", "new-pkg", None, "new-pkg").unwrap();
-        assert_eq!(command.display, "pnpm install -g new-pkg && pnpm remove -g old-pkg");
+        assert_eq!(command.display, "pnpm remove -g old-pkg && pnpm install -g new-pkg");
     }
 
     #[test]

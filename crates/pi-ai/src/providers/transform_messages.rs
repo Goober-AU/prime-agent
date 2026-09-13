@@ -334,6 +334,7 @@ mod tests {
 			provider: "test-provider".to_string(),
 			api: "test-api".to_string(),
 			model: "test-model".to_string(),
+			base_url: text_model().base_url,
 			..checkpoint
 		};
 		let user = Message::user(UserMessage {
@@ -342,7 +343,7 @@ mod tests {
 			provider_context: Some(matching),
 			timestamp: 0,
 		});
-		assert_eq!(try_transform_messages(vec![user], &text_model(), None).unwrap().len(), 1);
+		assert_eq!(try_transform_messages(vec![user.clone()], &text_model(), None).unwrap(), vec![user]);
 	}
 
 	#[test]
@@ -363,7 +364,8 @@ mod tests {
 			},
 			_ => panic!("expected user"),
 		};
-		assert_eq!(blocks.len(), 3);
+		// TypeScript coalesces consecutive images into one placeholder.
+		assert_eq!(blocks.len(), 2);
 		match &blocks[0] {
 			ImageOrTextContent::Text(t) => assert_eq!(t.text, NON_VISION_USER_IMAGE_PLACEHOLDER),
 			_ => panic!("expected text"),

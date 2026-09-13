@@ -1453,9 +1453,15 @@ mod tests {
             .iter()
             .find(|item| item["type"] == json!("function_call"))
             .unwrap();
-        // The item id is normalized and loses the pipe; the call id keeps it.
-        assert_eq!(function_call["id"], json!("fc_1"));
-        assert_eq!(function_call["call_id"], json!("call_1"));
+        // A disallowed target provider normalizes the entire identifier before
+        // splitting it, so there is no separate Responses item identifier.
+        assert_eq!(function_call["id"], Value::Null);
+        assert_eq!(function_call["call_id"], json!("call_1_fc_1"));
+        let tool_result = messages
+            .iter()
+            .find(|item| item["type"] == json!("function_call_output"))
+            .unwrap();
+        assert_eq!(tool_result["call_id"], json!("call_1_fc_1"));
     }
 
     #[test]
@@ -1633,6 +1639,9 @@ mod tests {
             .await
             .unwrap();
 
+        // The provider caller owns the output stream's terminal event/end.
+        assert!(!stream.is_done());
+        stream.end(Some(output.clone()));
         let emitted: Vec<String> = drain_events(&stream).await;
         assert_eq!(
             emitted,
@@ -1731,6 +1740,9 @@ mod tests {
             }
             other => panic!("unexpected block {}", other.content_type()),
         }
+        // The shared processor leaves the caller's output stream open.
+        assert!(!stream.is_done());
+        stream.end(Some(output.clone()));
         assert_eq!(
             drain_events(&stream).await,
             vec![

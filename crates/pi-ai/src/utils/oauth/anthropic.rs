@@ -19,10 +19,11 @@ use crate::utils::oauth::types::{
     OAuthAuthInfo, OAuthCredentials, OAuthLoginCallbacks, OAuthPrompt, OAuthProviderInterface,
 };
 use crate::utils::oauth::plumbing::{
-    bind_callback_listener, decode_base64, oauth_callback_host, spawn_http_callback_server, CallbackSlot,
+    bind_callback_listener, oauth_callback_host, spawn_http_callback_server, CallbackSlot,
 };
 
-pub const CLIENT_ID: &str = "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl";
+// TypeScript decodes its base64 literal before using the ID in OAuth requests.
+pub const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 pub const AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
 pub const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 pub const CALLBACK_PORT: u16 = 53692;
@@ -35,7 +36,7 @@ pub const TOKEN_REQUEST_TIMEOUT_MS: u64 = 30_000;
 /// The TypeScript computes CLIENT_ID with `atob`; the decoded value is used by the
 /// tests below to prove the literal is the same.
 pub fn decoded_client_id() -> String {
-    decode_base64(CLIENT_ID)
+    CLIENT_ID.to_string()
 }
 
 pub struct CallbackServerInfo {
@@ -254,6 +255,29 @@ async fn exchange_authorization_code(
     })
 }
 
+/// The manual promise settles the callback waiter; a browser callback can finish
+/// login while manual input remains pending.
+async fn wait_for_callback_or_manual(
+    server: &CallbackServerInfo,
+    mut manual: BoxFuture<Result<String, String>>,
+) -> Result<(Option<(String, String)>, Option<String>), String> {
+    tokio::select! {
+        biased;
+        result = &mut manual => {
+            server.cancel_wait();
+            let input = result?;
+            Ok((server.wait_for_code().await, Some(input)))
+        }
+        callback = server.wait_for_code() => {
+            if callback.is_some() {
+                Ok((callback, None))
+            } else {
+                Ok((None, Some(manual.await?)))
+            }
+        }
+    }
+}
+
 /// Login with Anthropic OAuth (authorization code + PKCE).
 pub async fn login_anthropic(options: AnthropicLoginOptions) -> Result<OAuthCredentials, String> {
     let (verifier, challenge) = generate_pkce().await;
@@ -287,21 +311,9 @@ pub async fn login_anthropic(options: AnthropicLoginOptions) -> Result<OAuthCred
         });
     }
 
-    let mut manual_input: Option<String> = None;
-    let mut manual_error: Option<String> = None;
     if let Some(on_manual_code_input) = options.on_manual_code_input.as_ref() {
-        let from_callback = server.wait_for_code();
-        let manual = on_manual_code_input();
-        let (callback_result, manual_value) = tokio::join!(from_callback, manual);
-        server.cancel_wait();
-        match manual_value {
-            Ok(input) => manual_input = Some(input),
-            Err(error) => manual_error = Some(error),
-        }
-
-        if let Some(error) = manual_error {
-            return Err(error);
-        }
+        let (callback_result, manual_input) =
+            wait_for_callback_or_manual(&server, on_manual_code_input()).await?;
 
         if let Some((callback_code, callback_state)) = callback_result {
             code = Some(callback_code);
@@ -449,9 +461,29 @@ fn _assert_hash_map(_: HashMap<String, String>) {}
 mod tests {
     use super::*;
 
+    // The real Anthropic redirect uses a fixed port. Keep real listener tests
+    // exclusive until the aborted server task has released its socket.
+    static CALLBACK_SERVER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    async fn close_callback_server(mut server: CallbackServerInfo) {
+        let handle = server.handle.take().expect("running callback server");
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    fn callback_waiter() -> CallbackServerInfo {
+        CallbackServerInfo {
+            port: CALLBACK_PORT,
+            redirect_uri: REDIRECT_URI.to_string(),
+            slot: CallbackSlot::default(),
+            handle: None,
+        }
+    }
+
     #[test]
     fn client_id_matches_decoded_typescript_literal() {
         assert_eq!(decoded_client_id(), "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+        assert_eq!(CLIENT_ID, decoded_client_id());
     }
 
     #[test]
@@ -494,7 +526,8 @@ mod tests {
 
     #[tokio::test]
     async fn callback_server_serves_success_and_state_mismatch() {
-        let mut server = start_callback_server("expected-state").await.unwrap();
+        let _guard = CALLBACK_SERVER_LOCK.lock().await;
+        let server = start_callback_server("expected-state").await.unwrap();
         let redirect_uri = server.redirect_uri.clone();
         assert_eq!(redirect_uri, REDIRECT_URI);
 
@@ -519,13 +552,56 @@ mod tests {
         let code = server.wait_for_code().await.unwrap();
         assert_eq!(code.0, "abc");
         assert_eq!(code.1, "expected-state");
-        server.close();
+        close_callback_server(server).await;
     }
 
     #[tokio::test]
     async fn cancel_wait_settles_with_none() {
+        let _guard = CALLBACK_SERVER_LOCK.lock().await;
         let server = start_callback_server("s").await.unwrap();
         server.cancel_wait();
+        assert!(server.wait_for_code().await.is_none());
+        close_callback_server(server).await;
+    }
+
+    #[tokio::test]
+    async fn manual_input_settles_without_a_browser_callback() {
+        let server = callback_waiter();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_callback_or_manual(&server, Box::pin(async { Ok("code#state".to_string()) })),
+        )
+        .await
+        .expect("manual input must cancel the callback wait")
+        .unwrap();
+        assert_eq!(result, (None, Some("code#state".to_string())));
+        assert!(server.wait_for_code().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn browser_callback_does_not_wait_for_pending_manual_input() {
+        let server = callback_waiter();
+        server.slot.settle(Some(("code".to_string(), "state".to_string())));
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_callback_or_manual(&server, Box::pin(std::future::pending())),
+        )
+        .await
+        .expect("browser callback must finish independently of manual input")
+        .unwrap();
+        assert_eq!(result, (Some(("code".to_string(), "state".to_string())), None));
+    }
+
+    #[tokio::test]
+    async fn manual_input_rejection_cancels_callback_wait() {
+        let server = callback_waiter();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            wait_for_callback_or_manual(&server, Box::pin(async { Err("cancelled".to_string()) })),
+        )
+        .await
+        .expect("manual rejection must cancel the callback wait");
+        assert_eq!(result.unwrap_err(), "cancelled");
         assert!(server.wait_for_code().await.is_none());
     }
 

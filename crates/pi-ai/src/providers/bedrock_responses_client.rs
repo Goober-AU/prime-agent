@@ -543,7 +543,7 @@ mod tests {
 		let mut options = BedrockResponsesAuthOptions::default();
 		options.region = Some("eu-west-1".to_string());
 		let client = create_bedrock_responses_client(
-			&model("global.openai.gpt-6-astra", "https://bedrock-runtime.ap-southeast-2.amazonaws.com/openai/v1"),
+			&model("global.openai.gpt-6-astra", "https://proxy.example.com/openai/v1"),
 			Some(&options),
 		)
 		.unwrap();

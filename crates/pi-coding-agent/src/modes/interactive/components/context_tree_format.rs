@@ -242,7 +242,7 @@ pub fn format_context_tree(root: &ContextTreeNode, width: f64) -> String {
     let widest_label = rows
         .iter()
         .zip(nodes.iter())
-        .map(|(row, node)| row.prefix.len() + 2 + visible_width(&node.label))
+        .map(|(row, node)| row.prefix.encode_utf16().count() + 2 + visible_width(&node.label))
         .max()
         .unwrap_or(0);
     let label_width = std::cmp::max(
@@ -283,7 +283,7 @@ pub fn format_context_tree(root: &ContextTreeNode, width: f64) -> String {
         let label_space = std::cmp::max(
             1,
             label_width
-                .saturating_sub(row.prefix.len())
+                .saturating_sub(row.prefix.encode_utf16().count())
                 .saturating_sub(2),
         );
         let label = truncate_to_width(&node.label, label_space as f64, "...", false);
@@ -462,7 +462,7 @@ mod tests {
         assert!(text.contains("context"));
         assert!(text.contains("Session"));
         assert!(text.contains("Child"));
-        assert!(text.contains("\u{2514}\u{2500} Child"));
+        assert!(text.contains("\u{2514}\u{2500} \u{2713} Child"));
         assert!(text.contains("across 2 agents"));
         assert!(text.contains("Tokens"));
         assert!(text.contains("Input: 2,000"));

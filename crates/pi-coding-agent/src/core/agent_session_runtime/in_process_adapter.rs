@@ -64,11 +64,12 @@ use crate::modes::agent_connection::types::{
 /// The `runtimeHost` the in-process agent connection drives.
 pub struct InProcessRuntimeHostAdapter {
     runtime: Arc<AgentSessionRuntime>,
+    event_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl InProcessRuntimeHostAdapter {
     pub fn new(runtime: Arc<AgentSessionRuntime>) -> Self {
-        Self { runtime }
+        Self { runtime, event_tasks: Mutex::new(Vec::new()) }
     }
 
     pub fn runtime(&self) -> &Arc<AgentSessionRuntime> {
@@ -294,24 +295,29 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
         // member feeds `create_agent_connection_state` / `create_agent_connection_snapshot`
         // (in_process_agent_connection.rs:370/375/438/883), so a wrong value here is observable.
         let session = self.session();
+        let (session_dir, leaf_id, compaction_count) = {
+            let manager = session.session_manager.lock().unwrap();
+            let compaction_count = manager.get_entries().iter().filter(|entry| entry.get("type").and_then(Value::as_str) == Some("compaction")).count();
+            (manager.get_session_dir(), manager.get_leaf_id(), compaction_count)
+        };
         AgentSessionRuntimeSnapshotSource {
             session: crate::modes::agent_connection::snapshot::AgentSessionSnapshotSource {
                 session_id: session.session_id(),
                 // blocked_on: `AgentSession` has no `getCwd`; the cwd lives on the session file
                 // metadata / runtime, not on the session object.
-                cwd: String::new(),
+                cwd: self.runtime.cwd(),
                 // blocked_on: no `sessionDir` accessor on `AgentSession`.
-                session_dir: None,
+                session_dir: Some(session_dir),
                 // blocked_on: `getLeafId` would come through the `SessionManager`, which the adapter
                 // reaches as `Arc<StdMutex<SessionManager>>`; no sync accessor is wired here.
-                leaf_id: None,
+                leaf_id,
                 session_file: session.session_file(),
                 session_name: session.session_name(),
                 model: session.model(),
                 thinking_level: session.thinking_level(),
                 service_tier: session.service_tier(),
                 // blocked_on: no `getAvailableThinkingLevels` accessor on `AgentSession`.
-                available_thinking_levels: Vec::new(),
+                available_thinking_levels: session.get_available_thinking_levels(),
                 is_streaming: session.is_streaming(),
                 is_compacting: session.is_compacting(),
                 is_bash_running: session.is_bash_running(),
@@ -322,30 +328,30 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
                 // blocked_on: no `messageCount` accessor; the count is the messages length.
                 message_count: session.messages().len() as f64,
                 // blocked_on: no `sessionActions` accessor on `AgentSession`.
-                session_actions: Value::Null,
+                session_actions: serde_json::to_value(session.get_session_action_snapshot()).unwrap(),
                 // blocked_on: no `compactionCount` accessor on `AgentSession`.
-                compaction_count: 0.0,
+                compaction_count: compaction_count as f64,
                 // blocked_on: no `goal` accessor on `AgentSession`.
-                goal: Value::Null,
+                goal: serde_json::to_value(session.goal_state()).unwrap(),
                 // `SessionSummary` carries the `AgentConnectionScopedModel` projection; the canonical
                 // `ScopedModel` has the same fields (runtime_members.rs:703 builds the seam form).
-                scoped_models: Vec::new(),
+                scoped_models: session.scoped_models().into_iter().map(|entry| AgentConnectionScopedModel { model: entry.model, thinking_level: entry.thinking_level }).collect(),
                 // blocked_on: no `activeToolNames` accessor on `AgentSession`.
-                active_tool_names: Vec::new(),
+                active_tool_names: session.get_active_tool_names(),
                 // blocked_on: `getContextUsage` is a private session member; `get_session_stats`
                 // exposes its own shape.
-                context_usage: Value::Null,
+                context_usage: serde_json::to_value(session.get_context_usage()).unwrap(),
                 // blocked_on: `persistedRecap` is private session state.
-                persisted_recap: None,
+                persisted_recap: session.get_current_recap(),
                 messages: session.messages(),
                 // blocked_on: `streamingMessage` is private session state.
-                streaming_message: None,
+                streaming_message: session.state().streaming_message,
                 // blocked_on: `sessionContext` is produced by
                 // `create_agent_connection_state`, which consumes this struct - a cycle.
-                session_context: None,
+                session_context: Some(session_context_value(&session)),
                 // blocked_on: `sessionTree` is produced by `build_session_tree_from_flat_nodes`
                 // over `SessionManager` state, not read off `AgentSession`.
-                session_tree: None,
+                session_tree: Some(session_tree_value(&session)),
                 // blocked_on: needs `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`
                 // (runtime_members.rs:1800/1850), which are `pub(super)` in
                 // `core::agent_session` and so unreachable from this module.
@@ -355,27 +361,49 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
     }
 
     fn session_subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync> {
-        // blocked_on: requires an `AgentSessionEvent` -> `AgentConnectionSessionEvent` converter;
-        // `AgentSessionEvent` derives only Debug/Clone and no converter exists in any slice.
-        let _ = listener;
-        Box::new(|| {})
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let sender = Arc::new(Mutex::new(Some(sender)));
+        let task = tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await { listener(event).await; }
+        });
+        self.event_tasks.lock().unwrap().push(task);
+        let event_sender = sender.clone();
+        let unsubscribe = self.session().subscribe(Arc::new(move |event| {
+            let event = match event {
+                crate::core::agent_session::AgentSessionEvent::Agent(event) =>
+                    crate::modes::agent_connection::types::AgentConnectionSessionEvent::Agent(event),
+                event => match serde_json::to_value(event).and_then(serde_json::from_value) {
+                    Ok(event) => event,
+                    Err(error) => { eprintln!("Could not serialize session event: {error}"); return; }
+                },
+            };
+            if let Some(sender) = event_sender.lock().unwrap().as_ref() {
+                let _ = sender.send(crate::modes::agent_connection::types::AgentConnectionEvent::SessionEvent { event });
+            }
+        }));
+        Box::new(move || { unsubscribe(); sender.lock().unwrap().take(); })
     }
 
     fn session_wait_for_headless_completion(
-        &self,
-        options: Option<AgentConnectionHeadlessCompletionOptions>,
+        &self, options: Option<AgentConnectionHeadlessCompletionOptions>,
     ) -> BoxFuture<Result<AgentAutonomousStatus, String>> {
-        // blocked_on: requires `impl HeadlessCompletionSession for AgentSession`.
-        let _ = options;
-        Box::pin(async {
-            Err("blocked_on: no `impl HeadlessCompletionSession for AgentSession`".to_string())
+        let session = self.session();
+        Box::pin(async move {
+            crate::modes::headless_completion::wait_for_headless_completion(Arc::new(session),
+                crate::modes::headless_completion::HeadlessCompletionOptions {
+                    wait_for_rlm_quiescence: options.and_then(|options| options.wait_for_rlm_quiescence),
+                }).await
         })
     }
 
     fn session_model_catalog(&self) -> AgentConnectionModelCatalog {
-        // blocked_on: the seam member is synchronous while `ModelRegistry` refresh is async; the
-        // registry is held as `Arc<Mutex<ModelRegistry>>` and a sync member cannot await it.
-        AgentConnectionModelCatalog::default()
+        let registry = self.session().model_registry();
+        let registry = registry.lock().unwrap();
+        let mut configured_providers = Vec::new();
+        for model in registry.get_available() {
+            if !configured_providers.contains(&model.provider) { configured_providers.push(model.provider); }
+        }
+        AgentConnectionModelCatalog { models: registry.get_all(), configured_providers }
     }
 
     fn session_context_tree(&self) -> Value {
@@ -910,8 +938,11 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
     }
 
     fn session_model_registry_available_models(&self) -> BoxFuture<Vec<AgentConnectionModel>> {
-        let models = self.registry_available_models();
-        Box::pin(async move { models })
+        let registry = self.session().model_registry();
+        Box::pin(async move {
+            crate::core::sdk::with_model_registry(registry, |registry| Box::pin(registry.refresh_available_models()))
+                .await.expect("model registry worker failed")
+        })
     }
 
     fn session_model_registry_provider_auth_source(&self, provider: &str) -> String {
@@ -1132,12 +1163,11 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
 
     fn runtime_dispose(&self) -> BoxFuture<()> {
         let runtime = Arc::clone(&self.runtime);
+        let tasks = std::mem::take(&mut *self.event_tasks.lock().unwrap());
         Box::pin(async move {
-            // `dispose()` returns a diagnostic result; the seam signature reports
-            // nothing, so the failure is logged.
-            if let Err(error) = runtime.dispose(None).await {
-                eprintln!("Warning: Could not dispose the session runtime: {error}");
-            }
+            if let Err(error) = runtime.dispose(None).await { eprintln!("Could not dispose session runtime: {error}"); }
+            for task in tasks { let _ = task.await; }
         })
     }
+
 }

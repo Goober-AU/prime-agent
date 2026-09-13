@@ -1273,7 +1273,8 @@ mod tests {
     #[test]
     fn descriptor_collapses_whitespace_and_truncates() {
         assert_eq!(descriptor("  a\n\n  b  "), "a b");
-        let long = "x".repeat(100);
+        // A continuous 80-character token is redacted before truncation.
+        let long = "abcdefghij ".repeat(10);
         let truncated = descriptor(&long);
         assert_eq!(truncated.chars().count(), DESCRIPTOR_MAX_WIDTH);
         assert!(truncated.ends_with('\u{2026}'));
@@ -1283,7 +1284,7 @@ mod tests {
     fn redact_noise_masks_secrets_and_blobs() {
         assert_eq!(descriptor("API_TOKEN=abc123"), "API_TOKEN=<redacted>");
         assert_eq!(descriptor("api_key = \"abc123\""), "api_key=<redacted>");
-        assert_eq!(descriptor("Authorization: Bearer abc.def"), "Authorization: Bearer<redacted>");
+        assert_eq!(descriptor("Authorization: Bearer abc.def"), "Authorization: Bearer <redacted>");
         assert_eq!(descriptor("x='sk-abcdef'"), "x='<redacted>'");
         let blob = "A".repeat(120);
         assert_eq!(descriptor(&format!("data {blob}")), "data <blob>");
@@ -1313,7 +1314,7 @@ mod tests {
         let command = "python3 - <<'PY'\nfrom pathlib import Path\nPath('/tmp/x').write_text('hi')\nPY\n";
         let preview = preview_bash_command(command);
         assert_eq!(preview.language, CodePreviewLanguage::Python);
-        assert_eq!(preview.text, "write /tmp/x");
+        assert_eq!(preview.text, "Path('/tmp/x').write_text('hi')");
     }
 
     #[test]
@@ -1332,10 +1333,11 @@ mod tests {
     }
 
     #[test]
-    fn preview_python_code_simplifies_control_line_with_child() {
+    fn preview_python_code_prefers_effectful_control_child() {
         let code = "if True:\n    subprocess.run('rm -rf build', shell=True)\n";
         let preview = preview_python_code(code);
-        assert_eq!(preview.text, "if True: rm -rf build");
+        assert_eq!(preview.text, "subprocess.run('rm -rf build', shell=True)");
+        assert_eq!(preview_python_code("if True:\n    subprocess.run(\"rm -rf build\", shell=True)\n").text, "rm -rf build");
     }
 
     #[test]

@@ -249,10 +249,9 @@ pub fn build_prime_inference_models(
             .unwrap_or(0.0)
             .min(context_window);
         let (cache_read, cache_write) = cache_costs(entry, template);
-        let input = if entry.vision.unwrap_or(false)
-            || template
+        let input = if entry.vision.unwrap_or_else(|| template
                 .map(|model| model.input.contains(&InputModality::Image))
-                .unwrap_or(false)
+                .unwrap_or(false))
         {
             vec![InputModality::Text, InputModality::Image]
         } else {
@@ -553,7 +552,13 @@ mod tests {
                 {
                     "id": "anthropic/claude-sonnet-4-5",
                     "display_name": "Claude Sonnet 4.5",
-                    "pricing": {"input_usd_per_mtok": 3, "output_usd_per_mtok": 15}
+                    "pricing": {"input_usd_per_mtok": 3, "output_usd_per_mtok": 15},
+                    "specs": {
+                        "context_window": 200000,
+                        "max_output_tokens": 64000,
+                        "modalities": {"input": ["text"], "output": ["text"]},
+                        "supports_reasoning": false
+                    }
                 },
                 {
                     "id": "internal/glm-5.2-fast",
@@ -684,9 +689,9 @@ mod tests {
             .iter()
             .find(|model| model.id == "anthropic/claude-sonnet-4-5")
             .unwrap();
-        assert_eq!(sonnet.cost.cache_read, 0.3);
+        assert_eq!(sonnet.cost.cache_read, 3.0 * 0.1);
         assert_eq!(sonnet.cost.cache_write, 3.75);
-        assert_eq!(sonnet.max_tokens, 0.0);
+        assert_eq!(sonnet.max_tokens, 64000.0);
         assert!(!sonnet.reasoning);
         assert_eq!(sonnet.input, vec![InputModality::Text]);
     }
@@ -698,6 +703,20 @@ mod tests {
         // Only one of two bundled models is covered: below the 0.5 * 2 = 1 floor? it equals 1, so passes.
         assert!(build_prime_inference_models(&bundled, &entries, false, None).is_some());
         assert!(build_prime_inference_models(&bundled, &entries, false, Some(2.0)).is_none());
+    }
+
+    #[test]
+    fn explicit_text_only_specs_override_a_vision_template() {
+        let mut bundled = template();
+        bundled.input.push(InputModality::Image);
+        let mut entries = parse_prime_inference_model_catalog(&catalog_value(), false).unwrap();
+        entries.retain(|entry| entry.id == bundled.id);
+        entries[0].vision = Some(false);
+        let models = build_prime_inference_models(&[bundled.clone()], &entries, false, None).unwrap();
+        assert_eq!(models[0].input, vec![InputModality::Text]);
+        entries[0].vision = None;
+        let models = build_prime_inference_models(&[bundled], &entries, false, None).unwrap();
+        assert!(models[0].input.contains(&InputModality::Image));
     }
 
     #[test]

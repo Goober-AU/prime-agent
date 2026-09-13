@@ -59,7 +59,7 @@ mod tests {
         assert_eq!(format_session_display_id("abc"), "abc");
         assert_eq!(
             format_session_display_id("00112233-4455-6677"),
-            "1223344556" .to_string() + "77"
+            "223344556677"
         );
     }
 

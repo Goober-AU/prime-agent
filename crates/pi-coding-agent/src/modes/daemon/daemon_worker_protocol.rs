@@ -364,10 +364,20 @@ pub fn wait_for_daemon_worker_startup_gate(environment: &mut HashMap<String, Str
 
 #[cfg(not(unix))]
 pub fn wait_for_daemon_worker_startup_gate(environment: &mut HashMap<String, String>) -> Result<(), String> {
-    let Some(_raw_fd) = environment.remove(DAEMON_WORKER_STARTUP_GATE_FD_ENV) else {
+    let Some(gate) = environment.remove(DAEMON_WORKER_STARTUP_GATE_FD_ENV) else {
         return Ok(());
     };
-    Err("Daemon session worker startup gate is unavailable on this platform".to_string())
+    if gate != "stdin" {
+        return Err("Daemon session worker has an invalid startup gate".to_string());
+    }
+    // Windows workers do not otherwise consume stdin. Its inherited pipe is
+    // committed only after the supervisor persists the worker descriptor.
+    let mut marker = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut marker).map_err(|error| error.to_string())?;
+    if marker != DAEMON_WORKER_STARTUP_GATE_COMMIT {
+        return Err("Daemon session worker startup was cancelled".to_string());
+    }
+    Ok(())
 }
 
 pub fn daemon_worker_instance_id(environment: &HashMap<String, String>) -> Option<String> {

@@ -288,7 +288,7 @@ mod tests {
         ];
         let table = format_session_list_table(&sessions, 1_767_225_600_000.0);
         let lines: Vec<&str> = table.lines().collect();
-        assert_eq!(lines[0], "name                 id            status    age  model        messages  clients");
+        assert_eq!(lines[0], "name                 id            status    age  model     messages  clients");
         assert!(lines[1].starts_with("agent-aaaaaaaaaaaa3"));
         assert!(lines[2].contains("idle"));
         assert!(lines[3].contains("archived"));
@@ -303,7 +303,7 @@ mod tests {
         let stripped = strip_ansi(row);
         assert_eq!(
             stripped,
-            "agent-aaaaaaaaaaaa1  456789abcdef  working   alpha/m1  2         1"
+            "agent-aaaaaaaaaaaa1  aaaaaaaaaaa1  working       alpha/m1  2         1      "
         );
     }
 
@@ -357,6 +357,6 @@ mod tests {
         assert_eq!(format_session_display_id("0123456789abcdef"), "456789abcdef");
         assert_eq!(format_session_display_id("abc"), "abc");
         assert_eq!(format_session_display_id("0123-4567-89ab-cdef"), "456789abcdef");
-        assert_eq!(format_session_display_id("zzzzzzzzzzzzzzzzzz"), "zzzzzzzzzzzzzzzzzz");
+        assert_eq!(format_session_display_id("zzzzzzzzzzzzzzzzzz"), "zzzzzzzzzzzz");
     }
 }

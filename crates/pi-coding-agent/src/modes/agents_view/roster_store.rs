@@ -136,6 +136,8 @@ impl DaemonClientRequestOptions {
 /// Local port of the `DaemonTransportClient` interface (daemon-client.ts). The
 /// daemon slice owns the socket implementation; this store only calls these.
 pub trait DaemonTransport: Send + Sync {
+    /// A separate connection for one-shot operations that close their socket.
+    fn fresh_transport(&self) -> Option<Arc<dyn DaemonTransport>> { None }
     fn hello(&self) -> Option<DaemonHello>;
     fn is_connected(&self) -> bool;
     fn supports_server_capability(&self, capability: &str) -> bool;
@@ -238,17 +240,16 @@ type Listener = Arc<dyn Fn() + Send + Sync>;
 
 /// Mirrors `AgentsViewRosterStore`: one subscription per attached client, with
 /// pushes buffered until the subscribe reply lands.
+#[derive(Clone)]
 pub struct AgentsViewRosterStore {
-    entries: AsyncMutex<Vec<AgentRosterEntry>>,
-    listeners: AsyncMutex<Vec<Listener>>,
-    client: AsyncMutex<Option<DaemonTransportClient>>,
-    unsubscribe_message: AsyncMutex<Option<Box<dyn Fn() + Send + Sync>>>,
-    emit_scheduled: AsyncMutex<bool>,
-    subscribed: AsyncMutex<bool>,
-    subscribed_hello: AsyncMutex<Option<DaemonHello>>,
-    /// Pushes racing the subscribe reply buffer until the snapshot lands.
-    pending_updates: Arc<Mutex<Option<Vec<RosterUpdate>>>>,
-    attach_chain: AsyncMutex<()>,
+    entries: Arc<AsyncMutex<Vec<AgentRosterEntry>>>,
+    listeners: Arc<AsyncMutex<Vec<Listener>>>,
+    client: Arc<AsyncMutex<Option<DaemonTransportClient>>>,
+    unsubscribe_message: Arc<AsyncMutex<Option<Box<dyn Fn() + Send + Sync>>>>,
+    emit_scheduled: Arc<AsyncMutex<bool>>,
+    subscribed: Arc<AsyncMutex<bool>>,
+    subscribed_hello: Arc<AsyncMutex<Option<DaemonHello>>>,
+    attach_chain: Arc<AsyncMutex<()>>,
 }
 
 impl Default for AgentsViewRosterStore {
@@ -260,17 +261,17 @@ impl Default for AgentsViewRosterStore {
 impl AgentsViewRosterStore {
     pub fn new() -> Self {
         Self {
-            entries: AsyncMutex::new(Vec::new()),
-            listeners: AsyncMutex::new(Vec::new()),
-            client: AsyncMutex::new(None),
-            unsubscribe_message: AsyncMutex::new(None),
-            emit_scheduled: AsyncMutex::new(false),
-            subscribed: AsyncMutex::new(false),
-            subscribed_hello: AsyncMutex::new(None),
-            pending_updates: Arc::new(Mutex::new(Some(Vec::new()))),
-            attach_chain: AsyncMutex::new(()),
+            entries: Arc::new(AsyncMutex::new(Vec::new())),
+            listeners: Arc::new(AsyncMutex::new(Vec::new())),
+            client: Arc::new(AsyncMutex::new(None)),
+            unsubscribe_message: Arc::new(AsyncMutex::new(None)),
+            emit_scheduled: Arc::new(AsyncMutex::new(false)),
+            subscribed: Arc::new(AsyncMutex::new(false)),
+            subscribed_hello: Arc::new(AsyncMutex::new(None)),
+            attach_chain: Arc::new(AsyncMutex::new(())),
         }
     }
+
 
     /// Serialized: a stale attempt settling late must not detach a newer
     /// subscription's listener. The `Err` mirrors the reference's `throw`.
@@ -304,19 +305,25 @@ impl AgentsViewRosterStore {
         }
         self.detach_from_client().await;
         *self.client.lock().await = Some(client.clone());
-        *self.pending_updates.lock().unwrap() = Some(Vec::new());
-        let pending_for_listener = self.pending_updates.clone();
+        let (updates, mut incoming) = tokio::sync::mpsc::unbounded_channel::<RosterUpdate>();
+        let ready = tokio_util::sync::CancellationToken::new();
+        let ready_consumer = ready.clone();
+        let store = self.clone();
+        let consumer = tokio::spawn(async move {
+            ready_consumer.cancelled().await;
+            while let Some(update) = incoming.recv().await {
+                store.apply_update(update.changed, update.removed, update.resync).await;
+            }
+        });
         let unsubscribe = client.on_message(Box::new(move |message| {
-            let Some(update) = RosterUpdate::from_outbound(message) else {
-                return;
-            };
-            if let Ok(mut guard) = pending_for_listener.lock() {
-                if let Some(buffer) = guard.as_mut() {
-                    buffer.push(update);
-                }
+            if let Some(update) = RosterUpdate::from_outbound(message) {
+                let _ = updates.send(update);
             }
         }));
-        *self.unsubscribe_message.lock().await = Some(unsubscribe);
+        *self.unsubscribe_message.lock().await = Some(Box::new(move || {
+            unsubscribe();
+            consumer.abort();
+        }));
 
         // Not parkable: the awaiting reconnect loop must see a close as a rejection.
         let response = match client
@@ -353,10 +360,7 @@ impl AgentsViewRosterStore {
             })
             .unwrap_or_default();
         self.apply_update(roster, None, Some(true)).await;
-        let buffered = self.pending_updates.lock().unwrap().take().unwrap_or_default();
-        for update in buffered {
-            self.apply_update(update.changed, update.removed, update.resync).await;
-        }
+        ready.cancel();
         *self.subscribed.lock().await = true;
         *self.subscribed_hello.lock().await = hello;
         Ok(true)
@@ -686,6 +690,24 @@ mod tests {
         transport.push(Ok(err_response("boom")));
         let client = DaemonTransportClient::new(transport);
         assert_eq!(store.attach(client).await, Err("roster_subscribe failed: boom".to_string()));
+    }
+
+    #[tokio::test]
+    async fn attached_store_applies_live_updates_in_order_and_detaches() {
+        let store = AgentsViewRosterStore::new();
+        let transport = FakeDaemonTransport::new("pipe-live", &["agent_roster"]);
+        transport.push(Ok(ok_response(serde_json::json!({"roster": []}))));
+        store.attach(DaemonTransportClient::new(transport.clone())).await.unwrap();
+        transport.emit(DaemonOutbound::RosterUpdate { changed: vec![entry("a", "first")], removed: None, resync: None });
+        transport.emit(DaemonOutbound::RosterUpdate { changed: vec![entry("a", "last")], removed: None, resync: None });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if store.summaries().await.first().is_some_and(|row| row.session_id == "last") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        store.dispose().await;
+        assert!(transport.listeners.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn panel_line_pads_to_full_width_with_panel_padding() {
         let line = tool_panel_line("hi", 6.0);
-        assert_eq!(strip_ansi(&line), "  hi    ");
+        assert_eq!(strip_ansi(&line), "  hi  ");
     }
 
     #[test]
@@ -163,7 +163,7 @@ mod tests {
         panel.add_child(Box::new(Text::new("child".to_string(), 0, 0, None)));
         let lines = panel.render_impl(9.0);
         assert_eq!(lines.len(), 3);
-        assert_eq!(strip_ansi(&lines[0]), "  header ");
+        assert_eq!(strip_ansi(&lines[0]), "  heade  ");
         assert_eq!(strip_ansi(&lines[1]), " ".repeat(9));
         assert_eq!(strip_ansi(&lines[2]), "  child  ");
     }

@@ -2432,11 +2432,23 @@ mod tests {
         assert!(parse_package_command(&args(&["frobnicate"])).is_none());
         assert!(parse_package_command(&args(&[])).is_none());
         // `--daemon-socket` is only accepted for update and the coordinator flag.
-        assert!(parse_package_command(&args(&["install", "--daemon-socket", "/tmp/d.sock"])).is_none());
+        assert_eq!(
+            parse_package_command(&args(&["install", "--daemon-socket", "/tmp/d.sock"]))
+                .unwrap().invalid_option.as_deref(),
+            Some("--daemon-socket")
+        );
         assert!(parse_package_command(&args(&["update", "--daemon-socket", "/tmp/d.sock"])).is_some());
         // `--self` conflicts with an explicit source.
-        assert!(parse_package_command(&args(&["update", "--self", "src"])).is_none());
-        assert!(parse_package_command(&args(&["update", "--local", "--self"])).is_none());
+        assert_eq!(
+            parse_package_command(&args(&["update", "--self", "src"]))
+                .unwrap().conflicting_options.as_deref(),
+            Some("positional update targets cannot be combined with --self or --extensions")
+        );
+        assert_eq!(
+            parse_package_command(&args(&["update", "--local", "--self"]))
+                .unwrap().invalid_option.as_deref(),
+            Some("--local")
+        );
     }
 
     #[test]

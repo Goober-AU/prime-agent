@@ -506,7 +506,18 @@ impl ResourceList {
                     .find(|i| i.path == item.path && i.resource_type == item.resource_type);
                 if let Some(found) = found {
                     found.enabled = enabled;
-                    return;
+                }
+            }
+        }
+        // TypeScript keeps shared item references; Rust owns copies in each view.
+        for entry in self
+            .flat_items
+            .iter_mut()
+            .chain(self.filtered_items.iter_mut())
+        {
+            if let FlatEntry::Item { item: visible } = entry {
+                if visible.path == item.path && visible.resource_type == item.resource_type {
+                    visible.enabled = enabled;
                 }
             }
         }
@@ -902,10 +913,9 @@ impl Component for ResourceList {
             if let Some(FlatEntry::Item { mut item }) = entry {
                 let new_enabled = !item.enabled;
                 self.toggle_resource(&item, new_enabled);
-                let toggled = item.clone();
                 self.update_item(&mut item, new_enabled);
                 if let Some(callback) = self.on_toggle.as_mut() {
-                    callback(&toggled, new_enabled);
+                    callback(&item, new_enabled);
                 }
             }
             return;
@@ -1167,7 +1177,7 @@ mod tests {
                 .iter()
                 .map(|i| i.display_name.clone())
                 .collect::<Vec<_>>(),
-            vec!["aaa.ts".to_string(), "zzz.ts".to_string()]
+            vec!["a/aaa.ts".to_string(), "a/zzz.ts".to_string()]
         );
         let order: Vec<&str> = group.subgroups.iter().map(|s| s.r#type).collect();
         let mut sorted = order.clone();
@@ -1207,7 +1217,8 @@ mod tests {
             FlatEntry::Subgroup { subgroup, .. } => subgroup.r#type == "skills",
             FlatEntry::Item { item } => item.display_name == "pdf",
         }));
-        assert_eq!(list.selected_index, 0);
+        assert_eq!(list.selected_index, 2);
+        assert!(entry_is_item(&list.filtered_items[list.selected_index]));
 
         list.filter_items("nothing-matches-this");
         assert!(list.filtered_items.is_empty());
@@ -1248,7 +1259,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_exits_and_escape_cancels() {
+    fn cancellation_precedes_ctrl_c_exit_unless_rebound() {
+        let previous = pi_tui::keybindings::get_keybindings();
+        pi_tui::keybindings::set_keybindings(pi_tui::keybindings::KeybindingsManager::new(
+            pi_tui::keybindings::tui_keybindings(),
+            Default::default(),
+        ));
         let groups = build_groups(&paths());
         let mut list = ResourceList::new(
             groups,
@@ -1264,8 +1280,18 @@ mod tests {
         list.on_exit = Some(Box::new(move || *exit_flag.borrow_mut() = true));
         list.handle_input("\u{1b}");
         assert!(*cancelled.borrow());
+        *cancelled.borrow_mut() = false;
+        list.handle_input("\u{3}");
+        assert!(*cancelled.borrow());
+        assert!(!*exited.borrow());
+        let mut configured = pi_tui::keybindings::get_keybindings();
+        let mut bindings = configured.get_user_bindings();
+        bindings.insert("tui.select.cancel".to_string(), vec!["escape".to_string()]);
+        configured.set_user_bindings(bindings);
+        pi_tui::keybindings::set_keybindings(configured);
         list.handle_input("\u{3}");
         assert!(*exited.borrow());
+        pi_tui::keybindings::set_keybindings(previous);
     }
 
     #[test]
@@ -1280,12 +1306,19 @@ mod tests {
         let toggled: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
         let sink = Rc::clone(&toggled);
         list.on_toggle = Some(Box::new(move |item, enabled| {
+            assert_eq!(item.enabled, enabled);
             sink.borrow_mut().push((item.path.clone(), enabled))
         }));
         list.handle_input(" ");
         let recorded = toggled.borrow();
         assert_eq!(recorded.len(), 1);
         assert!(!recorded[0].1, "an enabled item toggles to disabled");
+        drop(recorded);
+        list.handle_input(" ");
+        let recorded = toggled.borrow();
+        assert_eq!(recorded.len(), 2);
+        assert_eq!(recorded[0].0, recorded[1].0);
+        assert!(recorded[1].1, "the same item toggles back to enabled");
     }
 
     #[test]

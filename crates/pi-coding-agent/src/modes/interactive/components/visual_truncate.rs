@@ -69,7 +69,10 @@ mod tests {
     #[test]
     fn short_text_is_returned_whole() {
         let result = truncate_to_visual_lines("hello", 5, 20.0, 0);
-        assert_eq!(result.visual_lines, vec!["hello".to_string()]);
+        assert_eq!(
+            result.visual_lines,
+            vec!["hello               ".to_string()]
+        );
         assert_eq!(result.skipped_count, 0);
     }
 
@@ -79,7 +82,7 @@ mod tests {
         let result = truncate_to_visual_lines(text, 2, 10.0, 0);
         assert_eq!(
             result.visual_lines,
-            vec!["three".to_string(), "four".to_string()]
+            vec!["three     ".to_string(), "four      ".to_string()]
         );
         assert_eq!(result.skipped_count, 2);
     }

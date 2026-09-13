@@ -238,17 +238,20 @@ mod tests {
         )
     }
 
-    #[test]
-    fn renders_borders_loader_hint_and_spacers() {
+    #[tokio::test]
+    async fn renders_borders_loader_hint_and_spacers() {
         let mut bordered = loader(true);
         let lines = bordered.render(6.0);
-        assert_eq!(lines[0], "\u{2500}".repeat(6));
-        assert_eq!(lines[lines.len() - 1], "\u{2500}".repeat(6));
+        assert_eq!(pi_tui::utils::strip_ansi(&lines[0]), "\u{2500}".repeat(6));
+        assert_eq!(
+            pi_tui::utils::strip_ansi(&lines[lines.len() - 1]),
+            "\u{2500}".repeat(6)
+        );
         assert!(lines.len() >= 6);
     }
 
-    #[test]
-    fn non_cancellable_loaders_omit_the_hint_block() {
+    #[tokio::test]
+    async fn non_cancellable_loaders_omit_the_hint_block() {
         let mut cancellable = loader(true);
         let mut plain = loader(false);
         assert!(cancellable.render(6.0).len() > plain.render(6.0).len());
@@ -256,8 +259,8 @@ mod tests {
         assert_eq!(cancellable.signal_aborted(), false);
     }
 
-    #[test]
-    fn escape_aborts_only_the_cancellable_loader() {
+    #[tokio::test]
+    async fn escape_aborts_only_the_cancellable_loader() {
         let mut cancellable = loader(true);
         cancellable.handle_input("\u{1b}");
         assert!(cancellable.signal_aborted());
@@ -266,8 +269,8 @@ mod tests {
         assert!(!plain.signal_aborted());
     }
 
-    #[test]
-    fn on_abort_fires_for_the_cancellable_loader() {
+    #[tokio::test]
+    async fn on_abort_fires_for_the_cancellable_loader() {
         let fired = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&fired);
         let mut cancellable = loader(true);
@@ -276,8 +279,8 @@ mod tests {
         assert!(fired.load(Ordering::SeqCst));
     }
 
-    #[test]
-    fn dispose_stops_the_loader() {
+    #[tokio::test]
+    async fn dispose_stops_the_loader() {
         let mut cancellable = loader(true);
         cancellable.dispose();
         cancellable.dispose();

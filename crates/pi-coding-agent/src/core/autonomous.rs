@@ -1174,7 +1174,7 @@ mod tests {
             3.0,
             0.0,
         );
-        assert!(text.contains("`npm test` exit 1.\n\nContinue working."));
+        assert!(text.contains("`npm test` exit 1.\n\n\nContinue working."));
     }
 
     #[test]

@@ -1167,7 +1167,7 @@ mod tests {
 
     #[test]
     fn pairing_acceptance_round_trips_through_the_frame_the_worker_sends() {
-        let (code, pairing) = create_pairing(0);
+        let (code, pairing) = create_pairing(now_ms());
         let bot_username = "prime_bot".to_string();
         let mut settings = TelegramConnectionSettings {
             version: 1.0,
@@ -1205,5 +1205,13 @@ mod tests {
             expires_at: f64::MAX,
         });
         assert!(!accept_telegram_pairing(&mut other, &frame));
+
+        // Correct codes still fail once their ten-minute pairing window expires.
+        other.pairing = Some(TelegramPairing {
+            hash: pairing_hash(&code),
+            expires_at: 0.0,
+        });
+        assert!(!accept_telegram_pairing(&mut other, &frame));
+        assert!(other.paired_user_id.is_none());
     }
 }

@@ -129,8 +129,12 @@ mod tests {
     fn malformed_message_renders_the_error_label() {
         init();
         let mut component = MalformedCompactionOutcomeMessageComponent::new();
-        let lines = component.render(40.0);
+        let lines = component.render(60.0);
         assert_eq!(lines.len(), 3);
         assert!(lines[1].contains("[Malformed compaction outcome message]"));
+        let wrapped = component.render(40.0);
+        assert_eq!(wrapped.len(), 4);
+        assert!(wrapped[1].contains("[Malformed compaction outcome"));
+        assert!(wrapped[2].contains("message]"));
     }
 }

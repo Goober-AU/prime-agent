@@ -63,7 +63,9 @@ fn message_parts(message: &CustomMessage) -> (String, CustomMessageContent, bool
 /// `MessageRenderer` takes that one type). Fixing it belongs to the extensions
 /// slice; until then `sourceInfo` cannot be carried across because the two
 /// `SourceInfo` shapes differ.
-fn to_extension_theme(source: &crate::modes::interactive::theme::theme::Theme) -> crate::core::extensions::types::Theme {
+fn to_extension_theme(
+    source: &crate::modes::interactive::theme::theme::Theme,
+) -> crate::core::extensions::types::Theme {
     crate::core::extensions::types::Theme {
         name: source.name.clone(),
         source_path: source.source_path.clone(),
@@ -75,7 +77,9 @@ fn to_extension_theme(source: &crate::modes::interactive::theme::theme::Theme) -
 fn to_tui_markdown_theme(
     source: crate::modes::interactive::theme::theme::MarkdownTheme,
 ) -> pi_tui::components::markdown::MarkdownTheme {
-    fn rc(value: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>) -> Rc<dyn Fn(&str) -> String> {
+    fn rc(
+        value: std::sync::Arc<dyn Fn(&str) -> String + Send + Sync>,
+    ) -> Rc<dyn Fn(&str) -> String> {
         Rc::new(move |text: &str| value(text))
     }
 
@@ -260,7 +264,8 @@ mod tests {
         let lines = component.render(20.0);
         let plain: Vec<String> = lines.iter().map(|line| strip_ansi(line)).collect();
         assert_eq!(plain[0], "");
-        assert_eq!(plain[1], " [note]");
+        assert_eq!(plain[1], " ".repeat(20));
+        assert_eq!(plain[2], format!(" [note]{}", " ".repeat(13)));
     }
 
     #[test]
@@ -276,7 +281,10 @@ mod tests {
             Some(renderer),
             get_markdown_theme(),
         );
-        assert_eq!(component.render(10.0), vec!["custom".to_string()]);
+        assert_eq!(
+            component.render(10.0),
+            vec!["".to_string(), "custom".to_string()]
+        );
     }
 
     struct FixedComponent;

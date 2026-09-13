@@ -2,12 +2,84 @@
 
 use std::collections::HashMap;
 
-use pi_ai::types::{AssistantMessage, AssistantMessageEvent, ContentBlock, ToolCall};
+use pi_ai::types::{AssistantMessage, ContentBlock, ToolCall};
 use pi_ai::utils::json_parse::parse_streaming_json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::daemon_protocol::DaemonEventMeta;
+
+/// The streaming event with its redundant partial message omitted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CompactAssistantMessageEvent {
+    #[serde(rename = "start")]
+    Start {},
+    #[serde(rename = "text_start")]
+    TextStart {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+    },
+    #[serde(rename = "text_delta")]
+    TextDelta {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+        delta: String,
+    },
+    #[serde(rename = "text_end")]
+    TextEnd {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+        content: String,
+    },
+    #[serde(rename = "thinking_start")]
+    ThinkingStart {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+    },
+    #[serde(rename = "thinking_delta")]
+    ThinkingDelta {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+        delta: String,
+    },
+    #[serde(rename = "thinking_end")]
+    ThinkingEnd {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+        content: String,
+    },
+    #[serde(rename = "toolcall_start")]
+    ToolCallStart {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+    },
+    #[serde(rename = "toolcall_delta")]
+    ToolCallDelta {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+        delta: String,
+    },
+    #[serde(rename = "toolcall_end")]
+    ToolCallEnd {
+        #[serde(rename = "contentIndex")]
+        content_index: usize,
+        #[serde(rename = "toolCall")]
+        tool_call: ToolCall,
+    },
+    #[serde(rename = "done")]
+    Done {
+        /// `Extract<StopReason, "stop" | "length" | "toolUse">`
+        reason: String,
+        message: AssistantMessage,
+    },
+    #[serde(rename = "error")]
+    Error {
+        /// `Extract<StopReason, "aborted" | "error">`
+        reason: String,
+        error: AssistantMessage,
+    },
+}
 
 /// A compact assistant delta: `assistant_stream_delta` on the worker wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -17,7 +89,7 @@ pub struct CompactAssistantDelta {
     #[serde(rename = "activeSessionId")]
     pub active_session_id: String,
     #[serde(rename = "assistantMessageEvent")]
-    pub assistant_message_event: AssistantMessageEvent,
+    pub assistant_message_event: CompactAssistantMessageEvent,
     #[serde(rename = "contentStart", skip_serializing_if = "Option::is_none", default)]
     pub content_start: Option<ContentBlock>,
     #[serde(rename = "toolCallArguments", skip_serializing_if = "Option::is_none", default)]
@@ -59,7 +131,7 @@ pub fn create_compact_assistant_delta(
         .cloned()
         .ok_or_else(|| "assistantMessageEvent must be an object".to_string())?;
     event_object.shift_remove("partial");
-    let compact_event: AssistantMessageEvent =
+    let compact_event: CompactAssistantMessageEvent =
         serde_json::from_value(Value::Object(event_object)).map_err(|error| error.to_string())?;
 
     let content_start = compact_content_start(&assistant_message, &compact_event);
@@ -83,9 +155,9 @@ pub fn create_compact_assistant_delta(
 
 fn compact_tool_call_arguments(
     message: &AssistantMessage,
-    event: &AssistantMessageEvent,
+    event: &CompactAssistantMessageEvent,
 ) -> Option<serde_json::Map<String, Value>> {
-    let AssistantMessageEvent::ToolCallDelta { content_index, .. } = event else {
+    let CompactAssistantMessageEvent::ToolCallDelta { content_index, .. } = event else {
         return None;
     };
     match message.content.get(*content_index) {
@@ -94,26 +166,26 @@ fn compact_tool_call_arguments(
     }
 }
 
-fn compact_content_start(message: &AssistantMessage, event: &AssistantMessageEvent) -> Option<ContentBlock> {
+fn compact_content_start(message: &AssistantMessage, event: &CompactAssistantMessageEvent) -> Option<ContentBlock> {
     let content_index = match event {
-        AssistantMessageEvent::TextStart { content_index, .. }
-        | AssistantMessageEvent::ThinkingStart { content_index, .. }
-        | AssistantMessageEvent::ToolCallStart { content_index, .. } => *content_index,
+        CompactAssistantMessageEvent::TextStart { content_index, .. }
+        | CompactAssistantMessageEvent::ThinkingStart { content_index, .. }
+        | CompactAssistantMessageEvent::ToolCallStart { content_index, .. } => *content_index,
         _ => return None,
     };
     let content = message.content.get(content_index)?;
     match (event, content) {
-        (AssistantMessageEvent::TextStart { .. }, ContentBlock::Text(text)) => {
+        (CompactAssistantMessageEvent::TextStart { .. }, ContentBlock::Text(text)) => {
             let mut cleared = text.clone();
             cleared.text = String::new();
             Some(ContentBlock::Text(cleared))
         }
-        (AssistantMessageEvent::ThinkingStart { .. }, ContentBlock::Thinking(thinking)) => {
+        (CompactAssistantMessageEvent::ThinkingStart { .. }, ContentBlock::Thinking(thinking)) => {
             let mut cleared = thinking.clone();
             cleared.thinking = String::new();
             Some(ContentBlock::Thinking(cleared))
         }
-        (AssistantMessageEvent::ToolCallStart { .. }, ContentBlock::ToolCall(tool_call)) => {
+        (CompactAssistantMessageEvent::ToolCallStart { .. }, ContentBlock::ToolCall(tool_call)) => {
             let mut cleared = tool_call.clone();
             cleared.arguments = serde_json::Map::new();
             Some(ContentBlock::ToolCall(cleared))
@@ -195,45 +267,45 @@ impl CompactAssistantStreamReconstructor {
         let partial = self.partial_messages.get_mut(&active_session_id)?;
         let event = &delta.assistant_message_event;
         match event {
-            AssistantMessageEvent::TextStart { content_index, .. } => {
+            CompactAssistantMessageEvent::TextStart { content_index, .. } => {
                 let block = delta
                     .content_start
                     .clone()
                     .unwrap_or_else(|| ContentBlock::Text(default_text_content()));
                 set_content(partial, *content_index, block);
             }
-            AssistantMessageEvent::TextDelta { content_index, delta: text_delta, .. } => {
+            CompactAssistantMessageEvent::TextDelta { content_index, delta: text_delta, .. } => {
                 match partial.content.get_mut(*content_index) {
                     Some(ContentBlock::Text(content)) => content.text.push_str(text_delta),
                     _ => return None,
                 }
             }
-            AssistantMessageEvent::TextEnd { content_index, content, .. } => {
+            CompactAssistantMessageEvent::TextEnd { content_index, content, .. } => {
                 match partial.content.get_mut(*content_index) {
                     Some(ContentBlock::Text(block)) => block.text = content.clone(),
                     _ => return None,
                 }
             }
-            AssistantMessageEvent::ThinkingStart { content_index, .. } => {
+            CompactAssistantMessageEvent::ThinkingStart { content_index, .. } => {
                 let block = delta
                     .content_start
                     .clone()
                     .unwrap_or_else(|| ContentBlock::Thinking(default_thinking_content()));
                 set_content(partial, *content_index, block);
             }
-            AssistantMessageEvent::ThinkingDelta { content_index, delta: text_delta, .. } => {
+            CompactAssistantMessageEvent::ThinkingDelta { content_index, delta: text_delta, .. } => {
                 match partial.content.get_mut(*content_index) {
                     Some(ContentBlock::Thinking(content)) => content.thinking.push_str(text_delta),
                     _ => return None,
                 }
             }
-            AssistantMessageEvent::ThinkingEnd { content_index, content, .. } => {
+            CompactAssistantMessageEvent::ThinkingEnd { content_index, content, .. } => {
                 match partial.content.get_mut(*content_index) {
                     Some(ContentBlock::Thinking(block)) => block.thinking = content.clone(),
                     _ => return None,
                 }
             }
-            AssistantMessageEvent::ToolCallStart { content_index, .. } => {
+            CompactAssistantMessageEvent::ToolCallStart { content_index, .. } => {
                 let Some(ContentBlock::ToolCall(tool_call)) = delta.content_start.clone() else {
                     return None;
                 };
@@ -241,7 +313,7 @@ impl CompactAssistantStreamReconstructor {
                 self.tool_call_json
                     .insert(Self::tool_call_key(&active_session_id, *content_index), String::new());
             }
-            AssistantMessageEvent::ToolCallDelta { content_index, delta: text_delta, .. } => {
+            CompactAssistantMessageEvent::ToolCallDelta { content_index, delta: text_delta, .. } => {
                 let arguments = match delta.tool_call_arguments.clone() {
                     Some(arguments) => arguments,
                     None => {
@@ -263,21 +335,20 @@ impl CompactAssistantStreamReconstructor {
                     _ => return None,
                 }
             }
-            AssistantMessageEvent::ToolCallEnd { content_index, tool_call, .. } => {
+            CompactAssistantMessageEvent::ToolCallEnd { content_index, tool_call, .. } => {
                 set_content(partial, *content_index, ContentBlock::ToolCall(tool_call.clone()));
                 self.tool_call_json
                     .remove(&Self::tool_call_key(&active_session_id, *content_index));
             }
-            AssistantMessageEvent::Start { .. }
-            | AssistantMessageEvent::Done { .. }
-            | AssistantMessageEvent::Error { .. } => return None,
+            CompactAssistantMessageEvent::Start { .. }
+            | CompactAssistantMessageEvent::Done { .. }
+            | CompactAssistantMessageEvent::Error { .. } => return None,
         }
         let mut message = partial.clone();
         message.content = partial.content.clone();
         let event_value = serde_json::to_value(event).ok()?;
         let mut event_object = event_value.as_object().cloned().unwrap_or_default();
-        event_object.insert("partial".to_string(), serde_json::to_value(&message).ok()?);
-        Some(serde_json::json!({
+        let mut outbound = serde_json::json!({
             "type": "session_event",
             "activeSessionId": delta.active_session_id,
             "event": {
@@ -285,8 +356,11 @@ impl CompactAssistantStreamReconstructor {
                 "message": serde_json::to_value(&message).ok()?,
                 "assistantMessageEvent": Value::Object(event_object),
             },
-            "meta": delta.meta.as_ref().and_then(|meta| serde_json::to_value(meta).ok()),
-        }))
+        });
+        if let Some(meta) = &delta.meta {
+            outbound["meta"] = serde_json::to_value(meta).ok()?;
+        }
+        Some(outbound)
     }
 
     pub fn clear(&mut self, active_session_id: &str) {
@@ -421,9 +495,13 @@ mod tests {
         assert_eq!(delta.active_session_id, "a");
         assert!(matches!(
             delta.assistant_message_event,
-            AssistantMessageEvent::TextDelta { .. }
+            CompactAssistantMessageEvent::TextDelta { .. }
         ));
-        assert!(is_compact_assistant_delta(&serde_json::to_value(&delta).expect("serializes")));
+        let wire = serde_json::to_value(&delta).expect("serializes");
+        assert!(is_compact_assistant_delta(&wire));
+        assert!(wire["assistantMessageEvent"].get("partial").is_none());
+        let decoded: CompactAssistantDelta = serde_json::from_value(wire).expect("compact wire round trip");
+        assert_eq!(decoded, delta);
     }
 
     #[test]
@@ -467,10 +545,9 @@ mod tests {
         let delta = CompactAssistantDelta {
             type_: "assistant_stream_delta".to_string(),
             active_session_id: "a".to_string(),
-            assistant_message_event: AssistantMessageEvent::TextDelta {
+            assistant_message_event: CompactAssistantMessageEvent::TextDelta {
                 content_index: 0,
                 delta: "hello".to_string(),
-                partial: partial_with_text(""),
             },
             content_start: None,
             tool_call_arguments: None,
@@ -487,10 +564,9 @@ mod tests {
         let delta = CompactAssistantDelta {
             type_: "assistant_stream_delta".to_string(),
             active_session_id: "missing".to_string(),
-            assistant_message_event: AssistantMessageEvent::TextDelta {
+            assistant_message_event: CompactAssistantMessageEvent::TextDelta {
                 content_index: 0,
                 delta: "x".to_string(),
-                partial: partial_with_text(""),
             },
             content_start: None,
             tool_call_arguments: None,
@@ -511,10 +587,9 @@ mod tests {
         let delta = CompactAssistantDelta {
             type_: "assistant_stream_delta".to_string(),
             active_session_id: "a".to_string(),
-            assistant_message_event: AssistantMessageEvent::TextDelta {
+            assistant_message_event: CompactAssistantMessageEvent::TextDelta {
                 content_index: 0,
                 delta: "x".to_string(),
-                partial: partial_with_text(""),
             },
             content_start: None,
             tool_call_arguments: None,
@@ -545,10 +620,9 @@ mod tests {
         let delta = CompactAssistantDelta {
             type_: "assistant_stream_delta".to_string(),
             active_session_id: "a".to_string(),
-            assistant_message_event: AssistantMessageEvent::ToolCallDelta {
+            assistant_message_event: CompactAssistantMessageEvent::ToolCallDelta {
                 content_index: 0,
                 delta: "{\"cmd\":\"ls\"}".to_string(),
-                partial: partial_with_text(""),
             },
             content_start: None,
             tool_call_arguments: None,

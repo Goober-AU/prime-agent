@@ -56,7 +56,7 @@ pub fn get_provider_checkpoint(details: &Value) -> Option<ProviderCompactionChec
         "model": object.get("model").cloned().unwrap_or(Value::Null),
         "baseUrl": object.get("baseUrl").cloned().unwrap_or(Value::Null),
         "items": Value::Array(items.clone()),
-        "estimatedTokens": ((serialized.chars().count() + 3) / 4) as f64 + (images as f64) * 1200.0,
+        "estimatedTokens": ((serialized.encode_utf16().count() + 3) / 4) as f64 + (images as f64) * 1200.0,
     });
     if is_compaction_checkpoint(&checkpoint) {
         serde_json::from_value(checkpoint).ok()

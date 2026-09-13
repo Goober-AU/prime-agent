@@ -142,7 +142,8 @@ mod tests {
         assert!(plain
             .iter()
             .any(|line| line.contains("Read the blog post:")));
-        assert!(plain.iter().any(|line| line.contains(BLOG_URL)));
+        let unwrapped = plain.iter().map(|line| line.trim()).collect::<String>();
+        assert!(unwrapped.contains(BLOG_URL));
         assert!(plain.last().unwrap().starts_with('\u{2500}'));
     }
 

@@ -1,11 +1,7 @@
 //! Port of packages/coding-agent/src/modes/agents-view/agents-view-mode.ts
 //!
-//! Integration seams (see blocked_on in evidence/status/ca-agents-view.json):
-//! the TUI (`TUI`, `ProcessTerminal`, `CustomEditor`, `BrandSplashHeader`), the
-//! interactive chat mode and the daemon socket client belong to other slices that
-//! are still empty in this workspace. They are modelled here as small traits with
-//! the exact operations this mode calls, so the port keeps its structure and its
-//! behaviour is testable without a terminal.
+//! Platform adapters in native_host connect the controller to pi-tui, the
+//! daemon client, and interactive chat while keeping model behavior testable.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -656,6 +652,7 @@ pub trait AgentsViewEditor: Send {
     fn handle_input(&mut self, data: &str) -> bool;
     fn focus(&mut self);
     fn is_focused(&self) -> bool;
+    fn take_submissions(&mut self) -> Vec<String>;
 }
 
 /// `Component` from pi-tui.
@@ -669,6 +666,9 @@ pub trait AgentsViewTerminal: Send + Sync {
     fn rows(&self) -> usize;
     fn request_render(&self, force: bool);
     fn set_title(&self, title: &str);
+    fn columns(&self) -> usize;
+    fn poll_input(&self) -> Result<Option<Vec<String>>, String>;
+    fn present(&self, lines: Vec<String>, dock: Vec<String>) -> Result<(), String>;
 }
 
 /// `clippedFullscreenDockHeight(renderedRows, terminalRows)` from pi-tui.
@@ -680,42 +680,12 @@ pub fn clipped_fullscreen_dock_height(rendered_rows: usize, terminal_rows: usize
 /// `truncateToWidth` from pi-tui; ANSI-aware in the reference. This port keeps the
 /// plain-text path and leaves escape-aware truncation to the TUI slice.
 pub fn truncate_to_width(value: &str, width: usize) -> String {
-    if visible_width(value) <= width {
-        return value.to_string();
-    }
-    let mut out = String::new();
-    let mut used = 0usize;
-    for ch in value.chars() {
-        let ch_width = unicode_width_of(ch);
-        if used + ch_width > width {
-            break;
-        }
-        used += ch_width;
-        out.push(ch);
-    }
-    out
+    pi_tui::utils::truncate_to_width(value, width as f64, "", false)
 }
 
 /// `visibleWidth` from pi-tui (ANSI sequences count as zero width).
 pub fn visible_width(value: &str) -> usize {
-    let mut width = 0usize;
-    let mut chars = value.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\u{1b}' {
-            // Skip CSI/OSC sequences.
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                for next in chars.by_ref() {
-                    if next.is_ascii_alphabetic() {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        width += unicode_width_of(ch);
-    }
-    width
+    pi_tui::utils::visible_width(value)
 }
 
 fn unicode_width_of(ch: char) -> usize {
@@ -741,38 +711,7 @@ fn is_wide(ch: char) -> bool {
 
 /// `wrapTextWithAnsi(line, width)` reduced to plain text wrapping.
 pub fn wrap_text_with_ansi(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-    if text.is_empty() {
-        return vec![String::new()];
-    }
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut current_width = 0usize;
-    for word in text.split(' ') {
-        let word_width = visible_width(word);
-        if current_width > 0 && current_width + 1 + word_width > width {
-            lines.push(std::mem::take(&mut current));
-            current_width = 0;
-        }
-        if current_width > 0 {
-            current.push(' ');
-            current_width += 1;
-        }
-        while word_width > width && current.is_empty() {
-            // Long word: hard-split at the width boundary.
-            let head = truncate_to_width(word, width);
-            lines.push(head);
-            break;
-        }
-        current.push_str(word);
-        current_width += word_width;
-    }
-    if !current.is_empty() || lines.is_empty() {
-        lines.push(current);
-    }
-    lines
+    pi_tui::utils::wrap_text_with_ansi(text, width)
 }
 
 /// `padLine(line, width)`.
@@ -889,7 +828,7 @@ pub fn default_keybinding(keybinding: &str) -> &'static str {
 }
 
 pub fn matches_key(data: &str, keybinding: &str) -> bool {
-    default_keybinding(keybinding) == data
+    pi_tui::keybindings::get_keybindings().matches(data, keybinding)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1297,6 +1236,7 @@ pub async fn connect_agents_view_daemon_client(
     socket_path: &str,
     transport: Arc<dyn super::roster_store::DaemonTransport>,
 ) -> Result<DaemonTransportClient, String> {
+    let transport = transport.fresh_transport().unwrap_or(transport);
     let client = DaemonTransportClient::new(transport);
     match client.connect(3000).await {
         Ok(()) => Ok(client),
@@ -1551,6 +1491,9 @@ impl AgentsViewRunner<'_> {
     async fn run_loop(&mut self) -> Result<(), String> {
         let result = self.run_loop_inner().await;
         // Close first: the supervisor drops the subscription with the socket.
+        if let Some(client) = self.persistent_state.roster_client.take() {
+            client.close();
+        }
         if let Some(client) = self.roster_client.take() {
             client.close();
         }
@@ -1581,12 +1524,13 @@ impl AgentsViewRunner<'_> {
                     &mut self.interactive_factory,
                     self.recover_daemon.clone(),
                 );
-                let view_result = view.run().await?;
+                let view_result = view.run().await;
                 let persistent_state = view.take_persistent_state();
                 (view_result, persistent_state, view.editor)
             };
             self.editor = Some(editor);
             self.persistent_state = persistent_state;
+            let view_result = view_result?;
             let result = match view_result {
                 AgentsViewRunResult::ScopeBack {
                     ref selection,
@@ -1623,6 +1567,7 @@ impl AgentsViewRunner<'_> {
                     expanded_ancestor_session_ids.clone(),
                     status_message.clone(),
                 ),
+                AgentsViewRunResult::Exit => return Ok(()),
                 _ => continue,
             };
             self.persistent_state.selected_row_identity = Some(get_agents_view_summary_identity(&selection));
@@ -1665,6 +1610,7 @@ impl AgentsViewRunner<'_> {
                     });
                     match interactive.run().await {
                         Ok(interactive_result) => {
+                            if interactive_result.kind == "exit" { return Ok(()); }
                             let mut returned_session = opened_summary.clone();
                             let source = interactive_result.source;
                             returned_session.active_session_id = source.active_session_id.clone();
@@ -2329,7 +2275,11 @@ impl<'a> AgentsViewMode<'a> {
 
         let (tx, mut rx) = tokio::sync::oneshot::channel();
         self.resolve_run = Some(tx);
-        let listener_index = self.roster_store.on_update(Arc::new(|| {})).await;
+        let roster_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let roster_changed_listener = roster_changed.clone();
+        let listener_index = self.roster_store.on_update(Arc::new(move || {
+            roster_changed_listener.store(true, std::sync::atomic::Ordering::SeqCst);
+        })).await;
         self.roster_listener = Some(listener_index);
         let summaries = self.roster_store.summaries().await;
         self.apply_session_list(summaries, true);
@@ -2337,7 +2287,15 @@ impl<'a> AgentsViewMode<'a> {
         self.resolve_missing_selection_anchor();
         let _ = self.refresh_heartbeats(false).await;
         self.load_startup_notices();
+        self.editor.focus();
+        self.focused = true;
+        if let Some(message) = self.persistent_state.status_message.take() {
+            self.set_status_message(Some(&message), false, None, false);
+        }
         self.terminal.request_render(true);
+        let width = self.terminal.columns();
+        let lines = self.render(width);
+        self.terminal.present(lines, self.render_dock(width))?;
 
         let mut heartbeat_ticker =
             tokio::time::interval(std::time::Duration::from_millis(HEARTBEAT_POLL_INTERVAL_MS));
@@ -2354,6 +2312,7 @@ impl<'a> AgentsViewMode<'a> {
         loop {
             tokio::select! {
                 result = &mut rx => {
+                    self.roster_store.dispose().await;
                     return result.map_err(|_| "agents view run loop ended unexpectedly".to_string());
                 }
                 _ = heartbeat_ticker.tick() => {
@@ -2364,7 +2323,38 @@ impl<'a> AgentsViewMode<'a> {
                     self.tick_animation();
                 }
                 _ = pending_ticker.tick() => {
+                    match self.terminal.poll_input()? {
+                        None => self.finish(AgentsViewRunResult::Exit),
+                        Some(input) => for data in input {
+                            self.handle_input(&data);
+                            if self.stopped { break; }
+                        },
+                    }
+                    if self.stopped { continue; }
+                    for text in self.editor.take_submissions() {
+                        self.submit(&text, "steer").await;
+                    }
+                    if self.stopped { continue; }
+                    if roster_changed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        self.on_roster_update().await;
+                    }
+                    if heartbeats_changed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        let _ = self.refresh_heartbeats(false).await;
+                    }
+                    let close_reason = self.last_close_reason.lock().expect("close reason poisoned").take();
+                    if let Some(reason) = close_reason {
+                        if reason.contains("shutdown") { self.handle_daemon_shutdown(&reason); }
+                        else { self.start_client_reconnect(&reason); }
+                    }
+                    if self.reconnect_started {
+                        let error = self.reconnect_last_error.clone().unwrap_or_default();
+                        self.reconnect_client(&error).await?;
+                    }
                     self.dispatch_pending_actions().await;
+                    if self.stopped { continue; }
+                    let width = self.terminal.columns();
+                    let lines = self.render(width);
+                    self.terminal.present(lines, self.render_dock(width))?;
                 }
             }
         }
@@ -2944,6 +2934,29 @@ impl<'a> AgentsViewMode<'a> {
     /// `handleInput(data)`.
     pub fn handle_input(&mut self, data: &str) {
         self.clear_sticky_status_message();
+        if pi_tui::keybindings::get_keybindings().matches(data, "app.exit") && self.editor.get_text().is_empty() {
+            self.finish(AgentsViewRunResult::Exit);
+            return;
+        }
+        if matches_key(data, "app.agents.back") {
+            if self.reply_target.is_some() { self.set_reply_target(None); return; }
+            if self.editor.get_text().is_empty() {
+                // The global view has no hierarchy parent: consume Left.
+                if self.scope_root_summary.is_some() { self.finish(self.build_agents_back_result()); }
+                return;
+            }
+        }
+        if matches_key(data, "app.input.clear") && self.rename_target.is_none() && !self.show_actions {
+            if self.reply_target.is_some() { self.set_reply_target(None); }
+            else if !self.editor.get_text().is_empty() { self.set_search_query(""); }
+            else if let Some(summary) = self.persistent_state.back_session.clone() {
+                let has_children = has_unified_session_children(&self.unified_records,
+                    &scope_key_from_selection(&get_agents_view_selection_key(&summary)), Some(&self.unified_index));
+                self.finish(AgentsViewRunResult::Open { summary, selection: None,
+                    expanded_ancestor_session_ids: None, has_children: Some(has_children), status_message: None });
+            } else { self.finish(AgentsViewRunResult::Exit); }
+            return;
+        }
         if self.show_actions {
             self.show_actions = false;
             self.terminal.request_render(false);
@@ -4482,22 +4495,24 @@ impl<'a> AgentsViewMode<'a> {
         lines
     }
 
-    /// `BrandSplashHeader.render(width, height)`. The splash component belongs to
-    /// the interactive-components slice; this keeps the row budget exact.
-    /// TODO(port): render the real portrait via the interactive slice.
+    /// The same adaptive portrait and metadata component used by interactive chat.
     pub fn render_splash(&self, width: usize, height: usize) -> Vec<String> {
-        let mut lines: Vec<String> = Vec::new();
-        if height == 0 {
-            return lines;
-        }
-        let metadata = self.splash_metadata();
-        for line in metadata {
-            if lines.len() >= height {
-                break;
-            }
-            lines.push(format_table_cell(&line, width));
-        }
-        lines
+        use crate::modes::interactive::interactive_mode::{BrandSplashHeader, BrandSplashHeaderOptions, BrandSplashMetadataLine};
+        let model = self.get_splash_model_id();
+        let cwd = self.get_splash_cwd();
+        let rows = self.terminal.rows() as f64;
+        let metadata = vec![
+            BrandSplashMetadataLine { label: "agents".into(), value: self.get_agent_counts_text() },
+            BrandSplashMetadataLine { label: "scope".into(), value: self.scope_root_summary.as_ref().map(get_agents_view_session_title).unwrap_or_else(|| "global".into()) },
+            BrandSplashMetadataLine { label: "depth".into(), value: get_agents_view_depth(self.scope_root_summary.as_ref()).to_string() },
+        ];
+        BrandSplashHeader::new(crate::config::VERSION.into(), Box::new(move || model.clone()),
+            Box::new(move || cwd.clone()), None, BrandSplashHeaderOptions {
+                get_rows: Some(Box::new(move || rows)),
+                get_extra_metadata: Some(Box::new(move || metadata.clone())),
+                get_hide_start_hint: Some(Box::new(|| true)),
+                ..Default::default()
+            }).render(width as f64, Some(height as f64))
     }
 
     /// `getExtraMetadata` for the splash header.
@@ -5029,6 +5044,9 @@ mod tests {
             *self.renders.lock().unwrap() += 1;
         }
         fn set_title(&self, _title: &str) {}
+        fn columns(&self) -> usize { 80 }
+        fn poll_input(&self) -> Result<Option<Vec<String>>, String> { Ok(Some(Vec::new())) }
+        fn present(&self, _lines: Vec<String>, _dock: Vec<String>) -> Result<(), String> { Ok(()) }
     }
 
     #[derive(Default)]
@@ -5061,7 +5079,7 @@ mod tests {
             (0, self.text.chars().count())
         }
         fn handle_input(&mut self, data: &str) -> bool {
-            if data.chars().count() == 1 {
+            if data.chars().count() == 1 && data.chars().all(|character| !character.is_control()) {
                 self.text.push_str(data);
                 return true;
             }
@@ -5071,6 +5089,7 @@ mod tests {
         fn is_focused(&self) -> bool {
             true
         }
+        fn take_submissions(&mut self) -> Vec<String> { Vec::new() }
     }
 
     /// Fake daemon transport with scripted responses.
@@ -5243,6 +5262,8 @@ mod tests {
         initial_session: Option<SessionSummary>,
         persistent_state: AgentsViewPersistentState,
     ) -> AgentsViewMode<'static> {
+        crate::modes::interactive::theme::theme::init_theme(Some("dark"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
         let options = AgentsViewModeOptions {
             socket_path: Some("pipe".to_string()),
             config: AgentsViewRuntimeConfig::default(),
@@ -5580,14 +5601,15 @@ mod tests {
 
     #[test]
     fn key_text_formats_bindings_like_the_reference() {
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
         assert_eq!(key_text("escape"), "Esc");
         assert_eq!(key_text("up"), "↑");
         assert_eq!(key_text("ctrl+o"), "Ctrl+O");
         assert_eq!(key_text("alt+enter"), "Alt+Enter");
         assert_eq!(key_text("up/down"), "↑/↓");
         assert_eq!(default_keybinding("app.clear"), "ctrl+c");
-        assert!(matches_key("ctrl+c", "app.clear"));
-        assert!(!matches_key("ctrl+x", "app.clear"));
+        assert!(matches_key("\x03", "app.clear"));
+        assert!(!matches_key("\x18", "app.clear"));
     }
 
     #[test]
@@ -5608,8 +5630,8 @@ mod tests {
         let now = 1_700_000_000_000i64;
         assert_eq!(format_agents_view_relative_time(None, now), "");
         assert_eq!(
-            format_agents_view_relative_time(Some(&to_iso_string(&chrono::Utc::now())), now),
-            ""
+            format_agents_view_relative_time(Some(&to_iso_string(&chrono::DateTime::from_timestamp_millis(now + 1000).unwrap())), now),
+            "0s"
         );
         let thirty_seconds = now - 30_000;
         let stamp = to_iso_string(&chrono::DateTime::from_timestamp_millis(thirty_seconds).unwrap());
@@ -5622,6 +5644,45 @@ mod tests {
         assert_eq!(format_agents_view_relative_time(Some(&stamp), now), "3d");
         assert!(parse_session_timestamp(Some("")).is_none());
         assert!(parse_session_timestamp(Some("nonsense")).is_none());
+    }
+
+    #[tokio::test]
+    async fn run_pumps_terminal_input_renders_rows_and_exits() {
+        struct Driver {
+            input: StdMutex<std::collections::VecDeque<Vec<String>>>,
+            frames: StdMutex<Vec<Vec<String>>>,
+        }
+        impl AgentsViewTerminal for Driver {
+            fn rows(&self) -> usize { 30 }
+            fn columns(&self) -> usize { 80 }
+            fn request_render(&self, _force: bool) {}
+            fn set_title(&self, _title: &str) {}
+            fn poll_input(&self) -> Result<Option<Vec<String>>, String> {
+                Ok(self.input.lock().unwrap().pop_front())
+            }
+            fn present(&self, lines: Vec<String>, _dock: Vec<String>) -> Result<(), String> {
+                self.frames.lock().unwrap().push(lines); Ok(())
+            }
+        }
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let terminal = Arc::new(Driver {
+            input: StdMutex::new(std::collections::VecDeque::from([
+                vec!["\x1b[B".into()], vec!["\x03".into(), "\x03".into()],
+            ])),
+            frames: StdMutex::new(Vec::new()),
+        });
+        let mut mode = build_mode(vec![roster_entry("a-1", "Alpha"), roster_entry("b-1", "Beta")]).await;
+        mode.terminal = terminal.clone();
+        mode.push_response(ok_response(serde_json::json!({"heartbeats":[]})));
+        mode.push_response(ok_response(serde_json::json!({"sessions":[]})));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), mode.run()).await.unwrap().unwrap();
+        assert_eq!(result, AgentsViewRunResult::Exit);
+        assert_eq!(mode.selected_index(), 1);
+        let frames = terminal.frames.lock().unwrap();
+        assert!(frames.len() >= 2);
+        assert!(frames.iter().all(|lines| lines.len() == 29));
+        assert!(frames[0].iter().any(|line| line.contains("Alpha")));
+        assert!(frames[1].iter().any(|line| line.contains("Beta")));
     }
 
     #[tokio::test]
@@ -5652,7 +5713,7 @@ mod tests {
         assert_eq!(mode.rows()[0].title, "Alpha");
         mode.set_search_query_for_test("");
         assert_eq!(mode.rows().len(), 2);
-        mode.set_search_query_for_test("re:^Beta$");
+        mode.set_search_query_for_test("re:Beta");
         assert_eq!(mode.rows().len(), 1);
         mode.set_search_query_for_test("re:[");
         assert!(mode.rows().is_empty());
@@ -5776,18 +5837,46 @@ mod tests {
     #[tokio::test]
     async fn ctrl_c_needs_two_presses_to_exit() {
         let mut mode = build_mode(vec![roster_entry("a-1", "Alpha")]).await;
-        mode.handle_input("ctrl+c");
+        mode.handle_input("\x03");
         assert!(mode.exit_hint_visible());
         assert!(!mode.is_stopped());
-        mode.handle_input("ctrl+c");
+        mode.handle_input("\x03");
         assert!(mode.is_stopped());
     }
 
     #[tokio::test]
     async fn handle_input_records_the_new_session_intent() {
         let mut mode = build_mode(vec![roster_entry("a-1", "Alpha")]).await;
-        mode.handle_input("ctrl+n");
+        mode.handle_input("\x0e");
         assert!(mode.new_session_requested());
+    }
+
+    #[tokio::test]
+    async fn back_and_clear_use_configured_application_bindings() {
+        let mut mode = build_mode(vec![roster_entry("a-1", "Alpha")]).await;
+        let previous = pi_tui::keybindings::get_keybindings();
+        let mut configured = previous.clone();
+        let mut bindings = configured.get_user_bindings();
+        bindings.insert("app.agents.back".into(), vec!["ctrl+l".into()]);
+        bindings.insert("app.input.clear".into(), vec!["ctrl+k".into()]);
+        configured.set_user_bindings(bindings);
+        pi_tui::keybindings::set_keybindings(configured);
+
+        mode.set_search_query_for_test("Alpha");
+        mode.handle_input("\x1b");
+        assert_eq!(mode.editor_text(), "Alpha");
+        mode.handle_input("\x0b");
+        assert_eq!(mode.editor_text(), "");
+        let chat = summary("a-1", "Alpha");
+        mode.enter_scope_for_test(
+            AgentsViewScopeKey { session_id: chat.session_id.clone(), active_session_id: chat.active_session_id.clone() },
+            chat,
+        );
+        mode.handle_input("\x1b[D");
+        assert!(!mode.is_stopped());
+        mode.handle_input("\x0c");
+        assert!(mode.is_stopped());
+        pi_tui::keybindings::set_keybindings(previous);
     }
 
     #[tokio::test]
@@ -5864,6 +5953,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_attach_model_fallback_prefers_the_summary() {
         let mut summary = summary("a-1", "Alpha");
+        summary.model = Some(super::super::agents_view_state::ModelRef { provider: "faux".into(), id: "test".into() });
         assert_eq!(resolve_attach_model_fallback_message(&summary, Some("startup")), None);
         summary.model = None;
         assert_eq!(
@@ -5884,6 +5974,7 @@ mod tests {
         let client = DaemonTransportClient::new(transport.clone());
         let mut chat = summary("a-9", "Resumed");
         chat.active_session_id = None;
+        chat.cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
         chat.session_file = Some("C:/sessions/a.jsonl".to_string());
         let config = AgentsViewRuntimeConfig {
             cwd: Some("C:/work".to_string()),
@@ -5975,7 +6066,7 @@ mod tests {
         runtime.block_on(async {
             let mode = build_mode(vec![roster_entry("a-1", "Alpha")]).await;
             let metadata = mode.splash_metadata();
-            assert!(metadata[0].contains("1 running, 0 idle, 0 inactive"));
+            assert!(metadata[0].contains("0 running, 1 idle, 0 inactive"));
             assert!(metadata[1].contains("global"));
             assert!(metadata[2].contains('0'));
         });

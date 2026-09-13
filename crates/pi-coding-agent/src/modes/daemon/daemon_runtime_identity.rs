@@ -88,12 +88,12 @@ pub fn get_daemon_runtime_identity(
 /// `getDaemonRuntimeIdentity()` with the live `process.env`, `process.argv` and
 /// `process.execPath` equivalents.
 pub fn get_daemon_runtime_identity_from_process() -> DaemonRuntimeIdentity {
-    let argv: Vec<String> = std::env::args().collect();
     let executable = std::env::current_exe()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default();
     let lookup = |key: &str| std::env::var(key).ok();
-    get_daemon_runtime_identity(&lookup, argv.get(1).cloned(), &executable)
+    // The native executable is also its entry point. argv[1] is a CLI flag.
+    get_daemon_runtime_identity(&lookup, Some(executable.clone()), &executable)
 }
 
 #[cfg(test)]

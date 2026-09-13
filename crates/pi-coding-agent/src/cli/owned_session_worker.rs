@@ -4,12 +4,11 @@
 //! a child process so the frontend survives a worker crash and can replay the
 //! last persisted session.
 //!
-//! blocked_on: a library crate cannot read `process.stdin`, subscribe to OS
-//! signals, write `process.stdout` or call `process.exit`, so the port takes the
-//! same explicit host seam the other CLI/mode modules use
+//! The frontend takes the same explicit host seam the other CLI/mode modules use
 //! (`RpcModeHost` in modes/rpc/rpc-mode.ts, `DaemonCommandIo` in cli/daemon-command.ts).
 //! Every host method mirrors exactly one Node call the TypeScript makes; the
-//! `OwnedSessionWorkerHost` trait documents each one.
+//! `OwnedSessionWorkerHost` trait documents each one. `native_owned_worker`
+//! provides the process, stream, signal, and owner-channel implementation.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -372,9 +371,7 @@ fn exit_code_for_signal(signal: Option<&str>) -> i32 {
 
 /// The Node process/child-process surface this module needs.
 ///
-/// blocked_on: a library crate cannot read `process.stdin`, write
-/// `process.stdout`, subscribe to OS signals or call `process.exit`; the port
-/// takes an explicit host seam like `modes/rpc/rpc-mode.ts` does. Every method
+/// The port takes an explicit host seam like `modes/rpc/rpc-mode.ts`. Every method
 /// mirrors exactly one Node call the TypeScript makes.
 pub trait OwnedSessionWorkerHost: Send + Sync {
     /// `process.platform`.
@@ -481,6 +478,10 @@ pub trait OwnedWorkerChildStdin: Send + Sync {
     fn writable(&self) -> bool;
     /// `input.write(text)`; `false` means backpressure.
     fn write(&self, text: &str) -> bool;
+    /// Raw pipe writes preserve bytes, including UTF-8 sequences split across reads.
+    fn write_bytes(&self, bytes: &[u8]) -> bool {
+        self.write(&String::from_utf8_lossy(bytes))
+    }
     /// `input.once("drain", handler)`.
     fn once_drain(&self, handler: Arc<dyn Fn() + Send + Sync>);
     /// `input.end()`.
@@ -568,6 +569,10 @@ struct OwnedSessionWorkerFrontend {
     terminating: AtomicBool,
     termination_signal: Mutex<Option<String>>,
     stdin_ended: AtomicBool,
+    // Node delivers stdin and child callbacks serially. Native readers run on
+    // separate threads, so installing a new input and flushing buffered records
+    // must be atomic with forwarding new input and its EOF.
+    rpc_input_bridge: Mutex<()>,
     current_rpc_input: Mutex<Option<Arc<dyn OwnedWorkerChildStdin>>>,
     current_rpc_output: Mutex<Option<Arc<dyn OwnedWorkerChildStdout>>>,
     rpc_stdout_paused: AtomicBool,
@@ -606,6 +611,7 @@ impl OwnedSessionWorkerFrontend {
             terminating: AtomicBool::new(false),
             termination_signal: Mutex::new(None),
             stdin_ended: AtomicBool::new(false),
+            rpc_input_bridge: Mutex::new(()),
             current_rpc_input: Mutex::new(None),
             current_rpc_output: Mutex::new(None),
             rpc_stdout_paused: AtomicBool::new(false),
@@ -805,7 +811,6 @@ impl OwnedSessionWorkerFrontend {
                     return Err("Owned RPC worker did not expose stdin".to_string());
                 };
                 let child_output = child_output.expect("checked above");
-                *self.current_rpc_input.lock().expect("rpc input poisoned") = Some(child_input.clone());
                 *self.current_rpc_output.lock().expect("rpc output poisoned") = Some(child_output.clone());
                 if self.rpc_stdout_paused.load(Ordering::SeqCst) {
                     child_output.pause();
@@ -815,6 +820,8 @@ impl OwnedSessionWorkerFrontend {
                     frontend.observe_rpc_output(&line);
                 }));
                 *self.detach_rpc_output.lock().expect("rpc detach poisoned") = Some(detach);
+                let _bridge = self.rpc_input_bridge.lock().expect("rpc input bridge poisoned");
+                *self.current_rpc_input.lock().expect("rpc input poisoned") = Some(child_input.clone());
                 let buffered: Vec<String> = self
                     .buffered_rpc_input
                     .lock()
@@ -841,6 +848,7 @@ impl OwnedSessionWorkerFrontend {
     fn attach_rpc_input(self: &Arc<Self>) {
         let frontend = self.clone();
         let detach = self.host.attach_stdin_lines(Arc::new(move |line: String| {
+            let _bridge = frontend.rpc_input_bridge.lock().expect("rpc input bridge poisoned");
             let framed = frontend.prepare_rpc_input(&line);
             let input = frontend.current_rpc_input.lock().expect("rpc input poisoned").clone();
             match input {
@@ -871,6 +879,7 @@ impl OwnedSessionWorkerFrontend {
         *self.detach_rpc_input.lock().expect("rpc detach poisoned") = Some(detach);
         let frontend = self.clone();
         self.host.on_stdin_end(Arc::new(move || {
+            let _bridge = frontend.rpc_input_bridge.lock().expect("rpc input bridge poisoned");
             frontend.stdin_ended.store(true, Ordering::SeqCst);
             if let Some(input) = frontend.current_rpc_input.lock().expect("rpc input poisoned").clone() {
                 input.end();
@@ -938,7 +947,10 @@ impl OwnedSessionWorkerFrontend {
                 signal: exit_signal,
             };
             *self.current_child.lock().expect("current child poisoned") = None;
-            *self.current_rpc_input.lock().expect("rpc input poisoned") = None;
+            {
+                let _bridge = self.rpc_input_bridge.lock().expect("rpc input bridge poisoned");
+                *self.current_rpc_input.lock().expect("rpc input poisoned") = None;
+            }
             *self.current_rpc_output.lock().expect("rpc output poisoned") = None;
             if self.profile == OwnedSessionWorkerProfile::Rpc && !self.stdin_ended.load(Ordering::SeqCst) {
                 self.host.resume_stdin();

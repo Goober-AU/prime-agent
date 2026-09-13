@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(substitute_args("${@:0}", &args), "one two three");
         assert_eq!(substitute_args("no placeholders", &args), "no placeholders");
         assert_eq!(substitute_args("$", &args), "$");
-        assert_eq!(substitute_args("$ARGUMENT", &args), "one two three");
+        assert_eq!(substitute_args("$ARGUMENT", &args), "$ARGUMENT");
     }
 
     #[test]
@@ -571,7 +571,7 @@ mod tests {
         assert_eq!(loaded[0].description, "From frontmatter");
         assert_eq!(loaded[0].argument_hint.as_deref(), Some("[x]"));
         assert_eq!(loaded[0].content, "Body $1");
-        assert_eq!(loaded[0].source_info.scope, "project");
+        assert_eq!(loaded[0].source_info.scope, "user");
 
         assert_eq!(loaded[1].name, "second");
         assert_eq!(loaded[1].description.chars().count(), 63);

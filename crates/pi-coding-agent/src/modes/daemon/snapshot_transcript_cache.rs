@@ -73,11 +73,12 @@ impl Iterator for SnapshotTranscriptChunks {
     type Item = Result<Vec<u8>, SnapshotTranscriptAborted>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.options.aborted {
-            return Some(Err(SnapshotTranscriptAborted));
-        }
         if self.finished {
             return None;
+        }
+        if self.options.aborted {
+            self.finished = true;
+            return Some(Err(SnapshotTranscriptAborted));
         }
         let target = self
             .options
@@ -95,6 +96,10 @@ impl Iterator for SnapshotTranscriptChunks {
             let bytes = serialized.len() + usize::from(!self.serialized_messages.is_empty());
             if !self.serialized_messages.is_empty() && self.serialized_bytes + bytes > target {
                 if let Some(chunk) = self.flush() {
+                    // A Rust Iterator resumes at next(), unlike a generator
+                    // resuming after yield. Preserve the overflow message now.
+                    self.serialized_messages.push(serialized);
+                    self.serialized_bytes += bytes;
                     return Some(Ok(chunk));
                 }
             }
@@ -145,7 +150,9 @@ pub struct SnapshotTranscriptCache {
 impl SnapshotTranscriptCache {
     pub fn new(options: SnapshotTranscriptCacheOptions) -> Self {
         let cache = Self {
-            target_chunk_bytes: options.target_chunk_bytes.unwrap_or(SNAPSHOT_TARGET_CHUNK_BYTES),
+            target_chunk_bytes: options
+                .target_chunk_bytes
+                .unwrap_or(SNAPSHOT_TARGET_CHUNK_BYTES),
             snapshot_id: options.snapshot_id.clone(),
             active_session_id: options.active_session_id.clone(),
             options: options.clone(),
@@ -199,7 +206,9 @@ impl SnapshotTranscriptCache {
         };
         match chunk {
             SnapshotTranscriptChunk::Buffer(buffer) => Ok(buffer),
-            SnapshotTranscriptChunk::Path(path) => std::fs::read(&path).map_err(|error| error.to_string()),
+            SnapshotTranscriptChunk::Path(path) => {
+                std::fs::read(&path).map_err(|error| error.to_string())
+            }
         }
     }
 
@@ -216,7 +225,10 @@ impl SnapshotTranscriptCache {
             || self.failure.lock().expect("failure poisoned").is_some()
             || *self.disposed.lock().expect("disposed poisoned")
         {
-            return Err(format!("Snapshot transcript {} is not writable", self.snapshot_id));
+            return Err(format!(
+                "Snapshot transcript {} is not writable",
+                self.snapshot_id
+            ));
         }
         self.store_chunk(buffer)
     }
@@ -279,7 +291,10 @@ impl SnapshotTranscriptCache {
         let (sender, receiver) = oneshot::channel();
         {
             let mut waiters = self.chunk_waiters.lock().expect("waiters poisoned");
-            waiters.entry(index).or_default().push(ChunkWaiter { sender });
+            waiters
+                .entry(index)
+                .or_default()
+                .push(ChunkWaiter { sender });
         }
         receiver
             .await
@@ -320,7 +335,10 @@ impl SnapshotTranscriptCache {
             }
             *disposed = true;
         }
-        self.mark_failed(&format!("Snapshot transcript {} was disposed", self.snapshot_id));
+        self.mark_failed(&format!(
+            "Snapshot transcript {} was disposed",
+            self.snapshot_id
+        ));
         if let Some(directory) = self
             .cache_directory
             .lock()
@@ -341,7 +359,8 @@ impl SnapshotTranscriptCache {
                 Err(_) => continue,
             };
             let bytes = serialized.len() + usize::from(!serialized_messages.is_empty());
-            if !serialized_messages.is_empty() && serialized_bytes + bytes > self.target_chunk_bytes {
+            if !serialized_messages.is_empty() && serialized_bytes + bytes > self.target_chunk_bytes
+            {
                 self.flush_messages(&mut serialized_messages, &mut serialized_bytes);
             }
             serialized_messages.push(serialized);
@@ -381,9 +400,13 @@ impl SnapshotTranscriptCache {
             .is_none()
             && *total_bytes > memory_limit
         {
-            let directory = Path::new(&self.options.cache_root).join(sanitize_snapshot_id(&self.options.snapshot_id));
+            let directory = Path::new(&self.options.cache_root)
+                .join(sanitize_snapshot_id(&self.options.snapshot_id));
             create_private_directory(&directory).map_err(|error| error.to_string())?;
-            *self.cache_directory.lock().expect("cache directory poisoned") = Some(directory.clone());
+            *self
+                .cache_directory
+                .lock()
+                .expect("cache directory poisoned") = Some(directory.clone());
             let mut chunks = self.chunks.lock().expect("chunks poisoned");
             for index in 0..chunks.len() {
                 let existing = chunks[index].clone();
@@ -580,6 +603,12 @@ mod tests {
         .collect::<Result<Vec<_>, _>>()
         .expect("chunks");
         assert_eq!(chunks.len(), 2);
+        let decoded: Vec<serde_json::Value> = chunks
+            .iter()
+            .map(|chunk| serde_json::from_slice(chunk).expect("chunk JSON"))
+            .collect();
+        assert_eq!(decoded[0]["messages"][0]["content"][0]["text"], "one");
+        assert_eq!(decoded[1]["messages"][0]["content"][0]["text"], "two");
         assert!(String::from_utf8(chunks[1].clone())
             .expect("utf8")
             .contains("\"index\":1"));
@@ -595,6 +624,7 @@ mod tests {
             aborted: true,
         });
         assert_eq!(chunks.next(), Some(Err(SnapshotTranscriptAborted)));
+        assert_eq!(chunks.next(), None);
     }
 
     #[test]
@@ -633,7 +663,9 @@ mod tests {
 
     #[test]
     fn dispose_waits_for_readers() {
-        let cache = Arc::new(SnapshotTranscriptCache::new(options(Some(vec![text_message("hello")]))));
+        let cache = Arc::new(SnapshotTranscriptCache::new(options(Some(vec![
+            text_message("hello"),
+        ]))));
         let retain = cache.retain();
         cache.dispose();
         assert!(cache.complete());
@@ -648,19 +680,23 @@ mod tests {
 
     #[tokio::test]
     async fn waiters_are_released_by_new_chunks_completion_and_failure() {
-        let cache = Arc::new(SnapshotTranscriptCache::new(SnapshotTranscriptCacheOptions {
-            active_session_id: "a".to_string(),
-            snapshot_id: "s".to_string(),
-            messages: None,
-            cache_root: std::env::temp_dir().to_string_lossy().to_string(),
-            target_chunk_bytes: None,
-            memory_cache_bytes: None,
-        }));
+        let cache = Arc::new(SnapshotTranscriptCache::new(
+            SnapshotTranscriptCacheOptions {
+                active_session_id: "a".to_string(),
+                snapshot_id: "s".to_string(),
+                messages: None,
+                cache_root: std::env::temp_dir().to_string_lossy().to_string(),
+                target_chunk_bytes: None,
+                memory_cache_bytes: None,
+            },
+        ));
         let waiter = {
             let cache = Arc::clone(&cache);
             tokio::spawn(async move { cache.wait_for_chunk(0).await })
         };
-        cache.append_encoded_chunk(b"line\n".to_vec()).expect("append");
+        cache
+            .append_encoded_chunk(b"line\n".to_vec())
+            .expect("append");
         let stored = waiter.await.expect("join").expect("ok").expect("chunk");
         assert_eq!(stored, b"line\n".to_vec());
 

@@ -102,6 +102,8 @@ use crate::modes::daemon::daemon_errors::{
 };
 use crate::modes::daemon::daemon_session_list::SessionSummary;
 use crate::modes::daemon::daemon_socket::default_daemon_socket_path;
+use crate::modes::agents_view::agents_view_state::AgentsViewScopeKey;
+use crate::modes::interactive::interactive_mode::{InteractiveModeRunResult, InteractiveModeRunResultType};
 use crate::utils::daemon_socket_path::normalize_socket_path;
 use crate::modes::daemon::daemon_catalog_process::is_daemon_catalog_process_from_env;
 use crate::modes::daemon::daemon_worker_protocol::{
@@ -1784,12 +1786,12 @@ fn main_entry_outbound_from_wire(value: &Value) -> Option<ConnectionOutbound> {
 /// adapter is the missing bridge and nothing else. `main.ts` hands one
 /// `DaemonClient` to `DaemonAgentConnection.attach` here, exactly like the
 /// telegram worker does, so this call site carries the same bridge.
-struct MainEntryDaemonTransport {
+pub(crate) struct MainEntryDaemonTransport {
     client: Arc<DaemonClient>,
 }
 
 impl MainEntryDaemonTransport {
-    fn new(client: Arc<DaemonClient>) -> Self {
+    pub(crate) fn new(client: Arc<DaemonClient>) -> Self {
         Self { client }
     }
 }
@@ -2296,7 +2298,7 @@ pub trait MainHost: Send + Sync {
         options: PrintModeSeamOptions,
     ) -> BoxFuture<Result<i32, String>>;
     /// `new InteractiveMode({ ... })` + `interactiveMode.run()`.
-    fn run_interactive_mode(&self, options: InteractiveModeSeamOptions) -> BoxFuture<Result<(), String>>;
+    fn run_interactive_mode(&self, options: InteractiveModeSeamOptions) -> BoxFuture<Result<Option<InteractiveModeRunResult>, String>>;
     /// `new InteractiveMode({ ... })` + `interactiveMode.init()` for the benchmark.
     fn init_interactive_mode(&self, options: InteractiveModeSeamOptions) -> BoxFuture<Result<(), String>>;
     /// `preloadCodeHighlighter()`.
@@ -2350,6 +2352,8 @@ pub struct AgentsViewSeamOptions {
     pub model_fallback_message: Option<String>,
     pub startup_model_id: Option<String>,
     pub verbose: bool,
+    pub initial_session: Option<SessionSummary>,
+    pub initial_scope_key: Option<AgentsViewScopeKey>,
 }
 
 /// `runPrintModeWithConnection(connection, options)` arguments.
@@ -2876,6 +2880,8 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
                     model_fallback_message: startup_model.model_fallback_message.clone(),
                     startup_model_id: startup_model.model.as_ref().map(|model| model.id.clone()),
                     verbose: parsed.verbose == Some(true),
+                    initial_session: None,
+                    initial_scope_key: None,
                 })
                 .await;
             if let Err(message) = result {
@@ -2951,18 +2957,19 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
                 runtime: None,
             })
             .await;
-        if let Err(message) = result {
-            eprintln!("{message}");
-            host.exit(1);
-            return;
-        }
+        let interactive_result = match result {
+            Ok(Some(result)) => result,
+            Ok(None) => return,
+            Err(message) => {
+                eprintln!("{message}");
+                host.exit(1);
+                return;
+            }
+        };
         if parsed.no_session == Some(true) {
             return;
         }
-        // The returned `interactiveResult.source` decides whether the agents view
-        // opens next (`scoped_agents_view` also carries the scope key); the
-        // session summary merge and the scope key are host-owned because they
-        // belong to the interactive slice's run result.
+        let (returned_summary, initial_scope_key) = returned_agents_view_state(summary, interactive_result);
         host.preload_code_highlighter();
         print_timings();
         let result = host
@@ -2974,6 +2981,8 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
                 model_fallback_message: None,
                 startup_model_id: None,
                 verbose: parsed.verbose == Some(true),
+                initial_session: Some(returned_summary),
+                initial_scope_key,
             })
             .await;
         if let Err(message) = result {
@@ -3309,6 +3318,24 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
     }
 }
 
+/// Carry the returned chat identity into the roster, preserving its daemon metadata.
+fn returned_agents_view_state(
+    mut summary: SessionSummary,
+    result: InteractiveModeRunResult,
+) -> (SessionSummary, Option<AgentsViewScopeKey>) {
+    let scope = (result.type_ == InteractiveModeRunResultType::ScopedAgentsView).then(|| AgentsViewScopeKey {
+        session_id: result.source.session_id.clone(),
+        active_session_id: result.source.active_session_id.clone(),
+    });
+    summary.id = result.source.active_session_id.clone().unwrap_or(summary.id);
+    summary.active_session_id = result.source.active_session_id;
+    summary.session_file = result.source.session_file;
+    summary.session_id = result.source.session_id;
+    summary.session_name = result.source.session_name;
+    summary.cwd = result.source.cwd;
+    (summary, scope)
+}
+
 /// `console.log(chalk.dim(\`Model scope: ...\`))`.
 fn print_model_scope(scoped_models: &[ScopedModel], verbose: bool, settings_manager: &Arc<Mutex<SettingsManager>>) {
     if !scoped_models.is_empty() && (verbose || !settings_manager.lock().unwrap().get_quiet_startup()) {
@@ -3634,7 +3661,7 @@ mod tests {
             "--model",
             "provider/model",
             "--no-tools",
-            "--skills",
+            "--skill",
             "./skills",
             "--goal",
             "ship",
@@ -3679,7 +3706,7 @@ mod tests {
         assert!(runtime_autonomous_config_from_args(&args(&["--model", "m"])).is_none());
         let config = runtime_autonomous_config_from_args(&args(&[
             "--autonomous",
-            "--autonomous-gates",
+            "--autonomous-gate",
             "cargo test",
             "--autonomous-gate-retries",
             "2",
@@ -3695,7 +3722,7 @@ mod tests {
         );
         assert_eq!(config.gates.as_ref().and_then(|gates| gates.max_retries), Some(2.0));
         // Gate flags alone still turn autonomous mode on.
-        let gates_only = runtime_autonomous_config_from_args(&args(&["--autonomous-gates", "cargo test"]))
+        let gates_only = runtime_autonomous_config_from_args(&args(&["--autonomous-gate", "cargo test"]))
             .expect("autonomous config");
         assert_eq!(gates_only.enabled, Some(true));
         assert!(gates_only.max_turns.is_none());
@@ -3818,6 +3845,41 @@ mod tests {
     }
 
     #[test]
+    fn returning_from_chat_preserves_roster_identity_and_child_scope() {
+        let original = SessionSummary {
+            id: "old-active".into(),
+            session_id: "old-session".into(),
+            message_count: 42,
+            ..Default::default()
+        };
+        let result = InteractiveModeRunResult {
+            type_: InteractiveModeRunResultType::ScopedAgentsView,
+            source: crate::modes::interactive::interactive_mode::InteractiveModeRunResultSource {
+                active_session_id: Some("new-active".into()),
+                session_id: "new-session".into(),
+                session_name: Some("renamed".into()),
+                session_file: Some("/sessions/new.jsonl".into()),
+                cwd: "/new-cwd".into(),
+            },
+        };
+        let (summary, scope) = returned_agents_view_state(original.clone(), result.clone());
+        assert_eq!(summary.id, "new-active");
+        assert_eq!(summary.session_id, "new-session");
+        assert_eq!(summary.cwd, "/new-cwd");
+        assert_eq!(summary.session_name.as_deref(), Some("renamed"));
+        assert_eq!(summary.message_count, 42);
+        let scope = scope.expect("direct children scope");
+        assert_eq!(scope.session_id, "new-session");
+        assert_eq!(scope.active_session_id.as_deref(), Some("new-active"));
+
+        let (_, scope) = returned_agents_view_state(original, InteractiveModeRunResult {
+            type_: InteractiveModeRunResultType::AgentsView,
+            ..result
+        });
+        assert!(scope.is_none());
+    }
+
+    #[test]
     fn active_summary_matching_demands_an_id_and_a_session_file() {
         let session_file = "/sessions/a.jsonl";
         let mut summary = SessionSummary {
@@ -3878,7 +3940,10 @@ mod tests {
         let path = dir.path().join("session.jsonl");
         std::fs::write(
             &path,
-            "{\"type\":\"session\",\"cwd\":\"/from-header\"}\n{\"type\":\"message\",\"message\":{\"role\":\"user\",\"content\":\"hi\"}}\n",
+            concat!(
+                "{\"type\":\"session\",\"version\":3,\"id\":\"test-session\",\"timestamp\":\"2026-01-01T00:00:00.000Z\",\"cwd\":\"/from-header\"}\n",
+                "{\"type\":\"message\",\"id\":\"m1\",\"parentId\":null,\"timestamp\":\"2026-01-01T00:00:01.000Z\",\"message\":{\"role\":\"user\",\"content\":\"hi\",\"timestamp\":1767225601000}}\n",
+            ),
         )
         .expect("write session");
         let manager = read_session_manager(&path.to_string_lossy(), None, None);

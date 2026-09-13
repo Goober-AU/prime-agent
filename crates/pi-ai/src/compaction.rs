@@ -7,6 +7,7 @@ use crate::types::{Api, Model, SimpleStreamOptions, Usage};
 
 /// An opaque provider checkpoint; replay the entire window without rewriting its items.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ProviderCompactionCheckpoint {
     pub version: i64,
     pub provider: String,
@@ -28,6 +29,7 @@ pub struct ProviderCompactionResult {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CompactionOptions {
     #[serde(flatten)]
     pub simple: SimpleStreamOptions,
@@ -46,7 +48,7 @@ pub fn is_compaction_checkpoint(value: &Value) -> bool {
     let model_ok = checkpoint.get("model").map(Value::is_string).unwrap_or(false);
     let base_url_ok = checkpoint.get("baseUrl").map(Value::is_string).unwrap_or(false);
     let endpoint_ok = match checkpoint.get("endpoint") {
-        None | Some(Value::Null) => true,
+        None => true,
         Some(Value::String(endpoint)) => !endpoint.is_empty(),
         Some(_) => false,
     };
@@ -124,6 +126,11 @@ mod tests {
     #[test]
     fn accepts_minimal_checkpoint() {
         assert!(is_compaction_checkpoint(&checkpoint_json()));
+        let checkpoint: ProviderCompactionCheckpoint = serde_json::from_value(checkpoint_json()).unwrap();
+        let serialized = serde_json::to_value(checkpoint).unwrap();
+        assert!(is_compaction_checkpoint(&serialized));
+        assert_eq!(serialized["baseUrl"], checkpoint_json()["baseUrl"]);
+        assert_eq!(serialized["estimatedTokens"].as_f64(), Some(10.0));
     }
 
     #[test]
@@ -144,6 +151,8 @@ mod tests {
         assert!(!is_compaction_checkpoint(&value));
         let mut value = checkpoint_json();
         value["endpoint"] = json!("");
+        assert!(!is_compaction_checkpoint(&value));
+        value["endpoint"] = Value::Null;
         assert!(!is_compaction_checkpoint(&value));
     }
 

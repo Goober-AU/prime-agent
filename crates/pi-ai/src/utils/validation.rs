@@ -68,7 +68,9 @@ pub fn convert_json_schema_value(value: &mut Value, schema: &Value) {
     if types.is_empty() {
         return;
     }
-    let already_matches = types.iter().any(|schema_type| matches_json_type(value, schema_type));
+    let already_matches = types
+        .iter()
+        .any(|schema_type| matches_json_type(value, schema_type));
     if already_matches {
         // Still convert nested object/array members.
     } else {
@@ -300,7 +302,10 @@ fn coerce_with_json_schema(value: &Value, schema: &Value) -> Value {
         }
     }
 
-    if schema_types.iter().any(|schema_type| schema_type == "object") {
+    if schema_types
+        .iter()
+        .any(|schema_type| schema_type == "object")
+    {
         if let Value::Object(object) = &next_value {
             let mut object = object.clone();
             apply_schema_object_coercion(&mut object, schema_object);
@@ -308,7 +313,10 @@ fn coerce_with_json_schema(value: &Value, schema: &Value) -> Value {
         }
     }
 
-    if schema_types.iter().any(|schema_type| schema_type == "array") {
+    if schema_types
+        .iter()
+        .any(|schema_type| schema_type == "array")
+    {
         if let Value::Array(items) = &next_value {
             let mut items = items.clone();
             apply_schema_array_coercion(&mut items, schema_object);
@@ -392,7 +400,11 @@ fn validate_against_schema(
     };
 
     let schema_types = get_schema_types(schema_object);
-    if !schema_types.is_empty() && !schema_types.iter().any(|schema_type| matches_json_type(value, schema_type)) {
+    if !schema_types.is_empty()
+        && !schema_types
+            .iter()
+            .any(|schema_type| matches_json_type(value, schema_type))
+    {
         errors.push(JsonSchemaError {
             keyword: "type".to_string(),
             instance_path: instance_path.to_string(),
@@ -478,7 +490,11 @@ fn validate_against_schema(
                 .iter()
                 .filter(|candidate| get_validator(candidate).check(value))
                 .count();
-            let valid = if keyword == "oneOf" { matches == 1 } else { matches >= 1 };
+            let valid = if keyword == "oneOf" {
+                matches == 1
+            } else {
+                matches >= 1
+            };
             if !valid {
                 errors.push(JsonSchemaError {
                     keyword: keyword.to_string(),
@@ -517,7 +533,10 @@ fn format_validation_path(error: &JsonSchemaError) -> String {
             };
         }
     }
-    let path = error.instance_path.trim_start_matches('/').replace('/', ".");
+    let path = error
+        .instance_path
+        .trim_start_matches('/')
+        .replace('/', ".");
     if path.is_empty() {
         "root".to_string()
     } else {
@@ -546,7 +565,11 @@ pub fn validate_tool_arguments(tool: &Tool, tool_call: &ToolCall) -> Result<Valu
             if is_record(&args) && is_record(&coerced) {
                 args = coerced;
             } else {
-                return Ok(if validator.check(&coerced) { coerced } else { args });
+                return Ok(if validator.check(&coerced) {
+                    coerced
+                } else {
+                    args
+                });
             }
         }
     }
@@ -601,10 +624,10 @@ mod tests {
     #[test]
     fn coerces_serialized_plain_json_schemas() {
         let passing = [
-            (json!({"type": "number"}), json!("42"), json!(42)),
+            (json!({"type": "number"}), json!("42"), json!(42.0)),
             (json!({"type": "number"}), json!(true), json!(1)),
             (json!({"type": "number"}), json!(null), json!(0)),
-            (json!({"type": "integer"}), json!("42"), json!(42)),
+            (json!({"type": "integer"}), json!("42"), json!(42.0)),
             (json!({"type": "boolean"}), json!("true"), json!(true)),
             (json!({"type": "boolean"}), json!("false"), json!(false)),
             (json!({"type": "boolean"}), json!(1), json!(true)),
@@ -614,8 +637,16 @@ mod tests {
             (json!({"type": "null"}), json!(""), json!(null)),
             (json!({"type": "null"}), json!(0), json!(null)),
             (json!({"type": "null"}), json!(false), json!(null)),
-            (json!({"type": ["number", "string"]}), json!("1"), json!("1")),
-            (json!({"type": ["boolean", "number"]}), json!("1"), json!(1)),
+            (
+                json!({"type": ["number", "string"]}),
+                json!("1"),
+                json!("1"),
+            ),
+            (
+                json!({"type": ["boolean", "number"]}),
+                json!("1"),
+                json!(1.0),
+            ),
         ];
         for (schema, input, expected) in passing {
             let tool = tool_with_schema(schema);
@@ -659,7 +690,8 @@ mod tests {
         };
         let mut arguments = Map::new();
         arguments.insert("other".to_string(), json!("x"));
-        let error = validate_tool_arguments(&tool, &ToolCall::new("id", "echo", arguments)).unwrap_err();
+        let error =
+            validate_tool_arguments(&tool, &ToolCall::new("id", "echo", arguments)).unwrap_err();
         assert!(error.starts_with("Validation failed for tool \"echo\":"));
         assert!(error.contains("  - count:"));
         assert!(error.contains("\n\nReceived arguments:\n{\n  \"other\": \"x\"\n}"));
@@ -683,7 +715,8 @@ mod tests {
         };
         let mut arguments = Map::new();
         arguments.insert("outer".to_string(), json!({}));
-        let error = validate_tool_arguments(&tool, &ToolCall::new("id", "echo", arguments)).unwrap_err();
+        let error =
+            validate_tool_arguments(&tool, &ToolCall::new("id", "echo", arguments)).unwrap_err();
         assert!(error.contains("  - outer.inner:"), "{}", error);
     }
 
@@ -707,7 +740,7 @@ mod tests {
         convert_json_schema_value(&mut value, &schema);
         assert_eq!(
             value,
-            json!({"count": 42, "flag": true, "name": "7", "items": [1, 2]})
+            json!({"count": 42.0, "flag": true, "name": "7", "items": [1.0, 2.0]})
         );
     }
 }

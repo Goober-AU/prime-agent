@@ -787,6 +787,7 @@ mod tests {
         let get_rows = Rc::new(|| 12.0);
         let layout = get_menu_list_layout(MenuListLayoutOptions {
             get_rows: Some(get_rows),
+            total_items: Some(8),
             preferred_visible_items: 8,
             reserved_rows: 5,
             comfortable_item_rows: 2,

@@ -541,7 +541,7 @@ mod tests {
 
     #[test]
     fn client_id_matches_decoded_typescript_literal() {
-        assert_eq!(client_id(), "Iu1.b507a08c87ecfe98");
+        assert_eq!(client_id(), "Iv1.b507a08c87ecfe98");
     }
 
     #[test]

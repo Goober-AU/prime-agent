@@ -1,7 +1,7 @@
 //! Port of packages/coding-agent/src/cli-main.ts
 
-use crate::config::APP_NAME;
 use crate::cli::daemon_launch::maybe_start_daemon_early;
+use crate::config::APP_NAME;
 
 /// `enableCompileCache?.()`: the port is a compiled binary, so there is no cache
 /// to enable; the TypeScript swallows a read-only cache dir the same way.
@@ -53,7 +53,7 @@ pub trait CliMainHost: OwnedSessionWorkerEntry {
 }
 
 /// `runCli()`.
-pub async fn run_cli(host: &dyn CliMainHost) {
+pub async fn run_cli(host: &dyn CliMainHost) -> Result<(), String> {
     enable_compile_cache();
 
     host.set_process_title(APP_NAME);
@@ -74,8 +74,9 @@ pub async fn run_cli(host: &dyn CliMainHost) {
 
         let result = host.run_main(args).await;
         host.close_owner_watch();
-        let _ = result;
+        result?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -111,18 +112,26 @@ mod tests {
         fn run_main(
             &self,
             _args: Vec<String>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>
+        {
             self.calls.lock().unwrap().push("main".to_string());
             Box::pin(async { Ok(()) })
         }
         fn argv(&self) -> Vec<String> {
-            vec!["node".to_string(), "cli.js".to_string(), "--version".to_string()]
+            vec![
+                "node".to_string(),
+                "cli.js".to_string(),
+                "--version".to_string(),
+            ]
         }
         fn set_process_title(&self, title: &str) {
             self.calls.lock().unwrap().push(format!("title:{title}"));
         }
         fn set_env(&self, key: &str, value: &str) {
-            self.calls.lock().unwrap().push(format!("env:{key}={value}"));
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("env:{key}={value}"));
         }
         fn silence_emit_warning(&self) {
             self.calls.lock().unwrap().push("silence".to_string());
@@ -135,7 +144,7 @@ mod tests {
     #[test]
     fn run_cli_sets_identity_then_runs_main() {
         let recorder = Recorder::default();
-        futures::executor::block_on(run_cli(&recorder));
+        futures::executor::block_on(run_cli(&recorder)).expect("CLI startup");
         let calls = recorder.calls.lock().unwrap().clone();
         assert_eq!(
             calls,

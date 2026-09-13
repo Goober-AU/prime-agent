@@ -1,0 +1,45 @@
+{
+  "slice": "runnable-agents-native",
+  "reference": "9f547ceaba079dee45ee415a430d57fb86fa940d",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/modes/agents-view/agents-view-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/agents_view/agents_view_mode.rs",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Drive the existing roster/state/action mode with terminal input, editor submissions, render frames, live roster dirty flags, heartbeat refresh and exit results. Keep persistent roster client across interactive round trips and close on final exit. Match canonical application keybindings from terminal bytes, ANSI layout utilities and BrandSplashHeader. Baseline fixture corrections follow pinned TS: future relative time clamps to 0s; regex applies to aggregate search text; fallback-model fixture needs an actual fallback; resume fixture uses existing native cwd; idle splash fixture has zero running and one idle. Added async full mode input/render/exit regression. Back and Clear use app.agents.back/app.input.clear, with regression proving rebinding and old-key suppression; synthetic editor rejects control bytes like native editor."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/agents-view/agents-view-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/agents_view/native_host.rs",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Concrete Rust platform adapter for ProcessTerminal/TUI/CustomEditor, settings/theme, canonical daemon client and native interactive host. Runs local Rc components on one owner thread. Terminal callbacks enqueue keys before component dispatch to avoid RefCell reentrancy. Daemon connections are separate for roster and actions; full AgentSessionRuntimeConfig is retained by attachment factory. Preserves initial session and scope from main options and returned interactive result. Tests raw editor input and canonical daemon event decoding."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/agents-view/agents-view-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/agents_view/mod.rs",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Declare concrete native host module."
+    },
+    {
+      "src": "packages/coding-agent/src/main.ts; packages/ai/src/providers/openai-completions.ts",
+      "rust": "crates/pi-coding-agent/tests/native_cli.rs",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Launch actual optimus-rust --mode daemon and text/JSON --print CLI subprocesses against private local HTTP SSE fixture using models.json and canonical provider registration. Verify prompt reaches HTTP, text response, final JSON assistant event. Clear child environment, isolate home/config/session/temp/socket under private scratch, never use credentials, set process timeouts, shut down owned daemon through protocol and bounded owned-process-group fallback."
+    }
+  ],
+  "verification": {
+    "shared_check": "Parent reports check3 completed exit 0 with no compile errors (343 coding-agent warnings); native_cli integration test awaits executable build.",
+    "rustfmt": "PASS: edition 2021 parse/format for native_host.rs and native_cli.rs; parse-only check of agents_view_mode.rs.",
+    "tests": "Pending parent-coordinated workspace tests and native CLI integration test. This agent did not run Cargo while shared writers were active.",
+    "native_cli": "First parent execution reached real daemon handshake, then failed an unnecessary agent_roster capability prerequisite. Fixture now checks exact canonical protocol info; print has no roster dependency. Rerun pending.",
+    "coding_agent": "Parent first full diagnostic run: 1953 passed /144 failed; 142 failures cascaded from first theme-not-initialized panic. Owned mode test builder now initializes dark theme. Remaining owned Ctrl+C failure was caused by tui.select.cancel containing ctrl+c and is fixed by canonical app.input.clear routing. Rerun pending."
+  },
+  "remaining": [
+    "Await parent workspace test results, including new terminal-driver and native editor regressions.",
+    "Await actual CLI local HTTP test and native agents/chat terminal smoke; compile success alone does not establish complete behavior parity.",
+    "Inherited broader AgentsViewMode parity has not been exhaustively audited; reconnect may await daemon availability while UI loop is paused.",
+    "No real provider, OAuth, clipboard or production daemon is used.",
+    "Default agents view requires native supervisor to advertise and implement agent_roster; coordinated with supervisor owner after actual hello exposed absent capability."
+  ],
+  "scope": "Owned files enumerated before edits in evidence/slices/runnable-agents-native.json. No commits, pushes, TypeScript or Python edits."
+}

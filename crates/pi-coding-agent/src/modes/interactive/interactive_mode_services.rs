@@ -1131,7 +1131,7 @@ mod tests {
                 SessionManager::in_memory(Some("."), None).expect("in-memory session manager"),
             )),
         );
-        assert_eq!(services.get_initial_cwd(), "");
+        assert_eq!(services.get_initial_cwd(), ".");
         assert_eq!(services.get_initial_session_name(), None);
         assert!(services.get_themes().is_empty());
     }

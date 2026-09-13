@@ -545,7 +545,7 @@ pub async fn execute_bash(
         .await;
 
     let snapshot = finish_output(&output, on_update.as_ref());
-    let (text, details) = format_output(&snapshot, &output);
+    let (text, details) = format_output(&snapshot, &output, if result.is_err() { "" } else { "(no output)" });
 
     match result {
         Ok(exec_result) => {
@@ -599,10 +599,10 @@ fn finish_output(
     accumulator.snapshot()
 }
 
-fn format_output(snapshot: &OutputSnapshot, output: &Arc<std::sync::Mutex<OutputAccumulator>>) -> (String, Option<BashToolDetails>) {
+fn format_output(snapshot: &OutputSnapshot, output: &Arc<std::sync::Mutex<OutputAccumulator>>, empty_text: &str) -> (String, Option<BashToolDetails>) {
     let truncation = snapshot.truncation.clone();
     let mut text = if snapshot.content.is_empty() {
-        "(no output)".to_string()
+        empty_text.to_string()
     } else {
         snapshot.content.clone()
     };

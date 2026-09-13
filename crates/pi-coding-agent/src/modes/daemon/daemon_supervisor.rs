@@ -1,11 +1,7 @@
 //! Port of packages/coding-agent/src/modes/daemon/daemon-supervisor.ts
 //!
-//! Modules owned by other slices are still empty on disk (daemon-protocol,
-//! daemon-socket, daemon-supervisor-ownership, config, core/agent-session-config,
-//! core/cron-jobs, core/performance-metrics, core/prompt-admission). This module
-//! carries the minimal private plumbing it consumes from them, with the same
-//! names and shapes, so the supervisor port stands on its own. They are marked
-//! `slice plumbing` and move to their own modules when those slices land.
+//! Shared protocol constants are kept here; the private native adapter owns
+//! socket serving, durable supervisor ownership and isolated worker processes.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -268,3 +264,7 @@ pub const DAEMON_COMMAND_TYPES: [&str; 107] = [
     "restart",
     "shutdown",
 ];
+
+#[path = "native_supervisor.rs"]
+mod native_supervisor;
+pub(crate) use native_supervisor::run_daemon_supervisor_mode;

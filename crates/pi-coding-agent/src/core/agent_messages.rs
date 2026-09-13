@@ -337,8 +337,15 @@ pub fn session_name_reservation_key(input: &AgentSessionNameScope, name: &str) -
     } else {
         ("root", String::new())
     };
+    // Reservation keys compare serialized bytes across hosts. JavaScript emits
+    // integral depths without a decimal suffix (including negative zero).
+    let depth = if input.depth.fract() == 0.0 && input.depth.abs() <= 9_007_199_254_740_991.0 {
+        serde_json::json!(input.depth as i64)
+    } else {
+        serde_json::json!(input.depth)
+    };
     serde_json::to_string(&serde_json::json!([
-        input.depth,
+        depth,
         parent_type,
         parent_value,
         name

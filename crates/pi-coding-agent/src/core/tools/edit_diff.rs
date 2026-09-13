@@ -823,7 +823,7 @@ mod tests {
     #[test]
     fn generate_diff_string_marks_added_and_removed_lines() {
         let (diff, first_changed_line) = generate_diff_string("a\nb\nc", "a\nB\nc", 4, 1);
-        assert_eq!(diff, "-2 b\n+2 B");
+        assert_eq!(diff, " 1 a\n-2 b\n+2 B\n 3 c");
         assert_eq!(first_changed_line, Some(2));
     }
 
@@ -835,8 +835,7 @@ mod tests {
         new = new.replace("line12\n", "line12 changed\n");
         let (diff, _) = generate_diff_string(&old, &new, 1, 1);
         assert!(diff.contains(" ..."), "expected elision marker in:\n{diff}");
-        assert!(diff.contains("-1 line1"));
-        assert!(diff.contains("+1 line1 changed"));
+        assert_eq!(diff, "- 1 line1\n+ 1 line1 changed\n  2 line2\n    ...\n 11 line11\n-12 line12\n+12 line12 changed");
     }
 
     #[test]
@@ -881,7 +880,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         match outcome {
             EditDiffOutcome::Result(result) => {
-                assert_eq!(result.diff, "-2 b\n+2 B");
+                assert_eq!(result.diff, " 1 a\n-2 b\n+2 B\n 3 c");
                 assert_eq!(result.first_changed_line, Some(2));
             }
             EditDiffOutcome::Error(error) => panic!("unexpected error: {}", error.error),

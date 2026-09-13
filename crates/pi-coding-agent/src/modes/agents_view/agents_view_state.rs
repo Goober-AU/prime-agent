@@ -2359,7 +2359,6 @@ mod tests {
                 AgentsViewRowKind::SubagentCode,
                 AgentsViewRowKind::SubagentCode,
                 AgentsViewRowKind::SubagentCode,
-                AgentsViewRowKind::SubagentCode,
                 AgentsViewRowKind::Subagent,
             ]
         );
@@ -2475,8 +2474,9 @@ mod tests {
         summary.rlm_depth = Some(0);
         assert!(!is_subagent_summary(&summary));
         summary.parent_session_path = Some("C:/p.jsonl".into());
-        assert!(is_subagent_summary(&summary));
+        assert!(!is_subagent_summary(&summary));
         summary.rlm_depth = None;
+        assert!(is_subagent_summary(&summary));
         summary.parent_session_path = None;
         summary.runtime_kind = Some(RuntimeKind::TopLevel);
         assert!(!is_subagent_summary(&summary));

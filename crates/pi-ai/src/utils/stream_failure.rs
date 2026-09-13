@@ -12,8 +12,8 @@ use serde_json::{Map, Value};
 use crate::log::get_logger;
 use crate::types::AssistantMessage;
 use crate::utils::diagnostics::{
-    append_assistant_message_diagnostic, create_assistant_message_diagnostic_from_value, now_millis,
-    AssistantMessageDiagnostic,
+    append_assistant_message_diagnostic, create_assistant_message_diagnostic_from_value,
+    now_millis, AssistantMessageDiagnostic,
 };
 
 pub type StreamFailureKind = &'static str;
@@ -81,9 +81,15 @@ pub const KIND_MESSAGES: [(&str, &str); 10] = [
     ("rate_limit", "Provider rate limit exceeded"),
     ("server_error", "Provider server error"),
     ("auth", "Provider authentication failed"),
-    ("permission", "Provider denied access to the requested resource"),
+    (
+        "permission",
+        "Provider denied access to the requested resource",
+    ),
     ("invalid_request", "Provider rejected the request"),
-    ("malformed_response", "Provider returned a malformed response"),
+    (
+        "malformed_response",
+        "Provider returned a malformed response",
+    ),
     ("unknown", "Provider stream failed"),
 ];
 
@@ -150,7 +156,10 @@ fn matches(pattern: &str, text: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn classify_stream_failure(provider_error_type: Option<&str>, status: Option<i64>) -> StreamFailureKind {
+pub fn classify_stream_failure(
+    provider_error_type: Option<&str>,
+    status: Option<i64>,
+) -> StreamFailureKind {
     let type_ = provider_error_type.unwrap_or_default().to_lowercase();
     if type_ == "refusal" {
         return KIND_REFUSAL;
@@ -173,7 +182,10 @@ pub fn classify_stream_failure(provider_error_type: Option<&str>, status: Option
     if matches("permission", &type_) || status == Some(403) {
         return KIND_PERMISSION;
     }
-    if type_.contains("invalid_request") || type_.contains("not_found_error") || status == Some(400) || status == Some(404)
+    if type_.contains("invalid_request")
+        || type_.contains("not_found_error")
+        || status == Some(400)
+        || status == Some(404)
     {
         return KIND_INVALID_REQUEST;
     }
@@ -211,7 +223,9 @@ pub fn stream_failure_from_stop_reason(
     }
     let message = match raw_stop_reason {
         Some(_) => stream_failure_message(&info, None),
-        None => stream_failure_message(&info, Some("stream ended with an error and no stop reason")),
+        None => {
+            stream_failure_message(&info, Some("stream ended with an error and no stop reason"))
+        }
     };
     StreamFailureError::new(message, info)
 }
@@ -259,15 +273,17 @@ pub fn extract_stream_failure_parts(error: &ThrownStreamError<'_>) -> StreamFail
         },
         ThrownStreamError::Error(err) => {
             let message = err.to_string();
+            let mut kind = classify_stream_failure(Some(&message), None);
+            // A plain Rust Error has no provider type or HTTP status. Like a
+            // JavaScript Error, its message alone cannot invalidate credentials.
+            if kind == KIND_AUTH || kind == KIND_PERMISSION {
+                kind = KIND_UNKNOWN;
+            }
             let info = StreamFailureInfo {
-                kind: classify_stream_failure(Some(&message), None).to_string(),
-                provider_error_type: Some(message.clone()),
+                kind: kind.to_string(),
                 ..Default::default()
             };
-            StreamFailureParts {
-                info,
-                detail: None,
-            }
+            StreamFailureParts { info, detail: None }
         }
     }
 }
@@ -299,10 +315,17 @@ fn extract_parts_from_value(value: &Value) -> StreamFailureParts {
     let body_type = body
         .and_then(|body| body.get("type").or_else(|| body.get("code")))
         .and_then(Value::as_str);
-    let body_message = body.and_then(|body| body.get("message")).and_then(Value::as_str);
+    let body_message = body
+        .and_then(|body| body.get("message"))
+        .and_then(Value::as_str);
     let provider_error_type = body_type
         .map(str::to_string)
-        .or_else(|| object.get("code").and_then(Value::as_str).map(str::to_string))
+        .or_else(|| {
+            object
+                .get("code")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .or_else(|| {
             object
                 .get("name")
@@ -312,11 +335,16 @@ fn extract_parts_from_value(value: &Value) -> StreamFailureParts {
         });
 
     let headers = object.get("headers");
-    let header_request_id = header_value(headers, "request-id").or_else(|| header_value(headers, "x-request-id"));
+    let header_request_id =
+        header_value(headers, "request-id").or_else(|| header_value(headers, "x-request-id"));
     let raw_request_id = object
         .get("requestID")
         .or_else(|| object.get("request_id"))
-        .or_else(|| object.get("$metadata").and_then(|metadata| metadata.get("requestId")))
+        .or_else(|| {
+            object
+                .get("$metadata")
+                .and_then(|metadata| metadata.get("requestId"))
+        })
         .and_then(Value::as_str)
         .map(str::to_string)
         .or(header_request_id);
@@ -326,8 +354,12 @@ fn extract_parts_from_value(value: &Value) -> StreamFailureParts {
         .filter(|value| *value >= 0.0)
         .or_else(|| parse_retry_after_ms(headers));
 
-    let message = object.get("message").and_then(Value::as_str).unwrap_or_default();
-    let mut kind = classify_stream_failure(provider_error_type.as_deref().or(Some(message)), status);
+    let message = object
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut kind =
+        classify_stream_failure(provider_error_type.as_deref().or(Some(message)), status);
     // Message text is too weak for these verdicts: without a structured type, only
     // the status decides.
     if (kind == KIND_AUTH || kind == KIND_PERMISSION) && provider_error_type.is_none() {
@@ -421,7 +453,11 @@ pub fn format_stream_failure_message(error: &ThrownStreamError<'_>) -> String {
 /// Record a terminal stream failure on the message (structured diagnostic that
 /// persists to session JSONL) and emit one structured log line. No-op for
 /// user-initiated aborts.
-pub fn record_stream_failure(model: &crate::types::Model, output: &mut AssistantMessage, error: &ThrownStreamError<'_>) {
+pub fn record_stream_failure(
+    model: &crate::types::Model,
+    output: &mut AssistantMessage,
+    error: &ThrownStreamError<'_>,
+) {
     if output.stop_reason != "error" {
         return;
     }
@@ -429,7 +465,10 @@ pub fn record_stream_failure(model: &crate::types::Model, output: &mut Assistant
     let mut details = Map::new();
     details.insert("kind".to_string(), Value::String(info.kind.clone()));
     if let Some(provider_error_type) = info.provider_error_type.clone() {
-        details.insert("providerErrorType".to_string(), Value::String(provider_error_type));
+        details.insert(
+            "providerErrorType".to_string(),
+            Value::String(provider_error_type),
+        );
     }
     if let Some(status) = info.status {
         details.insert("status".to_string(), Value::Number(status.into()));
@@ -443,8 +482,11 @@ pub fn record_stream_failure(model: &crate::types::Model, output: &mut Assistant
         }
     }
 
-    let diagnostic: AssistantMessageDiagnostic =
-        create_assistant_message_diagnostic_from_value("provider_stream_failure", &Value::Null, Some(details));
+    let diagnostic: AssistantMessageDiagnostic = create_assistant_message_diagnostic_from_value(
+        "provider_stream_failure",
+        &Value::Null,
+        Some(details),
+    );
     append_assistant_message_diagnostic(output, diagnostic);
 
     let raw_message = match error {
@@ -454,12 +496,18 @@ pub fn record_stream_failure(model: &crate::types::Model, output: &mut Assistant
         ThrownStreamError::Value(value) => value.to_string(),
     };
     let mut fields = Map::new();
-    fields.insert("provider".to_string(), Value::String(model.provider.clone()));
+    fields.insert(
+        "provider".to_string(),
+        Value::String(model.provider.clone()),
+    );
     fields.insert("model".to_string(), Value::String(model.id.clone()));
     fields.insert("api".to_string(), Value::String(model.api.clone()));
     fields.insert("kind".to_string(), Value::String(info.kind.clone()));
     if let Some(provider_error_type) = info.provider_error_type.clone() {
-        fields.insert("providerErrorType".to_string(), Value::String(provider_error_type));
+        fields.insert(
+            "providerErrorType".to_string(),
+            Value::String(provider_error_type),
+        );
     }
     if let Some(status) = info.status {
         fields.insert("status".to_string(), Value::Number(status.into()));
@@ -494,22 +542,46 @@ mod tests {
     fn classification_order_matches_typescript() {
         assert_eq!(classify_stream_failure(Some("refusal"), None), KIND_REFUSAL);
         assert_eq!(classify_stream_failure(Some("SAFETY"), None), KIND_SAFETY);
-        assert_eq!(classify_stream_failure(Some("content_filter"), None), KIND_SAFETY);
-        assert_eq!(classify_stream_failure(Some("overloaded_error"), None), KIND_OVERLOADED);
+        assert_eq!(
+            classify_stream_failure(Some("content_filter"), None),
+            KIND_SAFETY
+        );
+        assert_eq!(
+            classify_stream_failure(Some("overloaded_error"), None),
+            KIND_OVERLOADED
+        );
         assert_eq!(classify_stream_failure(None, Some(529)), KIND_OVERLOADED);
         assert_eq!(
             classify_stream_failure(Some("usage_not_included"), None),
             KIND_RATE_LIMIT
         );
         assert_eq!(classify_stream_failure(None, Some(429)), KIND_RATE_LIMIT);
-        assert_eq!(classify_stream_failure(Some("authentication_error"), None), KIND_AUTH);
+        assert_eq!(
+            classify_stream_failure(Some("authentication_error"), None),
+            KIND_AUTH
+        );
         assert_eq!(classify_stream_failure(None, Some(401)), KIND_AUTH);
-        assert_eq!(classify_stream_failure(Some("permission_error"), None), KIND_PERMISSION);
+        assert_eq!(
+            classify_stream_failure(Some("permission_error"), None),
+            KIND_PERMISSION
+        );
         assert_eq!(classify_stream_failure(None, Some(403)), KIND_PERMISSION);
-        assert_eq!(classify_stream_failure(Some("invalid_request_error"), None), KIND_INVALID_REQUEST);
-        assert_eq!(classify_stream_failure(None, Some(404)), KIND_INVALID_REQUEST);
-        assert_eq!(classify_stream_failure(Some("malformed_json"), None), KIND_MALFORMED_RESPONSE);
-        assert_eq!(classify_stream_failure(Some("api_error"), None), KIND_SERVER_ERROR);
+        assert_eq!(
+            classify_stream_failure(Some("invalid_request_error"), None),
+            KIND_INVALID_REQUEST
+        );
+        assert_eq!(
+            classify_stream_failure(None, Some(404)),
+            KIND_INVALID_REQUEST
+        );
+        assert_eq!(
+            classify_stream_failure(Some("malformed_json"), None),
+            KIND_MALFORMED_RESPONSE
+        );
+        assert_eq!(
+            classify_stream_failure(Some("api_error"), None),
+            KIND_SERVER_ERROR
+        );
         assert_eq!(classify_stream_failure(None, Some(500)), KIND_SERVER_ERROR);
         assert_eq!(classify_stream_failure(None, None), KIND_UNKNOWN);
     }
@@ -537,7 +609,10 @@ mod tests {
             kind: KIND_UNKNOWN.to_string(),
             ..Default::default()
         };
-        assert_eq!(stream_failure_message(&plain, None), "Provider stream failed");
+        assert_eq!(
+            stream_failure_message(&plain, None),
+            "Provider stream failed"
+        );
     }
 
     #[test]
@@ -546,7 +621,10 @@ mod tests {
         assert_eq!(failure.info.kind, KIND_REFUSAL);
         assert_eq!(failure.info.provider_error_type.as_deref(), Some("refusal"));
         assert_eq!(failure.info.request_id.as_deref(), Some("req_1"));
-        assert_eq!(failure.message, "Model refused to respond (refusal) [request_id: req_1]");
+        assert_eq!(
+            failure.message,
+            "Model refused to respond (refusal) [request_id: req_1]"
+        );
 
         let malformed = stream_failure_from_stop_reason(Some("malformed_json"), None);
         assert_eq!(malformed.info.kind, KIND_MALFORMED_RESPONSE);
@@ -578,7 +656,10 @@ mod tests {
         });
         let parts = extract_stream_failure_parts(&ThrownStreamError::Value(&error));
         assert_eq!(parts.info.kind, KIND_OVERLOADED);
-        assert_eq!(parts.info.provider_error_type.as_deref(), Some("overloaded_error"));
+        assert_eq!(
+            parts.info.provider_error_type.as_deref(),
+            Some("overloaded_error")
+        );
         assert_eq!(parts.info.status, Some(529));
         assert_eq!(parts.info.request_id.as_deref(), Some("req_header"));
         assert_eq!(parts.detail.as_deref(), Some("Overloaded"));
@@ -589,7 +670,18 @@ mod tests {
         // Message text is too weak: without a structured type the status decides.
         let error = json!({"message": "authentication failed"});
         let parts = extract_stream_failure_parts(&ThrownStreamError::Value(&error));
-        assert_eq!(parts.info.kind, KIND_AUTH, "message text still classifies");
+        assert_eq!(
+            parts.info.kind, KIND_UNKNOWN,
+            "message text cannot invalidate credentials"
+        );
+        let plain = std::io::Error::other("authentication failed");
+        let parts = extract_stream_failure_parts(&ThrownStreamError::Error(&plain));
+        assert_eq!(parts.info.kind, KIND_UNKNOWN);
+        assert!(parts.info.provider_error_type.is_none());
+        assert_eq!(
+            format_stream_failure_message(&ThrownStreamError::Error(&plain)),
+            "authentication failed"
+        );
 
         let error = json!({"message": "please authenticate", "status": 400});
         let parts = extract_stream_failure_parts(&ThrownStreamError::Value(&error));
@@ -612,7 +704,7 @@ mod tests {
         let error = json!({"message": "weird failure"});
         assert_eq!(
             format_stream_failure_message(&ThrownStreamError::Value(&error)),
-            "\"weird failure\""
+            "{\"message\":\"weird failure\"}"
         );
         let failure = StreamFailureError::new(
             "Model refused to respond (refusal)",
@@ -630,7 +722,13 @@ mod tests {
 
     #[test]
     fn record_stream_failure_only_for_error_stop_reason() {
-        let model = crate::types::Model::new("m", "M", "openai-responses", "openai", "https://example.test");
+        let model = crate::types::Model::new(
+            "m",
+            "M",
+            "openai-responses",
+            "openai",
+            "https://example.test",
+        );
         let mut message = AssistantMessage::default();
         message.stop_reason = "stop".to_string();
         record_stream_failure(&model, &mut message, &ThrownStreamError::Message("boom"));
@@ -644,7 +742,12 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].type_, "provider_stream_failure");
         assert_eq!(
-            diagnostics[0].details.as_ref().unwrap().get("kind").and_then(Value::as_str),
+            diagnostics[0]
+                .details
+                .as_ref()
+                .unwrap()
+                .get("kind")
+                .and_then(Value::as_str),
             Some("overloaded")
         );
     }

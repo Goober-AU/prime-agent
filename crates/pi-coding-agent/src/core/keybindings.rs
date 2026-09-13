@@ -817,6 +817,15 @@ fn to_tui_config(user_bindings: &KeybindingsConfig) -> TuiKeybindingsConfig {
 }
 
 impl KeybindingsManager {
+    /// Install application and editor bindings for components on this UI thread.
+    /// Mirrors `setKeybindings(this.keybindings)` during interactive startup.
+    pub fn install(&self) {
+        pi_tui::keybindings::set_keybindings(TuiKeybindingsManager::new(
+            keybindings(),
+            to_tui_config(&self.user_bindings),
+        ));
+    }
+
     /// `constructor(userBindings: KeybindingsConfig = {}, configPath?: string)`.
     pub fn new(user_bindings: KeybindingsConfig, config_path: Option<String>) -> Self {
         Self {

@@ -12,6 +12,9 @@
 //! daemon-mode port stands on its own; it moves out unchanged when those slices
 //! land. Everything private is marked `// slice plumbing:`.
 
+#[path = "daemon_server.rs"]
+mod native_server;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -69,7 +72,7 @@ use crate::core::session_file_actions::{
     delete_session_artifacts, delete_session_file, DeleteSessionFileOptions,
     DeleteSessionFileResult,
 };
-use crate::core::session_lease::{acquire_session_lease, canonical_session_path, SessionLease};
+use crate::core::session_lease::canonical_session_path;
 use crate::core::session_manager::SessionManager;
 use crate::core::session_manager::{
     get_session_artifact_path_for_file, order_session_context_for_transcript, read_session_info,
@@ -306,7 +309,7 @@ pub struct AgentSessionRuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub model: Option<String>,
     #[serde(
-        rename = "thinkingLevel",
+        rename = "thinking",
         skip_serializing_if = "Option::is_none",
         default
     )]
@@ -317,7 +320,7 @@ pub struct AgentSessionRuntimeConfig {
         default
     )]
     pub telemetry_disabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[serde(rename = "apiKey", skip_serializing_if = "Option::is_none", default)]
     pub api_key: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -396,6 +399,7 @@ pub struct CreateAgentSessionRuntimeInput {
     pub agent_dir: Option<String>,
     pub session_manager: Arc<std::sync::Mutex<SessionManager>>,
     pub session_options: SessionRuntimeOptions,
+    pub session_config: Option<crate::core::agent_session_config::AgentSessionRuntimeConfig>,
     pub runtime_metadata: Option<Value>,
 }
 
@@ -403,8 +407,7 @@ pub struct CreateAgentSessionRuntimeInput {
 #[derive(Clone, Default)]
 pub struct SessionRuntimeOptions {
     pub model: Option<Value>,
-    pub rlm_heartbeat_controller:
-        Option<Arc<dyn Fn(Value) -> BoxFuture<'static, Result<Value, String>> + Send + Sync>>,
+    pub rlm_heartbeat_controller: Option<Arc<dyn crate::core::cron_jobs::AgentRlmHeartbeatController>>,
     pub agent_message_controller: Option<Arc<dyn AgentSessionMessageController>>,
     pub agent_observe_controller: Option<Arc<dyn AgentObserveController>>,
 }
@@ -1320,8 +1323,8 @@ impl DaemonOutbound {
             DaemonOutbound::HeartbeatsChanged
             | DaemonOutbound::RosterDelta { .. }
             | DaemonOutbound::RosterHeartbeat
-            | DaemonOutbound::DaemonClosing { .. }
-            | DaemonOutbound::Raw(_) => None,
+            | DaemonOutbound::DaemonClosing { .. } => None,
+            DaemonOutbound::Raw(value) => value.get("activeSessionId").and_then(Value::as_str),
         }
     }
 }
@@ -1429,28 +1432,37 @@ const CLOSING_REASON_UPDATE: &str = "update";
 
 /// Writes serialized lines to one client socket. `end()` mirrors `socket.end()`.
 pub struct DaemonClientWriter {
-    sender: mpsc::UnboundedSender<String>,
+    sender: mpsc::UnboundedSender<Vec<u8>>,
     closed: AtomicBool,
+    ended: tokio_util::sync::CancellationToken,
+    drained: tokio_util::sync::CancellationToken,
 }
 
 impl DaemonClientWriter {
-    pub fn new(sender: mpsc::UnboundedSender<String>) -> Self {
+    pub fn new(sender: mpsc::UnboundedSender<Vec<u8>>) -> Self {
         Self {
             sender,
             closed: AtomicBool::new(false),
+            ended: tokio_util::sync::CancellationToken::new(),
+            drained: tokio_util::sync::CancellationToken::new(),
         }
     }
 
     pub fn write(&self, line: String) -> bool {
+        self.write_bytes(line.into_bytes())
+    }
+
+    fn write_bytes(&self, bytes: Vec<u8>) -> bool {
         if self.closed.load(Ordering::SeqCst) {
             return false;
         }
-        self.sender.send(line).is_ok()
+        self.sender.send(bytes).is_ok()
     }
 
     /// `socket.end()`.
     pub fn end(&self) {
         self.closed.store(true, Ordering::SeqCst);
+        self.ended.cancel();
     }
 
     /// `socket.destroyed`.
@@ -1830,6 +1842,10 @@ pub fn should_send_daemon_outbound_to_client(
             !is_daemon_dialog_extension_ui_request(method)
                 || client.supports_extension_ui_for_session(active_session_id)
         }
+        DaemonOutbound::Raw(value) if value.get("type").and_then(Value::as_str) == Some("extension_ui_request") => {
+            let method = value.get("method").and_then(Value::as_str).unwrap_or("");
+            !is_daemon_dialog_extension_ui_request(method) || client.supports_extension_ui_for_session(value.get("activeSessionId").and_then(Value::as_str).unwrap_or(""))
+        }
         _ => true,
     }
 }
@@ -1922,8 +1938,7 @@ pub async fn run_daemon_mode(options: DaemonModeOptions) -> Result<(), String> {
     );
     let daemon = AgentDaemon::new(socket_path, options);
     daemon.start().await?;
-    // `return new Promise(() => {})`: the daemon lives until the process exits.
-    std::future::pending::<()>().await;
+    daemon.shutdown_complete.cancelled().await;
     Ok(())
 }
 
@@ -2028,6 +2043,8 @@ pub struct AgentDaemon {
     pub socket_path: String,
     pub options: DaemonModeOptions,
     pub shutting_down: AtomicBool,
+    server_stopped: tokio_util::sync::CancellationToken,
+    shutdown_complete: tokio_util::sync::CancellationToken,
     pub update_restart_queue_pauses: StdMutex<HashMap<String, UpdateRestartQueuePause>>,
     pub session_input_pauses: StdMutex<HashMap<String, SessionInputPauseEntry>>,
     pub acp_mcp_owners: StdMutex<HashMap<String, AcpMcpOwner>>,
@@ -2133,6 +2150,8 @@ impl AgentDaemon {
             socket_path,
             options,
             shutting_down: AtomicBool::new(false),
+            server_stopped: tokio_util::sync::CancellationToken::new(),
+            shutdown_complete: tokio_util::sync::CancellationToken::new(),
             update_restart_queue_pauses: StdMutex::new(HashMap::new()),
             session_input_pauses: StdMutex::new(HashMap::new()),
             acp_mcp_owners: StdMutex::new(HashMap::new()),
@@ -2281,6 +2300,7 @@ impl AgentDaemon {
         prepare_daemon_socket_path(&self.socket_path, None)
             .await
             .map_err(|error| error.to_string())?;
+        native_server::bind(self).await?;
         self.owns_socket_path.store(true, Ordering::SeqCst);
         *self
             .socket_identity
@@ -2999,7 +3019,7 @@ pub trait DaemonSession: Send + Sync {
     fn set_exec_env_provider(&self, client_env: Option<HashMap<String, String>>);
     fn set_runtime_env_scope(&self, client_env: Option<HashMap<String, String>>);
     /// `state.runtime.setSubagentRuntimeHost(...)` (daemon-extension-binding.ts:61).
-    fn set_subagent_runtime_host(&self, host: Option<Value>);
+    fn set_subagent_runtime_host(&self, host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>);
     /// `state.runtime.setRebindSession(...)` (daemon-extension-binding.ts:70).
     fn set_rebind_session(&self, rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>);
     /// `session.bindExtensions({...})` (daemon-extension-binding.ts:83).
@@ -3902,6 +3922,7 @@ impl AgentDaemon {
                         "daemon worker command \"{}\" failed: {error}",
                         worker_command.type_
                     ));
+                    self.write(&client, &DaemonOutbound::Raw(serde_json::to_value(DaemonResponse::failure(worker_command.id.as_deref(), &worker_command.type_, &error, serialize_daemon_error(&DaemonError::Message(error.clone())))).unwrap_or(Value::Null)));
                 }
                 return;
             }
@@ -4602,8 +4623,7 @@ impl AgentDaemon {
                                     .cancel_scheduled_jobs_for_session_file(&removed_path);
                             })),
                         }),
-                    )
-                    .await;
+                    );
                 if result.is_ok() && self.is_worker() {
                     let removed_agent_id = composed_entry
                         .as_ref()
@@ -6432,13 +6452,6 @@ impl AgentDaemon {
         } else {
             SessionManager::create(&cwd, config.session_dir.as_deref())?
         };
-        let session_lease = acquire_session_lease(
-            resolved_session_path.as_deref(),
-            &agent_dir,
-            None,
-        )
-        .ok()
-        .flatten();
         let state = self
             .create_state_for_runtime(
                 command,
@@ -6447,7 +6460,6 @@ impl AgentDaemon {
                 desired_active_session_id,
                 client_env,
                 runtime_open_guard,
-                session_lease,
             )
             .await?;
         if let Some(session_key) = session_key {
@@ -6470,43 +6482,34 @@ impl AgentDaemon {
         desired_active_session_id: Option<String>,
         client_env: Option<HashMap<String, String>>,
         runtime_open_guard: Option<RuntimeOpenGuard>,
-        session_lease: Option<SessionLease>,
     ) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
         let session_manager = Arc::new(StdMutex::new(session_manager));
+        let session_config = crate::core::agent_session_config::merge_agent_session_runtime_config(
+            &serde_json::from_value(serde_json::to_value(&self.options.default_session_config).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?,
+            command.body.get("config").map(|config| serde_json::from_value(config.clone())).transpose().map_err(|error| error.to_string())?.as_ref(),
+        );
         let input = CreateAgentSessionRuntimeInput {
             factory: Value::Null,
             cwd: session_manager
                 .lock()
                 .expect("session manager poisoned")
                 .get_cwd(),
-            agent_dir: self.options.default_session_config.agent_dir.clone(),
+            agent_dir: session_config.agent_dir.clone(),
             session_manager: Arc::clone(&session_manager),
             session_options: SessionRuntimeOptions::default(),
+            session_config: Some(session_config),
             runtime_metadata: None,
         };
-        let runtime = match (self.options.create_runtime)(input).await {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                if let Some(mut lease) = session_lease {
-                    lease.release();
-                }
-                return Err(error);
-            }
-        };
+        let runtime = super::daemon_client_env::with_client_env(client_env.as_ref(), || (self.options.create_runtime)(input)).await?;
         if let Some(guard) = &runtime_open_guard {
             if !guard().await {
                 runtime.session.dispose().await;
                 return Err(RuntimeOpenCancelledError.to_string());
             }
         }
-        self.add_runtime(runtime, desired_active_session_id, None, None)
-            .await
-            .map(|state| {
-                if let Some(env) = client_env {
-                    self.adopt_client_env(&state, Some(env));
-                }
-                state
-            })
+        self.add_runtime(runtime, desired_active_session_id, Some(Arc::new(move |state| {
+            state.lock().expect("active session poisoned").client_env = client_env.clone();
+        })), None).await
     }
 
     /// `addRuntime(runtime, desiredActiveSessionId?, onStateCreated?, onStateBound?)`.
@@ -6638,45 +6641,43 @@ impl AgentDaemon {
         session: Arc<dyn DaemonSession>,
     ) -> Result<(), String> {
         let binder: Arc<dyn DaemonExtensionBindingSession> = Arc::new(SessionBinder { session });
-        let daemon = Arc::clone(self);
+        let state_daemon = Arc::clone(self);
         let broadcast_daemon = Arc::clone(self);
+        let replaced_daemon = Arc::clone(self);
         let shutdown_daemon = Arc::clone(self);
-        let subagent_host_value = self.create_subagent_runtime_host_value(state);
-        // REPAIR CURSOR: this guard cannot be dropped before the await. The callee
-        // `bind_active_session_state` (daemon_extension_binding.rs:120) takes
-        // `state: &mut ActiveSessionState` and its own body awaits
-        // (`session.bind_extensions(..).await`, :153-169), so the borrow - and therefore this
-        // guard - is live across that await by construction. That makes `bind_state`'s future
-        // non-`Send`, which transitively poisons every `Send` boundary that reaches a bound
-        // session: the cron `run_job` hook (daemon_mode.rs:6825) and the two agent-observe
-        // boxed futures (daemon_mode.rs:15395, :15417) all report it.
-        // Fix (in that file, owned by the lead - not in this pack's file list): change the
-        // signature to `state: &Arc<StdMutex<ActiveSessionState>>` and lock only in the
-        // synchronous prologue (set_exec_env_provider / set_runtime_env_scope / unsubscribe /
-        // subscribe / set_rebind_session), releasing the guard before the first await, exactly
-        // as `bindActiveSessionState` (daemon-extension-binding.ts:49-97) does: it takes the
-        // state object, mutates it synchronously, and only `bindExtensions` is awaited
-        // afterwards. Verified with rustc on a minimal repro: the guard-across-await shape
-        // fails for all variants (drop(guard), scoped block, owned local of the guard), while
-        // the `&Arc<StdMutex<..>>` callee with a scoped lock compiles. Then delete this cursor.
+        let session_daemon = Arc::downgrade(self);
+        let session_id = state.lock().expect("active session poisoned").active_session_id.clone();
         bind_active_session_state(
             state,
             binder,
             ActiveSessionBindingCallbacks {
+                get_session: Arc::new(move || {
+                    let daemon = session_daemon.upgrade()?;
+                    let state = daemon.get_session_state(&session_id).ok()?;
+                    Some(Arc::new(SessionBinder { session: daemon.session_of(&state) }) as Arc<dyn DaemonExtensionBindingSession>)
+                }),
                 broadcast: Arc::new(
                     move |target: &ActiveSessionState, message: BindingDaemonOutbound| {
-                        // The binding module keeps its own four-variant `DaemonOutbound`
-                        // (daemon_extension_binding.rs:30) with the same wire fields as this
-                        // file's superset; hand the frame over as its serialized object,
-                        // which is exactly what the TypeScript passes along.
-                        broadcast_daemon.broadcast_raw_to_session(target, &message_to_value(&message));
+                        let Ok(state) = broadcast_daemon.get_session_state(&target.active_session_id) else { return; };
+                        let entry = broadcast_daemon.session_entry_for_state(&state);
+                        let message = match message {
+                            BindingDaemonOutbound::SessionEvent { active_session_id, event } => DaemonOutbound::SessionEvent { active_session_id, event },
+                            BindingDaemonOutbound::SessionReplaced { active_session_id, state, .. } => DaemonOutbound::SessionReplaced { active_session_id, state, messages: entry.session.messages().iter().map(|message| serde_json::to_value(message).expect("agent message is serializable")).collect() },
+                            BindingDaemonOutbound::ExtensionError { active_session_id, extension_path, event, error } => DaemonOutbound::ExtensionError { active_session_id, extension_path, event, error },
+                            BindingDaemonOutbound::ExtensionUiRequest { active_session_id, id, method, payload } => DaemonOutbound::ExtensionUiRequest { active_session_id, id, method, payload },
+                        };
+                        broadcast_daemon.broadcast_to_session(&entry, message);
                     },
                 ),
-                create_connection_state: Some(Arc::new(|target: &ActiveSessionState| {
-                    serde_json::to_value(target.active_session_id.clone()).unwrap_or(Value::Null)
+                create_connection_state: Some(Arc::new(move |target: &ActiveSessionState| {
+                    state_daemon.get_session_state(&target.active_session_id)
+                        .map(|state| state_daemon.create_connection_state(&state))
+                        .unwrap_or(Value::Null)
                 })),
                 session_replaced: Some(Arc::new(move |target: &ActiveSessionState| {
-                    let _ = target;
+                    if let Ok(state) = replaced_daemon.get_session_state(&target.active_session_id) {
+                        replaced_daemon.refresh_replaced_session_state(&state);
+                    }
                 })),
                 shutdown: Arc::new(move || {
                     let daemon = Arc::clone(&shutdown_daemon);
@@ -6684,11 +6685,11 @@ impl AgentDaemon {
                         daemon.shutdown(0, None).await;
                     });
                 }),
-                subagent_runtime_host: subagent_host_value,
+                // The canonical runtime installs its live SubagentRuntimeHost.
+                subagent_runtime_host: None,
             },
         )
         .await;
-        let _ = daemon;
         Ok(())
     }
 
@@ -6891,7 +6892,7 @@ impl DaemonExtensionBindingSession for SessionBinder {
         self.session.set_runtime_env_scope(client_env);
     }
 
-    fn set_subagent_runtime_host(&self, host: Option<Value>) {
+    fn set_subagent_runtime_host(&self, host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>) {
         self.session.set_subagent_runtime_host(host);
     }
 
@@ -7028,7 +7029,7 @@ impl DaemonSession for MissingSession {
     }
     fn set_exec_env_provider(&self, _client_env: Option<HashMap<String, String>>) {}
     fn set_runtime_env_scope(&self, _client_env: Option<HashMap<String, String>>) {}
-    fn set_subagent_runtime_host(&self, _host: Option<Value>) {}
+    fn set_subagent_runtime_host(&self, _host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>) {}
     fn set_rebind_session(&self, _rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>) {}
     fn bind_extensions(
         &self,
@@ -7405,6 +7406,7 @@ impl DaemonSessionState {
     /// session. The TypeScript reads those fields straight off the session
     /// object, so the port refreshes them at every read boundary instead.
     pub fn sync_view(&self) {
+        let streaming_message = self.state.lock().expect("active session poisoned").runtime.session.streaming_message.clone();
         let view = {
             let session = &self.session;
             ActiveSessionRuntimeSession {
@@ -7415,6 +7417,8 @@ impl DaemonSessionState {
                 is_streaming: session.is_streaming(),
                 is_compacting: session.is_compacting(),
                 messages_len: session.messages().len(),
+                messages: session.messages(),
+                streaming_message,
                 has_running_rlm_children: session.has_running_rlm_children(),
                 rlm_depth: session.rlm_depth(),
                 ..ActiveSessionRuntimeSession::default()
@@ -7467,8 +7471,10 @@ impl DaemonSessionState {
 impl AgentDaemon {
     /// `broadcastToSession(state, message)`.
     fn broadcast_to_session(self: &Arc<Self>, entry: &Arc<DaemonSessionState>, message: DaemonOutbound) {
+        entry.sync_view();
         let state = entry.state.clone();
         if let DaemonOutbound::SessionEvent { event, .. } = &message {
+            entry.handle_event(event);
             let event_type = event
                 .get("type")
                 .and_then(Value::as_str)
@@ -7680,28 +7686,9 @@ impl AgentDaemon {
         state: &Arc<StdMutex<ActiveSessionState>>,
         message: DaemonOutbound,
     ) -> DaemonOutbound {
-        let value = match &message {
-            DaemonOutbound::SessionEvent {
-                active_session_id,
-                event,
-            } => {
-                let mut object = Map::new();
-                object.insert(
-                    "type".to_string(),
-                    Value::String("session_event".to_string()),
-                );
-                object.insert(
-                    "activeSessionId".to_string(),
-                    Value::String(active_session_id.clone()),
-                );
-                object.insert("event".to_string(), event.clone());
-                Value::Object(object)
-            }
-            DaemonOutbound::SessionStatus { .. } => message.to_value(),
-            other => return other.clone(),
-        };
-        if !is_sequenced_session_outbound(message.type_name()) {
-            return DaemonOutbound::Raw(value);
+        let mut value = message.to_value();
+        if !is_sequenced_session_outbound(message.type_name()) || value.get("meta").is_some_and(|meta| !meta.is_null()) {
+            return message;
         }
         let (generation, sequence) = {
             let mut state = state.lock().expect("active session poisoned");
@@ -7714,43 +7701,25 @@ impl AgentDaemon {
             now_iso(),
             &generation,
         );
-        let mut value = value;
         if let Some(object) = value.as_object_mut() {
-            object.insert("id".to_string(), Value::String(meta.id.clone()));
-            object.insert(
-                "protocol".to_string(),
-                serde_json::to_value(meta.protocol.clone()).unwrap_or(Value::Null),
-            );
-            object.insert(
-                "activeSessionId".to_string(),
-                Value::String(meta.active_session_id.clone().unwrap_or_default()),
-            );
-            object.insert("sequence".to_string(), Value::from(sequence as f64));
-            object.insert(
-                "cursor".to_string(),
-                serde_json::to_value(meta.cursor.clone().unwrap_or_else(|| {
-                    crate::modes::daemon::daemon_protocol::DaemonEventCursor {
-                        generation: generation.clone(),
-                        sequence,
-                    }
-                }))
-                .unwrap_or(Value::Null),
-            );
-            object.insert(
-                "emittedAt".to_string(),
-                Value::String(meta.emitted_at.clone()),
-            );
+            object.insert("meta".to_string(), serde_json::to_value(meta).expect("daemon event metadata is serializable"));
         }
         DaemonOutbound::Raw(value)
     }
 
     /// `write(client, message)`.
     fn write(self: &Arc<Self>, client: &Arc<DaemonClientHandle>, message: &DaemonOutbound) -> bool {
-        self.write_serialized(
-            client,
-            &serialize_json_line(&message.to_value()),
-            Some(message),
-        )
+        let compact_allowed = {
+            let state = client.state.lock().expect("daemon client poisoned");
+            state.transport.as_deref() == Some("private-framed") && state.authentication_role.as_deref() != Some("session_client")
+        };
+        let value = message.to_value();
+        if compact_allowed {
+            if let Ok(Some(delta)) = create_compact_assistant_delta(&value) {
+                return self.write_serialized_encoded(client, serialize_json_line(&serde_json::to_value(delta).expect("compact delta is serializable")).as_bytes(), message, "assistant-delta", None);
+            }
+        }
+        self.write_serialized(client, &serialize_json_line(&value), Some(message))
     }
 
     /// `writeSerialized(client, line, message, payloadEncoding = "jsonl", snapshotPurpose?)`.
@@ -7810,8 +7779,8 @@ impl AgentDaemon {
                     );
                 }
             }
-            if let DaemonOutbound::SessionEvent { event, .. } = message {
-                if let Some(event_type) = event.get("type").and_then(Value::as_str) {
+            if message.type_name() == "session_event" {
+                if let Some(event_type) = message.to_value().get("event").and_then(|event| event.get("type")).and_then(Value::as_str) {
                     header.insert(
                         "sessionEventType".to_string(),
                         Value::String(event_type.to_string()),
@@ -7825,10 +7794,7 @@ impl AgentDaemon {
         } else {
             line.to_vec()
         };
-        let delivered = match std::str::from_utf8(&wire) {
-            Ok(text) => client.writer.write(text.to_string()),
-            Err(_) => false,
-        };
+        let delivered = client.writer.write_bytes(wire);
         if !delivered {
             if let Some(active_session_id) = message.active_session_id() {
                 self.mark_client_backpressured(client, active_session_id);
@@ -7846,6 +7812,12 @@ impl AgentDaemon {
     ) -> bool {
         if client.writer.destroyed() {
             return false;
+        }
+        let private_framed = client.state.lock().expect("daemon client poisoned").transport.as_deref() == Some("private-framed");
+        if private_framed {
+            if let Some(message) = message {
+                return self.write_serialized_encoded(client, serialized.as_bytes(), message, "jsonl", None);
+            }
         }
         if client.is_backpressured() {
             if let Some(message) = message {
@@ -8948,7 +8920,7 @@ impl AgentDaemon {
 
     /// `writeWorkerSnapshotRecord(...)`.
     fn write_worker_snapshot_record(
-        &self,
+        self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
         message: &Value,
         _drain_timeout_ms: Option<u64>,
@@ -8956,7 +8928,7 @@ impl AgentDaemon {
         if client.writer.destroyed() {
             return false;
         }
-        client.writer.write(serialize_json_line(message))
+        self.write(client, &DaemonOutbound::Raw(message.clone()))
     }
 
     /// `createConnectionState(state)`.
@@ -9056,6 +9028,47 @@ impl AgentDaemon {
     ) -> Result<(), String> {
         let body = &command.body;
         match command.type_.as_str() {
+            "worker_auth" => Err("Worker is already authenticated".to_string()),
+            "worker_subscribe" => {
+                let state = self.get_bound_session_state(body.get("activeSessionId").and_then(Value::as_str).unwrap_or(""))?;
+                let active_session_id = state.lock().expect("active session poisoned").active_session_id.clone();
+                let requested = body.get("capabilities").and_then(Value::as_array).map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect::<HashSet<_>>());
+                set_daemon_client_session_capabilities(client, &active_session_id, normalize_client_capabilities(requested.as_ref(), body.get("supportsExtensionUi").and_then(Value::as_bool)));
+                {
+                    let mut state = state.lock().expect("active session poisoned");
+                    if !state.clients.iter().any(|peer| Arc::ptr_eq(peer, &client.state)) { state.clients.push(client.state.clone()); }
+                }
+                client.state.lock().expect("daemon client poisoned").attached_active_session_ids.insert(active_session_id);
+                let summary = self.summary_for_state(&state);
+                self.write(client, &DaemonOutbound::Raw(serde_json::json!({"type":"response", "id":command.id,"command":"attach","success":true,"data":summary})));
+                Ok(())
+            }
+            "worker_unsubscribe" => {
+                let state = self.get_session_state(body.get("activeSessionId").and_then(Value::as_str).unwrap_or(""))?;
+                self.detach_client_from_session(client, &state);
+                self.write(client, &DaemonOutbound::Raw(serde_json::json!({"type":"response","id":command.id,"command":"detach","success":true})));
+                Ok(())
+            }
+            "worker_archive_and_shutdown" => {
+                for state in self.state_refs() { self.close_session(state, "killed", false, false, None, None).await; }
+                self.fence_peer_transports(None);
+                self.write_worker_success(client, command, None);
+                let daemon = self.clone();
+                tokio::spawn(async move { daemon.shutdown(0, None).await; });
+                Ok(())
+            }
+            "worker_passivate_idle_children" => {
+                let idle = match body.get("idleEvictionMinutes") { Some(Value::String(value)) if value == "off" => IdleEvictionMinutes::Off, Some(value) if value.as_f64().is_some() => IdleEvictionMinutes::Minutes(value.as_f64().unwrap()), _ => return Err("idleEvictionMinutes is required".to_string()) };
+                let count = self.passivate_idle_children(idle, body.get("now").and_then(Value::as_f64).unwrap_or_else(now_millis), body.get("limit").and_then(Value::as_u64).unwrap_or(u64::MAX).min(usize::MAX as u64) as usize).await;
+                self.write_worker_success(client, command, Some(serde_json::json!({"count": count})));
+                Ok(())
+            }
+            "worker_deliver_message" => {
+                let sender: AgentSessionMessageSender = serde_json::from_value(body.get("sender").cloned().ok_or("sender is required")?).map_err(|error| error.to_string())?;
+                let receipt = self.send_agent_session_message(SendAgentMessageInput { target_selector: body.get("targetActiveSessionId").and_then(Value::as_str).ok_or("targetActiveSessionId is required")?.to_string(), message: body.get("message").and_then(Value::as_str).ok_or("message is required")?.to_string(), from_state: None, client_id: None, sender_key: Some(sender.active_session_id.clone().unwrap_or_else(|| format!("client:{}", sender.client_id.as_deref().unwrap_or("")))), sender: Some(sender), origin: "agent".to_string() }).await?;
+                self.write_worker_success(client, command, Some(serde_json::to_value(receipt).map_err(|error| error.to_string())?));
+                Ok(())
+            }
             "worker_prepare_update" => {
                 let manifest = self.prepare_update_restart().await?;
                 self.write_worker_success(client, command, Some(manifest));
@@ -9079,7 +9092,7 @@ impl AgentDaemon {
                 self.write_worker_success(client, command, None);
                 Ok(())
             }
-            "worker_peer_grant" => {
+            "worker_register_peer_transport" | "worker_peer_grant" => {
                 let grant = body
                     .get("grant")
                     .cloned()
@@ -9090,10 +9103,18 @@ impl AgentDaemon {
                 let expires_at = chrono::DateTime::parse_from_rfc3339(&grant.expires_at)
                     .map(|value| value.timestamp_millis() as f64)
                     .unwrap_or(0.0);
-                if expires_at - now_millis() > PEER_GRANT_TTL_LIMIT_MS as f64 {
-                    return Err("peer grant ttl exceeds the daemon limit".to_string());
+                let now = now_millis();
+                let claim = self.supervisor_claims.lock().expect("supervisor claims poisoned").get(&(Arc::as_ptr(client) as usize)).cloned();
+                if self.peer_admissions_fenced.load(Ordering::SeqCst)
+                    || claim.as_ref().map(|claim| claim.claim.supervisor_generation.as_str()) != Some(grant.issuer_generation.as_str())
+                    || grant.purpose != "session_client" || grant.grant_id.is_empty() || grant.token.is_empty()
+                    || self.options.worker.as_ref().and_then(|worker| worker.worker_instance_id.as_deref()) != Some(grant.worker_instance_id.as_str())
+                    || !self.sessions.lock().expect("sessions poisoned").contains_key(&grant.active_session_id)
+                    || expires_at <= now || expires_at - now > PEER_GRANT_TTL_LIMIT_MS as f64 {
+                    return Err("Peer transport grant is invalid".to_string());
                 }
                 let mut grants = self.peer_grants.lock().expect("peer grants poisoned");
+                grants.retain(|_, grant| chrono::DateTime::parse_from_rfc3339(&grant.expires_at).map(|time| time.timestamp_millis() as f64 >= now).unwrap_or(false));
                 if grants.len() >= PEER_GRANT_LIMIT {
                     return Err("peer grant table is full".to_string());
                 }
@@ -9155,6 +9176,7 @@ impl AgentDaemon {
         if self.shutting_down.swap(true, Ordering::SeqCst) {
             return;
         }
+        self.server_stopped.cancel();
         let closing_reason = reason.unwrap_or_else(|| self.get_shutdown_closing_reason());
         self.clear_supervisor_availability_check();
         if let Some(handle) = self
@@ -9201,9 +9223,18 @@ impl AgentDaemon {
         {
             handler();
         }
+        let clients = self.client_handles();
+        for client in &clients {
+            client.writer.end();
+        }
+        // Keep the runtime alive while final closing frames reach the sockets.
+        let _ = tokio::time::timeout(Duration::from_secs(1), async {
+            futures::future::join_all(clients.iter().map(|client| client.writer.drained.cancelled())).await;
+        }).await;
         self.summarizer.stop();
         self.cleanup_socket_path();
         let _ = kill_tracked_detached_children();
+        self.shutdown_complete.cancel();
     }
 
     /// `getShutdownClosingReason()`.
@@ -9224,13 +9255,7 @@ impl AgentDaemon {
 
     /// `registerSignalHandlers()`.
     fn register_signal_handlers(self: &Arc<Self>) {
-        // Rust installs no SIGINT/SIGTERM handlers without extra crates; the daemon
-        // keeps the same cleanup list so the handler registration above can be
-        // wired by the CLI slice. Nothing is registered here on purpose.
-        self.signal_cleanup_handlers
-            .lock()
-            .expect("signal cleanup handlers poisoned")
-            .push(Arc::new(|| {}));
+        native_server::register_signal_handlers(self);
     }
 
     /// `detachClient(client)`.
@@ -10574,7 +10599,7 @@ impl AgentDaemon {
     }
 
     /// `deleteSavedSessionFile(sessionPath, options?)`.
-    pub(crate) async fn delete_saved_session_file(
+    pub(crate) fn delete_saved_session_file(
         &self,
         session_path: &str,
         options: Option<crate::core::session_file_actions::DeleteSessionFileOptions>,
@@ -13865,17 +13890,17 @@ impl AgentDaemon {
             agent_dir: self.options.default_session_config.agent_dir.clone(),
             session_manager: Arc::new(StdMutex::new(session_manager)),
             session_options: SessionRuntimeOptions::default(),
+            session_config: Some(serde_json::from_value(serde_json::to_value(&self.options.default_session_config).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?),
             // `runtimeMetadata` is handed to the factory as the same object the
             // TypeScript builds, so it stays a value here.
             runtime_metadata: Some(metadata.clone()),
         };
-        let runtime = (self.options.create_runtime)(input).await?;
+        let runtime = super::daemon_client_env::with_client_env(hydration_env.as_ref(), || (self.options.create_runtime)(input)).await?;
         let state = self
-            .add_runtime(runtime.clone(), restore_active_session_id, None, None)
+            .add_runtime(runtime.clone(), restore_active_session_id, Some(Arc::new(move |state| {
+                state.lock().expect("active session poisoned").client_env = hydration_env.clone();
+            })), None)
             .await?;
-        if let Some(env) = hydration_env {
-            self.adopt_client_env(&state, Some(env));
-        }
         // The session transcript is authoritative for mutable metadata such as a
         // later user-assigned name; the registry value is only the spawn snapshot.
         if !self.session_of(&parent_state)
@@ -14584,38 +14609,6 @@ impl AgentDaemon {
         _message: &str,
     ) -> Result<AgentSessionMessageReceipt, String> {
         Err(format!("Unknown active session: {target_selector}"))
-    }
-}
-
-impl AgentDaemon {
-    /// `createSubagentRuntimeHost(parentState)`.
-    ///
-    /// The host is a closure bag over this daemon; the extension-binding
-    /// boundary carries it as a value, so the daemon hands the parent identity
-    /// and the operation names the session slice must route back.
-    fn create_subagent_runtime_host_value(
-        &self,
-        state: &Arc<StdMutex<ActiveSessionState>>,
-    ) -> Option<Value> {
-        let active_session_id = state
-            .lock()
-            .expect("active session poisoned")
-            .active_session_id
-            .clone();
-        let session = self.session_of(state);
-        Some(serde_json::json!({
-            "parentActiveSessionId": active_session_id,
-            "parentSessionId": session.session_id(),
-            "parentSessionFile": session.session_file(),
-            "operations": [
-                "createRlmSubagentRuntime",
-                "createRlmRootSession",
-                "completeRlmSubagentRuntime",
-                "releaseRlmSubagentRuntime",
-                "deleteRlmSubagentRuntime",
-                "disposeRlmSubagentRuntimes",
-            ],
-        }))
     }
 }
 

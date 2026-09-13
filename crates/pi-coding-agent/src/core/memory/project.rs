@@ -207,7 +207,9 @@ mod tests {
             normalize_remote("https://example.com:8443/x/y/"),
             "example.com:8443/x/y"
         );
-        assert_eq!(normalize_remote("C:/Users/x/repo"), "C:/Users/x/repo");
+        // The pinned JS URL parser treats the drive letter as a URL scheme.
+        assert_eq!(normalize_remote("C:/Users/x/repo"), "/Users/x/repo");
+        assert_eq!(normalize_remote("/Users/x/repo"), "/Users/x/repo");
     }
 
     #[test]

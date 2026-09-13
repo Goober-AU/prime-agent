@@ -273,7 +273,7 @@ pub fn validate_settings(value: &Value) -> Result<PartialMemorySettings, String>
                 || parsed.password().is_some()
                 || parsed.query().is_some()
                 || parsed.fragment().is_some()
-                || (parsed.scheme() != "https:" && !(parsed.scheme() == "http:" && loopback))
+                || (parsed.scheme() != "https" && !(parsed.scheme() == "http" && loopback))
             {
                 return Err("Use HTTPS or a loopback SSH tunnel for memory sharing".to_string());
             }
@@ -523,7 +523,7 @@ impl MemoryStore {
             let fingerprint = hash(
                 &serde_json::to_string(&serde_json::json!({
                     "proposal": proposal,
-                    "sources": options.sources,
+                    "sources": options.sources.as_deref().unwrap_or(&[]),
                     "host": options.host,
                     "replaceMetadata": options.replace_metadata,
                 }))
@@ -592,6 +592,7 @@ impl MemoryStore {
                     .as_ref()
                     .and_then(|entry| entry.metadata.get("hostId"))
                     .and_then(Value::as_str)
+                    .filter(|host| !host.is_empty())
                     .map(str::to_string);
                 if let Some(host) = &before_host {
                     if host != &self.host_id {
@@ -614,6 +615,7 @@ impl MemoryStore {
                 let metadata_host = metadata
                     .get("hostId")
                     .and_then(Value::as_str)
+                    .filter(|host| !host.is_empty())
                     .map(str::to_string);
                 if let Some(host) = &metadata_host {
                     if host != &self.host_id {
@@ -652,7 +654,12 @@ impl MemoryStore {
                     "projectId".to_string(),
                     Value::String(self.project.id.clone()),
                 );
-                metadata.insert("hostId".to_string(), Value::String(host_id));
+                // JSON.stringify omits the TS undefined hostId for project memories.
+                if host_id.is_empty() {
+                    metadata.remove("hostId");
+                } else {
+                    metadata.insert("hostId".to_string(), Value::String(host_id));
+                }
                 metadata.insert(
                     "sources".to_string(),
                     Value::Array(
@@ -974,8 +981,8 @@ mod tests {
     fn empty_document_matches_the_typescript_shape() {
         let document = empty_document("project_test");
         let value = serde_json::to_value(&document).unwrap();
-        assert_eq!(value["schema"], serde_json::json!(1));
-        assert_eq!(value["memory"]["schema"], serde_json::json!(1));
+        assert_eq!(value["schema"].as_f64(), Some(1.0));
+        assert_eq!(value["memory"]["schema"].as_f64(), Some(1.0));
         assert_eq!(
             value["memory"]["projectId"],
             serde_json::json!("project_test")
@@ -1061,7 +1068,11 @@ mod tests {
         std::fs::create_dir_all(&store.dir).unwrap();
         std::fs::write(&store.path, "{\"schema\": 2}").unwrap();
         let error = store.read().expect_err("corrupt state");
-        assert_eq!(error, "Invalid project memory snapshot");
+        assert_eq!(error, "Expected an object");
+        let mut invalid = serde_json::to_value(empty_document(&store.project.id)).unwrap();
+        invalid["schema"] = serde_json::json!(2);
+        write_json(&store.path, &invalid).unwrap();
+        assert_eq!(store.read().unwrap_err(), "Invalid project memory snapshot");
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -1178,6 +1189,10 @@ mod tests {
             },
         )
         .unwrap();
+        // A second host reading the same authoritative project snapshot must
+        // reject its host-scoped entry, rather than testing an empty store.
+        std::fs::create_dir_all(&other.dir).unwrap();
+        std::fs::copy(&store.path, &other.path).unwrap();
         let mut update = proposal("host_only", "Content host changed");
         update.edits[0].action = "update".to_string();
         let error = runtime

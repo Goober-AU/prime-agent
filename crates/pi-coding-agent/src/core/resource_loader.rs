@@ -1822,7 +1822,7 @@ mod tests {
                 handlers: HashMap::new(),
                 tools: HashMap::new(),
                 message_renderers: HashMap::new(),
-                commands: HashMap::new(),
+                commands: Default::default(),
                 flags: HashMap::new(),
                 shortcuts: HashMap::new(),
             }

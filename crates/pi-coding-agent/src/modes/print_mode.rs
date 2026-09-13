@@ -394,7 +394,7 @@ mod tests {
             describe_autonomous_limit(&status, LIMIT_MAX_TOKENS),
             "maxTokens reached (80000/80000)"
         );
-        assert!(describe_autonomous_limit(&status, LIMIT_TIMEOUT_MS).ends_with("/1800000"));
+        assert!(describe_autonomous_limit(&status, LIMIT_TIMEOUT_MS).ends_with("/1800000)"));
     }
 
     #[test]

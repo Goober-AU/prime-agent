@@ -45,6 +45,7 @@ fn read_all_sync(
             )));
         }
     }
+    file.seek(SeekFrom::Start(0))?;
     let mut buffer = vec![0u8; size as usize];
     let mut offset = 0usize;
     while offset < buffer.len() {

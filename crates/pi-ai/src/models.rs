@@ -246,7 +246,16 @@ mod tests {
         assert_eq!(get_supported_thinking_levels(&model), vec!["off".to_string()]);
 
         model.reasoning = true;
-        assert_eq!(get_supported_thinking_levels(&model).len(), 7);
+        assert_eq!(
+            get_supported_thinking_levels(&model),
+            vec!["off", "minimal", "low", "medium", "high"]
+        );
+
+        model.thinking_level_map = Some(crate::types::ThinkingLevelMap::from([
+            ("xhigh".to_string(), Some("xhigh".to_string())),
+            ("max".to_string(), Some("max".to_string())),
+        ]));
+        assert_eq!(get_supported_thinking_levels(&model), EXTENDED_THINKING_LEVELS);
 
         let mut map = crate::types::ThinkingLevelMap::new();
         map.insert("xhigh".to_string(), None);

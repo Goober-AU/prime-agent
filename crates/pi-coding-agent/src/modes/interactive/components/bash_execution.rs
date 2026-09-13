@@ -444,8 +444,8 @@ mod tests {
         strip_ansi(text)
     }
 
-    #[test]
-    fn running_component_renders_the_command_and_loader_message() {
+    #[tokio::test]
+    async fn running_component_renders_the_command_and_loader_message() {
         init();
         let mut component =
             BashExecutionComponent::new("echo hi", ui(), false, BashExecutionOptions::default());
@@ -459,8 +459,8 @@ mod tests {
         assert!(text.contains("Running..."));
     }
 
-    #[test]
-    fn append_output_merges_partial_lines() {
+    #[tokio::test]
+    async fn append_output_merges_partial_lines() {
         init();
         let mut component =
             BashExecutionComponent::new("cmd", ui(), false, BashExecutionOptions::default());
@@ -469,8 +469,8 @@ mod tests {
         assert_eq!(component.get_output(), "ab\nc");
     }
 
-    #[test]
-    fn append_output_normalises_newlines_and_strips_ansi() {
+    #[tokio::test]
+    async fn append_output_normalises_newlines_and_strips_ansi() {
         init();
         let mut component =
             BashExecutionComponent::new("cmd", ui(), false, BashExecutionOptions::default());
@@ -478,8 +478,8 @@ mod tests {
         assert_eq!(component.get_output(), "red\nnext\nthird");
     }
 
-    #[test]
-    fn complete_with_exit_code_zero_is_not_an_error() {
+    #[tokio::test]
+    async fn complete_with_exit_code_zero_is_not_an_error() {
         init();
         let mut component =
             BashExecutionComponent::new("cmd", ui(), false, BashExecutionOptions::default());
@@ -493,8 +493,8 @@ mod tests {
         assert!(!text.contains("(exit"));
     }
 
-    #[test]
-    fn nonzero_exit_code_renders_the_error_status() {
+    #[tokio::test]
+    async fn nonzero_exit_code_renders_the_error_status() {
         init();
         let mut component =
             BashExecutionComponent::new("cmd", ui(), false, BashExecutionOptions::default());
@@ -508,8 +508,8 @@ mod tests {
         assert!(text.contains("(exit 2)"));
     }
 
-    #[test]
-    fn cancelled_execution_renders_the_warning() {
+    #[tokio::test]
+    async fn cancelled_execution_renders_the_warning() {
         init();
         let mut component =
             BashExecutionComponent::new("cmd", ui(), false, BashExecutionOptions::default());
@@ -523,8 +523,8 @@ mod tests {
         assert!(text.contains("(cancelled)"));
     }
 
-    #[test]
-    fn set_failed_prefers_the_message_over_the_exit_code() {
+    #[tokio::test]
+    async fn set_failed_prefers_the_message_over_the_exit_code() {
         init();
         let mut component =
             BashExecutionComponent::new("cmd", ui(), false, BashExecutionOptions::default());
@@ -538,8 +538,8 @@ mod tests {
         assert!(text.contains("(failed: spawn ENOENT)"));
     }
 
-    #[test]
-    fn hidden_lines_are_counted_and_the_hint_renders() {
+    #[tokio::test]
+    async fn hidden_lines_are_counted_and_the_hint_renders() {
         init();
         let mut component =
             BashExecutionComponent::new("cmd", ui(), false, BashExecutionOptions::default());
@@ -556,8 +556,8 @@ mod tests {
         assert!(text.contains("to expand"));
     }
 
-    #[test]
-    fn truncation_warning_names_the_full_output_path() {
+    #[tokio::test]
+    async fn truncation_warning_names_the_full_output_path() {
         init();
         let mut component =
             BashExecutionComponent::new("cmd", ui(), false, BashExecutionOptions::default());

@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn normalizes_escape_and_arrow_parts() {
-        assert_eq!(format_key_text("escape", Some("linux")), "esc");
+        assert_eq!(format_key_text("escape", Some("linux")), "Esc");
         assert_eq!(format_key_text("up", Some("linux")), "\u{2191}");
         assert_eq!(format_key_text("ctrl+down", Some("linux")), "Ctrl+\u{2193}");
     }

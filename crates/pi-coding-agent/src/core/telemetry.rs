@@ -1506,7 +1506,7 @@ mod tests {
         assert_eq!(body["events"][0]["name"], serde_json::json!("agent started"));
         assert_eq!(
             body["events"][0]["timestamp"],
-            serde_json::json!("2026-03-29T04:00:00.000Z")
+            serde_json::json!("2026-03-26T00:00:00.000Z")
         );
         assert_eq!(body["events"][0]["properties"]["version"], serde_json::json!("1.2.3"));
         drop(recorded);

@@ -786,7 +786,7 @@ mod tests {
         std::fs::create_dir_all(&child).unwrap();
         std::fs::write(
             child.join("s.jsonl"),
-            b"{\"type\":\"message\",\"id\":\"u\",\"parentId\":null,\"message\":{\"role\":\"user\",\"content\":\"hello\",\"timestamp\":1}}\n",
+            b"{\"type\":\"model_change\",\"id\":\"m\",\"parentId\":null,\"provider\":\"openai\",\"modelId\":\"gpt-5\"}\n{\"type\":\"message\",\"id\":\"u\",\"parentId\":\"m\",\"message\":{\"role\":\"user\",\"content\":\"hello\",\"timestamp\":1}}\n",
         )
         .unwrap();
         let loader: SessionEntryLoader = std::sync::Arc::new(|path: &str| {

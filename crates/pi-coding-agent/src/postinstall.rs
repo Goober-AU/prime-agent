@@ -32,6 +32,15 @@ pub fn error_message(message: &str) -> String {
 /// `process.exit(0)` becomes the returned code, so the caller decides how to
 /// end the process exactly like the script's `process.exit(0)` does.
 pub async fn run_postinstall() -> i32 {
+    run_postinstall_with(async {
+        ensure_kernel_python(EnsureKernelPythonOptions::default())
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }).await
+}
+
+async fn run_postinstall_with(kernel_setup: impl std::future::Future<Output = Result<(), String>>) -> i32 {
     let bootstrap_kernel = std::env::var(BOOTSTRAP_KERNEL_ON_INSTALL_ENV).as_deref() == Ok("1");
     let bootstrap_tools = std::env::var(BOOTSTRAP_TOOLS_ON_INSTALL_ENV).as_deref() == Ok("1");
 
@@ -55,9 +64,7 @@ pub async fn run_postinstall() -> i32 {
             let _ = (fd, rg);
         }
         if bootstrap_kernel {
-            ensure_kernel_python(EnsureKernelPythonOptions::default())
-                .await
-                .map_err(|error| error.to_string())?;
+            kernel_setup.await?;
         }
         Ok(())
     }
@@ -73,6 +80,26 @@ pub async fn run_postinstall() -> i32 {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct InstallEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl InstallEnv {
+        fn capture() -> Self {
+            Self([BOOTSTRAP_KERNEL_ON_INSTALL_ENV, BOOTSTRAP_TOOLS_ON_INSTALL_ENV, INSTALL_UV_ENV]
+                .into_iter().map(|key| (key, std::env::var_os(key))).collect())
+        }
+    }
+
+    impl Drop for InstallEnv {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                if let Some(value) = value { std::env::set_var(key, value); }
+                else { std::env::remove_var(key); }
+            }
+        }
+    }
+
     #[test]
     fn one_line_collapses_whitespace() {
         assert_eq!(one_line("  a\n b\t c  "), "a b c");
@@ -81,21 +108,28 @@ mod tests {
 
     #[test]
     fn the_install_hook_does_nothing_without_the_flags() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = InstallEnv::capture();
         std::env::remove_var(BOOTSTRAP_KERNEL_ON_INSTALL_ENV);
         std::env::remove_var(BOOTSTRAP_TOOLS_ON_INSTALL_ENV);
         std::env::remove_var(INSTALL_UV_ENV);
-        assert_eq!(futures::executor::block_on(run_postinstall()), 0);
+        assert_eq!(futures::executor::block_on(run_postinstall_with(async {
+            panic!("kernel setup must not run without the flag")
+        })), 0);
         assert!(std::env::var(INSTALL_UV_ENV).is_err());
     }
 
     #[test]
     fn requesting_the_kernel_sets_the_uv_flag() {
-        // Only the flag write is asserted; the kernel bootstrap itself needs a
-        // Python toolchain, so the hook's own catch keeps the exit code 0.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _env = InstallEnv::capture();
         std::env::set_var(BOOTSTRAP_KERNEL_ON_INSTALL_ENV, "1");
         std::env::remove_var(BOOTSTRAP_TOOLS_ON_INSTALL_ENV);
         std::env::remove_var(INSTALL_UV_ENV);
-        assert_eq!(futures::executor::block_on(run_postinstall()), 0);
+        assert_eq!(futures::executor::block_on(run_postinstall_with(async {
+            assert_eq!(std::env::var(INSTALL_UV_ENV).as_deref(), Ok("1"));
+            Err("fixture kernel setup failed".to_string())
+        })), 0);
         assert_eq!(std::env::var(INSTALL_UV_ENV).as_deref(), Ok("1"));
         std::env::remove_var(BOOTSTRAP_KERNEL_ON_INSTALL_ENV);
         std::env::remove_var(INSTALL_UV_ENV);

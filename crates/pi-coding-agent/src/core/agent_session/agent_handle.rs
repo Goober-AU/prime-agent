@@ -1,5 +1,8 @@
 //! Private bridge from the session's Agent surface to the real foundation Agent.
 
+#[path = "runtime_bridge.rs"]
+mod runtime_bridge;
+
 use super::{
     AfterToolCallHook, AgentHandle, BeforeToolCallHook, BoxFuture,
     GetContinuationMessagesHook,

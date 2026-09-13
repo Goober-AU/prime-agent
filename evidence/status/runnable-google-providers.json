@@ -1,0 +1,35 @@
+{
+  "slice": "runnable-google-providers",
+  "reference": "9f547ceaba079dee45ee415a430d57fb86fa940d",
+  "files": [
+    {
+      "src": "packages/ai/src/providers/google.ts",
+      "rust": "crates/pi-ai/src/providers/google.rs",
+      "status": "implemented_pending_shared_tests",
+      "notes": "The unanchored TS Gemini3 Pro regex accepts preview suffixes; fix that incorrect fixture and add malformed-version negative case. Replace tautological no-runtime stream fixture with bounded Tokio loopback HTTP 400 server: verify empty x-goog-api-key, real request path, Error event reason/message, stream completion and no remaining event. SDK 1.52.0 warns on empty key and still sends request, so no invented production authentication guard was added."
+    },
+    {
+      "src": "packages/ai/src/providers/google-shared.ts; packages/ai/src/providers/transform-messages.ts",
+      "rust": "crates/pi-ai/src/providers/google_shared.rs",
+      "status": "implemented_pending_shared_tests",
+      "notes": "TS transformMessages drops orphan tool results. Add corresponding assistant calls to merge/image fixtures, preserving exact response JSON and image nesting/separate user-turn coverage. For nonvision models assert the canonical transformed tool-image placeholder. Add explicit orphan-removal regression."
+    },
+    {
+      "src": "packages/ai/src/providers/google-vertex.ts",
+      "rust": "crates/pi-ai/src/providers/google_vertex.rs",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Real fix: use provider's explicit API_VERSION v1 as TS passes it into both GoogleGenAI constructors; retain httpOptions empty-version override for versioned custom base URLs. Existing regional/custom URL expectations now match implementation; add explicit API-key mode version assertion."
+    }
+  ],
+  "verification": {
+    "parse": "PASS: rustfmt --edition 2021 --emit stdout on all three files.",
+    "whitespace": "PASS: git diff --check on all three files.",
+    "cargo": "Pending parent-coordinated shared tests; no Cargo run by this agent.",
+    "baseline": ".port-env/tmp/runnable-validation/pi-ai-failures.json: seven Google-family failures",
+    "sdk": "Inspected public pinned @google/genai@1.52.0 via npm pack --ignore-scripts in .port-env/tmp/google-sdk-reference (no install or package changes); tarball SHA1 0dc2544b5ac93bdabfd313482d9a5c12623cbc7a. Node constructor warns on empty API key; NodeAuth.addKeyHeader appends an explicitly empty string."
+  },
+  "remaining": [
+    "Await parent shared pi-ai test results. No real Google/Vertex API or credentials used; loopback HTTP only.",
+    "Inherited Vertex ADC implementation is partial (explicit Authorization / GOOGLE_VERTEX_ACCESS_TOKEN fallback); not changed by this bounded failure-fix slice."
+  ]
+}

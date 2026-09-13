@@ -1370,7 +1370,8 @@ mod tests {
 	fn model_predicates_match_typescript_regexes() {
 		assert!(is_gemini3_pro_model(&model("gemini-3-pro")));
 		assert!(is_gemini3_pro_model(&model("gemini-3.1-pro")));
-		assert!(!is_gemini3_pro_model(&model("gemini-3-pro-preview-extra")));
+		assert!(is_gemini3_pro_model(&model("gemini-3-pro-preview-extra")));
+		assert!(!is_gemini3_pro_model(&model("gemini-3.preview-pro")));
 		assert!(is_gemini3_flash_model(&model("gemini-3-flash")));
 		assert!(is_gemini3_flash_model(&model("gemini-3.5-flash-lite")));
 		assert!(!is_gemini3_flash_model(&model("gemini-2.5-flash")));
@@ -1446,12 +1447,52 @@ mod tests {
 		);
 	}
 
-	#[test]
-	fn stream_google_returns_a_stream_and_reports_missing_key_through_it() {
-		let model = model("gemini-3-pro");
+	#[tokio::test]
+	async fn stream_google_returns_a_stream_and_reports_missing_key_through_it() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			loop {
+				let mut buffer = [0u8; 4096];
+				let count = socket.read(&mut buffer).await.unwrap();
+				assert!(count > 0 && request.len() + count <= 16384);
+				request.extend_from_slice(&buffer[..count]);
+				if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+					let headers = std::str::from_utf8(&request[..end]).unwrap();
+					let length = headers.lines().filter_map(|line| line.split_once(':'))
+						.find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+						.map(|(_, value)| value.trim().parse::<usize>().unwrap()).unwrap();
+					if request.len() >= end + 4 + length {
+						assert!(headers.starts_with("POST /v1beta/models/gemini-3-pro:streamGenerateContent?alt=sse "));
+						let api_key = headers.lines().filter_map(|line| line.split_once(':'))
+							.find(|(key, _)| key.eq_ignore_ascii_case("x-goog-api-key")).unwrap().1.trim();
+						assert_eq!(api_key, "");
+						break;
+					}
+				}
+			}
+			let body = r#"{"error":{"code":400,"message":"fixture missing API key","status":"INVALID_ARGUMENT"}}"#;
+			let response = format!("HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+			socket.write_all(response.as_bytes()).await.unwrap();
+		});
+		let mut model = model("gemini-3-pro");
+		model.base_url = format!("http://{address}/v1beta");
 		let context = Context::new(None, vec![], None);
-		let stream = stream_google(&model, &context, Some(GoogleOptions::from_base(&base_options())));
-		assert!(!stream.is_done() || stream.is_done());
+		let mut options = GoogleOptions::from_base(&base_options());
+		options.stream.api_key = Some(String::new());
+		options.stream.timeout_ms = Some(1000.0);
+		let stream = stream_google(&model, &context, Some(options));
+		let event = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next()).await.unwrap().unwrap();
+		let AssistantMessageEvent::Error { reason, error } = event else { panic!("expected provider error event") };
+		assert_eq!(reason, "error");
+		assert_eq!(error.stop_reason, "error");
+		assert!(error.error_message.as_deref().unwrap().contains("fixture missing API key"));
+		assert!(stream.is_done());
+		assert!(stream.next().await.is_none());
+		tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
 	}
 
 	#[test]

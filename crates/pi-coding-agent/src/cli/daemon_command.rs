@@ -2699,7 +2699,7 @@ mod tests {
     }
 
     #[test]
-    fn double_dash_is_a_separator_for_send_and_cron_only() {
+    fn double_dash_ends_option_parsing_and_is_retained_for_send_and_cron() {
         let parsed = parse_daemon_client_command(&[
             "send".to_string(),
             "--".to_string(),
@@ -2715,7 +2715,7 @@ mod tests {
             "--json".to_string(),
         ])
         .unwrap();
-        assert!(parsed.json);
+        assert!(!parsed.json);
         assert_eq!(parsed.positionals, vec!["--json".to_string()]);
     }
 

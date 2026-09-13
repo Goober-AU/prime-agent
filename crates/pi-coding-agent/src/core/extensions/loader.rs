@@ -502,7 +502,7 @@ fn create_extension(extension_path: &str, resolved_path: &str) -> Extension {
         handlers: HashMap::new(),
         tools: HashMap::new(),
         message_renderers: HashMap::new(),
-        commands: HashMap::new(),
+        commands: indexmap::IndexMap::new(),
         flags: HashMap::new(),
         shortcuts: HashMap::new(),
     }

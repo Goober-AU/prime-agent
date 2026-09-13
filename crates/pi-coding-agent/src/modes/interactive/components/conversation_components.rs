@@ -357,7 +357,8 @@ mod tests {
                 role: "user".to_string(),
                 content: pi_ai::types::UserContent::Blocks(vec![
                     pi_ai::types::ImageOrTextContent::Image(pi_ai::types::ImageContent::new(
-                        "x", "image/png",
+                        "x",
+                        "image/png",
                     )),
                 ]),
                 provider_context: None,
@@ -376,22 +377,22 @@ mod tests {
     fn hidden_session_commands_are_skipped() {
         let message = crate::core::messages::custom_message_to_agent_message(
             create_session_slash_command_message(
-            SessionSlashCommand {
-                name: "help".to_string(),
-                args: String::new(),
-                text: "/help".to_string(),
-            },
-            crate::core::messages::SessionSlashCommandDetails {
-                command: SessionSlashCommand {
-                    name: "help".to_string(),
+                SessionSlashCommand {
+                    name: "compact".to_string(),
                     args: String::new(),
-                    text: "/help".to_string(),
+                    text: "/compact".to_string(),
                 },
-                command_entry_id: None,
-            },
-            false,
-            0,
-        ),
+                crate::core::messages::SessionSlashCommandDetails {
+                    command: SessionSlashCommand {
+                        name: "compact".to_string(),
+                        args: String::new(),
+                        text: "/compact".to_string(),
+                    },
+                    command_entry_id: None,
+                },
+                false,
+                0,
+            ),
         );
         let kinds = build_conversation_components(&[message], &options(&no_definition));
         assert!(kinds.is_empty());
@@ -400,23 +401,23 @@ mod tests {
     #[test]
     fn displayed_session_command_results_produce_their_component() {
         let command = SessionSlashCommand {
-            name: "help".to_string(),
+            name: "compact".to_string(),
             args: String::new(),
-            text: "/help".to_string(),
+            text: "/compact".to_string(),
         };
         let message = crate::core::messages::custom_message_to_agent_message(
             create_session_slash_command_result_message(
-            "done".to_string(),
-            crate::core::messages::SessionSlashCommandResultDetails {
-                command: command.clone(),
-                success: true,
-                severity: "info".to_string(),
-                error: None,
-                command_entry_id: None,
-            },
-            true,
-            0,
-        ),
+                "done".to_string(),
+                crate::core::messages::SessionSlashCommandResultDetails {
+                    command: command.clone(),
+                    success: true,
+                    severity: "info".to_string(),
+                    error: None,
+                    command_entry_id: None,
+                },
+                true,
+                0,
+            ),
         );
         let kinds = build_conversation_components(&[message], &options(&no_definition));
         assert_eq!(

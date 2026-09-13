@@ -1,6 +1,6 @@
 //! Port of packages/ai/src/api-registry.ts
 
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::compaction::CompactionOptions;
@@ -53,12 +53,12 @@ struct RegisteredApiProvider {
     source_id: Option<String>,
 }
 
-fn api_provider_registry() -> &'static Mutex<HashMap<String, RegisteredApiProvider>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, RegisteredApiProvider>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+fn api_provider_registry() -> &'static Mutex<IndexMap<String, RegisteredApiProvider>> {
+    static REGISTRY: OnceLock<Mutex<IndexMap<String, RegisteredApiProvider>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(IndexMap::new()))
 }
 
-fn lock_registry() -> std::sync::MutexGuard<'static, HashMap<String, RegisteredApiProvider>> {
+fn lock_registry() -> std::sync::MutexGuard<'static, IndexMap<String, RegisteredApiProvider>> {
     api_provider_registry()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -162,6 +162,9 @@ pub fn clear_api_providers() {
 }
 
 #[cfg(test)]
+pub(crate) static API_REGISTRY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{AssistantMessage, STOP_REASON_STOP};
@@ -191,6 +194,7 @@ mod tests {
 
     #[test]
     fn register_get_and_clear() {
+        let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_api_providers();
         register_api_provider(provider("openai-responses"), Some("src-a".to_string()));
         assert!(get_api_provider("openai-responses").is_some());
@@ -209,6 +213,7 @@ mod tests {
 
     #[test]
     fn registry_is_last_write_wins_per_api() {
+        let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_api_providers();
         register_api_provider(provider("openai-completions"), Some("first".to_string()));
         register_api_provider(provider("openai-completions"), Some("second".to_string()));
@@ -220,6 +225,7 @@ mod tests {
 
     #[test]
     fn wrapped_stream_returns_events_for_matching_api() {
+        let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_api_providers();
         register_api_provider(provider("google-generative-ai"), None);
         let internal = get_api_provider("google-generative-ai").unwrap();
@@ -233,11 +239,27 @@ mod tests {
     #[test]
     #[should_panic(expected = "Mismatched api: openai-responses expected anthropic-messages")]
     fn wrapped_stream_panics_on_mismatched_api() {
+        let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         clear_api_providers();
         register_api_provider(provider("anthropic-messages"), None);
         let internal = get_api_provider("anthropic-messages").unwrap();
         let model = Model::new("m", "M", "openai-responses", "openai", "https://example.test");
         let context = Context::default();
         let _ = (internal.stream)(&model, &context, None);
+    }
+
+    #[test]
+    fn replacement_and_removal_preserve_registration_order() {
+        let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        clear_api_providers();
+        for api in ["first", "second", "third"] {
+            register_api_provider(provider(api), Some(api.to_string()));
+        }
+        register_api_provider(provider("second"), Some("replacement".to_string()));
+        let ids = || get_api_providers().into_iter().map(|provider| provider.api).collect::<Vec<_>>();
+        assert_eq!(ids(), ["first", "second", "third"]);
+        unregister_api_providers("first");
+        assert_eq!(ids(), ["second", "third"]);
+        clear_api_providers();
     }
 }

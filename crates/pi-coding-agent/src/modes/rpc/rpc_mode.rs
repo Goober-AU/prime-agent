@@ -111,6 +111,8 @@ pub async fn run_rpc_mode_with_connection(
         observation_locks: Mutex::new(HashMap::new()),
         prompt_command_tail: Arc::new(AsyncMutex::new(())),
         detach_input: Mutex::new(None),
+        pending_commands: std::sync::atomic::AtomicUsize::new(0),
+        commands_settled: tokio::sync::Notify::new(),
     });
 
     let unsubscribe = connection.subscribe(Arc::new({
@@ -160,16 +162,36 @@ pub async fn run_rpc_mode_with_connection(
     let dispatch: Arc<dyn Fn(String) + Send + Sync> = {
         let state = state.clone();
         Arc::new(move |line: String| {
+            state.pending_commands.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let state = state.clone();
-            tokio::spawn(async move {
+            let mut command = Box::pin(async move {
+                let _completion = CommandCompletion(state.clone());
                 state.handle_input_line(line).await;
             });
+            // Preserve the synchronous command prologue before accepting EOF or
+            // the next line, as the JavaScript async handler does.
+            let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+            if std::future::Future::poll(command.as_mut(), &mut context).is_pending() {
+                tokio::spawn(command);
+            }
         })
     };
 
+    let reader = Arc::new(Mutex::new(JsonlLineReader::new(
+        dispatch.clone(), JsonlLineReaderOptions::default(),
+    )));
+    let decoder = Arc::new(Mutex::new(StringDecoder::new()));
     let on_end: Arc<dyn Fn() + Send + Sync> = {
         let state = state.clone();
+        let reader = reader.clone();
+        let decoder = decoder.clone();
         Arc::new(move || {
+            let tail = decoder.lock().expect("decoder poisoned").end();
+            {
+                let mut reader = reader.lock().expect("reader poisoned");
+                reader.push(&tail);
+                reader.end();
+            }
             let state = state.clone();
             tokio::spawn(async move {
                 state.on_input_end().await;
@@ -177,11 +199,6 @@ pub async fn run_rpc_mode_with_connection(
         })
     };
     let on_data: Arc<dyn Fn(&[u8]) + Send + Sync> = {
-        let reader = Arc::new(Mutex::new(JsonlLineReader::new(
-            dispatch.clone(),
-            JsonlLineReaderOptions::default(),
-        )));
-        let decoder = Arc::new(Mutex::new(StringDecoder::new()));
         Arc::new(move |chunk: &[u8]| {
             let text = decoder.lock().expect("decoder poisoned").write(chunk);
             reader.lock().expect("reader poisoned").push(&text);
@@ -231,6 +248,17 @@ struct RpcModeState {
     observation_locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
     prompt_command_tail: Arc<AsyncMutex<()>>,
     detach_input: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    pending_commands: std::sync::atomic::AtomicUsize,
+    commands_settled: tokio::sync::Notify,
+}
+
+struct CommandCompletion(Arc<RpcModeState>);
+
+impl Drop for CommandCompletion {
+    fn drop(&mut self) {
+        self.0.pending_commands.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.commands_settled.notify_one();
+    }
 }
 
 impl RpcModeState {
@@ -574,6 +602,9 @@ impl RpcModeState {
         }
         self.host.pause_stdin();
         self.cancel_pending_extension_ui().await;
+        while self.pending_commands.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            self.commands_settled.notified().await;
+        }
         match self.connection.wait_for_idle().await {
             Ok(()) => self.shutdown(0).await,
             Err(_) => self.shutdown(1).await,

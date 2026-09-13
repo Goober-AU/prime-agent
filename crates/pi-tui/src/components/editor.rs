@@ -449,6 +449,7 @@ pub struct Editor {
     focused: bool,
 
     tui: Rc<RefCell<TUI>>,
+    terminal_rows: usize,
     theme: EditorTheme,
     padding_x: usize,
     prompt_prefix: String,
@@ -508,6 +509,7 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(tui: Rc<RefCell<TUI>>, theme: EditorTheme, options: EditorOptions) -> Self {
+        let terminal_rows = tui.borrow().terminal_rows();
         let border_color = Rc::clone(&theme.border_color);
         let background_color = theme.background_color.clone();
         let autocomplete_background_color = theme.autocomplete_background_color.clone();
@@ -532,6 +534,7 @@ impl Editor {
             },
             focused: false,
             tui,
+            terminal_rows,
             theme,
             padding_x,
             prompt_prefix,
@@ -584,6 +587,16 @@ impl Editor {
 
     pub fn get_padding_x(&self) -> usize {
         self.padding_x
+    }
+
+    /// The UI host updates this on resize, before borrowing the TUI to render.
+    /// Rendering must not re-borrow the owner that is traversing its children.
+    pub fn set_terminal_rows(&mut self, rows: usize) {
+        self.terminal_rows = rows.max(1);
+    }
+
+    fn current_terminal_rows(&self) -> usize {
+        self.tui.try_borrow().map(|ui| ui.terminal_rows()).unwrap_or(self.terminal_rows)
     }
 
     pub fn set_padding_x(&mut self, padding: f64) {
@@ -2075,7 +2088,7 @@ impl Editor {
     /// Moves cursor by the page size while keeping it in bounds.
     fn page_scroll(&mut self, direction: i64) {
         self.last_action = None;
-        let terminal_rows = self.tui.borrow().terminal_rows();
+        let terminal_rows = self.current_terminal_rows();
         let page_size = ((terminal_rows as f64 * 0.3).floor() as i64).max(5);
 
         let visual_lines = self.build_visual_line_map(self.last_width);
@@ -2876,7 +2889,7 @@ impl Component for Editor {
 
         let layout_lines = self.layout_text(layout_width);
 
-        let terminal_rows = self.tui.borrow().terminal_rows();
+        let terminal_rows = self.current_terminal_rows();
         let max_visible_lines = ((terminal_rows as f64 * 0.3).floor() as usize).max(5);
 
         let cursor_line_index = layout_lines
@@ -3383,6 +3396,26 @@ impl Component for Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renders_while_the_owning_tui_is_borrowed() {
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(crate::terminal::ProcessTerminal::new()), None)));
+        let mut editor = Editor::new(ui.clone(), EditorTheme {
+            border_color: Rc::new(str::to_string), background_color: None,
+            autocomplete_background_color: None, command_color: None,
+            select_list: SelectListTheme {
+                selected_prefix: Box::new(str::to_string), selected_text: Box::new(str::to_string),
+                description: Box::new(str::to_string), argument_hint: None, source_tag: None,
+                scroll_info: Box::new(str::to_string), no_match: Box::new(str::to_string),
+            },
+        }, EditorOptions::default());
+        editor.set_text("one\ntwo\nthree\nfour\nfive\nsix\nseven");
+        editor.set_terminal_rows(10);
+        let _render_owner = ui.borrow_mut();
+        let lines = editor.render(30.0);
+        assert_eq!(lines.len(), 7, "five visible lines and two borders");
+        assert!(lines.iter().any(|line| line.contains("seven")));
+    }
 
     #[test]
     fn paste_marker_is_atomic_only_with_valid_id() {

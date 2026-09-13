@@ -1,5 +1,9 @@
 # HANDOFF — Rust port of the first-party TypeScript app layer
 
+> **Latest checkpoint (2026-09-13):** continue from [RUST_CLI_NEXT_STEPS.md](RUST_CLI_NEXT_STEPS.md).
+> It supersedes the current-state claims below: the final CLI repair checkpoint has one test compile error,
+> saved but unverified deadlock fixes, and an unfinished supervisor roster. The older results below are historical.
+
 **Target:** `C:/Users/openclawuser/optimus-rust-port`, branch `fix/rust-port-completion`
 **Pinned reference:** commit `9f547ceaba079dee45ee415a430d57fb86fa940d` (build optimus-main-20260911, v0.9.3)
 **Scope:** behaviourally faithful Rust port of `packages/agent`, `packages/ai`,

@@ -18,8 +18,8 @@ use pi_tui::tui::TUI;
 pub struct CountdownTimer {
     remaining_seconds: Arc<AtomicI64>,
     disposed: Arc<AtomicBool>,
-    pending_ticks: tokio::sync::mpsc::UnboundedReceiver<()>,
-    tick_sender: Option<tokio::sync::mpsc::UnboundedSender<()>>,
+    pending_ticks: tokio::sync::mpsc::UnboundedReceiver<i64>,
+    tick_sender: Option<tokio::sync::mpsc::UnboundedSender<i64>>,
     interval_task: Option<tokio::task::JoinHandle<()>>,
     on_tick: Option<Box<dyn Fn(f64)>>,
     on_expire: Option<Box<dyn Fn()>>,
@@ -62,7 +62,7 @@ impl CountdownTimer {
         let Some(sender) = self.tick_sender.clone() else {
             return;
         };
-        let remaining_seconds = Arc::clone(&self.remaining_seconds);
+        let mut remaining_seconds = self.remaining_seconds.load(Ordering::SeqCst);
         let disposed = Arc::clone(&self.disposed);
         let task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(std::time::Duration::from_millis(1000));
@@ -73,8 +73,8 @@ impl CountdownTimer {
                 if disposed.load(Ordering::SeqCst) {
                     break;
                 }
-                remaining_seconds.fetch_sub(1, Ordering::SeqCst);
-                if sender.send(()).is_err() {
+                remaining_seconds -= 1;
+                if sender.send(remaining_seconds).is_err() || remaining_seconds <= 0 {
                     break;
                 }
             }
@@ -85,9 +85,12 @@ impl CountdownTimer {
     /// Runs the pending interval callbacks: `onTick`, `requestRender`, and
     /// `dispose()` + `onExpire()` once the remainder reaches zero.
     pub fn poll(&mut self) {
-        while let Ok(()) = self.pending_ticks.try_recv() {
-            let seconds = self.remaining_seconds.load(Ordering::SeqCst) as f64;
-            self.on_tick(seconds);
+        if self.disposed.load(Ordering::SeqCst) {
+            return;
+        }
+        while let Ok(seconds) = self.pending_ticks.try_recv() {
+            self.remaining_seconds.store(seconds, Ordering::SeqCst);
+            self.on_tick(seconds as f64);
             if let Some(tui) = &self.tui {
                 tui.borrow_mut().request_render();
             }
@@ -141,8 +144,8 @@ mod tests {
         assert_eq!(js_ceil(2000.0 / 1000.0), 2);
     }
 
-    #[test]
-    fn ticks_immediately_then_expires_after_the_remaining_ticks() {
+    #[tokio::test]
+    async fn ticks_immediately_then_expires_after_the_remaining_ticks() {
         let ticks = Arc::new(std::sync::Mutex::new(Vec::<f64>::new()));
         let expired = Arc::new(AtomicBool::new(false));
         let observed = Arc::clone(&ticks);
@@ -157,7 +160,7 @@ mod tests {
         // The constructor ticks once with the full remainder.
         assert_eq!(*ticks.lock().expect("ticks"), vec![2.0]);
 
-        std::thread::sleep(std::time::Duration::from_millis(2100));
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
         timer.poll();
         assert_eq!(timer.remaining_seconds(), 0.0);
         assert!(expired.load(Ordering::SeqCst));
@@ -165,8 +168,8 @@ mod tests {
         assert!(timer.tick_sender.is_none());
     }
 
-    #[test]
-    fn dispose_stops_the_interval() {
+    #[tokio::test]
+    async fn dispose_stops_the_interval() {
         let mut timer = CountdownTimer::new(5000.0, None, Box::new(|_| {}), Box::new(|| {}));
         timer.dispose();
         assert!(timer.tick_sender.is_none());

@@ -57,7 +57,7 @@ pub fn agent_message_summary_line(label: &str, participant: &str, preview: Optio
 /// Single-line message preview sized to fit after the summary-line prefix.
 pub fn agent_message_preview(prefix_width: usize, message: &str) -> String {
     let max_columns = std::cmp::max(20, 100usize.saturating_sub(prefix_width));
-    truncate_to_width(&collapse_text(message), max_columns as f64, "", false)
+    truncate_to_width(&collapse_text(message), max_columns as f64, "...", false)
 }
 
 /// `╰─`-guttered message body lines shared by received and sent agent-message UI.
@@ -282,9 +282,13 @@ mod tests {
     fn leading_space_is_suppressed_on_request() {
         init();
         let mut spaced = AgentMessageComponent::new(details("x"), false);
-        assert_eq!(spaced.render(40.0).len(), 2);
         let mut tight = AgentMessageComponent::new(details("x"), true);
-        assert_eq!(tight.render(40.0).len(), 1);
+        for width in [40.0, 100.0] {
+            let spaced_lines = spaced.render(width);
+            let tight_lines = tight.render(width);
+            assert_eq!(spaced_lines[0], "");
+            assert_eq!(&spaced_lines[1..], tight_lines.as_slice());
+        }
     }
 
     /// Test helper: drop SGR sequences so assertions read the visible text.

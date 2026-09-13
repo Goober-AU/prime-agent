@@ -380,7 +380,7 @@ pub struct IpythonToolOptions {
 
 /// The kernel client surface the ipython tool drives.
 ///
-/// `ReplKernelManager` (kernel slice, still empty) implements this trait; the
+/// The native adapter forwards these operations to `ReplKernelManager`; the
 /// provisioner only depends on the operations below.
 pub trait KernelClient: Send + Sync {
     fn is_running(&self) -> bool;
@@ -1269,12 +1269,50 @@ pub(crate) fn abort_signal_from_token(token: tokio_util::sync::CancellationToken
     signal
 }
 
-/// The kernel slice owns `ReplKernelManager`. Until it lands this factory is
-/// the only producer of [`KernelClient`]s; it panics because starting a real
-/// kernel is impossible without that implementation.
+/// Adapt the shared kernel lifecycle to the tool's owned-future interface.
+struct ReplKernelClient {
+    manager: Arc<dyn crate::core::kernel::shared::KernelClient>,
+}
+
+impl KernelClient for ReplKernelClient {
+    fn is_running(&self) -> bool { self.manager.is_running() }
+    fn is_defunct(&self) -> bool { self.manager.is_defunct() }
+    fn start(&self, options: KernelStartOptions) -> BoxFuture<'static, Result<(), KernelError>> {
+        let manager = self.manager.clone();
+        Box::pin(async move { manager.start(options).await })
+    }
+    fn execute(&self, code: &str, signal: Option<AbortSignal>, on_stream: Option<Arc<dyn Fn(&str, StreamName) + Send + Sync>>) -> BoxFuture<'static, Result<ExecuteResult, KernelError>> {
+        let manager = self.manager.clone();
+        let code = code.to_string();
+        Box::pin(async move { manager.execute(code, ExecuteOptions { signal, on_stream, ..Default::default() }).await })
+    }
+    fn restore_state(&self) -> BoxFuture<'static, Result<Option<RestoreResult>, KernelError>> {
+        let manager = self.manager.clone();
+        Box::pin(async move { Ok(manager.restore_state(Default::default()).await) })
+    }
+    fn shutdown(&self, snapshot: bool, drain_host_requests: bool) -> BoxFuture<'static, Result<(), KernelError>> {
+        let manager = self.manager.clone();
+        Box::pin(async move { manager.shutdown(crate::core::kernel::shared::KernelShutdownOptions { snapshot, drain_host_requests }).await.map(|_| ()) })
+    }
+    fn kill(&self) -> BoxFuture<'static, Result<(), KernelError>> {
+        let manager = self.manager.clone();
+        Box::pin(async move { manager.kill().await; Ok(()) })
+    }
+    fn prune_oversized_variables(&self) -> BoxFuture<'static, Result<Option<PruneResult>, KernelError>> {
+        let manager = self.manager.clone();
+        Box::pin(async move { Ok(manager.prune_oversized_variables().await.map(|result| PruneResult { pruned: result.pruned })) })
+    }
+    fn list_namespace_names(&self, signal: Option<AbortSignal>) -> BoxFuture<'static, Result<Option<Vec<String>>, KernelError>> {
+        let manager = self.manager.clone();
+        Box::pin(async move { Ok(manager.list_namespace_names(signal).await) })
+    }
+}
+
 fn default_kernel_client_factory() -> KernelClientFactory {
-    Arc::new(|_options: KernelManagerOptions| -> Arc<dyn KernelClient> {
-        panic!("ReplKernelManager is not ported yet: pass IpythonToolOptions::provisioner")
+    Arc::new(|options: KernelManagerOptions| -> Arc<dyn KernelClient> {
+        Arc::new(ReplKernelClient {
+            manager: crate::core::kernel::repl_manager::new_repl_kernel_manager(options),
+        })
     })
 }
 
@@ -1479,10 +1517,13 @@ mod tests {
         }
         fn execute(
             &self,
-            _code: &str,
+            code: &str,
             _signal: Option<AbortSignal>,
             _on_stream: Option<Arc<dyn Fn(&str, StreamName) + Send + Sync>>,
         ) -> BoxFuture<'static, Result<ExecuteResult, KernelError>> {
+            if code == build_rlm_bootstrap_code(&[]) {
+                return StubKernelClient.execute(code, _signal, _on_stream);
+            }
             Box::pin(async {
                 Ok(ExecuteResult {
                     stdout: "partial".to_string(),
@@ -1524,6 +1565,21 @@ mod tests {
 
     fn provisioner_with(client: Arc<dyn KernelClient>) -> Arc<IpythonKernelProvisioner> {
         IpythonKernelProvisioner::new("/tmp", None, Arc::new(move |_options| client.clone()))
+    }
+
+    #[tokio::test]
+    async fn default_kernel_factory_constructs_a_lazy_real_manager() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = default_kernel_client_factory()(KernelManagerOptions {
+            cwd: Some(directory.path().to_string_lossy().into_owned()),
+            // Construction must not run the interpreter or bootstrap a venv.
+            python: Some(directory.path().join("not-started-python").to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+        assert!(!manager.is_running());
+        assert!(!manager.is_defunct());
+        manager.shutdown(false, true).await.unwrap();
+        assert!(!manager.is_running());
     }
 
     #[test]

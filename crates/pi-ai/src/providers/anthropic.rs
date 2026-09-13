@@ -1582,17 +1582,24 @@ fn build_params(
 	);
 	params.insert(
 		"max_tokens".to_string(),
-		Value::Number(
-			serde_json::Number::from_f64(
-				options
-					.stream
-					.max_tokens
-					// JS `options?.maxTokens || ...`: 0 and NaN are falsy.
-					.filter(|max_tokens| *max_tokens != 0.0 && !max_tokens.is_nan())
-					.unwrap_or_else(|| (model.max_tokens / 3.0).trunc()),
-			)
-			.unwrap_or_else(|| serde_json::Number::from(0)),
-		),
+		serde_json::Number::from_f64(
+			options
+				.stream
+				.max_tokens
+				// JS `options?.maxTokens || ...`: 0 and NaN are falsy.
+				.filter(|max_tokens| *max_tokens != 0.0 && !max_tokens.is_nan())
+				.unwrap_or_else(|| {
+					// JS `(model.maxTokens / 3) | 0` wraps only the fallback.
+					let fallback = (model.max_tokens / 3.0).trunc();
+					if fallback.is_finite() {
+						(fallback.rem_euclid(4_294_967_296.0) as u32 as i32) as f64
+					} else {
+						0.0
+					}
+				}),
+		)
+		.map(Value::Number)
+		.unwrap_or(Value::Null),
 	);
 	params.insert("stream".to_string(), Value::Bool(true));
 
@@ -2674,7 +2681,7 @@ mod tests {
 			"{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
 			Some("req_abc"),
 		);
-		assert_eq!(failure.message, "Provider overloaded (overloaded_error) [request_id: req_abc]: Overloaded");
+		assert_eq!(failure.message, "Provider overloaded (overloaded_error): Overloaded [request_id: req_abc]");
 		assert_eq!(failure.info.kind, "overloaded");
 		assert_eq!(failure.info.request_id, Some("req_abc".to_string()));
 		assert_eq!(failure.info.raw.as_deref(), Some("{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"));
@@ -2739,7 +2746,7 @@ mod tests {
 		let plain = test_model("anthropic", "claude-sonnet-4-5");
 		assert_eq!(map_thinking_level_to_effort(&plain, Some(&"minimal".to_string())), "low");
 		assert_eq!(map_thinking_level_to_effort(&plain, Some(&"medium".to_string())), "medium");
-		assert_eq!(map_thinking_level_to_effort(&plain, Some(&"xhigh".to_string())), "xhigh");
+		assert_eq!(map_thinking_level_to_effort(&plain, Some(&"xhigh".to_string())), "high");
 		assert_eq!(map_thinking_level_to_effort(&plain, None), "high");
 	}
 
@@ -2752,11 +2759,37 @@ mod tests {
 
 		assert_eq!(params["model"], Value::String("claude-sonnet-4-5".to_string()));
 		assert_eq!(params["stream"], Value::Bool(true));
-		assert_eq!(params["max_tokens"], serde_json::json!(2730));
+		assert_eq!(params["max_tokens"].as_f64(), Some(2730.0));
 		assert!(params.get("system").is_none());
 		assert!(params.get("temperature").is_none());
 		assert_eq!(params["messages"][0]["role"], Value::String("user".to_string()));
 		assert_eq!(params["messages"][0]["content"], Value::String("Say hello.".to_string()));
+	}
+
+	#[test]
+	fn build_params_preserves_explicit_limits_and_wraps_the_default_like_javascript() {
+		let context = context_with_user("hi");
+		for (limit, model_limit, expected) in [
+			(Some(3.9), 8192.0, Some(3.9)),
+			(None, 8.7, Some(2.0)),
+			(None, 6_442_450_950.0, Some(-2_147_483_646.0)),
+			(None, -6_442_450_950.0, Some(2_147_483_646.0)),
+			(Some(0.0), 6_442_450_950.0, Some(-2_147_483_646.0)),
+			(Some(f64::NAN), 8.7, Some(2.0)),
+			(None, f64::INFINITY, Some(0.0)),
+			(None, f64::NAN, Some(0.0)),
+			(Some(f64::INFINITY), 8192.0, None),
+		] {
+			let mut model = test_model("anthropic", "claude-sonnet-4-5");
+			model.max_tokens = model_limit;
+			let mut options = AnthropicOptions::default();
+			options.stream.max_tokens = limit;
+			let params = build_params(&model, &context, false, &options, None).unwrap();
+			assert_eq!(params["max_tokens"].as_f64(), expected, "limit={limit:?}, model_limit={model_limit}");
+			if expected.is_none() {
+				assert!(params["max_tokens"].is_null());
+			}
+		}
 	}
 
 	#[test]
@@ -2872,7 +2905,7 @@ mod tests {
 		budget.thinking_budget_tokens = Some(4096.0);
 		let params = build_params(&model, &context, false, &budget, None).unwrap();
 		assert_eq!(params["thinking"]["type"], Value::String("enabled".to_string()));
-		assert_eq!(params["thinking"]["budget_tokens"], serde_json::json!(4096));
+		assert_eq!(params["thinking"]["budget_tokens"].as_f64(), Some(4096.0));
 		assert_eq!(params["thinking"]["display"], Value::String("summarized".to_string()));
 
 		let mut adaptive = AnthropicOptions::default();
@@ -2955,19 +2988,23 @@ mod tests {
 		assert_eq!(params.len(), 3);
 		assert_eq!(params[1]["content"][0]["type"], Value::String("tool_use".to_string()));
 		assert_eq!(params[0]["content"], Value::String("real".to_string()));
-		assert_eq!(params[1]["role"], Value::String("user".to_string()));
-		assert_eq!(params[1]["content"].as_array().unwrap().len(), 2);
-		assert_eq!(params[1]["content"][0]["type"], Value::String("tool_result".to_string()));
-		assert_eq!(params[1]["content"][0]["tool_use_id"], Value::String("call_1".to_string()));
-		assert_eq!(params[1]["content"][0]["content"], Value::String("first".to_string()));
-		assert_eq!(params[1]["content"][0]["is_error"], Value::Bool(false));
-		assert_eq!(params[1]["content"][1]["is_error"], Value::Bool(true));
+		assert_eq!(params[1]["role"], Value::String("assistant".to_string()));
+		assert_eq!(params[2]["role"], Value::String("user".to_string()));
+		assert_eq!(params[2]["content"].as_array().unwrap().len(), 2);
+		assert_eq!(params[2]["content"][0]["type"], Value::String("tool_result".to_string()));
+		assert_eq!(params[2]["content"][0]["tool_use_id"], Value::String("call_1".to_string()));
+		assert_eq!(params[2]["content"][0]["content"], Value::String("first".to_string()));
+		assert_eq!(params[2]["content"][0]["is_error"], Value::Bool(false));
+		assert_eq!(params[2]["content"][1]["is_error"], Value::Bool(true));
 	}
 
 	#[test]
 	fn convert_messages_rewrites_redacted_and_unsigned_thinking() {
 		let model = test_model("anthropic", "claude-sonnet-4-5");
 		let mut assistant = AssistantMessage::default();
+		assistant.provider = model.provider.clone();
+		assistant.api = model.api.clone();
+		assistant.model = model.id.clone();
 		assistant.content = vec![
 			ContentBlock::Thinking(ThinkingContent {
 				type_: crate::types::THINKING_CONTENT_TYPE.to_string(),
@@ -3078,7 +3115,6 @@ mod tests {
 		assert_eq!(
 			names,
 			vec![
-				"Accept",
 				"User-Agent",
 				"X-Stainless-Retry-Count",
 				"X-Stainless-Timeout",
@@ -3088,8 +3124,9 @@ mod tests {
 				"X-Stainless-Arch",
 				"X-Stainless-Runtime",
 				"X-Stainless-Runtime-Version",
-				"anthropic-dangerous-direct-browser-access",
 				"anthropic-version",
+				"accept",
+				"anthropic-dangerous-direct-browser-access",
 				"x-api-key",
 				"anthropic-beta",
 				"content-type"
@@ -3216,7 +3253,7 @@ mod tests {
 		match anthropic_api_error(403, None, "Forbidden", &headers) {
 			AnthropicStreamError::Failure(failure) => {
 				assert_eq!(failure.info.kind, "permission");
-				assert_eq!(failure.message, "Provider denied access to the requested resource (PermissionDeniedError, 403): Forbidden");
+				assert_eq!(failure.message, "Provider denied access to the requested resource (PermissionDeniedError, 403)");
 			}
 			other => panic!("unexpected error {:?}", other),
 		}
@@ -3274,7 +3311,7 @@ mod tests {
 		let options = AnthropicOptions::from_base(&base);
 		let value = serde_json::to_value(&options).unwrap();
 		assert_eq!(value["temperature"], serde_json::json!(0.2));
-		assert_eq!(value["maxTokens"], serde_json::json!(1024));
+		assert_eq!(value["maxTokens"].as_f64(), Some(1024.0));
 		let back: AnthropicOptions = serde_json::from_value(value).unwrap();
 		assert_eq!(back.stream.max_tokens, Some(1024.0));
 		assert_eq!(back.thinking_enabled, None);

@@ -842,6 +842,7 @@ pub type FauxSimpleStreamOptions = SimpleStreamOptions;
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::api_registry::API_REGISTRY_TEST_LOCK;
 	use crate::types::{Tool, UserMessage};
 
 	#[test]
@@ -980,11 +981,11 @@ mod tests {
 		};
 		let cache = Mutex::new(HashMap::new());
 		let message = with_usage_estimate(faux_assistant_message(FauxAssistantContent::Text("abcd".to_string()), None), &context, None, &cache);
-		assert_eq!(message.usage.input, 11.0); // ceil((7 + 40) / 4)
+		assert_eq!(message.usage.input, 12.0); // ceil((7 + 40) / 4)
 		assert_eq!(message.usage.cache_read, 0.0);
 		assert_eq!(message.usage.cache_write, 0.0);
 		assert_eq!(message.usage.output, 1.0);
-		assert_eq!(message.usage.total_tokens, 12.0);
+		assert_eq!(message.usage.total_tokens, 13.0);
 	}
 
 	#[test]
@@ -1004,8 +1005,10 @@ mod tests {
 			Some(&options),
 			&cache,
 		);
-		assert_eq!(first.usage.cache_write, 11.0);
+		assert_eq!(first.usage.cache_write, 12.0);
 		assert_eq!(first.usage.cache_read, 0.0);
+		assert_eq!(first.usage.input, 12.0);
+		assert_eq!(first.usage.total_tokens, 25.0);
 
 		let second = with_usage_estimate(
 			faux_assistant_message(FauxAssistantContent::Text("abcd".to_string()), None),
@@ -1013,9 +1016,10 @@ mod tests {
 			Some(&options),
 			&cache,
 		);
-		assert_eq!(second.usage.cache_read, 11.0);
+		assert_eq!(second.usage.cache_read, 12.0);
 		assert_eq!(second.usage.cache_write, 0.0);
 		assert_eq!(second.usage.input, 0.0);
+		assert_eq!(second.usage.total_tokens, 13.0);
 	}
 
 	#[test]
@@ -1036,7 +1040,7 @@ mod tests {
 			&cache,
 		);
 		assert_eq!(message.usage.cache_write, 0.0);
-		assert_eq!(message.usage.input, 11.0);
+		assert_eq!(message.usage.input, 12.0);
 		assert!(cache.lock().unwrap().is_empty());
 	}
 
@@ -1079,6 +1083,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn register_faux_provider_defaults_and_responses() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		let registration = register_faux_provider(None);
 		assert!(registration.api.starts_with("faux:"));
 		assert_eq!(registration.models.len(), 1);
@@ -1123,6 +1128,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn register_faux_provider_uses_explicit_models_and_api() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
 			api: Some("faux-api".to_string()),
 			provider: Some("faux-provider".to_string()),
@@ -1168,6 +1174,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn faux_stream_reports_error_when_no_responses_queued() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
 			provider: Some("faux-test-empty".to_string()),
 			..Default::default()
@@ -1191,6 +1198,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn faux_stream_emits_text_deltas_in_order() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 		let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
 			provider: Some("faux-test-deltas".to_string()),
 			token_size: Some(FauxTokenSize {

@@ -3010,24 +3010,30 @@ mod message_tests {
 
 	#[test]
 	fn user_message_with_only_images_keeps_image_parts() {
+		let mut model = base_model();
+		model.input = vec![InputModality::Text, InputModality::Image];
 		let user = Message::user(crate::types::UserMessage::new(
 			UserContent::Blocks(vec![
-				ImageOrTextContent::Text(TextContent::new("look")),
 				ImageOrTextContent::Image(ImageContent::new("ZmFrZQ==", "image/png")),
 			]),
 			1,
 		));
-		let params = convert_messages(&base_model(), &context(vec![user]), &full_compat()).unwrap();
-		assert_eq!(params[0]["content"][1]["type"], json!("image_url"));
+		let params = convert_messages(&model, &context(vec![user]), &full_compat()).unwrap();
+		assert_eq!(params.len(), 1);
+		assert_eq!(params[0]["role"], json!("user"));
 		assert_eq!(
-			params[0]["content"][1]["image_url"]["url"],
-			json!("data:image/png;base64,ZmFrZQ==")
+			params[0]["content"],
+			json!([{ "type": "image_url", "image_url": { "url": "data:image/png;base64,ZmFrZQ==" } }])
 		);
 	}
 
 	#[test]
 	fn normalize_tool_call_id_truncates_pipe_separated_ids() {
-		let long_id = format!("{{}}+/={{}}|tail{}", "a".repeat(40));
+		let mut model = base_model();
+		// Cross-provider replay invokes ID normalization; same-source IDs are kept.
+		model.provider = "openai".to_string();
+		let long_id = format!("call+/{}|tail", "a".repeat(50));
+		let expected_id = format!("call__{}", "a".repeat(34));
 		let messages = vec![
 			assistant_message(
 				vec![ContentBlock::ToolCall(ToolCall::new(&long_id, "echo", Map::new()))],
@@ -3041,9 +3047,9 @@ mod message_tests {
 				3,
 			)),
 		];
-		let params = convert_messages(&base_model(), &context(messages), &full_compat()).unwrap();
-		assert_eq!(params[0]["tool_calls"][0]["id"], json!("a".repeat(40)));
-		assert_eq!(params[1]["tool_call_id"], json!("a".repeat(40)));
+		let params = convert_messages(&model, &context(messages), &full_compat()).unwrap();
+		assert_eq!(params[0]["tool_calls"][0]["id"], json!(expected_id));
+		assert_eq!(params[1]["tool_call_id"], json!(expected_id));
 	}
 
 	#[test]

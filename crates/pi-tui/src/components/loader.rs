@@ -144,6 +144,13 @@ impl Loader {
     }
 
     fn update_display(&mut self) {
+        self.update_text();
+        if let Some(ui) = &self.ui {
+            ui.borrow_mut().request_render();
+        }
+    }
+
+    fn update_text(&mut self) {
         self.current_frame = self.current_frame();
         let frame = self
             .frames
@@ -162,14 +169,20 @@ impl Loader {
         };
         let message = (self.message_color_fn)(&self.message);
         self.text.set_text(format!("{indicator}{message}"));
-        if let Some(ui) = &self.ui {
-            ui.borrow_mut().request_render();
-        }
+    }
+}
+
+impl Drop for Loader {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
 impl Component for Loader {
     fn render(&mut self, width: f64) -> Vec<String> {
+        if self.current_frame != self.current_frame() {
+            self.update_text();
+        }
         let mut result = vec![String::new()];
         result.extend(self.text.render(width));
         result
@@ -190,6 +203,39 @@ mod tests {
         assert_eq!(DEFAULT_FRAMES[0], "⠋");
         assert_eq!(DEFAULT_FRAMES[9], "⠏");
         assert_eq!(DEFAULT_INTERVAL_MS, 80);
+    }
+
+    #[tokio::test]
+    async fn rendering_reads_advanced_frames_and_drop_stops_animation() {
+        let tui = Rc::new(RefCell::new(TUI::new(
+            Box::new(crate::terminal::ProcessTerminal::new()),
+            None,
+        )));
+        let mut loader = Loader::new(
+            tui,
+            Box::new(str::to_string),
+            Box::new(str::to_string),
+            "loading".to_string(),
+            Some(LoaderIndicatorOptions {
+                frames: Some(vec!["A".to_string(), "B".to_string()]),
+                interval_ms: Some(10),
+            }),
+        );
+        assert_eq!(loader.render(20.0)[1].trim(), "A loading");
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while loader.current_frame() == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("animation advances");
+        loader.stop();
+        assert_eq!(loader.render(20.0)[1].trim(), "B loading");
+        loader.start();
+        let running = Arc::clone(&loader.running);
+        assert!(running.load(Ordering::SeqCst));
+        drop(loader);
+        assert!(!running.load(Ordering::SeqCst));
     }
 
     #[test]

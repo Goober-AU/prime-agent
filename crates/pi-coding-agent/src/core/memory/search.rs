@@ -237,7 +237,7 @@ pub fn search_memory(
                 if project_id.is_some() && project_id != Some(store.project.id.as_str()) {
                     continue;
                 }
-                let host_id = entry.metadata.get("hostId").and_then(Value::as_str);
+                let host_id = entry.metadata.get("hostId").and_then(Value::as_str).filter(|id| !id.is_empty());
                 if host_id.is_some() && host_id != Some(store.host_id.as_str()) {
                     continue;
                 }
@@ -424,7 +424,7 @@ mod tests {
                     "summary": format!("entry_{index}"),
                     "rationale": "r",
                     "expectedOutcome": "o",
-                    "edits": [{"action": "create", "kind": "memory", "id": format!("entry_{index}"), "title": format!("entry_{index}"), "content": if index == 19 { "Sydney Astra details" } else { "Oregon item" }}]
+                    "edits": [{"action": "create", "kind": "memory", "id": format!("entry_{index}"), "title": format!("entry_{index}"), "content": if index == 19 { "Sydney Astra details".to_string() } else { format!("Oregon item {index}") }}]
                 }),
             );
             runtime

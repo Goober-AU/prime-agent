@@ -128,14 +128,11 @@ pub struct HeadlessCompletionOptions {
 }
 
 /// The `AgentSession` surface `waitForHeadlessCompletion` uses.
-///
-/// blocked_on: `core/agent-session.ts` belongs to another slice, so the port
-/// drives the exact same members through an explicit seam.
 pub trait HeadlessCompletionSession: Send + Sync {
     /// `session.waitForRlmQuiescence()`.
-    fn wait_for_rlm_quiescence(&self) -> BoxFuture<()>;
+    fn wait_for_rlm_quiescence(&self) -> BoxFuture<Result<(), String>>;
     /// `session.waitForHeadlessIdle()`.
-    fn wait_for_headless_idle(&self) -> BoxFuture<()>;
+    fn wait_for_headless_idle(&self) -> BoxFuture<Result<(), String>>;
     /// `session.getAutonomousStatus()`.
     fn get_autonomous_status(&self) -> AgentAutonomousStatus;
     /// `session.recordHostAutonomousContinuation()`.
@@ -143,32 +140,84 @@ pub trait HeadlessCompletionSession: Send + Sync {
     /// `session.prompt(text, { streamingBehavior, internalPrompt, suppressAutonomousContinuation })`.
     fn prompt_headless_continuation(&self, text: String) -> BoxFuture<Result<(), String>>;
     /// `session.waitForIdle()`.
-    fn wait_for_idle(&self) -> BoxFuture<()>;
+    fn wait_for_idle(&self) -> BoxFuture<Result<(), String>>;
     /// `session.refreshAutonomousGates()`.
-    fn refresh_autonomous_gates(&self) -> BoxFuture<()>;
+    fn refresh_autonomous_gates(&self) -> BoxFuture<Result<(), String>>;
     /// `session.state.messages`.
     fn state_messages(&self) -> Vec<AgentMessage>;
+}
+
+impl HeadlessCompletionSession for Arc<crate::core::agent_session::AgentSession> {
+    fn wait_for_rlm_quiescence(&self) -> BoxFuture<Result<(), String>> {
+        crate::core::agent_session::AgentSession::wait_for_rlm_quiescence(self, None)
+    }
+
+    fn wait_for_headless_idle(&self) -> BoxFuture<Result<(), String>> {
+        let session = self.clone();
+        Box::pin(async move { crate::core::agent_session::AgentSession::wait_for_headless_idle(&session).await })
+    }
+
+    fn get_autonomous_status(&self) -> AgentAutonomousStatus {
+        crate::core::agent_session::AgentSession::get_autonomous_status(self)
+    }
+
+    fn record_host_autonomous_continuation(&self) {
+        crate::core::agent_session::AgentSession::record_host_autonomous_continuation(self);
+    }
+
+    fn prompt_headless_continuation(&self, text: String) -> BoxFuture<Result<(), String>> {
+        let session = self.clone();
+        Box::pin(async move {
+            session.prompt(&text, Some(crate::core::agent_session::PromptOptions {
+                streaming_behavior: Some("followUp".to_string()),
+                internal_prompt: Some(true),
+                suppress_autonomous_continuation: Some(true),
+                ..Default::default()
+            })).await
+        })
+    }
+
+    fn wait_for_idle(&self) -> BoxFuture<Result<(), String>> {
+        let session = self.clone();
+        Box::pin(async move { crate::core::agent_session::AgentSession::wait_for_idle(&session).await })
+    }
+
+    fn refresh_autonomous_gates(&self) -> BoxFuture<Result<(), String>> {
+        let session = self.clone();
+        Box::pin(async move {
+            // The session serializes gate state with a synchronous mutex. Keep
+            // that operation on the blocking pool while its subprocesses await.
+            let runtime = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || runtime.block_on(
+                crate::core::agent_session::AgentSession::refresh_autonomous_gates(&session),
+            )).await.map_err(|error| error.to_string())
+        })
+    }
+
+    fn state_messages(&self) -> Vec<AgentMessage> {
+        crate::core::agent_session::AgentSession::state(self).messages
+    }
 }
 
 /// `waitForHeadlessCompletion(session, options)`.
 pub async fn wait_for_headless_completion(
     session: Arc<dyn HeadlessCompletionSession>,
     options: HeadlessCompletionOptions,
-) -> AgentAutonomousStatus {
+) -> Result<AgentAutonomousStatus, String> {
     let mut last_prompted_progress_key: Option<String> = None;
     let mut repeated_progress_prompts: i64 = 0;
     loop {
         if options.wait_for_rlm_quiescence.unwrap_or(false) {
-            session.wait_for_rlm_quiescence().await;
+            session.wait_for_rlm_quiescence().await?;
         } else {
-            session.wait_for_headless_idle().await;
+            session.wait_for_headless_idle().await?;
         }
         let status = session.get_autonomous_status();
         if !should_continue_autonomous_gates(&status) {
-            return status;
+            return Ok(status);
         }
         let Some(last_gate_failure) = status.last_gate_failure.clone() else {
-            return status;
+            return Ok(status);
         };
         let progress_key = autonomous_progress_key(&status);
         if Some(&progress_key) == last_prompted_progress_key.as_ref() {
@@ -192,10 +241,9 @@ pub async fn wait_for_headless_completion(
                 status.gates.max_retries,
                 now_ms(),
             ))
-            .await
-            .ok();
-        session.wait_for_idle().await;
-        session.refresh_autonomous_gates().await;
+            .await?;
+        session.wait_for_idle().await?;
+        session.refresh_autonomous_gates().await?;
         let result = select_headless_terminal_result(&session.state_messages());
         if let Some(HeadlessTerminalResultMessage::Assistant(primary)) = &result.primary {
             if primary.stop_reason == STOP_REASON_ERROR || primary.stop_reason == STOP_REASON_ABORTED {
@@ -207,7 +255,7 @@ pub async fn wait_for_headless_completion(
                 if options.wait_for_rlm_quiescence.unwrap_or(false) {
                     continue;
                 }
-                return post_error_status;
+                return Ok(post_error_status);
             }
         }
     }
@@ -407,6 +455,6 @@ mod tests {
             1.0,
             0,
         );
-        assert!(text.contains("exit 1.\n\nContinue working."));
+        assert!(text.contains("exit 1.\n\n\nContinue working."));
     }
 }

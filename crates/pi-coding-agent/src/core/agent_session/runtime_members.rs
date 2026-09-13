@@ -595,11 +595,15 @@ impl AgentSession {
             Some(tools) => tools.iter().map(|(name, tool)| (name.clone(),
                 crate::core::tools::tool_definition_wrapper::create_tool_definition_from_agent_tool(tool).into())).collect(),
             None => {
+                let (command_prefix, shell_path) = {
+                    let settings = self.settings_manager.lock().unwrap();
+                    (settings.get_shell_command_prefix(), settings.get_shell_path())
+                };
                 let options = crate::core::tools::ToolsOptions { ipython: Some(crate::core::tools::IpythonToolOptions {
                     env: Some(self.rlm_kernel_env().into_iter().collect()),
                     host_handlers: Some(self.create_kernel_host_handlers()), session_id: Some(self.session_id()),
-                    command_prefix: self.settings_manager.lock().unwrap().get_shell_command_prefix(),
-                    shell_path: self.settings_manager.lock().unwrap().get_shell_path(),
+                    command_prefix,
+                    shell_path,
                     snapshot_dir: self.session_manager.lock().unwrap().get_session_artifact_dir(),
                     ..Default::default()
                 }) };

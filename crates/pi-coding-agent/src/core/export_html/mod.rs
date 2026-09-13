@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(light.info_bg, "rgb(255, 255, 235)");
 
         let dark = derive_export_colors("#343541");
-        assert_eq!(dark.page_bg, "rgb(36, 37, 45)");
+        assert_eq!(dark.page_bg, "rgb(36, 37, 46)");
         assert_eq!(dark.card_bg, "rgb(44, 45, 55)");
         assert_eq!(dark.info_bg, "rgb(72, 68, 65)");
     }

@@ -76,8 +76,59 @@ fn set_raw_mode(raw: bool) -> std::io::Result<()> {
     }
 }
 
+enum NativeInput { Pending, Closed, Bytes(Vec<u8>) }
+
+#[cfg(unix)]
+fn read_available_input() -> std::io::Result<NativeInput> {
+    let mut fd = libc::pollfd { fd: libc::STDIN_FILENO, events: libc::POLLIN, revents: 0 };
+    // The descriptor is borrowed; polling never changes ownership or flags.
+    let ready = unsafe { libc::poll(&mut fd, 1, 0) };
+    if ready < 0 {
+        let error = std::io::Error::last_os_error();
+        return if error.kind() == std::io::ErrorKind::Interrupted { Ok(NativeInput::Pending) } else { Err(error) };
+    }
+    if ready == 0 { return Ok(NativeInput::Pending); }
+    if fd.revents & libc::POLLNVAL != 0 { return Ok(NativeInput::Closed); }
+    let mut bytes = [0u8; 4096];
+    match std::io::stdin().read(&mut bytes) {
+        Ok(0) => Ok(NativeInput::Closed),
+        Ok(count) => Ok(NativeInput::Bytes(bytes[..count].to_vec())),
+        Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted) => Ok(NativeInput::Pending),
+        Err(error) if error.raw_os_error() == Some(libc::EIO) => Ok(NativeInput::Closed),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(unix))]
+fn read_available_input() -> std::io::Result<NativeInput> {
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    if !event::poll(std::time::Duration::ZERO)? { return Ok(NativeInput::Pending); }
+    let sequence = match event::read()? {
+        Event::Paste(text) => format!("\x1b[200~{text}\x1b[201~"),
+        Event::Key(key) if key.kind != KeyEventKind::Release => {
+            let modifier = 1 + u8::from(key.modifiers.contains(KeyModifiers::SHIFT))
+                + 2 * u8::from(key.modifiers.contains(KeyModifiers::ALT))
+                + 4 * u8::from(key.modifiers.contains(KeyModifiers::CONTROL));
+            let code = match key.code {
+                KeyCode::Char(ch) if modifier == 1 => return Ok(NativeInput::Bytes(ch.to_string().into_bytes())),
+                KeyCode::Char(ch) => ch as u32,
+                KeyCode::Enter => 13, KeyCode::Tab | KeyCode::BackTab => 9, KeyCode::Backspace => 127, KeyCode::Esc => 27,
+                KeyCode::Up => 57352, KeyCode::Down => 57353, KeyCode::Left => 57350, KeyCode::Right => 57351,
+                KeyCode::Home => 57358, KeyCode::End => 57359, KeyCode::Delete => 57349, KeyCode::Insert => 57348,
+                KeyCode::PageUp => 57354, KeyCode::PageDown => 57355, KeyCode::F(n) => 57363 + u32::from(n),
+                _ => return Ok(NativeInput::Pending),
+            };
+            format!("\x1b[{code};{modifier}u")
+        }
+        _ => return Ok(NativeInput::Pending),
+    };
+    Ok(NativeInput::Bytes(sequence.into_bytes()))
+}
+
 /// Minimal terminal interface for TUI
 pub trait Terminal {
+    /// Pump available native input on the UI thread. False means EOF.
+    fn poll_input(&mut self) -> std::io::Result<bool> { Ok(true) }
     // Start the terminal with input and resize handlers
     fn start(&mut self, on_input: Box<dyn Fn(String)>, on_resize: Box<dyn Fn()>);
 
@@ -153,6 +204,9 @@ pub struct ProcessTerminal {
     stdin_dispatcher: Option<Rc<dyn Fn(String)>>,
     progress_interval: Option<u64>,
     write_log_path: String,
+    started_at: Option<std::time::Instant>,
+    last_input_at: Option<std::time::Instant>,
+    last_size: Option<(usize, usize)>,
 }
 
 fn timestamp_for_log() -> String {
@@ -195,6 +249,9 @@ impl ProcessTerminal {
             stdin_dispatcher: None,
             progress_interval: None,
             write_log_path: compute_write_log_path(),
+            started_at: None,
+            last_input_at: None,
+            last_size: None,
         }
     }
 
@@ -442,8 +499,40 @@ fn handle_default_color_probe_response(shared: &mut Shared, sequence: &str) -> b
 }
 
 impl Terminal for ProcessTerminal {
+    fn poll_input(&mut self) -> std::io::Result<bool> {
+        if !self.started { return Ok(true); }
+        // Bound each poll so a large paste cannot starve rendering or events.
+        for _ in 0..64 {
+            match read_available_input()? {
+                NativeInput::Pending => break,
+                NativeInput::Closed => return Ok(false),
+                NativeInput::Bytes(bytes) => {
+                    self.process_input_bytes(&bytes);
+                    self.last_input_at = Some(std::time::Instant::now());
+                }
+            }
+        }
+        if self.last_input_at.is_some_and(|last| last.elapsed().as_millis() >= 10) {
+            self.flush_pending_input();
+            self.last_input_at = None;
+        }
+        if let Some(start) = self.started_at {
+            if start.elapsed().as_millis() >= 100 { self.apply_default_color_probe_timeout(); }
+            if start.elapsed().as_millis() >= 150 { self.apply_keyboard_protocol_fallback(); }
+        }
+        let size = (self.columns(), self.rows());
+        if self.last_size != Some(size) {
+            self.last_size = Some(size);
+            let shared = self.shared.borrow();
+            if let Some(handler) = &shared.resize_handler { handler(); }
+        }
+        Ok(true)
+    }
+
     fn start(&mut self, on_input: Box<dyn Fn(String)>, on_resize: Box<dyn Fn()>) {
         self.started = true;
+        self.started_at = Some(std::time::Instant::now());
+        self.last_size = Some((self.columns(), self.rows()));
         {
             let mut s = self.shared.borrow_mut();
             s.input_handler = Some(on_input);
@@ -451,7 +540,7 @@ impl Terminal for ProcessTerminal {
         }
 
         // Save previous state and enable raw mode
-        self.was_raw = consume_input_handoff().unwrap_or(false);
+        self.was_raw = consume_input_handoff().unwrap_or_else(|| crossterm::terminal::is_raw_mode_enabled().unwrap_or(false));
         let _ = set_raw_mode(true);
 
         // Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
@@ -542,8 +631,6 @@ impl Terminal for ProcessTerminal {
 
         let start = std::time::Instant::now();
         let mut last_data_time = std::time::Instant::now();
-        let mut stdin = std::io::stdin();
-        let mut buf = [0u8; 1024];
         loop {
             let now = std::time::Instant::now();
             if now.duration_since(start).as_millis() as u64 >= max_ms {
@@ -552,13 +639,12 @@ impl Terminal for ProcessTerminal {
             if now.duration_since(last_data_time).as_millis() as u64 >= idle_ms {
                 break;
             }
-            // Non-blocking-ish read: rely on the terminal being in raw mode.
-            match stdin.read(&mut buf) {
-                Ok(0) => break,
-                Ok(_) => {
+            match read_available_input() {
+                Ok(NativeInput::Closed) => break,
+                Ok(NativeInput::Bytes(_)) => {
                     last_data_time = std::time::Instant::now();
                 }
-                Err(_) => {
+                Ok(NativeInput::Pending) | Err(_) => {
                     std::thread::sleep(std::time::Duration::from_millis(idle_ms.min(10)));
                 }
             }

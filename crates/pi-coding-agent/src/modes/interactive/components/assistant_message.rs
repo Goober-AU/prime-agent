@@ -340,6 +340,7 @@ impl AssistantMessageComponent {
         let base_url = options
             .cwd
             .as_ref()
+            .filter(|cwd| !cwd.is_empty())
             .map(|cwd| path_to_file_url(&format!("{cwd}{}", std::path::MAIN_SEPARATOR)));
         let tui_markdown_theme = to_tui_markdown_theme(markdown_theme);
         let content_container = Rc::new(RefCell::new(Container::new()));
@@ -715,21 +716,34 @@ fn is_visible_content(content: &ContentBlock) -> bool {
 
 /// `pathToFileURL(`${resolve(cwd)}${sep}`).href`
 fn path_to_file_url(path: &str) -> String {
-    let absolute = if std::path::Path::new(path).is_absolute() {
-        path.to_string()
+    use std::path::{Component as PathComponent, Path, PathBuf};
+
+    // Node resolve() is lexical: it collapses dots without resolving symlinks.
+    let absolute = if Path::new(path).is_absolute() {
+        PathBuf::from(path)
     } else {
         std::env::current_dir()
-            .map(|cwd| cwd.join(path).to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string())
+            .expect("resolve current working directory")
+            .join(path)
     };
-    let normalized = absolute.replace('\\', "/");
-    let normalized = if normalized.starts_with('/') {
-        normalized
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            PathComponent::CurDir => {}
+            PathComponent::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    let is_directory =
+        path.ends_with(std::path::MAIN_SEPARATOR) || (cfg!(windows) && path.ends_with('/'));
+    let url = if is_directory {
+        url::Url::from_directory_path(&normalized)
     } else {
-        format!("/{normalized}")
+        url::Url::from_file_path(&normalized)
     };
-    // `pathToFileURL` percent-encodes spaces and leaves other characters intact.
-    format!("file://{}", normalized.replace(' ', "%20"))
+    url.expect("absolute file URL").to_string()
 }
 
 impl Component for AssistantMessageComponent {
@@ -977,8 +991,25 @@ mod tests {
     }
 
     #[test]
-    fn file_url_marks_windows_paths_with_three_slashes() {
-        let url = path_to_file_url("C:\\work\\");
-        assert!(url.starts_with("file:///C:/work/"));
+    fn file_urls_use_native_paths_and_escape_reserved_characters() {
+        let directory = if cfg!(windows) {
+            "C:\\work\\"
+        } else {
+            "/work/"
+        };
+        let expected = if cfg!(windows) {
+            "file:///C:/work/"
+        } else {
+            "file:///work/"
+        };
+        assert_eq!(path_to_file_url(directory), expected);
+        let root = std::env::current_dir().unwrap();
+        let path = root
+            .join("folder with space")
+            .join("..")
+            .join("file #100%?.md");
+        let expected = url::Url::from_file_path(root.join("file #100%?.md")).unwrap();
+        assert_eq!(path_to_file_url(path.to_str().unwrap()), expected.as_str());
+        assert!(expected.as_str().ends_with("file%20%23100%25%3F.md"));
     }
 }

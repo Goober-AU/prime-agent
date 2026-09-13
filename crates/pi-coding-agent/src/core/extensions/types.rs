@@ -403,7 +403,7 @@ pub type HeaderFactory = Arc<dyn Fn(Arc<dyn Tui>, Theme) -> Arc<dyn Component> +
 
 /// Custom component result plus its dispose hook.
 pub type CustomComponentResult =
-    Pin<Box<dyn std::future::Future<Output = Arc<dyn Component>> + Send>>;
+    Pin<Box<dyn std::future::Future<Output = Option<Arc<dyn Component>>> + Send>>;
 
 /// Options for `ui.custom()`.
 pub type CustomOptions = Value;
@@ -2127,7 +2127,7 @@ pub struct Extension {
     pub handlers: std::collections::HashMap<String, Vec<ExtensionHandler>>,
     pub tools: std::collections::HashMap<String, RegisteredTool>,
     pub message_renderers: std::collections::HashMap<String, MessageRenderer>,
-    pub commands: std::collections::HashMap<String, RegisteredCommand>,
+    pub commands: indexmap::IndexMap<String, RegisteredCommand>,
     pub flags: std::collections::HashMap<String, ExtensionFlag>,
     pub shortcuts: std::collections::HashMap<KeyId, ExtensionShortcut>,
 }

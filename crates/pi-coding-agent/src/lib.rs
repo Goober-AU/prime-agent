@@ -6,6 +6,7 @@ pub mod cli_main_entry;
 pub mod config;
 pub mod core;
 pub mod main_entry;
+mod native_main_host;
 pub mod migrations;
 #[path = "mod.rs"]
 pub mod index;

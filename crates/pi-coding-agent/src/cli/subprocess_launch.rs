@@ -42,10 +42,19 @@ pub fn create_cli_subprocess_env(
         return environment;
     }
     let entrypoint = entrypoint.unwrap();
-    let mut directory = resolve(entrypoint).parent().map(Path::to_path_buf).unwrap_or_default();
+    let mut directory = resolve(entrypoint)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
     loop {
         let tsconfig_path = directory.join("tsconfig.json");
-        if tsconfig_path.exists() && directory.join("node_modules").join("tsx").join("package.json").exists() {
+        if tsconfig_path.exists()
+            && directory
+                .join("node_modules")
+                .join("tsx")
+                .join("package.json")
+                .exists()
+        {
             environment.insert(
                 TSX_TSCONFIG_PATH_ENV.to_string(),
                 tsconfig_path.to_string_lossy().to_string(),
@@ -91,12 +100,20 @@ pub fn format_current_cli_command(args: &[String], environment: &ProcessEnv) -> 
     if let Some(launcher_path) = environment.get("PRIME_AGENT_LAUNCHER_PATH") {
         let mut parts = vec![launcher_path.clone()];
         parts.extend(args.iter().cloned());
-        return parts.iter().map(|part| quote_command_argument(part)).collect::<Vec<_>>().join(" ");
+        return parts
+            .iter()
+            .map(|part| quote_command_argument(part))
+            .collect::<Vec<_>>()
+            .join(" ");
     }
     let launch = create_cli_subprocess_launch_spec(args, None, &[], None);
     let mut parts = vec![launch.command];
     parts.extend(launch.args);
-    parts.iter().map(|part| quote_command_argument(part)).collect::<Vec<_>>().join(" ")
+    parts
+        .iter()
+        .map(|part| quote_command_argument(part))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn create_cli_subprocess_launch_spec(
@@ -105,9 +122,15 @@ pub fn create_cli_subprocess_launch_spec(
     exec_args: &[String],
     entrypoint: Option<&str>,
 ) -> CliSubprocessLaunchSpec {
-    let executable = executable.map(str::to_string).unwrap_or_else(|| current_exec_path());
-    if is_bun_binary() {
-        return CliSubprocessLaunchSpec { command: executable, args: args.to_vec() };
+    let executable = executable
+        .map(str::to_string)
+        .unwrap_or_else(|| current_exec_path());
+    if is_bun_binary() || (exec_args.is_empty() && entrypoint.is_none_or(|path| path == executable))
+    {
+        return CliSubprocessLaunchSpec {
+            command: executable,
+            args: args.to_vec(),
+        };
     }
     let entrypoint = match entrypoint {
         Some(entrypoint) if !entrypoint.is_empty() => entrypoint.to_string(),
@@ -121,7 +144,10 @@ pub fn create_cli_subprocess_launch_spec(
     let mut launch_args = exec_args.to_vec();
     launch_args.push(resolved_entrypoint);
     launch_args.extend(args.iter().cloned());
-    CliSubprocessLaunchSpec { command: executable, args: launch_args }
+    CliSubprocessLaunchSpec {
+        command: executable,
+        args: launch_args,
+    }
 }
 
 /// `process.execPath`: the running binary in the port.
@@ -146,7 +172,10 @@ mod tests {
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> ProcessEnv {
-        pairs.iter().map(|(key, value)| (key.to_string(), value.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
     }
 
     #[test]
@@ -161,7 +190,10 @@ mod tests {
     fn launcher_path_wins_over_the_exec_path() {
         let environment = env(&[("PRIME_AGENT_LAUNCHER_PATH", "/usr/local/bin/prime-agent")]);
         assert_eq!(
-            format_current_cli_command(&["shutdown".to_string(), "--force".to_string()], &environment),
+            format_current_cli_command(
+                &["shutdown".to_string(), "--force".to_string()],
+                &environment
+            ),
             "/usr/local/bin/prime-agent shutdown --force"
         );
     }
@@ -177,7 +209,25 @@ mod tests {
             Some("/opt/prime-agent/cli.js"),
         );
         assert_eq!(launch.command, "/usr/bin/node");
-        assert_eq!(launch.args, vec!["/opt/prime-agent/cli.js", "--mode", "daemon"]);
+        assert_eq!(
+            launch.args,
+            vec!["/opt/prime-agent/cli.js", "--mode", "daemon"]
+        );
+    }
+
+    #[test]
+    fn native_subprocess_does_not_pass_its_executable_as_a_prompt() {
+        let args = vec!["--mode".to_string(), "daemon".to_string()];
+        let launch = create_cli_subprocess_launch_spec(&args, None, &[], None);
+        assert_eq!(launch.command, current_exec_path());
+        assert_eq!(launch.args, args);
+        let launch = create_cli_subprocess_launch_spec(
+            &args,
+            Some("/tmp/optimus-rust"),
+            &[],
+            Some("/tmp/optimus-rust"),
+        );
+        assert_eq!(launch.args, args);
     }
 
     #[test]
@@ -211,7 +261,11 @@ mod tests {
     #[test]
     fn missing_tsconfig_leaves_the_env_untouched() {
         let source = env(&[("A", "1")]);
-        let result = create_cli_subprocess_env(&source, Some("/definitely/not/here/cli.js"), &["tsx".to_string()]);
+        let result = create_cli_subprocess_env(
+            &source,
+            Some("/definitely/not/here/cli.js"),
+            &["tsx".to_string()],
+        );
         assert_eq!(result, source);
     }
 }

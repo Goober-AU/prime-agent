@@ -20,7 +20,7 @@ use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 /// The TypeScript declares an inline union with an optional `id` on every arm;
 /// serde uses the same `type` tag and the same field names.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum RpcCommand {
     // Prompting
     Prompt {
@@ -549,7 +549,7 @@ pub type RpcCommandType = String;
 
 /// `RpcObservedSessionEvent` union.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum RpcObservedSessionEvent {
     ObservedSessionEvent {
         active_session_id: String,

@@ -231,6 +231,22 @@ impl Component for MenuSearchInput {
     }
 }
 
+struct SharedLoginInput(Rc<RefCell<MenuSearchInput>>);
+
+impl Component for SharedLoginInput {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        self.0.borrow_mut().render(width)
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        self.0.borrow_mut().handle_input(data);
+    }
+
+    fn invalidate(&mut self) {
+        self.0.borrow_mut().invalidate();
+    }
+}
+
 /// `PRIME_LOGO_LINES`.
 fn prime_logo_lines() -> Vec<String> {
     PRIME_BUTTERFLY_LOGO
@@ -336,7 +352,7 @@ impl Component for PrimeLoginHeader {
 pub struct LoginDialogComponent {
     tui: Rc<RefCell<TUI>>,
     content_children: Vec<Box<dyn Component>>,
-    input: MenuSearchInput,
+    input: Rc<RefCell<MenuSearchInput>>,
     on_complete: Box<dyn FnMut(bool, Option<String>)>,
     is_prime_inference: bool,
     provider_id: String,
@@ -379,7 +395,7 @@ impl LoginDialogComponent {
         let dialog = Self {
             tui,
             content_children: Vec::new(),
-            input: MenuSearchInput::new("Paste value"),
+            input: Rc::new(RefCell::new(MenuSearchInput::new("Paste value"))),
             on_complete,
             is_prime_inference,
             provider_id: provider_id.to_string(),
@@ -422,10 +438,9 @@ impl LoginDialogComponent {
     /// Port of `cancel`.
     pub fn cancel(&mut self) {
         self.abort_controller.store(true, Ordering::SeqCst);
-        if self.input_rejecter.is_some() {
-            self.input_rejecter = None;
-            self.input_resolver = None;
-        }
+        // Dropping the sender rejects the pending Rust input future.
+        self.input_rejecter = None;
+        self.input_resolver = None;
         if self.continue_resolver.is_some() {
             self.continue_resolver = None;
         }
@@ -494,7 +509,8 @@ impl LoginDialogComponent {
         self.add_section_spacer();
         self.add_section_title("Manual fallback");
         self.add_muted_text(prompt);
-        self.content_children.push(Box::new(Spacer::new(0)));
+        self.content_children
+            .push(Box::new(SharedLoginInput(Rc::clone(&self.input))));
         self.input_visible = true;
         self.auth_actions_text = Some(self.get_auth_actions_text(None));
         self.content_children.push(Box::new(Text::new(
@@ -536,7 +552,8 @@ impl LoginDialogComponent {
                 None,
             )));
         }
-        self.content_children.push(Box::new(Spacer::new(0)));
+        self.content_children
+            .push(Box::new(SharedLoginInput(Rc::clone(&self.input))));
         self.input_visible = true;
         self.auth_actions_text = Some(self.get_auth_actions_text(None));
         self.content_children.push(Box::new(Text::new(
@@ -553,7 +570,7 @@ impl LoginDialogComponent {
             None,
         )));
 
-        self.input.set_value(String::new());
+        self.input.borrow_mut().set_value(String::new());
         self.tui.borrow_mut().request_render();
 
         self.wait_for_input()
@@ -795,7 +812,7 @@ impl LoginDialogComponent {
         // shown, only treat it as back at the start of the text so left still moves
         // the cursor mid-edit; on info/continue screens there is no field to guard.
         let back_guard_cursor = if self.input_visible {
-            Some(self.input.get_cursor())
+            Some(self.input.borrow().get_cursor())
         } else {
             None
         };
@@ -812,8 +829,16 @@ impl LoginDialogComponent {
             return;
         }
 
+        if kb.matches(data, "tui.input.submit") || data == "\n" {
+            if let Some(resolve) = self.input_resolver.take() {
+                let _ = resolve.send(self.input.borrow().get_value());
+                self.input_rejecter = None;
+                return;
+            }
+        }
+
         // Pass to input
-        self.input.handle_input(data);
+        self.input.borrow_mut().handle_input(data);
     }
 }
 
@@ -893,7 +918,7 @@ impl pi_tui::tui::Focusable for LoginDialogComponent {
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
-        self.input.set_focused(focused);
+        self.input.borrow_mut().set_focused(focused);
     }
 }
 
@@ -903,6 +928,7 @@ mod tests {
     use pi_tui::terminal::ProcessTerminal;
 
     fn tui() -> Rc<RefCell<TUI>> {
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
         Rc::new(RefCell::new(TUI::new(
             Box::new(ProcessTerminal::new()),
             Some(false),
@@ -953,7 +979,7 @@ mod tests {
 
         let mut other = dialog("anthropic");
         assert!(!other.is_prime_inference);
-        assert_eq!(other.title(), "Login to anthropic");
+        assert_eq!(other.title(), "Login to Anthropic (Claude Pro/Max)");
         assert!(other
             .render(60.0)
             .iter()
@@ -1026,13 +1052,23 @@ mod tests {
     #[test]
     fn show_prompt_resets_the_input_value() {
         let mut component = dialog("anthropic");
-        component.input.set_value("leftover".to_string());
-        let _receiver = component.show_prompt("Enter the code", Some("abc"));
-        assert_eq!(component.input.get_value(), "");
+        component
+            .input
+            .borrow_mut()
+            .set_value("leftover".to_string());
+        let mut receiver = component.show_prompt("Enter the code", Some("abc"));
+        assert_eq!(component.input.borrow().get_value(), "");
         let rendered = component.render(60.0);
         assert!(rendered.iter().any(|line| line.contains("Enter the code")));
         assert!(rendered.iter().any(|line| line.contains("e.g., abc")));
         assert!(rendered.iter().any(|line| line.contains("submit")));
+        component.handle_input("test-code");
+        assert!(component
+            .render(60.0)
+            .iter()
+            .any(|line| line.contains("test-code")));
+        component.handle_input("\r");
+        assert_eq!(receiver.try_recv().unwrap(), "test-code");
     }
 
     #[test]
@@ -1047,6 +1083,15 @@ mod tests {
         let rendered = component.render(60.0);
         assert!(rendered.iter().any(|line| line.contains("polling")));
         assert!(rendered
+            .iter()
+            .any(|line| line.contains("waiting for browser")));
+        assert!(!rendered
+            .iter()
+            .any(|line| line.contains("Preparing authentication")));
+        let mut fresh = dialog("anthropic");
+        fresh.show_progress("polling");
+        assert!(fresh
+            .render(60.0)
             .iter()
             .any(|line| line.contains("Preparing authentication")));
     }
@@ -1074,11 +1119,14 @@ mod tests {
     fn a_guarded_left_arrow_only_cancels_at_column_zero() {
         let mut component = dialog("anthropic");
         component.input_visible = true;
-        component.input.set_value("typed".to_string());
-        // The cursor sits after the typed text, so left must not cancel.
-        component.handle_input("\u{1b}[D");
-        assert!(!component.signal_aborted());
-        assert_eq!(component.input.get_cursor(), 0);
+        component.input.borrow_mut().handle_input("typed");
+        assert_eq!(component.input.borrow().get_cursor(), 5);
+        // Each left arrow moves the cursor until it reaches the start.
+        for cursor in (0..5).rev() {
+            component.handle_input("\u{1b}[D");
+            assert!(!component.signal_aborted());
+            assert_eq!(component.input.borrow().get_cursor(), cursor);
+        }
         // Now the cursor is at column 0.
         component.handle_input("\u{1b}[D");
         assert!(component.signal_aborted());
@@ -1086,13 +1134,24 @@ mod tests {
 
     #[test]
     fn should_treat_as_back_uses_the_modal_binding_and_the_cursor() {
-        let kb = get_keybindings();
-        if kb.matches("\u{1b}[D", "app.modal.back") {
-            assert!(should_treat_as_back("\u{1b}[D", None));
-            assert!(should_treat_as_back("\u{1b}[D", Some(0)));
-            assert!(!should_treat_as_back("\u{1b}[D", Some(3)));
-        }
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        assert!(get_keybindings().matches("\u{1b}[D", "app.modal.back"));
+        assert!(should_treat_as_back("\u{1b}[D", None));
+        assert!(should_treat_as_back("\u{1b}[D", Some(0)));
+        assert!(!should_treat_as_back("\u{1b}[D", Some(3)));
         assert!(!should_treat_as_back("z", None));
+    }
+
+    #[test]
+    fn cancel_closes_a_pending_input_request() {
+        let mut component = dialog("anthropic");
+        let mut receiver = component.show_manual_input("paste the code");
+        component.handle_input("\x1b");
+        assert!(component.signal_aborted());
+        assert_eq!(
+            receiver.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        );
     }
 
     #[test]

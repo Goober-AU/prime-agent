@@ -62,7 +62,7 @@ pub enum DaemonOutbound {
 pub trait DaemonExtensionBindingSession: Send + Sync {
     fn set_exec_env_provider(&self, client_env: Option<EnvMap>);
     fn set_runtime_env_scope(&self, client_env: Option<EnvMap>);
-    fn set_subagent_runtime_host(&self, host: Option<Value>);
+    fn set_subagent_runtime_host(&self, host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>);
     /// `session.subscribe(listener)`; the returned handle unsubscribes.
     fn subscribe(&self, listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
     fn set_rebind_session(&self, rebind: Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>);
@@ -87,12 +87,13 @@ pub struct ExtensionBindingError {
 
 #[derive(Clone)]
 pub struct ActiveSessionBindingCallbacks {
+    pub get_session: Arc<dyn Fn() -> Option<Arc<dyn DaemonExtensionBindingSession>> + Send + Sync>,
     pub broadcast: Arc<dyn Fn(&ActiveSessionState, DaemonOutbound) + Send + Sync>,
     /// `createConnectionState`; None keeps the daemon default (another slice).
     pub create_connection_state: Option<Arc<dyn Fn(&ActiveSessionState) -> Value + Send + Sync>>,
     pub session_replaced: Option<Arc<dyn Fn(&ActiveSessionState) + Send + Sync>>,
     pub shutdown: Arc<dyn Fn() + Send + Sync>,
-    pub subagent_runtime_host: Option<Value>,
+    pub subagent_runtime_host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>,
 }
 
 /// message_update events carry the full partial assistant message twice; the
@@ -121,11 +122,12 @@ pub fn slim_session_event_for_wire(event: &Value) -> Value {
 /// `&mut` borrow so the lock is held only for the synchronous prologue below. `bindActiveSessionState`
 /// (daemon-extension-binding.ts:49-97) mutates the state synchronously and awaits only
 /// `bindExtensions`, so a `&mut ActiveSessionState` parameter cannot be `Send` when this body awaits.
-pub async fn bind_active_session_state(
-    state: &Arc<StdMutex<ActiveSessionState>>,
+pub fn bind_active_session_state<'a>(
+    state: &'a Arc<StdMutex<ActiveSessionState>>,
     session: Arc<dyn DaemonExtensionBindingSession>,
     callbacks: ActiveSessionBindingCallbacks,
-) {
+) -> futures::future::BoxFuture<'a, ()> {
+    Box::pin(async move {
     // Synchronous prologue: every mutation and subscription happens under this one lock, which is
     // released before the first await. Every runtime rebuild re-loads extensions, which capture
     // client env synchronously at that moment.
@@ -137,7 +139,9 @@ pub async fn bind_active_session_state(
         if let Some(unsubscribe) = state.unsubscribe.take() {
             unsubscribe();
         }
-        session.set_subagent_runtime_host(callbacks.subagent_runtime_host.clone());
+        if let Some(host) = &callbacks.subagent_runtime_host {
+            session.set_subagent_runtime_host(Some(host.clone()));
+        }
         let active_session_id = state.active_session_id.clone();
         let broadcast = Arc::clone(&callbacks.broadcast);
         state.unsubscribe = Some(session.subscribe(Arc::new(move |event: &Value| {
@@ -150,9 +154,6 @@ pub async fn bind_active_session_state(
             );
         })));
 
-        let rebind_state = Arc::new(StdMutex::new(None::<Value>));
-        let _ = rebind_state;
-        session.set_rebind_session(Arc::new(move || Box::pin(async move {})));
 
         (
             Arc::new(ExtensionUiContext::new(&state, Arc::clone(&callbacks.broadcast))),
@@ -160,6 +161,30 @@ pub async fn bind_active_session_state(
             Arc::clone(&callbacks.broadcast),
         )
     };
+    *ui_context.live_state.lock().expect("live state poisoned") = Arc::downgrade(state);
+    let rebind_state = Arc::downgrade(state);
+    let rebind_callbacks = callbacks.clone();
+    session.set_rebind_session(Arc::new(move || {
+        let state = rebind_state.upgrade();
+        let session = (rebind_callbacks.get_session)();
+        let callbacks = rebind_callbacks.clone();
+        Box::pin(async move {
+            let (Some(state), Some(session)) = (state, session) else { return; };
+            Box::pin(bind_active_session_state(&state, session, callbacks.clone())).await;
+            // Daemon callbacks resolve this identity through the live registry. Do
+            // not hold its state lock while invoking them: broadcasts acquire it.
+            let state = {
+                let state = state.lock().expect("active session poisoned");
+                let mut snapshot = broadcast_state(&state.active_session_id);
+                snapshot.runtime.session.messages = state.runtime.session.messages.clone();
+                snapshot
+            };
+            if let Some(replaced) = &callbacks.session_replaced { replaced(&state); }
+            let connection_state = callbacks.create_connection_state.as_ref().map(|create| create(&state)).unwrap_or(Value::Null);
+            let messages = state.runtime.session.messages.iter().filter_map(|message| serde_json::to_value(message).ok()).collect();
+            (callbacks.broadcast)(&state, DaemonOutbound::SessionReplaced { active_session_id: state.active_session_id.clone(), state: connection_state, messages });
+        })
+    }));
     session
         .bind_extensions(ExtensionBindingInput {
             ui_context,
@@ -177,6 +202,7 @@ pub async fn bind_active_session_state(
             }),
         })
         .await;
+    })
 }
 
 /// `session.subscribe` listeners receive only the session id; the daemon
@@ -191,6 +217,7 @@ fn broadcast_state(active_session_id: &str) -> ActiveSessionState {
 /// `createExtensionUIContext`.
 pub struct ExtensionUiContext {
     clients: Arc<StdMutex<Vec<Arc<StdMutex<super::active_session_state::DaemonSocketClient>>>>>,
+    live_state: StdMutex<std::sync::Weak<StdMutex<ActiveSessionState>>>,
 
     requests: Arc<StdMutex<std::collections::HashMap<String, oneshot::Sender<DaemonExtensionUIResponse>>>>,
     next_request_id: AtomicU64,
@@ -224,6 +251,7 @@ impl ExtensionUiContext {
         };
         Self {
             clients,
+            live_state: StdMutex::new(std::sync::Weak::new()),
             requests,
             next_request_id: AtomicU64::new(0),
             emit,
@@ -241,7 +269,11 @@ impl ExtensionUiContext {
     }
 
     pub fn has_extension_ui_client_for_method(&self, method: &str) -> bool {
-        let clients = self.clients.lock().expect("clients poisoned");
+        let live = self.live_state.lock().expect("live state poisoned").upgrade();
+        let clients = match live {
+            Some(state) => state.lock().expect("active session poisoned").clients.clone(),
+            None => self.clients.lock().expect("clients poisoned").clone(),
+        };
         if !is_daemon_dialog_extension_ui_request(method) {
             return !clients.is_empty();
         }
@@ -317,21 +349,20 @@ impl ExtensionUiContext {
         confirmed_fallback: bool,
         response_kind: DialogResponseKind,
     ) -> DialogFuture {
+        if !self.has_extension_ui_client_for_method(method) {
+            return Box::pin(async move { DialogResult::from_fallback(fallback, confirmed_fallback, response_kind) });
+        }
         let request_id = self.emit_ui_request(method, payload);
         let (sender, receiver) = oneshot::channel::<DaemonExtensionUIResponse>();
-        let has_client = self.has_extension_ui_client_for_method(method);
-        if has_client {
-            self.requests
-                .lock()
-                .expect("requests poisoned")
-                .insert(request_id.clone(), sender);
+        let live = self.live_state.lock().expect("live state poisoned").clone();
+        if let Some(state) = live.upgrade() {
+            register_extension_ui_request(&mut state.lock().expect("active session poisoned"), &request_id, Box::new(move |response| { let _ = sender.send(response); }));
+        } else {
+            self.requests.lock().expect("requests poisoned").insert(request_id.clone(), sender);
         }
-        let requests = Arc::clone(&self.requests);
-        let pending = if has_client { Some(request_id) } else { None };
+        let cleanup = DialogCleanup { live, requests: self.requests.clone(), request_id };
         Box::pin(async move {
-            if !has_client {
-                return DialogResult::from_fallback(fallback, confirmed_fallback, response_kind);
-            }
+            let _cleanup = cleanup;
             let response = match timeout.map(Duration::from_millis) {
                 Some(duration) => match tokio::time::timeout(duration, receiver).await {
                     Ok(Ok(response)) => Some(response),
@@ -339,9 +370,6 @@ impl ExtensionUiContext {
                 },
                 None => receiver.await.ok(),
             };
-            if let Some(request_id) = pending {
-                requests.lock().expect("requests poisoned").remove(&request_id);
-            }
             match response {
                 Some(response) => DialogResult::from_response(response, response_kind),
                 None => DialogResult::from_fallback(fallback, confirmed_fallback, response_kind),
@@ -428,6 +456,96 @@ impl ExtensionUiContext {
     }
 
     pub fn set_tools_expanded(&self) {}
+}
+
+struct DialogCleanup {
+    live: std::sync::Weak<StdMutex<ActiveSessionState>>,
+    requests: Arc<StdMutex<std::collections::HashMap<String, oneshot::Sender<DaemonExtensionUIResponse>>>>,
+    request_id: String,
+}
+
+impl Drop for DialogCleanup {
+    fn drop(&mut self) {
+        if let Some(state) = self.live.upgrade() {
+            state.lock().expect("active session poisoned").extension_ui_requests.remove(&self.request_id);
+        }
+        self.requests.lock().expect("requests poisoned").remove(&self.request_id);
+    }
+}
+
+fn canonical_dialog(
+    context: &ExtensionUiContext,
+    method: &str,
+    mut payload: serde_json::Map<String, Value>,
+    opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>,
+    kind: DialogResponseKind,
+) -> DialogFuture {
+    let signal = opts.as_ref().and_then(|opts| opts.signal.clone());
+    if signal.as_ref().is_some_and(|signal| signal.is_cancelled()) {
+        return Box::pin(async move { DialogResult::from_fallback(None, false, kind) });
+    }
+    let timeout = opts.as_ref().and_then(|opts| opts.timeout);
+    if let Some(timeout) = timeout { payload.insert("timeout".to_string(), Value::from(timeout)); }
+    let timeout = timeout.map(|timeout| if !timeout.is_finite() || timeout < 1.0 || timeout > i32::MAX as f64 { 1 } else { timeout as u64 });
+    let dialog = context.spawn_dialog(method, Value::Object(payload), timeout, None, false, kind);
+    Box::pin(async move {
+        if let Some(signal) = signal {
+            tokio::select! {
+                result = dialog => result,
+                _ = signal.cancelled() => DialogResult::from_fallback(None, false, kind),
+            }
+        } else { dialog.await }
+    })
+}
+
+impl crate::core::extensions::types::ExtensionUiContext for ExtensionUiContext {
+    fn select(&self, title: String, options: Vec<String>, opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>) -> futures::future::BoxFuture<'static, Option<String>> {
+        let payload = serde_json::json!({"title": title, "options": options}).as_object().unwrap().clone();
+        let dialog = canonical_dialog(self, "select", payload, opts, DialogResponseKind::Value);
+        Box::pin(async move { dialog.await.value })
+    }
+    fn confirm(&self, title: String, message: String, opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>) -> futures::future::BoxFuture<'static, bool> {
+        let payload = serde_json::json!({"title": title, "message": message}).as_object().unwrap().clone();
+        let dialog = canonical_dialog(self, "confirm", payload, opts, DialogResponseKind::Confirmed);
+        Box::pin(async move { dialog.await.confirmed })
+    }
+    fn input(&self, title: String, placeholder: Option<String>, opts: Option<crate::core::extensions::types::ExtensionUIDialogOptions>) -> futures::future::BoxFuture<'static, Option<String>> {
+        let mut payload = serde_json::Map::new(); payload.insert("title".to_string(), Value::String(title));
+        if let Some(placeholder) = placeholder { payload.insert("placeholder".to_string(), Value::String(placeholder)); }
+        let dialog = canonical_dialog(self, "input", payload, opts, DialogResponseKind::Value);
+        Box::pin(async move { dialog.await.value })
+    }
+    fn editor(&self, title: String, prefill: Option<String>) -> futures::future::BoxFuture<'static, Option<String>> {
+        let mut payload = serde_json::Map::new(); payload.insert("title".to_string(), Value::String(title));
+        if let Some(prefill) = prefill { payload.insert("prefill".to_string(), Value::String(prefill)); }
+        let dialog = canonical_dialog(self, "editor", payload, None, DialogResponseKind::Value);
+        Box::pin(async move { dialog.await.value })
+    }
+    fn notify(&self, message: String, kind: Option<String>) { let mut payload = serde_json::json!({"message":message}); if let Some(kind) = kind { payload["notifyType"] = Value::String(kind); } self.emit_ui_request("notify", payload); }
+    fn on_terminal_input(&self, _handler: crate::core::extensions::types::TerminalInputHandler) -> Arc<dyn Fn() + Send + Sync> { Arc::new(|| {}) }
+    fn set_status(&self, key: String, text: Option<String>) { let mut payload = serde_json::json!({"statusKey":key}); if let Some(text) = text { payload["statusText"] = Value::String(text); } self.emit_ui_request("setStatus", payload); }
+    fn set_working_message(&self, message: Option<String>) { let mut payload = serde_json::json!({}); if let Some(message) = message { payload["message"] = Value::String(message); } self.emit_ui_request("setWorkingMessage", payload); }
+    fn set_working_visible(&self, visible: bool) { ExtensionUiContext::set_working_visible(self, visible); }
+    fn set_working_indicator(&self, options: Option<crate::core::extensions::types::WorkingIndicatorOptions>) { let mut payload = serde_json::json!({}); if let Some(options) = options { payload["options"] = serde_json::to_value(options).expect("working indicator is serializable"); } self.emit_ui_request("setWorkingIndicator", payload); }
+    fn set_hidden_thinking_label(&self, label: Option<String>) { let mut payload = serde_json::json!({}); if let Some(label) = label { payload["label"] = Value::String(label); } self.emit_ui_request("setHiddenThinkingLabel", payload); }
+    fn set_widget_strings(&self, key: String, content: Option<Vec<String>>, options: Option<crate::core::extensions::types::ExtensionWidgetOptions>) { let mut payload = serde_json::json!({"widgetKey":key}); if let Some(lines) = content { payload["widgetLines"] = serde_json::json!(lines); } if let Some(placement) = options.and_then(|options| options.placement) { payload["widgetPlacement"] = serde_json::to_value(placement).expect("widget placement is serializable"); } self.emit_ui_request("setWidget", payload); }
+    fn set_widget_factory(&self, _key: String, _content: Option<crate::core::extensions::types::WidgetFactory>, _options: Option<crate::core::extensions::types::ExtensionWidgetOptions>) {}
+    fn set_footer(&self, _factory: Option<crate::core::extensions::types::FooterFactory>) {}
+    fn set_header(&self, _factory: Option<crate::core::extensions::types::HeaderFactory>) {}
+    fn set_title(&self, title: String) { ExtensionUiContext::set_title(self, &title); }
+    fn custom(&self, _factory: Value, _options: Option<Value>) -> crate::core::extensions::types::CustomComponentResult { Box::pin(async { None }) }
+    fn paste_to_editor(&self, text: String) { ExtensionUiContext::paste_to_editor(self, &text); }
+    fn set_editor_text(&self, text: String) { ExtensionUiContext::set_editor_text(self, &text); }
+    fn get_editor_text(&self) -> String { ExtensionUiContext::get_editor_text(self) }
+    fn add_autocomplete_provider(&self, _factory: crate::core::extensions::types::AutocompleteProviderFactory) {}
+    fn set_editor_component(&self, _factory: Option<crate::core::extensions::types::EditorFactory>) {}
+    fn get_editor_component(&self) -> Option<crate::core::extensions::types::EditorFactory> { None }
+    fn theme(&self) -> crate::core::extensions::types::Theme { crate::core::extensions::types::Theme { name: crate::modes::interactive::theme::theme::theme().name.clone(), ..Default::default() } }
+    fn get_all_themes(&self) -> Vec<crate::core::extensions::types::ThemeInfo> { Vec::new() }
+    fn get_theme(&self, _name: String) -> Option<crate::core::extensions::types::Theme> { None }
+    fn set_theme(&self, _theme: Value) -> crate::core::extensions::types::SetThemeResult { crate::core::extensions::types::SetThemeResult { success: false, error: Some("Theme switching is not supported in daemon mode".to_string()) } }
+    fn get_tools_expanded(&self) -> bool { false }
+    fn set_tools_expanded(&self, _expanded: bool) {}
 }
 
 pub type DialogFuture = futures::future::BoxFuture<'static, DialogResult>;
@@ -603,6 +721,26 @@ mod tests {
             )
             .await;
         assert!(!result.confirmed);
+    }
+
+    #[tokio::test]
+    async fn canonical_dialog_uses_live_clients_and_response_registry() {
+        let state = Arc::new(StdMutex::new(ActiveSessionState::new("active-1", super::super::active_session_state::AgentSessionRuntime::default())));
+        let emitted = Arc::new(StdMutex::new(Vec::new()));
+        let captured = emitted.clone();
+        let context = ExtensionUiContext::new(&state.lock().unwrap(), Arc::new(move |_, outbound| captured.lock().unwrap().push(outbound)));
+        *context.live_state.lock().unwrap() = Arc::downgrade(&state);
+        // The client attaches after the extension context was created.
+        state.lock().unwrap().clients.push(Arc::new(StdMutex::new(super::super::active_session_state::DaemonSocketClient::new("client-1", true))));
+        let dialog = crate::core::extensions::types::ExtensionUiContext::select(&context, "Pick".to_string(), vec!["one".to_string()], None);
+        let request_id = match &emitted.lock().unwrap()[0] { DaemonOutbound::ExtensionUiRequest { id, payload, .. } => { assert!(payload.get("timeout").is_none()); id.clone() }, other => panic!("unexpected outbound: {other:?}") };
+        let request = state.lock().unwrap().extension_ui_requests.remove(&request_id).unwrap();
+        (request.resolve)(DaemonExtensionUIResponse::Value("one".to_string()));
+        assert_eq!(dialog.await.as_deref(), Some("one"));
+        let pending = crate::core::extensions::types::ExtensionUiContext::input(&context, "Input".to_string(), None, None);
+        assert_eq!(state.lock().unwrap().extension_ui_requests.len(), 1);
+        drop(pending);
+        assert!(state.lock().unwrap().extension_ui_requests.is_empty());
     }
 
     #[tokio::test]

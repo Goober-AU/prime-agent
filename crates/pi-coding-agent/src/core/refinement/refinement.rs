@@ -2735,16 +2735,17 @@ mod tests {
         let entries = vec![
             CustomEntry {
                 custom_type: REFINEMENT_CUSTOM_TYPE.to_string(),
-                data: Some(serde_json::json!({"id": "refine_a", "appliedEdits": []})),
+                data: Some(serde_json::json!({"id": "refine_a", "summary": "Saved refinement", "rationale": "Evidence", "expectedOutcome": "Better state", "appliedEdits": [], "harnessStatePath": "/session/harness/harness_state.json"})),
             },
             CustomEntry {
                 custom_type: "other".to_string(),
-                data: Some(serde_json::json!({"id": "refine_b", "appliedEdits": []})),
+                data: Some(serde_json::json!({"id": "refine_b", "summary": "Other entry", "rationale": "Evidence", "expectedOutcome": "Better state", "appliedEdits": [], "harnessStatePath": "/session/harness/harness_state.json"})),
             },
         ];
         let history = get_refinement_history(&entries);
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, "refine_a");
+        assert_eq!(history[0].summary, "Saved refinement");
     }
 
     #[test]
@@ -3040,7 +3041,7 @@ mod tests {
         assert_eq!(error.refinement_failure.output_fingerprints.len(), 1);
         assert_eq!(
             error.refinement_failure.output_fingerprints[0].utf8_bytes,
-            14
+            15
         );
         assert!(error.refinement_failure.output_fingerprints[0]
             .sha256

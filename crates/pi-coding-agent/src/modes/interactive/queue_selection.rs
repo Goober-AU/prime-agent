@@ -186,7 +186,7 @@ mod tests {
         assert_eq!(selection.move_cursor(&queue, "draft", -1), Some("f1".to_string()));
         assert_eq!(selection.refresh_at(&queue, QueueLane::FollowUp, 0, "f1"), None);
         assert!(selection.is_browsing());
-        assert_eq!(selection.refresh_at(&queue, QueueLane::FollowUp, 0, "changed"), Some(String::new()));
+        assert_eq!(selection.refresh_at(&queue, QueueLane::FollowUp, 0, "changed"), Some("draft".to_string()));
         assert!(!selection.is_browsing());
     }
 

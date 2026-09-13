@@ -2126,7 +2126,7 @@ pub fn daemon_command_compatibility(command: &str) -> DaemonCommandCompatibility
             DaemonCommandCompatibility::gated(15, Capability::QueueMessageMutation)
         }
         "acquire_session_input_pause" | "release_session_input_pause" => {
-            DaemonCommandCompatibility::capability(Capability::SessionInputPause)
+            DaemonCommandCompatibility::gated(19, Capability::SessionInputPause)
         }
         "heartbeats_list" => DaemonCommandCompatibility::capability(Capability::HeartbeatCatalog),
         "roster_subscribe" | "roster_unsubscribe" => {
@@ -2496,6 +2496,7 @@ pub enum DaemonOutbound {
     SessionEvent {
         #[serde(rename = "activeSessionId")]
         active_session_id: String,
+        #[serde(deserialize_with = "crate::modes::agent_connection::types::deserialize_agent_connection_session_event")]
         event: AgentConnectionSessionEvent,
         #[serde(skip_serializing_if = "Option::is_none", default)]
         meta: Option<DaemonEventMeta>,
@@ -3057,10 +3058,20 @@ mod tests {
         );
         assert_eq!(daemon_command_compatibility("get_rlm_max_depth_status"), DaemonCommandCompatibility::revision(11));
         assert_eq!(daemon_command_compatibility("set_rlm_max_depth"), DaemonCommandCompatibility::revision(11));
-        assert_eq!(
-            daemon_command_compatibility("acquire_session_input_pause"),
-            DaemonCommandCompatibility::gated(19, DaemonServerCapability::SessionInputPause)
-        );
+        for command in ["acquire_session_input_pause", "release_session_input_pause"] {
+            let requirement = daemon_command_compatibility(command);
+            assert_eq!(requirement, DaemonCommandCompatibility::gated(19, DaemonServerCapability::SessionInputPause));
+            let mut peer = DaemonCompatibilityHello {
+                protocol: daemon_protocol_info(),
+                schema_revision: Some(18),
+                server_capabilities: Some(vec![DaemonServerCapability::SessionInputPause]),
+            };
+            assert!(!meets_daemon_command_compatibility(&peer, &requirement));
+            peer.schema_revision = Some(19);
+            assert!(meets_daemon_command_compatibility(&peer, &requirement));
+            peer.server_capabilities = None;
+            assert!(!meets_daemon_command_compatibility(&peer, &requirement));
+        }
         assert_eq!(
             daemon_command_compatibility("cancel_prompt_admission"),
             DaemonCommandCompatibility::gated(8, DaemonServerCapability::PromptAdmissionCancellation)

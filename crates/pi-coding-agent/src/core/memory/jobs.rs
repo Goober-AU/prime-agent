@@ -745,8 +745,15 @@ mod tests {
             .unwrap();
         assert_eq!(first.status, ImportJobStatus::Pending);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
-        let second = runtime.block_on(jobs.run(&job.id, extract, None)).unwrap();
-        assert_eq!(second.status, ImportJobStatus::Preview);
+        let mut completed = first;
+        while completed.status == ImportJobStatus::Pending {
+            let previous = completed.next_chunk as usize;
+            completed = runtime.block_on(jobs.run(&job.id, extract.clone(), None)).unwrap();
+            assert_eq!(completed.next_chunk as usize, (previous + 4).min(job.chunks.len()));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), completed.next_chunk as usize);
+        }
+        assert_eq!(completed.status, ImportJobStatus::Preview);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), job.chunks.len());
         std::fs::remove_dir_all(&root).ok();
     }
 
