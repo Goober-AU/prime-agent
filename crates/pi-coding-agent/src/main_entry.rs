@@ -2051,7 +2051,10 @@ pub async fn create_daemon_client_connection(
                 if let Some(active_summary) =
                     find_active_daemon_session_summary_for_session_file(&typed, session_path)
                 {
-                    if active_summary.lifecycle != "failed" {
+                    // `activeSummary.workerState !== "failed"` (`main.ts:1090`).
+                    // `lifecycle` is only draft/live/archived, so testing it would
+                    // never guard a failed worker.
+                    if active_summary.worker_state.as_deref() != Some("failed") {
                         return attach(active_summary).await;
                     }
                 }

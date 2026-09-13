@@ -1111,6 +1111,12 @@ impl DaemonClient {
         };
 
         if let Some(hello) = DaemonHello::from_value(&message) {
+            // `this.helloMessage = message` is assigned BEFORE the waiters resolve
+            // (`daemon-client.ts:487-490`). Publishing the synchronous hello first
+            // keeps `supportsServerCapability` consistent for a waiter that resumes
+            // as soon as it is notified; otherwise it can read `None` and a
+            // `--print` run fails with "does not support client_owned_sessions".
+            *self.quick_hello.lock().expect("hello slot poisoned") = Some(hello.clone());
             {
                 let mut state = self.state.lock().await;
                 state.hello_message = Some(hello.clone());
@@ -1119,7 +1125,6 @@ impl DaemonClient {
                     let _ = waiter.sender.send(Ok(hello.clone()));
                 }
             }
-            *self.quick_hello.lock().expect("hello slot poisoned") = Some(hello.clone());
             if self.is_connected() {
                 let replays = self.take_reconnect_replays().await;
                 for (id, pending) in replays {
