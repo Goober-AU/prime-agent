@@ -220,6 +220,9 @@ async fn run_stream_mistral(
 			};
 		}
 	}
+	// TS: the SDK remaps the hook's result inside `chat.stream`
+	// (chatcompletionstreamrequest.js:104-118), so hook-added keys are remapped too.
+	wire_chat_payload(&mut payload);
 	let response = send_request(&server_url, &api_key, &payload, model, options).await?;
 	if let Some(on_response) = options.stream.on_response.clone() {
 		on_response(
@@ -276,8 +279,12 @@ pub fn stream_simple_mistral(
 		.and_then(|options| options.stream.api_key.clone())
 		.or_else(|| get_env_api_key(&model.provider));
 	let Some(api_key) = api_key else {
-		// The TypeScript throws synchronously here.
-		panic!("No API key for provider: {}", model.provider);
+		// mistral.ts:113-116 `const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+		// if (!apiKey) { throw new Error(`No API key for provider: ${model.provider}`); }` - a
+		// catchable error, never a process abort. A Rust `StreamFunction` returns a stream, so
+		// this terminates the stream with the same message, exactly like
+		// `streamSimpleGoogle` (google.ts:291-293) and the other ports.
+		return api_key_error_stream(model, &format!("No API key for provider: {}", model.provider));
 	};
 
 	let base = build_base_options(model, options.as_ref(), Some(&api_key));
@@ -314,6 +321,26 @@ fn create_output(model: &Model) -> AssistantMessage {
 		timestamp: now_ms(),
 		..Default::default()
 	}
+}
+
+/// Terminal `error` stream for a synchronous-configuration failure.
+///
+/// mistral.ts:113-116 throws out of `streamSimpleMistral`; a Rust `StreamFunction`
+/// returns a stream, so the caller-visible contract is an `error` event carrying the
+/// thrown message plus `recordStreamFailure` (the same body as `streamMistral`'s own
+/// catch block, mistral.ts:91-101), never a panic that would abort the process.
+fn api_key_error_stream(model: &Model, message: &str) -> AssistantMessageEventStream {
+	let stream = create_assistant_message_event_stream();
+	let mut output = create_output(model);
+	output.stop_reason = "error".to_string();
+	output.error_message = Some(message.to_string());
+	record_stream_failure(model, &mut output, &ThrownStreamError::Message(message));
+	stream.push(AssistantMessageEvent::Error {
+		reason: output.stop_reason.clone(),
+		error: output,
+	});
+	stream.end(None);
+	stream
 }
 
 /// TS: `createMistralToolCallIdNormalizer()` - the two `Map`s live inside the closure.
@@ -603,12 +630,18 @@ pub fn build_chat_payload(
 		}
 	}
 
-	rename_chat_payload_keys(&mut payload);
+	// TS: `buildChatPayload` returns the camelCase request object; the SDK's outbound
+	// `remap$` runs later, inside `mistral.chat.stream`, so the `onPayload` hook sees the
+	// camelCase shape (mistral.ts:72-77) and its edits are remapped too. See
+	// `wire_chat_payload`.
 	payload
 }
 
 /// TS: the SDK's outbound `remap$` - camelCase in code, snake_case on the wire.
-fn rename_chat_payload_keys(payload: &mut Map<String, Value>) {
+/// `ChatCompletionStreamRequest$outboundSchema` (chatcompletionstreamrequest.js:104-118)
+/// maps these ten keys; `funcs/chatStream.js:30-34` applies it to the payload it is given,
+/// i.e. after `onPayload` returned.
+fn wire_chat_payload(payload: &mut Map<String, Value>) {
 	const REMAP: [(&str, &str); 10] = [
 		("topP", "top_p"),
 		("maxTokens", "max_tokens"),
@@ -960,11 +993,73 @@ fn map_chat_stop_reason(reason: Option<&str>) -> StopReason {
 // Streaming
 // ---------------------------------------------------------------------------
 
+/// The SDK's inbound `remap$` (`lib/primitives.js:23-37`): every entry keeps its value
+/// and takes the mapped key, or its own key when no mapping applies.
+fn remap_object_keys(object: &mut Map<String, Value>, mappings: &[(&str, &str)]) {
+	let entries: Vec<(String, Value)> = std::mem::take(object).into_iter().collect();
+	for (key, value) in entries {
+		let target = mappings
+			.iter()
+			.find(|(from, _)| *from == key.as_str())
+			.map(|(_, to)| (*to).to_string())
+			.unwrap_or(key);
+		object.insert(target, value);
+	}
+}
+
+/// TS: the SDK's inbound schemas. `CompletionEvent$inboundSchema` JSON-parses each SSE
+/// `data:` payload and pipes it through `CompletionChunk$inboundSchema`, whose nested
+/// schemas remap the snake_case wire fields to the camelCase names
+/// `consumeChatStream` reads (`mistral.ts:306-310` usage, `mistral.ts:317-321`
+/// `finishReason`, `mistral.ts:388-401` `delta.toolCalls`):
+///
+/// * `usageinfo.js:11-23` - `prompt_tokens`/`completion_tokens`/`total_tokens`;
+/// * `completionresponsestreamchoice.js:22-35` - `finish_reason`;
+/// * `deltamessage.js:24-40` - `tool_calls`, `tool_call_id`.
+fn remap_completion_chunk(chunk: Value) -> Value {
+	let Value::Object(mut chunk) = chunk else {
+		return chunk;
+	};
+
+	if let Some(Value::Object(usage)) = chunk.get_mut("usage") {
+		remap_object_keys(
+			usage,
+			&[
+				("prompt_tokens", "promptTokens"),
+				("completion_tokens", "completionTokens"),
+				("total_tokens", "totalTokens"),
+			],
+		);
+	}
+
+	if let Some(Value::Array(choices)) = chunk.get_mut("choices") {
+		for choice in choices.iter_mut() {
+			let Value::Object(choice) = choice else {
+				continue;
+			};
+			remap_object_keys(choice, &[("finish_reason", "finishReason")]);
+			if let Some(Value::Object(delta)) = choice.get_mut("delta") {
+				remap_object_keys(
+					delta,
+					&[("tool_calls", "toolCalls"), ("tool_call_id", "toolCallId")],
+				);
+			}
+		}
+	}
+
+	Value::Object(chunk)
+}
+
 /// The Mistral SSE transport (`EventStream` in the SDK).
 struct MistralChunkStream {
 	chunks: std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
 	buffer: String,
 	pending: Vec<Value>,
+	/// Bytes that form an incomplete UTF-8 sequence at the end of a network chunk.
+	/// `parseMessage` decodes each message with `new TextDecoder("utf-8")`, which is
+	/// stateful across the chunks that make up one message, so these bytes must wait
+	/// for the next chunk instead of becoming U+FFFD.
+	pending_bytes: Vec<u8>,
 	done: bool,
 	finished: bool,
 	signal: Option<tokio_util::sync::CancellationToken>,
@@ -976,6 +1071,7 @@ impl MistralChunkStream {
 			chunks: Box::pin(response.bytes_stream()),
 			buffer: String::new(),
 			pending: Vec::new(),
+			pending_bytes: Vec::new(),
 			done: false,
 			finished: false,
 			signal,
@@ -1002,11 +1098,52 @@ impl MistralChunkStream {
 			match self.chunks.next().await {
 				None => {
 					self.finished = true;
+					// `findBoundary` failed and `upstream.read()` reported `done`, so the SDK calls
+					// `downstream.close()`: a trailing partial message (and the decoder's pending
+					// partial bytes) is dropped, never parsed.
+					self.pending_bytes.clear();
 				}
 				Some(Err(error)) => return Err(MistralStreamError::Message(error.to_string())),
 				Some(Ok(bytes)) => {
-					self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+					// The SDK accumulates raw bytes (`concatBuffer`) and decodes each message with
+					// `parseMessage`'s `new TextDecoder().decode(chunk)`, so a multi-byte character
+					// split across two network chunks stays intact instead of becoming U+FFFD
+					// (`String::from_utf8_lossy` per chunk would corrupt every straddling character).
+					self.pending_bytes.extend_from_slice(&bytes);
+					let chunk_string = self.decode_pending_bytes();
+					self.buffer.push_str(&chunk_string);
 					self.drain_events()?;
+				}
+			}
+		}
+	}
+
+	/// `new TextDecoder().decode(chunk)` - a stateful streaming UTF-8 decode.
+	///
+	/// Bytes that form an incomplete multi-byte sequence stay in `pending_bytes` until the
+	/// next chunk arrives; a genuinely invalid sequence becomes U+FFFD like the WHATWG
+	/// decoder. Same shape as `google.rs::decode_pending_bytes`.
+	fn decode_pending_bytes(&mut self) -> String {
+		let mut text = String::new();
+		loop {
+			match std::str::from_utf8(&self.pending_bytes) {
+				Ok(valid) => {
+					text.push_str(valid);
+					self.pending_bytes.clear();
+					return text;
+				}
+				Err(error) => {
+					let valid_up_to = error.valid_up_to();
+					text.push_str(&String::from_utf8_lossy(&self.pending_bytes[..valid_up_to]));
+					self.pending_bytes.drain(..valid_up_to);
+					match error.error_len() {
+						// Incomplete trailing sequence: wait for more bytes.
+						None => return text,
+						Some(error_length) => {
+							self.pending_bytes.drain(..error_length);
+							text.push('\u{FFFD}');
+						}
+					}
 				}
 			}
 		}
@@ -1041,7 +1178,9 @@ impl MistralChunkStream {
 				return Ok(());
 			}
 			match serde_json::from_str::<Value>(&data) {
-				Ok(value) => self.pending.push(value),
+				// `CompletionEvent$inboundSchema`: `JSON.parse(data)` then the chunk schema's
+				// inbound remap.
+				Ok(value) => self.pending.push(remap_completion_chunk(value)),
 				Err(error) => {
 					return Err(MistralStreamError::Message(format!(
 						"malformed json: {}",
@@ -1545,7 +1684,8 @@ mod tests {
 		options.tool_choice = Some(json!("any"));
 		options.prompt_mode = Some("reasoning".to_string());
 		options.reasoning_effort = Some("high".to_string());
-		let payload = build_chat_payload(&model, &context, &context.messages, Some(&options));
+		let mut payload = build_chat_payload(&model, &context, &context.messages, Some(&options));
+		wire_chat_payload(&mut payload);
 		assert_eq!(
 			Value::Object(payload),
 			json!({
@@ -1571,6 +1711,197 @@ mod tests {
 				"reasoning_effort": "high"
 			})
 		);
+	}
+
+	/// A one-request HTTP fixture server: it returns the parsed JSON request body it
+	/// received and answers with `sse_body` as a `text/event-stream`.
+	async fn mistral_fixture_server(
+		sse_body: &str,
+	) -> (String, std::sync::Arc<std::sync::Mutex<Value>>, tokio::task::JoinHandle<()>) {
+		use std::sync::{Arc, Mutex};
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+			.await
+			.unwrap();
+		let address = listener.local_addr().unwrap();
+		let received: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
+		let server_received = received.clone();
+		let sse_body = sse_body.to_string();
+		let server = tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			let length = loop {
+				let mut buffer = [0u8; 4096];
+				let count = socket.read(&mut buffer).await.unwrap();
+				if count == 0 {
+					break 0;
+				}
+				request.extend_from_slice(&buffer[..count]);
+				if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+					let headers = std::str::from_utf8(&request[..end]).unwrap();
+					let length = headers
+						.lines()
+						.filter_map(|line| line.split_once(':'))
+						.find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+						.map(|(_, value)| value.trim().parse::<usize>().unwrap())
+						.unwrap();
+					if request.len() >= end + 4 + length {
+						break length;
+					}
+				}
+			};
+			let body_start = request
+				.windows(4)
+				.position(|window| window == b"\r\n\r\n")
+				.unwrap()
+				+ 4;
+			*server_received.lock().unwrap() =
+				serde_json::from_slice(&request[body_start..body_start + length]).unwrap();
+			let response = format!(
+				"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{sse_body}",
+				sse_body.len()
+			);
+			socket.write_all(response.as_bytes()).await.unwrap();
+		});
+		(format!("http://{address}"), received, server)
+	}
+
+	/// GM-01 end to end (the worst finding: it corrupts cost on EVERY Mistral call):
+	/// a real snake_case wire frame must set `usage` + `cost`, the `finish_reason:
+	/// "tool_calls"` must become `stopReason: "toolUse"`, and a streamed `tool_calls`
+	/// entry must become a `toolCall` block - all of which the dropped inbound remap
+	/// silently lost. Breaks if the reader stops calling `remap_completion_chunk`.
+	#[tokio::test]
+	async fn stream_mistral_applies_wire_usage_cost_stop_reason_and_tool_calls() {
+		let frames = concat!(
+			"data: {\"id\":\"cmpl-1\",\"model\":\"mistral-large-latest\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+			"{\"id\":\"call-1\",\"index\":0,\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n",
+			"data: {\"id\":\"cmpl-1\",\"model\":\"mistral-large-latest\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[",
+			"{\"id\":\"call-1\",\"index\":0,\"function\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}]}}]}\n\n",
+			"data: {\"id\":\"cmpl-1\",\"model\":\"mistral-large-latest\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],",
+			"\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":500,\"total_tokens\":1500}}\n\n",
+			"data: [DONE]\n\n"
+		);
+		let (base_url, _received, server) = mistral_fixture_server(frames).await;
+
+		let mut model = model("mistral-large-latest");
+		model.base_url = base_url;
+		// A non-zero price makes a missing `calculate_cost` call visible as cost.total == 0.
+		model.cost.input = 3.0;
+		model.cost.output = 15.0;
+		let context = Context::new(
+			None,
+			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			None,
+		);
+		let mut options = MistralOptions::from_base(&base_options());
+		options.stream.api_key = Some("test-key".to_string());
+		options.stream.timeout_ms = Some(5000.0);
+		let stream = stream_mistral(&model, &context, Some(options));
+		let message = tokio::time::timeout(std::time::Duration::from_secs(5), stream.result())
+			.await
+			.expect("the fixture stream must complete");
+		server.await.unwrap();
+
+		// mistral.ts:305-312.
+		assert_eq!(message.usage.input, 1000.0);
+		assert_eq!(message.usage.output, 500.0);
+		assert_eq!(message.usage.total_tokens, 1500.0);
+		assert_eq!(message.response_id.as_deref(), Some("cmpl-1"));
+		assert_eq!(message.usage.cost.total, 0.0105);
+		// mistral.ts:317-321.
+		assert_eq!(message.stop_reason, "toolUse");
+		// mistral.ts:388-434.
+		let block = message
+			.content
+			.iter()
+			.find_map(|block| match block {
+				ContentBlock::ToolCall(tool_call) => Some(tool_call.clone()),
+				_ => None,
+			})
+			.expect("the streamed tool call must produce a toolCall block");
+		assert_eq!(block.id, "call-1");
+		assert_eq!(block.name, "read");
+		assert_eq!(block.arguments["path"], json!("a"));
+
+	}
+
+	/// GM-07 end to end: the hook's payload is remapped by the SDK step
+	/// (`funcs/chatStream.js:30-34`), so the bytes on the wire are snake_case even though
+	/// the hook (and `buildChatPayload`) use camelCase. Breaks if `wire_chat_payload` is
+	/// dropped from `run_stream_mistral`.
+	#[tokio::test]
+	async fn stream_mistral_sends_the_hook_payload_after_the_wire_remap() {
+		use std::sync::Arc;
+
+		let (base_url, received, server) = mistral_fixture_server("data: [DONE]\n\n").await;
+
+		let mut model = model("mistral-large-latest");
+		model.base_url = base_url;
+		let context = Context::new(
+			None,
+			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			None,
+		);
+		let mut options = MistralOptions::from_base(&base_options());
+		options.stream.api_key = Some("test-key".to_string());
+		options.stream.timeout_ms = Some(5000.0);
+		// The hook edits the camelCase payload exactly like a TypeScript hook.
+		options.stream.on_payload = Some(Arc::new(|payload: Value, _model: &Model| {
+			Box::pin(async move {
+				let mut payload = payload;
+				payload["promptMode"] = json!("reasoning");
+				payload["presencePenalty"] = json!(0.25);
+				Some(payload)
+			})
+		}));
+		let stream = stream_mistral(&model, &context, Some(options));
+		tokio::time::timeout(std::time::Duration::from_secs(5), stream.result())
+			.await
+			.expect("the fixture stream must complete");
+		server.await.unwrap();
+
+		let body = received.lock().unwrap().clone();
+		assert_eq!(body["prompt_mode"], json!("reasoning"));
+		assert_eq!(body["presence_penalty"], json!(0.25));
+		assert!(body.get("promptMode").is_none());
+		assert!(body.get("presencePenalty").is_none());
+	}
+
+	/// GM-07: mistral.ts:72-77 hands the hook the camelCase `ChatCompletionStreamRequest`
+	/// (`buildChatPayload` has no remap), and the SDK remaps the hook's result inside
+	/// `chat.stream` (chatcompletionstreamrequest.js:104-118), so hook-added keys must be
+	/// remapped too.
+	#[test]
+	fn wire_chat_payload_remaps_the_hook_result_after_build_chat_payload() {
+		let model = model("mistral-large-latest");
+		let context = Context::new(
+			None,
+			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			None,
+		);
+		let mut options = MistralOptions::from_base(&base_options());
+		options.stream.max_tokens = Some(128.0);
+		options.prompt_mode = Some("reasoning".to_string());
+
+		// The payload handed to `onPayload` is still camelCase.
+		let mut payload = build_chat_payload(&model, &context, &context.messages, Some(&options));
+		assert_eq!(payload["maxTokens"], json!(128.0));
+		assert_eq!(payload["promptMode"], json!("reasoning"));
+		assert!(payload.get("max_tokens").is_none());
+
+		// The hook edits/adds camelCase keys, exactly like a TypeScript hook.
+		payload.insert("presencePenalty".to_string(), json!(0.5));
+		payload.insert("toolChoice".to_string(), json!("auto"));
+		wire_chat_payload(&mut payload);
+		assert_eq!(payload["max_tokens"], json!(128.0));
+		assert_eq!(payload["prompt_mode"], json!("reasoning"));
+		assert_eq!(payload["presence_penalty"], json!(0.5));
+		assert_eq!(payload["tool_choice"], json!("auto"));
+		// Untouched keys and unknown hook keys keep their own name (`remap$` default).
+		assert_eq!(payload["model"], json!("mistral-large-latest"));
+		assert!(payload.get("presencePenalty").is_none());
 	}
 
 	#[test]
@@ -1730,6 +2061,7 @@ mod tests {
 			chunks: Box::pin(futures::stream::empty()),
 			buffer: "data: {\"id\": \"a\"}\n\ndata: [DONE]\n\ndata: {\"id\": \"b\"}\n\n".to_string(),
 			pending: Vec::new(),
+			pending_bytes: Vec::new(),
 			done: false,
 			finished: false,
 			signal: None,
@@ -1745,12 +2077,153 @@ mod tests {
 			chunks: Box::pin(futures::stream::empty()),
 			buffer: "data: {oops}\n\n".to_string(),
 			pending: Vec::new(),
+			pending_bytes: Vec::new(),
 			done: false,
 			finished: false,
 			signal: None,
 		};
 		let error = stream.drain_events().unwrap_err();
 		assert!(error.error_message().starts_with("malformed json: "));
+	}
+
+	fn byte_stream(chunks: Vec<&[u8]>) -> MistralChunkStream {
+		let items: Vec<reqwest::Result<bytes::Bytes>> = chunks
+			.into_iter()
+			.map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+			.collect();
+		MistralChunkStream {
+			chunks: Box::pin(futures::stream::iter(items)),
+			buffer: String::new(),
+			pending: Vec::new(),
+			pending_bytes: Vec::new(),
+			done: false,
+			finished: false,
+			signal: None,
+		}
+	}
+
+	/// GM-01: `UsageInfo$inboundSchema` (usageinfo.js:11-23) remaps the snake_case wire
+	/// fields `prompt_tokens`/`completion_tokens`/`total_tokens` to the camelCase names
+	/// `mistral.ts:306-310` reads; without the remap a real Mistral chunk reports 0 tokens
+	/// and 0 cost.
+	#[test]
+	fn completion_chunk_remaps_usage_and_finish_reason_from_the_wire() {
+		let chunk = remap_completion_chunk(json!({
+			"id": "abc",
+			"model": "mistral-large-latest",
+			"usage": {"prompt_tokens": 100, "completion_tokens": 40, "total_tokens": 140},
+			"choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+		}));
+		assert_eq!(chunk["usage"]["promptTokens"], json!(100));
+		assert_eq!(chunk["usage"]["completionTokens"], json!(40));
+		assert_eq!(chunk["usage"]["totalTokens"], json!(140));
+		assert_eq!(chunk["choices"][0]["finishReason"], json!("length"));
+		assert_eq!(
+			map_chat_stop_reason(chunk["choices"][0]["finishReason"].as_str()),
+			"length"
+		);
+
+		// `remap$` keeps unmapped keys and drops the snake_case source key.
+		assert_eq!(chunk["usage"].get("prompt_tokens"), None);
+		assert_eq!(chunk["id"], json!("abc"));
+	}
+
+	/// GM-01: `DeltaMessage$inboundSchema` (deltamessage.js:24-40) remaps
+	/// `delta.tool_calls` to the `toolCalls` key `mistral.ts:388-401` reads; without it
+	/// streamed tool calls are silently dropped.
+	#[test]
+	fn completion_chunk_remaps_streamed_tool_calls_from_the_wire() {
+		let chunk = remap_completion_chunk(json!({
+			"id": "abc",
+			"model": "mistral-large-latest",
+			"choices": [{
+				"index": 0,
+				"finish_reason": "tool_calls",
+				"delta": {
+					"tool_calls": [{
+						"id": "call-1",
+						"index": 0,
+						"function": {"name": "read", "arguments": "{\"path\":\"a\"}"}
+					}],
+					"tool_call_id": "call-1"
+				}
+			}]
+		}));
+		let delta = &chunk["choices"][0]["delta"];
+		assert_eq!(delta["toolCalls"][0]["id"], json!("call-1"));
+		assert_eq!(delta["toolCalls"][0]["function"]["name"], json!("read"));
+		assert_eq!(delta["toolCallId"], json!("call-1"));
+		assert_eq!(delta.get("tool_calls"), None);
+		assert_eq!(
+			map_chat_stop_reason(chunk["choices"][0]["finishReason"].as_str()),
+			"toolUse"
+		);
+	}
+
+	/// GM-01: the remap runs on the events the SSE reader yields, so a real wire frame
+	/// reaches `consume_chat_stream` with the camelCase keys the TypeScript reads.
+	#[tokio::test]
+	async fn chunk_stream_remaps_the_wire_frame_before_yielding_it() {
+		let frame = concat!(
+			"data: {\"id\":\"a\",\"model\":\"m\",",
+			"\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10},",
+			"\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"call-1\",\"index\":0,",
+			"\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+		);
+		let mut stream = byte_stream(vec![frame.as_bytes()]);
+		let chunk = stream.next().await.unwrap().unwrap();
+		assert_eq!(chunk["usage"]["promptTokens"], json!(7));
+		assert_eq!(chunk["usage"]["totalTokens"], json!(10));
+		assert_eq!(chunk["choices"][0]["finishReason"], json!("tool_calls"));
+		assert_eq!(chunk["choices"][0]["delta"]["toolCalls"][0]["id"], json!("call-1"));
+	}
+
+	/// GM-04: `parseMessage` decodes each message with the same stateful
+	/// `new TextDecoder()` across the chunks that make up that message, so a multi-byte
+	/// character split at a network chunk boundary survives instead of becoming U+FFFD.
+	#[tokio::test]
+	async fn chunk_stream_keeps_multibyte_characters_split_across_chunks() {
+		// 'é' is C3 A9 and '🎈' is F0 9F 8E 88; one split lands inside each character.
+		let event = "data: {\"id\":\"a\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"caf\u{e9} \u{1F388}\"}}]}\n\n";
+		let bytes = event.as_bytes();
+		let first_split = event.find('\u{e9}').unwrap() + 1;
+		let second_split = event.find('\u{1F388}').unwrap() + 2;
+		let mut stream = byte_stream(vec![
+			&bytes[..first_split],
+			&bytes[first_split..second_split],
+			&bytes[second_split..],
+		]);
+		let chunk = stream.next().await.unwrap().unwrap();
+		assert_eq!(
+			chunk["choices"][0]["delta"]["content"],
+			json!("caf\u{e9} \u{1F388}")
+		);
+	}
+
+	/// GM-05: mistral.ts:113-116 throws "No API key for provider: ..." out of
+	/// `streamSimpleMistral`; the port reports the same message as a terminal `error`
+	/// event instead of panicking (a panic would abort the whole process).
+	#[tokio::test]
+	async fn stream_simple_mistral_reports_a_missing_api_key_through_the_stream() {
+		std::env::remove_var("MISTRAL_API_KEY");
+		let model = model("mistral-large-latest");
+		let context = Context::new(None, vec![], None);
+		let stream = stream_simple_mistral(&model, &context, None);
+		let event = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+			.await
+			.expect("the api-key error must be reported without blocking")
+			.expect("the stream must carry the error event");
+		let AssistantMessageEvent::Error { reason, error } = event else {
+			panic!("expected provider error event")
+		};
+		assert_eq!(reason, "error");
+		assert_eq!(error.stop_reason, "error");
+		assert_eq!(
+			error.error_message.as_deref(),
+			Some("No API key for provider: mistral")
+		);
+		assert!(stream.is_done());
+		assert!(stream.next().await.is_none());
 	}
 
 	#[test]
