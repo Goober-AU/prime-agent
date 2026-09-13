@@ -14,8 +14,10 @@ use tokio::sync::{mpsc, Mutex as AsyncMutex};
 use tokio_util::sync::CancellationToken;
 use crate::core::agent_session_config::{AgentSessionRuntimeConfig, durable_agent_session_runtime_config, merge_agent_session_runtime_config};
 use crate::core::session_lease::{canonical_session_path, get_process_start_id};
+use crate::utils::child_process::is_process_alive;
 use crate::core::session_resolver::looks_like_session_path;
 use crate::utils::atomic_file::{write_file_atomic_sync, remove_file_durably, RemoveFileDurablyOptions, WriteFileAtomicOptions};
+use crate::utils::child_process::{signal_process_group_or_process, Signal};
 use super::super::active_session_state::create_active_session_id;
 use super::super::command_recovery_journal::{CommandRecoveryJournal, CommandJournalBeginResult};
 use super::super::compact_session_stream::{CompactAssistantStreamReconstructor, CompactAssistantDelta};
@@ -31,6 +33,8 @@ use super::super::daemon_errors::DaemonSessionRecoveringError;
 use super::super::daemon_protocol::{self, DaemonResponse};
 use super::super::daemon_session_id::matches_session_id_suffix;
 use super::super::daemon_session_list::{summary_for_inactive_session, SessionSummary};
+use crate::core::session_manager::SessionInfo;
+use crate::core::agent_messages::AgentFamilyCatalogEntry;
 use super::super::rlm_ledger::{create_rlm_ledger_registry_seed_source, RlmLedgerEdge, RlmSpawnLedger};
 use super::super::daemon_socket::*;
 use super::super::daemon_supervisor_ownership::*;
@@ -44,6 +48,17 @@ const MAX_PUBLIC_LINE: usize = super::super::daemon_client::DAEMON_MAX_LINE_LENG
 /// `ROSTER_WATCHDOG_INTERVAL_MS` / `ROSTER_STALE_AFTER_MS` (daemon-supervisor.ts:194-195).
 const ROSTER_WATCHDOG_INTERVAL_MS: u64 = 15_000;
 const ROSTER_STALE_AFTER_MS: u64 = 3 * ROSTER_HEARTBEAT_INTERVAL_MS;
+
+/// `SCHEDULED_WAKE_RETRY_MS` / `SCHEDULED_WAKE_MAX_TIMEOUT_MS` / `SCHEDULED_WAKE_CLIENT_ID`
+/// (daemon-supervisor.ts:198-199 and daemon_supervisor.rs:140-142, which owns the values).
+const SCHEDULED_WAKE_RETRY_MS: f64 = 60_000.0;
+const SCHEDULED_WAKE_MAX_TIMEOUT_MS: f64 = 2_147_483_647.0;
+const SCHEDULED_WAKE_CLIENT_ID: &str = "scheduled-wake";
+
+/// `const WORKER_RETRY_DELAYS_MS = [250, 1000, 5000] as const` (daemon-supervisor.ts:210).
+/// daemon_supervisor.rs also declares this ladder, but keeps it private; the close-time
+/// recovery ladder in this file needs its own copy.
+const WORKER_RETRY_DELAYS_MS: [u64; 3] = [250, 1000, 5000];
 
 struct PublicClient {
     connection_id: String,
@@ -85,6 +100,11 @@ struct Worker {
     pending_client: Mutex<Option<Arc<DaemonWorkerClient>>>,
     connection: AsyncMutex<()>,
     stream: Mutex<CompactAssistantStreamReconstructor>,
+    /// `worker.recovery`: one recovery ladder per worker (daemon-supervisor.ts:3912, 4226-4228).
+    recovery: AtomicBool,
+    /// `worker.deferredRecovery` / `worker.deferredRecoveryRounds` (daemon-supervisor.ts:3960-3966).
+    deferred_recovery: AtomicBool,
+    deferred_recovery_rounds: AtomicU64,
 }
 #[derive(Clone)]
 struct InputPause { connection_id: String, worker: Arc<Worker>, active: String, requested: String }
@@ -109,6 +129,13 @@ struct Supervisor {
     roster_push_scheduled: AtomicBool,
     /// `this.rlmSpawnLedgerInstance`, a process-wide OnceLock so every clone shares one.
     ledger: Arc<tokio::sync::OnceCell<Arc<RlmSpawnLedger>>>,
+    /// `this.scheduledWakeTimer` / `this.scheduledWakeRecompute` / `scheduledWakeRecomputeQueued`
+    /// (daemon-supervisor.ts:775-778, 942-1055).
+    scheduled_wake_timer: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    scheduled_wake_recompute: AtomicBool,
+    scheduled_wake_recompute_queued: AtomicBool,
+    /// `this.scheduledWakeFailures`: the failure floor per passive root.
+    scheduled_wake_failures: Mutex<HashMap<String, f64>>,
 }
 
 pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut config: AgentSessionRuntimeConfig) -> Result<(), String> {
@@ -147,6 +174,8 @@ pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut 
         roster: Mutex::new(None), pending_roster_changed: Mutex::new(HashSet::new()), pending_roster_removed: Mutex::new(HashSet::new()),
         published_roster_ids: Mutex::new(HashSet::new()), roster_push_scheduled: AtomicBool::new(false),
         ledger: Arc::new(tokio::sync::OnceCell::new()),
+        scheduled_wake_timer: Mutex::new(None), scheduled_wake_recompute: AtomicBool::new(false),
+        scheduled_wake_recompute_queued: AtomicBool::new(false), scheduled_wake_failures: Mutex::new(HashMap::new()),
     });
     // The TS store is installed lazily by `roster()`; the port installs it here
     // because its mutation sink needs a `Weak` to the finished `Arc`.
@@ -170,6 +199,8 @@ pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut 
         supervisor.adopt_workers().await?;
         supervisor.seed_roster_ledger().await;
         supervisor.start_roster_watchdog();
+        // `this.scheduleScheduledSessionWakeRecompute()` on startup (daemon-supervisor.ts:883).
+        supervisor.schedule_scheduled_session_wake_recompute();
         #[cfg(unix)]
         let listener = tokio::net::UnixListener::bind(&socket_path).map_err(|error| error.to_string())?;
         #[cfg(windows)]
@@ -265,6 +296,7 @@ impl Supervisor {
             descriptor: Mutex::new(descriptor), client: Mutex::new(Some(Arc::clone(&client))), roster_epoch: AtomicU64::new(0),
             roster_stale: AtomicBool::new(false), last_frame_at: Mutex::new(None), pending_client: Mutex::new(None),
             connection: AsyncMutex::new(()), stream: Mutex::new(CompactAssistantStreamReconstructor::new()),
+            recovery: AtomicBool::new(false), deferred_recovery: AtomicBool::new(false), deferred_recovery_rounds: AtomicU64::new(0),
         });
         self.attach_worker_listeners(&worker, &client);
         self.workers.lock().unwrap().insert(worker.descriptor.lock().unwrap().worker_id.clone(), Arc::clone(&worker));
@@ -316,17 +348,232 @@ impl Supervisor {
         }
         self.forward_frame(worker, frame);
     }
-    /// `handleWorkerClose(worker, client, error)`: a dead connection makes the
-    /// worker's own rows non-live, so they passivate (or die, when owned).
+    /// `handleWorkerClose(worker, client, error)` (daemon-supervisor.ts:3835-3888).
+    ///
+    /// A dead connection makes the worker's own rows non-live, and then the close
+    /// itself drives recovery: mark `recovering` (3872), persist the descriptor
+    /// transition with the close error (3884-3887) and hand off to the retry
+    /// ladder. Without that hand-off every session of a crashed worker stays stuck
+    /// on the typed "is recovering; retry shortly" error forever, because
+    /// `recovery_command` was reachable only from `adopt_workers` and `retry_worker`.
     async fn handle_worker_close(self: &Arc<Self>, worker: &Arc<Worker>, client: &Arc<DaemonWorkerClient>, error: &str) {
         {
             let mut current = worker.client.lock().unwrap();
             if current.as_ref().map(Arc::as_ptr) != Some(Arc::as_ptr(client)) { return; }
             *current = None;
         }
-        let _ = error;
         if self.stopped.is_cancelled() { return; }
         self.mark_worker_roster_entries(worker, Some(DAEMON_WORKER_LIFECYCLE_RECOVERING));
+        // `isWorkerRecoveryEligible` (3881, 3923-3925): no concurrent ladder may be
+        // admitted for the same worker.
+        if !self.is_worker_recovery_eligible(worker) { return; }
+        {
+            let mut descriptor = worker.descriptor.lock().unwrap();
+            descriptor.lifecycle = DAEMON_WORKER_LIFECYCLE_RECOVERING.into();
+            descriptor.last_error = Some(error.to_string());
+            let persisted = descriptor.clone();
+            drop(descriptor);
+            if let Err(persist_error) = self.persist_worker(&persisted) { eprintln!("Could not persist worker descriptor {}: {persist_error}", persisted.worker_id); }
+        }
+        // `persistAndRecoverWorker(worker, recoveryTransition, false)` (3887): the
+        // ladder is admitted (and its flag published) before the await returns.
+        let _ = self.persist_and_recover_worker(worker, false).await;
+    }
+    /// `isWorkerRecoveryCandidate(worker)` (daemon-supervisor.ts:3949-3957).
+    fn is_worker_recovery_candidate(&self, worker: &Arc<Worker>) -> bool {
+        let descriptor = worker.descriptor.lock().unwrap();
+        !self.stopped.is_cancelled()
+            && descriptor.lifecycle != DAEMON_WORKER_LIFECYCLE_STOPPING
+            && descriptor.stop_requested_at.is_none()
+            && self.workers.lock().unwrap().get(&descriptor.worker_id).is_some_and(|resident| Arc::ptr_eq(resident, worker))
+            && worker.client.lock().unwrap().is_none()
+    }
+    /// `isWorkerRecoveryEligible(worker)` (daemon-supervisor.ts:3923-3925).
+    fn is_worker_recovery_eligible(&self, worker: &Arc<Worker>) -> bool {
+        self.is_worker_recovery_candidate(worker) && !worker.recovery.load(Ordering::SeqCst)
+    }
+    /// `persistAndRecoverWorker(worker, transition, waitForRecovery)` (daemon-supervisor.ts:3890-3921).
+    /// The ladder flag is published before any await, so concurrent touches join it.
+    async fn persist_and_recover_worker(self: &Arc<Self>, worker: &Arc<Worker>, wait_for_recovery: bool) -> Result<(), String> {
+        // Joining an admitted ladder (`await worker.recovery`, daemon-supervisor.ts:3913-3914)
+        // needs a shared in-flight handle; the flag below is the admission gate, so a second
+        // caller returns instead of starting a competing ladder.
+        if worker.recovery.swap(true, Ordering::SeqCst) {
+            let _ = wait_for_recovery;
+            return Ok(());
+        }
+        let result = self.recover_worker(worker).await;
+        worker.recovery.store(false, Ordering::SeqCst);
+        result
+    }
+    /// `recoverWorker(worker)` (daemon-supervisor.ts:4222-4361): the close-time
+    /// retry ladder over `WORKER_RETRY_DELAYS_MS = [250, 1000, 5000]` (:210).
+    async fn recover_worker(self: &Arc<Self>, worker: &Arc<Worker>) -> Result<(), String> {
+        if self.is_worker_recovery_cancelled(worker) { return Ok(()); }
+        if self.ownership.assert_current().await.is_err() { return Ok(()); }
+        let descriptor_worker_id = worker.descriptor.lock().unwrap().worker_id.clone();
+        // `let keepProbingLiveWorker = false` (daemon-supervisor.ts:4237). TS re-initialises it at
+        // the top of every delay round (:4240); here every path that does not return sets it, so
+        // only the last round's verdict reaches the post-loop decision, exactly as in TS.
+        let mut keep_probing_live_worker = false;
+        for retry_delay in WORKER_RETRY_DELAYS_MS {
+            tokio::time::sleep(Duration::from_millis(retry_delay)).await;
+            if self.is_worker_recovery_cancelled(worker) { return Ok(()); }
+            if self.ownership.assert_current().await.is_err() { return Ok(()); }
+            let descriptor = worker.descriptor.lock().unwrap().clone();
+            let identity = ProcessIdentity { pid: descriptor.pid as i64, process_start_id: descriptor.process_start_id.clone() };
+            // `processIdentity(pid, processStartId)` (daemon-supervisor.ts:4246, 4287-4292): the
+            // three verdicts are distinguished so "unknown" keeps probing and "replaced" does not.
+            let verdict = process_identity_verdict(&identity);
+            let identity_compatible = verdict != ProcessIdentityVerdict::Gone && matches_exact_process_identity(&identity);
+            if identity_compatible {
+                match self.reconnect_worker(worker).await {
+                    Ok(()) => {
+                        if self.is_worker_recovery_cancelled(worker) { return Ok(()); }
+                        {
+                            let mut current = worker.descriptor.lock().unwrap();
+                            current.lifecycle = DAEMON_WORKER_LIFECYCLE_READY.into();
+                            current.consecutive_failures = 0;
+                            let ready = current.clone();
+                            drop(current);
+                            if let Err(error) = self.persist_worker(&ready) { eprintln!("Could not persist worker descriptor {}: {error}", ready.worker_id); }
+                        }
+                        worker.deferred_recovery_rounds.store(0, Ordering::SeqCst);
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        // daemon-supervisor.ts:4279-4284: a worker that keeps the same
+                        // durable identity may still be load-slow, so keep probing it
+                        // instead of replacing live work after a timeout.
+                        keep_probing_live_worker = true;
+                        {
+                            let mut current = worker.descriptor.lock().unwrap();
+                            current.consecutive_failures += 1;
+                            current.last_failure_at = Some(chrono::Utc::now().to_rfc3339());
+                            current.last_error = Some(error.clone());
+                            let failed = current.clone();
+                            drop(current);
+                            if let Err(persist_error) = self.persist_worker(&failed) { eprintln!("Could not persist worker descriptor {}: {persist_error}", failed.worker_id); }
+                        }
+                    }
+                }
+                continue;
+            }
+            // daemon-supervisor.ts:4230-4236: a client-owned worker whose process is gone and
+            // that has no stored launch environment waits for its owner, never for a relaunch.
+            if verdict == ProcessIdentityVerdict::Gone && descriptor.owner_client_id.is_some() {
+                let mut current = worker.descriptor.lock().unwrap();
+                current.lifecycle = DAEMON_WORKER_LIFECYCLE_FAILED.into();
+                current.last_error = Some("Waiting for the owning client to reconnect".to_string());
+                let failed = current.clone();
+                drop(current);
+                if let Err(error) = self.persist_worker(&failed) { eprintln!("Could not persist worker descriptor {}: {error}", failed.worker_id); }
+                return Err("Waiting for the owning client to reconnect".to_string());
+            }
+            // daemon-supervisor.ts:4287-4292: a live pid whose identity cannot be verified
+            // ("unknown") keeps probing instead of being replaced.
+            if verdict == ProcessIdentityVerdict::Unknown {
+                keep_probing_live_worker = true;
+                continue;
+            }
+            // daemon-supervisor.ts:4293-4302: the identity is gone and no client-owned launch
+            // context is stored here, so the worker parks failed with the TS message. Recovery
+            // from there is the shipped reclaim path (`create` / `retry_worker`), never a
+            // silent relaunch from the close handler.
+            //
+            // blocked_on: the TS line above relaunches only a client-owned worker that carries
+            // BOTH `transientCreateCommand` and `launchEnv`. Neither exists in
+            // `DaemonWorkerDescriptor`, and the capability that would advertise that flow
+            // (`owned_session_recovery_context`, daemon-supervisor.ts:1370-1375) is deliberately
+            // unadvertised by this supervisor, so the launch half stays unported on purpose.
+            {
+                let mut current = worker.descriptor.lock().unwrap();
+                current.lifecycle = DAEMON_WORKER_LIFECYCLE_FAILED.into();
+                current.last_error = Some("Waiting for a client with fresh runtime context".to_string());
+                let failed = current.clone();
+                drop(current);
+                if let Err(error) = self.persist_worker(&failed) { eprintln!("Could not persist worker descriptor {}: {error}", failed.worker_id); }
+            }
+            self.mark_worker_roster_entries(worker, Some(DAEMON_WORKER_LIFECYCLE_FAILED));
+            return Ok(());
+        }
+        if self.is_worker_recovery_cancelled(worker) { return Ok(()); }
+        if keep_probing_live_worker {
+            // daemon-supervisor.ts:4329-4343 -> `deferWorkerRecovery` (3959-3981): stay in
+            // `recovering` and re-probe every `DEFERRED_RECOVERY_RECHECK_MS`, parking failed
+            // only after `MAX_DEFERRED_RECOVERY_ROUNDS` so a silent worker is never killed.
+            {
+                let mut current = worker.descriptor.lock().unwrap();
+                current.lifecycle = DAEMON_WORKER_LIFECYCLE_RECOVERING.into();
+                let recovering = current.clone();
+                drop(current);
+                if let Err(error) = self.persist_worker(&recovering) { eprintln!("Could not persist worker descriptor {}: {error}", recovering.worker_id); }
+            }
+            let rounds = worker.deferred_recovery_rounds.fetch_add(1, Ordering::SeqCst) + 1;
+            if rounds > MAX_DEFERRED_RECOVERY_ROUNDS {
+                let mut current = worker.descriptor.lock().unwrap();
+                current.lifecycle = DAEMON_WORKER_LIFECYCLE_FAILED.into();
+                current.last_error = Some(format!("Live session worker did not answer recovery probes for {MAX_DEFERRED_RECOVERY_ROUNDS} rounds"));
+                let failed = current.clone();
+                drop(current);
+                if let Err(error) = self.persist_worker(&failed) { eprintln!("Could not persist worker descriptor {}: {error}", failed.worker_id); }
+                self.mark_worker_roster_entries(worker, Some(DAEMON_WORKER_LIFECYCLE_FAILED));
+                eprintln!("Worker {} is unresponsive; parked failed after {MAX_DEFERRED_RECOVERY_ROUNDS} probe rounds", descriptor_worker_id);
+                return Ok(());
+            }
+            self.schedule_deferred_worker_recovery(worker);
+            return Ok(());
+        }
+        // daemon-supervisor.ts:4351-4358: the worker's process is gone and no client
+        // launch context exists, so it parks failed; `create` / `retry_worker` reclaim it.
+        {
+            let mut current = worker.descriptor.lock().unwrap();
+            current.lifecycle = DAEMON_WORKER_LIFECYCLE_FAILED.into();
+            let failed = current.clone();
+            drop(current);
+            if let Err(error) = self.persist_worker(&failed) { eprintln!("Could not persist worker descriptor {}: {error}", failed.worker_id); }
+        }
+        self.mark_worker_roster_entries(worker, Some(DAEMON_WORKER_LIFECYCLE_FAILED));
+        eprintln!("Worker {descriptor_worker_id} failed after three recovery attempts");
+        Ok(())
+    }
+    /// `resumeDeferredWorkerRecovery(worker, error)` (daemon-supervisor.ts:3983-4020): probe
+    /// again after `DEFERRED_RECOVERY_RECHECK_MS` while the worker stays a candidate.
+    fn schedule_deferred_worker_recovery(self: &Arc<Self>, worker: &Arc<Worker>) {
+        if worker.deferred_recovery.swap(true, Ordering::SeqCst) { return; }
+        let supervisor = Arc::clone(self);
+        let worker = Arc::clone(worker);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(DEFERRED_RECOVERY_RECHECK_MS)).await;
+            worker.deferred_recovery.store(false, Ordering::SeqCst);
+            if !supervisor.is_worker_recovery_candidate(&worker) { return; }
+            if !supervisor.is_worker_recovery_eligible(&worker) { return; }
+            if supervisor.ownership.assert_current().await.is_err() { return; }
+            let _ = supervisor.persist_and_recover_worker(&worker, false).await;
+        });
+    }
+    /// `isWorkerRecoveryCancelled(worker)` (daemon-supervisor.ts:4365-4372).
+    fn is_worker_recovery_cancelled(&self, worker: &Arc<Worker>) -> bool {
+        if self.stopped.is_cancelled() { return true; }
+        let descriptor = worker.descriptor.lock().unwrap();
+        descriptor.lifecycle == DAEMON_WORKER_LIFECYCLE_STOPPING
+            || descriptor.stop_requested_at.is_some()
+            || !self.workers.lock().unwrap().get(&descriptor.worker_id).is_some_and(|resident| Arc::ptr_eq(resident, worker))
+    }
+    /// `connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS)` + `subscribeWorker` +
+    /// `refreshWorkerSummaries(worker, true)` (daemon-supervisor.ts:4252-4254).
+    async fn reconnect_worker(self: &Arc<Self>, worker: &Arc<Worker>) -> Result<(), String> {
+        let descriptor = worker.descriptor.lock().unwrap().clone();
+        let client = Arc::new(DaemonWorkerClient::new(&descriptor.socket_path));
+        self.attach_worker_listeners(worker, &client);
+        *worker.pending_client.lock().unwrap() = Some(Arc::clone(&client));
+        let result = self.authenticate(&client, &descriptor).await;
+        *worker.pending_client.lock().unwrap() = None;
+        if let Err(error) = result { client.close_now(); return Err(error); }
+        *worker.client.lock().unwrap() = Some(Arc::clone(&client));
+        self.subscribe(worker, &descriptor.root_active_session_id).await?;
+        self.refresh(worker).await?;
+        Ok(())
     }
     fn forward_frame(&self, worker: &Worker, frame: &PrivateFrame) {
         let kind = frame.header.get("outboundType").and_then(Value::as_str).unwrap_or("");
@@ -614,6 +861,101 @@ impl Supervisor {
             }
         }
     }
+    /// `scheduleScheduledSessionWakeRecompute()` (daemon-supervisor.ts:942-957): one recompute
+    /// at a time, with a queued re-run so a change during a recompute is never lost.
+    fn schedule_scheduled_session_wake_recompute(self: &Arc<Self>) {
+        if self.stopped.is_cancelled() { return; }
+        if self.scheduled_wake_recompute.swap(true, Ordering::SeqCst) {
+            self.scheduled_wake_recompute_queued.store(true, Ordering::SeqCst);
+            return;
+        }
+        let supervisor = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut requeue = true;
+            while requeue {
+                requeue = false;
+                if let Err(error) = supervisor.recompute_scheduled_session_wake().await {
+                    eprintln!("Scheduled-session wake recompute failed: {error}");
+                }
+                supervisor.scheduled_wake_recompute.store(false, Ordering::SeqCst);
+                if supervisor.scheduled_wake_recompute_queued.swap(false, Ordering::SeqCst) { requeue = true; }
+            }
+        });
+    }
+    /// `recomputeScheduledSessionWake()` (daemon-supervisor.ts:1028-1056): arm a timer for the
+    /// earliest due passive scheduled job, with the failure floor that keeps an overdue job
+    /// off a hot retry loop.
+    async fn recompute_scheduled_session_wake(self: &Arc<Self>) -> Result<(), String> {
+        if self.stopped.is_cancelled() { return Ok(()); }
+        let candidates = self.collect_passive_scheduled_jobs(false).await;
+        if self.stopped.is_cancelled() { return Ok(()); }
+        {
+            let mut timer = self.scheduled_wake_timer.lock().unwrap();
+            if let Some(handle) = timer.take() { handle.abort(); }
+        }
+        let now = supervisor_now_ms() as f64;
+        let candidate_roots: HashSet<String> = candidates.iter().map(|(root, _)| canonical_session_path(root)).collect();
+        {
+            let mut failures = self.scheduled_wake_failures.lock().unwrap();
+            failures.retain(|root, _| candidate_roots.contains(root));
+        }
+        let mut wake_times: Vec<f64> = Vec::new();
+        for (root_session_file, job) in &candidates {
+            if job.get("status").and_then(Value::as_str) != Some(crate::core::cron_jobs::STATUS_ACTIVE) { continue; }
+            let Some(next_run_at) = job.get("nextRunAt").and_then(Value::as_str) else { continue; };
+            let Some(run_at) = iso_to_ms(next_run_at) else { continue; };
+            let failed_at = self.scheduled_wake_failures.lock().unwrap().get(&canonical_session_path(root_session_file)).copied();
+            wake_times.push(match failed_at { Some(failed_at) => run_at.max(failed_at + SCHEDULED_WAKE_RETRY_MS), None => run_at });
+        }
+        if wake_times.is_empty() { return Ok(()); }
+        let earliest = wake_times.iter().cloned().fold(f64::INFINITY, f64::min);
+        let delay = (earliest - now).max(0.0).min(SCHEDULED_WAKE_MAX_TIMEOUT_MS);
+        let supervisor = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = supervisor.stopped.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_millis(delay as u64)) => {
+                    if let Err(error) = supervisor.wake_due_scheduled_sessions().await {
+                        eprintln!("Scheduled-session wake failed: {error}");
+                    }
+                }
+            }
+        });
+        // The TS unrefs this timer; aborting it on shutdown matches that (see `start_roster_watchdog`).
+        let replaced = self.scheduled_wake_timer.lock().unwrap().replace(handle);
+        if let Some(replaced) = replaced { replaced.abort(); }
+        Ok(())
+    }
+    /// `wakeDueScheduledSessions(now)` (daemon-supervisor.ts:1058-1086): create-or-reuse a
+    /// worker for every passive root whose active scheduled job is due, then re-arm.
+    async fn wake_due_scheduled_sessions(self: &Arc<Self>) -> Result<(), String> {
+        self.scheduled_wake_timer.lock().unwrap().take();
+        if self.stopped.is_cancelled() { return Ok(()); }
+        let now = supervisor_now_ms() as f64;
+        let mut due: Vec<(String, String)> = Vec::new();
+        {
+            let mut seen: HashSet<String> = HashSet::new();
+            for (root_session_file, job) in self.collect_passive_scheduled_jobs(false).await {
+                if job.get("status").and_then(Value::as_str) != Some(crate::core::cron_jobs::STATUS_ACTIVE) { continue; }
+                let Some(run_at) = job.get("nextRunAt").and_then(Value::as_str).and_then(iso_to_ms) else { continue; };
+                if run_at > now { continue; }
+                let key = canonical_session_path(&root_session_file);
+                if seen.insert(key) { due.push((canonical_session_path(&root_session_file), root_session_file)); }
+            }
+        }
+        for (root_key, session_path) in due {
+            if self.stopped.is_cancelled() { return Ok(()); }
+            let body = json!({"type":"create", "sessionPath": session_path}).as_object().cloned().unwrap_or_default();
+            // The supervisor only wakes non-resident trees; firing and delivery stay worker-owned
+            // (daemon-supervisor.ts:941), so the wake uses the `SCHEDULED_WAKE_CLIENT_ID` owner.
+            match self.create_for_owner(SCHEDULED_WAKE_CLIENT_ID.to_string(), &body).await {
+                Ok(_) => { self.scheduled_wake_failures.lock().unwrap().remove(&root_key); eprintln!("Woke session worker for a due scheduled job: {session_path}"); }
+                Err(error) => { self.scheduled_wake_failures.lock().unwrap().insert(root_key, supervisor_now_ms() as f64); eprintln!("Scheduled wake failed for {session_path}: {error}"); }
+            }
+        }
+        self.schedule_scheduled_session_wake_recompute();
+        Ok(())
+    }
     /// The roster watchdog (`setInterval(() => this.sweepRosterStaleness(), ROSTER_WATCHDOG_INTERVAL_MS)`).
     fn start_roster_watchdog(self: &Arc<Self>) {
         let supervisor = Arc::clone(self);
@@ -677,8 +1019,13 @@ impl Supervisor {
         Ok(())
     }
     async fn create(self: &Arc<Self>, public: &PublicClient, body: &Map<String, Value>) -> Result<Value, String> {
+        self.create_for_owner(public.identity(), body).await
+    }
+    /// `createOrReuseWorker(clientId, command)` (daemon-supervisor.ts:3033): the owner is a
+    /// client identity string, so the scheduled wake can reuse the same path with
+    /// `SCHEDULED_WAKE_CLIENT_ID` (:1075) instead of a live client connection.
+    async fn create_for_owner(self: &Arc<Self>, owner: String, body: &Map<String, Value>) -> Result<Value, String> {
         let _opening = self.opening.lock().await;
-        let owner = public.identity();
         if let Some(path) = body.get("sessionPath").and_then(Value::as_str) {
             let workers: Vec<_> = self.workers.lock().unwrap().values().cloned().collect();
             for worker in workers {
@@ -769,6 +1116,93 @@ impl Supervisor {
         result
     }
     /// `matchWorkers(selector, includeWorker)` over the roster, then
+    /// `collectedPassiveScheduledJob { rootSessionFile, job, info }` (daemon-supervisor.ts:962).
+    ///
+    /// `collectPassiveScheduledJobs(includeInactive)` (daemon-supervisor.ts:960-1026): the
+    /// durable scheduled-job truth for sessions with no resident worker, so a wake timer and
+    /// `cron_list` can see jobs of passivated trees. The ledger family supplies the sessions
+    /// and their parents; a session is "uncovered" when no worker holds its path.
+    ///
+    /// blocked_on: the TS prologue (964-974) first settles `collectEphemeralCancelIntents()`
+    /// (:1388-1411) through `cancelScheduledJobsForSessionTree` (:6998) and
+    /// `deleteWorkerDescriptor` (:1603) and excludes those roots. Neither helper is ported: the
+    /// owned-descriptor sweeper belongs to the descriptor-write ownership that
+    /// `daemon_supervisor.rs` and `daemon_mode.rs` own, so a stale owned descriptor is filtered
+    /// here only by the `AgentRoster`/worker lookup, not deleted.
+    async fn collect_passive_scheduled_jobs(self: &Arc<Self>, include_inactive: bool) -> Vec<(String, Value)> {
+        let ledger = match self.rlm_spawn_ledger().await { Ok(ledger) => ledger, Err(_) => return Vec::new() };
+        let infos = ledger.family().await;
+        let info_by_path: HashMap<String, SessionInfo> = infos.iter()
+            .map(|info| (canonical_session_path(&info.path), info.clone()))
+            .collect();
+        let mut results: Vec<(String, Value)> = Vec::new();
+        for info in &infos {
+            if info.state.as_ref().is_some_and(|state| state.status != crate::core::session_manager::SessionStateStatus::Active) { continue; }
+            let artifact_dir = crate::core::session_manager::get_session_artifact_path_for_file(&resolve_path(&info.path), Some(&info.id));
+            if !Path::new(&artifact_dir).join(crate::core::cron_jobs::SESSION_SCHEDULED_JOBS_FILENAME).exists() { continue; }
+            let store = crate::core::cron_jobs::AgentCronJobStore::for_session_artifacts();
+            if !store.register_session_artifact(&info.id, &artifact_dir) { continue; }
+            // TS wraps this in `try/catch` and skips unreadable jobs (1009-1014); the ported
+            // `AgentCronJobStore::list()` returns just the jobs and has no failure channel, so
+            // there is nothing to catch here.
+            let jobs = store.list();
+            for job in jobs {
+                if !include_inactive && job.status != crate::core::cron_jobs::STATUS_ACTIVE && job.status != crate::core::cron_jobs::STATUS_PAUSED { continue; }
+                // `uncoveredRootFor(info)`: walk up while no worker holds the current path.
+                let root = {
+                    let mut cursor = info.clone();
+                    let mut visited: HashSet<String> = HashSet::from([canonical_session_path(&cursor.path)]);
+                    loop {
+                        if self.find_worker_by_session_file(&cursor.path, None).is_some() { break; }
+                        let Some(parent_path) = cursor.parent_session_path.clone() else { break; };
+                        let Some(parent) = info_by_path.get(&canonical_session_path(&parent_path)) else { break; };
+                        if !visited.insert(canonical_session_path(&parent.path)) { break; }
+                        cursor = parent.clone();
+                    }
+                    cursor
+                };
+                let current = root;
+                results.push((current.path.clone(), serde_json::to_value(&job).unwrap_or(Value::Null)));
+            }
+        }
+        results
+    }
+    /// `findWorkerBySessionFile(sessionFile, exclude)` (daemon-supervisor.ts:5316-5340).
+    /// Conflicting resident paths are reported as an error, exactly like the TS throw.
+    fn find_worker_by_session_file(&self, session_file: &str, exclude: Option<&Arc<Worker>>) -> Option<Arc<Worker>> {
+        let target = canonical_session_path(session_file);
+        let target_entry_worker = self.roster().lock().unwrap().by_session_file(&target).and_then(|entry| entry.worker_id);
+        let mut matches: Vec<Arc<Worker>> = Vec::new();
+        for worker in self.workers.lock().unwrap().values() {
+            if exclude.is_some_and(|exclude| Arc::ptr_eq(exclude, worker)) { continue; }
+            let descriptor = worker.descriptor.lock().unwrap();
+            let summary_match = target_entry_worker.as_deref() == Some(descriptor.worker_id.as_str());
+            let descriptor_path = descriptor.session_file.as_ref().map(|file| canonical_session_path(file));
+            let configured_path = descriptor.create_command.session_path.as_ref().map(|file| canonical_session_path(file));
+            if !summary_match && descriptor_path.as_deref() != Some(target.as_str()) && configured_path.as_deref() != Some(target.as_str()) { continue; }
+            if descriptor_path.is_some() && configured_path.is_some() && descriptor_path != configured_path {
+                return None;
+            }
+            matches.push(Arc::clone(worker));
+        }
+        if matches.len() > 1 { return None; }
+        matches.into_iter().next()
+    }
+    /// `cancelPassiveScheduledJob`: `AgentCronJobStore.forSessionArtifacts().registerSessionArtifact(...).cancel(id)`
+    /// (daemon-supervisor.ts:2618-2630).
+    async fn cancel_passive_scheduled_job(self: &Arc<Self>, job_id: &str) -> Option<Value> {
+        let jobs = self.collect_passive_scheduled_jobs(true).await;
+        let job = jobs.into_iter().map(|(_, job)| job).find(|job| job.get("id").and_then(Value::as_str) == Some(job_id))?;
+        let session_file = job.get("sessionFile").and_then(Value::as_str)?.to_string();
+        let session_id = job.get("sessionId").and_then(Value::as_str)?.to_string();
+        let store = crate::core::cron_jobs::AgentCronJobStore::for_session_artifacts();
+        store.register_session_artifact(&session_id, &crate::core::session_manager::get_session_artifact_path_for_file(&resolve_path(&session_file), Some(&session_id)));
+        store.cancel(job_id, supervisor_now_ms() as f64).and_then(|job| serde_json::to_value(job).ok())
+    }
+    /// `isLiveWorker(worker)` (daemon-supervisor.ts:5053-5055).
+    fn is_live_worker(&self, worker: &Arc<Worker>) -> bool {
+        self.is_visible_worker(worker) && worker.descriptor.lock().unwrap().stop_requested_at.is_none()
+    }
     /// `findWorker`'s recovery fallback and its typed recovering error.
     async fn find(self: &Arc<Self>, identity: &str, requested: &str) -> Result<(Arc<Worker>, String), String> {
         let mut matches = self.match_workers(requested, Some(&|worker: &Arc<Worker>| visible(worker, identity)));
@@ -809,6 +1243,34 @@ impl Supervisor {
             return Err(DaemonSessionRecoveringError::new(worker.descriptor.lock().unwrap().root_active_session_id.clone()).message());
         }
         Err(format!("Unknown active session: {requested}"))
+    }
+    /// `familyCatalogEntry(summary)` (daemon-supervisor.ts:5148-5161).
+    fn family_catalog_entry(&self, summary: &SessionSummary) -> AgentFamilyCatalogEntry {
+        let depth = summary.rlm_depth.unwrap_or(if summary.parent_session_path.is_some() { 1 } else { 0 });
+        let status = summary.roster_status.unwrap_or_else(|| classify_session_roster_status(
+            &RosterSummaryView {
+                active_session_id: summary.active_session_id.clone(),
+                activity: Some(summary.activity.clone()),
+                is_session_active: Some(summary.is_session_active),
+            },
+            false,
+        ));
+        AgentFamilyCatalogEntry {
+            id: summary.session_id.clone(),
+            name: summary.session_name.clone(),
+            depth: depth as f64,
+            status: status.as_str().to_string(),
+            replied_since_task: None,
+            parent_session_id: (depth > 0).then(|| summary.parent_session_id.clone()).flatten(),
+            parent_session_path: (depth > 0).then(|| summary.parent_session_path.as_ref().map(|path| canonical_session_path(path))).flatten(),
+            session_path: summary.session_file.as_ref().map(|file| canonical_session_path(file)),
+        }
+    }
+    /// The roster summary for a resolved active session id, as the a2a send path needs it
+    /// (`target.summary`, daemon-supervisor.ts:2746-2753).
+    fn summary_for_active(&self, worker: &Arc<Worker>, active: &str) -> Option<SessionSummary> {
+        let entry = self.roster().lock().unwrap().by_active_session_id(active)?;
+        Some(self.public_summary(worker, summary_from_entry(&entry)))
     }
     /// `matchWorkers(selector, includeWorker)`: exact ids win, hex suffixes second.
     fn match_workers(&self, selector: &str, include_worker: Option<&dyn Fn(&Arc<Worker>) -> bool>) -> Vec<(Arc<Worker>, String)> {
@@ -1013,7 +1475,10 @@ impl Supervisor {
             )))
         }).await.cloned()
     }
-    async fn stop_worker(&self, worker: &Arc<Worker>, archive: bool) -> Result<(), String> {
+    /// `stopWorker(worker, removeDescriptor, force, archiveSession)` (daemon-supervisor.ts:6689).
+    /// Only the `shutdown` command's `force` flag reaches here (`forceWorkers`, 2419/7326); every
+    /// other caller keeps the non-forcing default of the port.
+    async fn stop_worker(&self, worker: &Arc<Worker>, archive: bool, force: bool) -> Result<(), String> {
         self.ownership.assert_current().await.map_err(|error| error.to_string())?;
         let descriptor = {
             let mut descriptor = worker.descriptor.lock().unwrap();
@@ -1029,10 +1494,29 @@ impl Supervisor {
             response_data(client.request_worker(command(kind), 30_000).await.map_err(|error| error.to_string())?)?;
         }
         let identity = ProcessIdentity { pid: descriptor.pid as i64, process_start_id: descriptor.process_start_id.clone() };
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        // `const gracefulDeadline = Date.now() + (force ? 500 : process.platform === "win32" ? 10_000 : 2000)`
+        // (daemon-supervisor.ts:6824); this port only serves Windows workers.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(if force { 500 } else { 10_000 });
         let mut alive = matches_exact_process_identity(&identity);
+        let mut sigkill_sent = false;
         while alive {
-            if tokio::time::Instant::now() >= deadline { return Err(format!("Session worker {} is still stopping", descriptor.worker_id)); }
+            if tokio::time::Instant::now() >= deadline {
+                // daemon-supervisor.ts:6830-6843: `force` escalates to SIGKILL, then waits 1s
+                // before declaring the stop a timeout.
+                if force && matches_exact_process_identity(&identity) {
+                    signal_process_group_or_process(descriptor.pid, Signal::Kill);
+                    sigkill_sent = true;
+                    let force_deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
+                    while matches_exact_process_identity(&identity) && tokio::time::Instant::now() < force_deadline {
+                        tokio::time::sleep(Duration::from_millis(25)).await;
+                    }
+                }
+                if matches_exact_process_identity(&identity) {
+                    // `throw new WorkerStopTimeoutError(...)` (daemon-supervisor.ts:6850-6852).
+                    return Err(format!("Session worker {} did not stop{}", descriptor.worker_id, if sigkill_sent { " after SIGKILL" } else { "" }));
+                }
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(25)).await;
             alive = matches_exact_process_identity(&identity);
         }
@@ -1097,15 +1581,155 @@ impl Supervisor {
                 let recovery = recovery_command(&descriptor)?;
                 return Ok(success(Some(self.launch_worker(&recovery, public.identity(), Some(descriptor)).await?)));
             }
+            // `case "agent_messages_status"` (daemon-supervisor.ts:2425-2435): without an
+            // `activeSessionId` the id-less form is served, not rejected. The port is a
+            // supervisor-only slice with no per-worker pause state, so the id-less answer is
+            // the TS "no live worker" fallback `{ paused: false, limits: {} }` (2432), and the
+            // id-less pause/resume fan-out (2436-2448) is refused explicitly because its
+            // durable counterpart (`agent_messages_paused`) lives in daemon_mode.rs.
+            "agent_messages_status" if body.get("activeSessionId").and_then(Value::as_str).is_none() => {
+                return Ok(success(Some(json!({"paused": false, "limits": {}}))));
+            }
+            "agent_messages_pause" | "agent_messages_resume" if body.get("activeSessionId").and_then(Value::as_str).is_none() => {
+                return Err(format!("Daemon supervisor command requires activeSessionId in this port: {kind}"));
+            }
+            // `case "cron_list"` (daemon-supervisor.ts:2450-2480): the id-less form aggregates
+            // the live workers' jobs and then adds every passive scheduled job
+            // (`collectPassiveScheduledJobs`, 2476-2478).
+            "cron_list" if body.get("activeSessionId").and_then(Value::as_str).is_none() => {
+                let mut jobs: Vec<Value> = Vec::new();
+                let mut seen: HashSet<String> = HashSet::new();
+                let workers: Vec<Arc<Worker>> = self.workers.lock().unwrap().values().cloned().collect();
+                for worker in workers {
+                    if !self.is_live_worker(&worker) { continue; }
+                    if worker.descriptor.lock().unwrap().lifecycle != DAEMON_WORKER_LIFECYCLE_READY { continue; }
+                    let Ok(client) = self.connected_client(&worker).await else { continue; };
+                    let Ok(response) = client.request_worker(command("cron_list"), 5_000).await else { continue; };
+                    for job in cron_jobs_from_response(&response) {
+                        let job_id = job.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                        if seen.insert(job_id) { jobs.push(job); }
+                    }
+                }
+                let include_inactive = body.get("includeInactive").and_then(Value::as_bool) == Some(true);
+                for (_, passive) in self.collect_passive_scheduled_jobs(include_inactive).await {
+                    let job_id = passive.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
+                    if seen.insert(job_id) { jobs.push(passive); }
+                }
+                jobs.sort_by(|left, right| compare_cron_jobs_by_next_run(left, right));
+                return Ok(success(Some(json!({"jobs": jobs}))));
+            }
+            // `case "heartbeats_list"` (daemon-supervisor.ts:2481-2535) with no
+            // `activeSessionId` needs per-worker heartbeat snapshots, which this supervisor
+            // slice does not cache; the passive half alone would silently drop live heartbeats.
+            "heartbeats_list" if body.get("activeSessionId").and_then(Value::as_str).is_none() => {
+                return Err("Daemon supervisor command requires activeSessionId in this port: heartbeats_list".to_string());
+            }
+            // `case "cron_cancel"` (daemon-supervisor.ts:2591-2632): the id-less form searches
+            // the live workers for the job, then the passive scheduled stores, then throws.
+            "cron_cancel" if body.get("activeSessionId").and_then(Value::as_str).is_none() => {
+                let job_id = body.get("jobId").and_then(Value::as_str).ok_or("cron_cancel requires jobId")?.to_string();
+                let workers: Vec<Arc<Worker>> = self.workers.lock().unwrap().values().cloned().collect();
+                for worker in workers {
+                    if !self.is_live_worker(&worker) { continue; }
+                    if worker.descriptor.lock().unwrap().lifecycle != DAEMON_WORKER_LIFECYCLE_READY { continue; }
+                    let Ok(client) = self.connected_client(&worker).await else { continue; };
+                    let mut list = command("cron_list");
+                    list.insert("includeInactive".into(), json!(true));
+                    let Ok(response) = client.request_worker(list, 5_000).await else { continue; };
+                    if !cron_jobs_from_response(&response).iter().any(|job| job.get("id").and_then(Value::as_str) == Some(job_id.as_str())) { continue; }
+                    let mut forwarded = body.clone();
+                    forwarded.insert("type".into(), json!("cron_cancel"));
+                    let mut response = client.request_worker(forwarded, REQUEST_TIMEOUT).await.map_err(|error| error.to_string())?;
+                    response.id = id; response.command = kind.clone();
+                    return Ok(Some(response));
+                }
+                if let Some(job) = self.cancel_passive_scheduled_job(&job_id).await {
+                    // `broadcastHeartbeatsChanged()` (2627) re-arms the wake timer (:7110).
+                    self.schedule_scheduled_session_wake_recompute();
+                    return Ok(success(Some(json!({"job": job}))));
+                }
+                return Err(format!("No cron job found: {job_id}"));
+            }
+            // `if (command.type === "send_message")` (daemon-supervisor.ts:2707-2779): the
+            // a2a path is reachable without an `activeSessionId`. The target is resolved by
+            // the ordinary worker lookup; when that fails with an unknown active session the
+            // session path is resolved through the catalog and a worker is woken on demand
+            // (:2741-2745). `fromActiveSessionId` is optional and only adds the `agentOrigin`
+            // family check (:2733-2740, 2754-2756), which is only enforceable when the
+            // sender already has a resident worker.
+            "send_message" if body.get("activeSessionId").and_then(Value::as_str).is_none() => {
+                let target_selector = body.get("targetActiveSessionId").and_then(Value::as_str).ok_or("send_message requires targetActiveSessionId")?.to_string();
+                let source = match body.get("fromActiveSessionId").and_then(Value::as_str) {
+                    Some(from) => Some(self.find(&public.identity(), from).await.map_err(|error| error.to_string())?),
+                    None => None,
+                };
+                let target = match self.find(&public.identity(), &target_selector).await {
+                    Ok(found) => found,
+                    Err(error) if error.starts_with("Unknown active session:") => {
+                        let cwd = source.as_ref().and_then(|(worker, _)| worker.descriptor.lock().unwrap().create_command.session_path.clone())
+                            .or_else(|| self.config.cwd.clone())
+                            .unwrap_or_else(|| std::env::current_dir().map(|dir| dir.to_string_lossy().into_owned()).unwrap_or_default());
+                        let session_dir = source.as_ref().and_then(|(worker, _)| worker.descriptor.lock().unwrap().session_dir.clone()).or_else(|| self.config.session_dir.clone());
+                        let session_path = self.catalog.resolve(&target_selector, &cwd, session_dir.as_deref()).await.map_err(|catalog_error| {
+                            // `Ambiguous session selector` is preserved so a2a senders can tell
+                            // it apart from the original lookup failure (:2725-2732).
+                            if catalog_error.starts_with("Ambiguous session selector") { catalog_error } else { error.clone() }
+                        })?;
+                        let create = json!({"type":"create", "sessionPath": session_path, "continueRecent": false});
+                        self.create_for_owner(public.identity(), create.as_object().expect("create body is an object")).await?;
+                        // `findSummaryInWorker(worker, sessionPath) ?? sessionSummaryFromRosterEntry(root)`
+                        // (:2746-2750): the created root is now addressable, so the ordinary
+                        // lookup yields the target the wake was for.
+                        self.find(&public.identity(), &target_selector).await?
+                    }
+                    Err(error) => return Err(error),
+                };
+                let (target_worker, target_active) = target;
+                let target_summary = self.summary_for_active(&target_worker, &target_active);
+                if let (Some((source_worker, source_active)), true) = (source.as_ref(), body.get("agentOrigin").and_then(Value::as_bool) == Some(true)) {
+                    // `assertAgentFamilyReach` on the resolved pair (:2754-2756).
+                    if let (Some(source_summary), Some(target_summary)) = (self.summary_for_active(source_worker, source_active), target_summary.as_ref()) {
+                        crate::core::agent_messages::assert_agent_family_reach(&self.family_catalog_entry(&source_summary), &self.family_catalog_entry(target_summary))?;
+                    }
+                }
+                let client = self.connected_client(&target_worker).await?;
+                let mut forwarded = body.clone();
+                forwarded.insert("type".into(), json!("send_message"));
+                forwarded.insert("targetActiveSessionId".into(), json!(target_active));
+                let mut response = client.request_worker(forwarded, REQUEST_TIMEOUT).await.map_err(|error| error.to_string())?;
+                response.id = id; response.command = kind.clone();
+                return Ok(Some(response));
+            }
             "list_saved_sessions" => {
                 let sessions = self.catalog.list(body.get("cwd").and_then(Value::as_str), self.config.session_dir.as_deref(), None).await?;
                 return Ok(success(Some(json!({"sessions":sessions.iter().map(serialize_saved_session_info).collect::<Vec<_>>()}))));
             }
+            // `case "shutdown"` (daemon-supervisor.ts:2418-2420): the success reply is returned
+            // immediately through `setImmediate`, the `daemon_closing` broadcast goes out BEFORE
+            // any worker stop (7314-7318), `force` (2419) is honoured by the stop, and a worker
+            // stop timeout is swallowed (7327-7334) instead of aborting the shutdown.
             "shutdown" => {
-                let workers: Vec<_> = self.workers.lock().unwrap().values().cloned().collect();
-                for worker in workers { self.stop_worker(&worker, false).await?; }
-                public.write(&json!(DaemonResponse::success(id.as_deref(), &kind, None)));
-                self.stopped.cancel(); return Ok(None);
+                let force = body.get("force").and_then(Value::as_bool) == Some(true);
+                let reply = DaemonResponse::success(id.as_deref(), &kind, None);
+                // `setImmediate(() => void this.shutdown(...))` + `return success(...)`
+                // (daemon-supervisor.ts:2418-2420): the reply is written before the deferred
+                // shutdown body runs, and that body writes `daemon_closing` to every client
+                // before it stops any worker (7314-7318).
+                public.write(&json!(reply));
+                for client in self.clients.lock().unwrap().values() { client.write(&json!({"type":"daemon_closing","reason":"shutdown"})); }
+                let supervisor = Arc::clone(self);
+                tokio::spawn(async move {
+                    let workers: Vec<_> = supervisor.workers.lock().unwrap().values().cloned().collect();
+                    for worker in workers {
+                        // `stopWorker(worker, true, forceWorkers, true)` in a `Promise.all` whose
+                        // `WorkerStopTimeoutError` is logged, not rethrown (7324-7334).
+                        if let Err(error) = supervisor.stop_worker(&worker, false, force).await {
+                            eprintln!("Worker {} remains tombstoned for recovery after shutdown: {error}", worker.descriptor.lock().unwrap().worker_id);
+                        }
+                    }
+                    supervisor.stopped.cancel();
+                });
+                return Ok(None);
             }
             "detach" => {
                 let active = body.get("activeSessionId").and_then(Value::as_str);
@@ -1152,11 +1776,11 @@ impl Supervisor {
                 let summary = self.refresh(&worker).await?.into_iter().find(|summary| summary.get("activeSessionId").or_else(|| summary.get("id")).and_then(Value::as_str) == Some(&active));
                 return Ok(success(summary));
             }
-            self.stop_worker(&worker, true).await?;
+            self.stop_worker(&worker, true, false).await?;
             return Ok(success(None));
         }
         if kind == "kill" && worker.descriptor.lock().unwrap().root_active_session_id == active {
-            self.stop_worker(&worker, true).await?;
+            self.stop_worker(&worker, true, false).await?;
             return Ok(success(None));
         }
         let pause_epoch = public.pause_epoch.load(std::sync::atomic::Ordering::SeqCst);
@@ -1280,7 +1904,7 @@ impl Supervisor {
             if supervisor.clients.lock().unwrap().values().any(|client| client.identity() == owner) { return; }
             let workers: Vec<_> = supervisor.workers.lock().unwrap().values().filter(|worker| worker.descriptor.lock().unwrap().owner_client_id.as_deref() == Some(&owner)).cloned().collect();
             for worker in workers {
-                if let Err(error) = supervisor.stop_worker(&worker, true).await { eprintln!("Owned worker cleanup failed: {error}"); }
+                if let Err(error) = supervisor.stop_worker(&worker, true, false).await { eprintln!("Owned worker cleanup failed: {error}"); }
             }
         });
     }
@@ -1392,6 +2016,47 @@ fn server_capabilities() -> Vec<String> {
     capabilities.push("agent_roster".to_string());
     capabilities
 }
+/// `cronJobsFromResponse(response)` (daemon-supervisor.ts:640-646).
+fn cron_jobs_from_response(response: &DaemonResponse) -> Vec<Value> {
+    if !response.success { return Vec::new(); }
+    response.data.as_ref().and_then(|data| data.get("jobs")).and_then(Value::as_array).cloned().unwrap_or_default()
+}
+
+/// `sortCronJobs(jobs)` (daemon-supervisor.ts:656-669): ascending `nextRunAt`, with
+/// jobs that have no `nextRunAt` last.
+fn compare_cron_jobs_by_next_run(left: &Value, right: &Value) -> std::cmp::Ordering {
+    let next_run = |job: &Value| job.get("nextRunAt").and_then(Value::as_str).map(str::to_string);
+    match (next_run(left), next_run(right)) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (Some(left), Some(right)) => left.cmp(&right),
+    }
+}
+
+/// `DEFERRED_RECOVERY_RECHECK_MS` / `MAX_DEFERRED_RECOVERY_ROUNDS`
+/// (daemon-supervisor.ts:211-213, values shared with daemon_supervisor.rs:121-123).
+const DEFERRED_RECOVERY_RECHECK_MS: u64 = 5000;
+const MAX_DEFERRED_RECOVERY_ROUNDS: u64 = 10;
+
+/// The three verdicts of `processIdentity(pid, processStartId)`
+/// (daemon-supervisor.ts:4246, 4287-4292): `Current`, `Unknown` (alive but not provably ours)
+/// and `Gone`/`Replaced`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProcessIdentityVerdict { Current, Unknown, Gone }
+
+fn process_identity_verdict(identity: &ProcessIdentity) -> ProcessIdentityVerdict {
+    if !is_process_alive(identity.pid as i32) { return ProcessIdentityVerdict::Gone; }
+    if identity.process_start_id.is_none() { return ProcessIdentityVerdict::Unknown; }
+    if get_process_start_id(identity.pid).as_deref() == identity.process_start_id.as_deref() { ProcessIdentityVerdict::Current } else { ProcessIdentityVerdict::Gone }
+}
+
+/// `Date.parse(value)`, `undefined` when unparseable (the TS guards with `Number.isFinite`).
+fn iso_to_ms(value: &str) -> Option<f64> {
+    let millis = crate::core::cron_jobs::parse_iso_date(value);
+    millis.is_finite().then_some(millis)
+}
+
 fn descriptor_key(socket: &str) -> String { format!("{:x}", Sha256::digest(socket.as_bytes()))[..12].to_string() }
 fn worker_socket(supervisor: &str, worker: &str) -> String {
     let key = descriptor_key(supervisor);

@@ -222,6 +222,7 @@ use crate::modes::agent_connection::daemon_agent_connection::now_iso;
 use pi_ai::models::{
     get_model_input_limit, get_supported_thinking_levels, models_are_equal, supports_fast_mode,
 };
+use pi_ai::utils::overflow::is_context_overflow;
 
 // ---------------------------------------------------------------------------
 // Private plumbing for cross-slice seams
@@ -3811,6 +3812,8 @@ impl AgentSession {
                     let mut state = self.autonomous_state.lock().unwrap();
                     set_autonomous_enabled(&mut state, false);
                 }
+                // TS 2213: `/autonomous off` clears queued continuations.
+                self.clear_queued_autonomous_continuations();
                 self.emit_autonomous_status();
             }
         }
@@ -4253,7 +4256,13 @@ impl AgentSession {
         *self.queued_goal_threshold_continuation.lock().unwrap() = None;
     }
 
-    /// `_clearQueuedAutonomousContinuations`.
+    /// `_clearQueuedAutonomousContinuations()` with no options
+    /// (agent-session.ts:2213 -> 3101-3147 with `messages === undefined`).
+    ///
+    /// DEVIATION (named): TS 3104-3125 also removes the messages from the agent
+    /// queues and cancels their turn actions; the Rust call sites here are the
+    /// `/autonomous off` command, which the TS also services through this no-arg
+    /// form, so the same three fields are cleared.
     fn clear_queued_autonomous_continuations(&self) {
         self.queued_autonomous_threshold_continuations.lock().unwrap().clear();
         self.queued_autonomous_continuation_snapshots.lock().unwrap().clear();
@@ -4261,11 +4270,91 @@ impl AgentSession {
             .lock()
             .unwrap()
             .clear();
+        // TS 3141-3143: no explicit `messages` means the flag is reset.
+        self.continue_after_threshold_compaction.store(false, Ordering::SeqCst);
     }
 
-    /// `_clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction`.
-    fn clear_queued_autonomous_continuations_after_skipped_threshold_compaction(&self) {
-        self.clear_queued_autonomous_continuations();
+    /// `_clearQueuedAutonomousContinuations({restoreAutonomousState, messages})`
+    /// (agent-session.ts:3101-3147).
+    fn clear_queued_autonomous_continuations_for_messages(
+        self: &Arc<Self>,
+        restore_autonomous_state: bool,
+        requested_messages: &[AgentMessage],
+    ) {
+        let requested: HashSet<String> =
+            requested_messages.iter().map(agent_message_key_of).collect();
+        let queued_messages: Vec<AgentMessage> = {
+            let post = self.post_compaction_continuation_messages.lock().unwrap();
+            post.iter()
+                .filter(|message| requested.contains(&agent_message_key_of(message)))
+                .cloned()
+                .collect()
+        };
+        if queued_messages.is_empty() {
+            return;
+        }
+        let queued: HashSet<String> = queued_messages.iter().map(agent_message_key_of).collect();
+        self.post_compaction_continuation_messages
+            .lock()
+            .unwrap()
+            .retain(|message| !queued.contains(&agent_message_key_of(message)));
+        // TS 3120: the agent queues hold the same messages.
+        let queued_for_agent = queued.clone();
+        self.agent
+            .remove_queued_messages(Arc::new(move |message: &AgentMessage| {
+                queued_for_agent.contains(&agent_message_key_of(message))
+            }));
+        // TS 3121-3124.
+        self.cancel_session_actions(
+            &|action: &QueuedSessionAction| match &action.payload {
+                QueuedActionPayload::Turn(_) => primary_delivery_record(action)
+                    .map(|record| queued.contains(&delivery_message_key_of(&record.message)))
+                    .unwrap_or(false),
+                QueuedActionPayload::SessionCommand(_) => false,
+            },
+            "Queued autonomous continuation was cleared before delivery.",
+            None,
+        );
+        self.emit_queue_update();
+        if restore_autonomous_state {
+            // TS 3126-3134: restore the queue-time snapshot of the first match.
+            let snapshot = {
+                let snapshots = self.queued_autonomous_continuation_snapshots.lock().unwrap();
+                queued_messages
+                    .iter()
+                    .find_map(|message| snapshots.get(&agent_message_key_of(message)).cloned())
+            };
+            if let Some(snapshot) = snapshot {
+                self.restore_autonomous_runtime_snapshot(snapshot);
+            }
+        }
+        // TS 3135-3140.
+        {
+            let mut snapshots = self.queued_autonomous_continuation_snapshots.lock().unwrap();
+            for message in &queued_messages {
+                snapshots.remove(&agent_message_key_of(message));
+            }
+        }
+        self.pending_threshold_compaction_autonomous_messages
+            .lock()
+            .unwrap()
+            .retain(|message| !queued.contains(&agent_message_key_of(message)));
+        // TS 3144-3146.
+        if !self.agent.has_queued_messages() && self.unfinished_action_count() == 0 {
+            self.cancel_post_compaction_continue();
+        }
+    }
+
+    /// `_clearQueuedAutonomousContinuationsAfterSkippedThresholdCompaction`
+    /// (agent-session.ts:3149-3159).
+    fn clear_queued_autonomous_continuations_after_skipped_threshold_compaction(
+        self: &Arc<Self>,
+        should_continue_after_threshold: bool,
+        queued_messages: &[AgentMessage],
+    ) {
+        if should_continue_after_threshold {
+            self.clear_queued_autonomous_continuations_for_messages(true, queued_messages);
+        }
     }
 
 
@@ -6141,10 +6230,19 @@ impl AgentSession {
                 }
             }
 
-            let compaction_will_retry = self
-                .check_compaction(&self.compaction_settings())
-                .await
-                .unwrap_or(false);
+            // TS 4298-4304: `_checkCompaction(msg)` (skipAbortedCheck defaults to
+            // true) - Case 1 (context overflow, which strips the failed assistant
+            // message and retries) runs before the requested/threshold cases.
+            let settings = self.compaction_settings();
+            let compaction_will_retry = match self.check_compaction_overflow(&message, &settings).await {
+                Some(will_retry) => will_retry,
+                // TS 4300 `_checkCompaction(msg)` keeps the default
+                // `queueAutonomousContinuation = true`.
+                None => self
+                    .check_compaction(&settings, true)
+                    .await
+                    .unwrap_or(false),
+            };
             if compaction_will_retry && self.retry_attempt.load(Ordering::SeqCst) > 0 {
                 return;
             }
@@ -7150,17 +7248,27 @@ impl AgentSession {
         Box::pin(async move { Ok(result) })
     }
 
-    /// `_runPreTurnCompaction`.
+    /// `_runPreTurnCompaction` (agent-session.ts:5092-5106).
     async fn run_pre_turn_compaction(self: &Arc<Self>) {
         let last_assistant = self.find_last_assistant_message();
-        if last_assistant.is_some() {
-            let _ = self.check_compaction(&self.compaction_settings()).await;
+        if let Some(last_assistant) = last_assistant {
+            let settings = self.compaction_settings();
+            // TS 5095 `_checkCompaction(lastAssistant, false, false)`: the pre-prompt
+            // path includes aborted messages and continues to the threshold case.
+            if self
+                .check_compaction_overflow_with(&last_assistant, &settings, false)
+                .await
+                .is_none()
+            {
+                // TS 5095 `_checkCompaction(lastAssistant, false, false)`.
+                let _ = self.check_compaction(&settings, false).await;
+            }
         } else {
             let model = self.agent.state().model;
             let tokens = estimate_context_tokens(&self.agent.state().messages).tokens;
             let settings = self.compaction_settings();
             if should_compact_for_model(tokens, &model, &settings) {
-                let _ = self.run_auto_compaction(COMPACTION_REASON_THRESHOLD).await;
+                let _ = self.run_auto_compaction(COMPACTION_REASON_THRESHOLD, false).await;
             }
         }
     }
@@ -8746,15 +8854,29 @@ impl AgentSession {
         }
     }
 
-    /// `_assertSessionActionAdmissionAvailable`.
+    /// `_assertSessionActionAdmissionAvailable` (agent-session.ts:6197-6209).
     fn assert_session_action_admission_available(&self) -> Result<(), String> {
-        if !self.session_input_admission_pauses.lock().unwrap().is_empty() {
-            return Err("Session input admission is paused".to_string());
+        // TS 6198-6200: a disposing or disposed session admits nothing.
+        if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
+            return Err(
+                "Cannot admit a session action because the session is disposing or disposed."
+                    .to_string(),
+            );
         }
-        if self.session_input_pump_suspended.load(Ordering::SeqCst)
-            && !self.session_input_suspended_for_update_restart.load(Ordering::SeqCst)
-        {
-            return Err("Session input admission is paused".to_string());
+        if !self.session_input_admission_pauses.lock().unwrap().is_empty() {
+            return Err(SessionInputAdmissionPausedError {
+                message: "Cannot admit a session action while session input admission is paused."
+                    .to_string(),
+            }
+            .to_string());
+        }
+        // TS 6206-6208: suspension is unconditional; the update-restart marker is
+        // NOT an exemption.
+        if self.session_input_pump_suspended.load(Ordering::SeqCst) {
+            return Err(
+                "Cannot admit a session action while queued session input is suspended."
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -10690,12 +10812,53 @@ impl AgentSession {
         self.resource_loader.clone()
     }
 
-    /// `requestAbort()`.
+    /// `requestAbort()` (agent-session.ts:7632-7659).
     pub fn request_abort(self: &Arc<Self>) {
-        self.session_input_suspended_for_update_restart
-            .store(true, Ordering::SeqCst);
-        self.session_input_pump_suspended.store(true, Ordering::SeqCst);
+        // TS 7633-7636: cancelled RLM child runs are abandoned for quiescence and
+        // the quiescence waiters are aborted.
+        let runs: Vec<Arc<Mutex<RlmChildRun>>> =
+            self.unsettled_rlm_child_runs.lock().unwrap().clone();
+        for run in runs {
+            let snapshot = run.lock().unwrap().clone();
+            if snapshot.status == "cancelled" {
+                self.abandon_rlm_run_for_quiescence(&snapshot);
+            }
+        }
+        for controller in self.rlm_quiescence_wait_aborts.lock().unwrap().iter() {
+            controller.cancel();
+        }
+        self.session_input_pump_requested.store(false, Ordering::SeqCst);
         self.session_input_pump_epoch.fetch_add(1, Ordering::SeqCst);
+        self.session_input_pump_suspended.store(true, Ordering::SeqCst);
+        // TS 7640: a plain requestAbort clears the update-restart marker; only
+        // `abortForUpdateRestart` sets it (TS 7685).
+        self.session_input_suspended_for_update_restart
+            .store(false, Ordering::SeqCst);
+        // TS 7641: terminal notices already queued as actions go back to the
+        // pending-next-turn list instead of being cancelled with the turns below.
+        self.demote_rlm_terminal_notice_actions();
+        // TS 7642-7648: queued invisible turns that are not durable RLM terminal
+        // notices are cancelled before delivery.
+        self.cancel_session_actions(
+            &|action: &QueuedSessionAction| {
+                matches!(action.payload, QueuedActionPayload::Turn(ref turn) if !turn.queue_visible)
+                    && !self
+                        .durable_rlm_terminal_notice_action_ids
+                        .lock()
+                        .unwrap()
+                        .contains(&action.id)
+            },
+            "Prompt aborted before delivery.",
+            None,
+        );
+        // TS 7649-7657.
+        self.cancel_post_compaction_continue();
+        self.abort_retry();
+        self.abort_compaction();
+        self.abort_branch_summary();
+        self.abort_bash();
+        *self.pending_requested_refine.lock().unwrap() = None;
+        self.auto_refine_branch_version.fetch_add(1, Ordering::SeqCst);
         let error = "Session input was aborted.".to_string();
         self.reject_queued_agent_message_deliveries(&error, None);
         self.agent.abort();
@@ -10703,25 +10866,77 @@ impl AgentSession {
         self.emit_queue_update();
     }
 
-    /// `abort()`.
+    /// `abort()` (agent-session.ts:7661-7677).
+    ///
+    /// TS 7668-7673 awaits `agent.waitForIdle()`, `_agentEventQueue` and the
+    /// in-flight compaction/branch-summary operations. Awaiting the session input
+    /// pump here (the previous `wait_for_session_input_idle`) deadlocked: the turns
+    /// just cancelled by `requestAbort` never drain while the pump is suspended.
+    ///
+    /// DEVIATION (named): the Rust port never assigns `branch_summary_operation`
+    /// (only `is_some()` reads exist, agent_session.rs:8793/9273), so there is no
+    /// branch-summary operation to await here.
     pub async fn abort(self: &Arc<Self>) -> Result<(), String> {
+        // TS 7662-7663: capture the in-flight operation before aborting it.
+        let compaction_operation = self
+            .compaction_operation
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|operation| operation.operation.clone());
         self.request_abort();
-        self.abort_compaction();
-        self.abort_branch_summary();
-        self.abort_retry();
+        // TS 7665-7666.
+        self.cancel_active_rlm_child_runs("Parent session aborted");
+        self.goal_abort_in_progress.store(
+            self.goal_state().status == GoalStatus::Active,
+            Ordering::SeqCst,
+        );
         let _ = self.agent.wait_for_idle().await;
-        self.wait_for_session_input_idle().await
+        self.await_agent_event_queue().await;
+        if let Some(operation) = compaction_operation {
+            let _ = operation.await;
+        }
+        // TS 7674-7676 `finally`.
+        self.goal_abort_in_progress.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
-    /// `abortForUpdateRestart()`.
+    /// `abortForUpdateRestart()` (agent-session.ts:7679-7700).
+    ///
+    /// This path must NOT run `requestAbort`: TS 7680-7681 keeps queued inputs for
+    /// the restart manifest, so it does not call `_cancelSessionActions`. TS 7685
+    /// is the only place that sets `_sessionInputSuspendedForUpdateRestart` true.
+    ///
+    /// UNRESOLVED in this file: TS 7655-7657 aborts `_autoRefineReviewAbort` and
+    /// `_refineAbortController`; the Rust `AgentSession` has no field owning those
+    /// tokens (each `_runBackgroundPlan` call makes a local `CancellationToken`,
+    /// agent_session.rs:13769/13795), so this file has no owner symbol to cancel.
     pub fn abort_for_update_restart(self: &Arc<Self>) {
-        self.request_abort();
+        self.session_input_pump_requested.store(false, Ordering::SeqCst);
+        self.session_input_pump_epoch.fetch_add(1, Ordering::SeqCst);
+        self.session_input_pump_suspended.store(true, Ordering::SeqCst);
+        self.session_input_suspended_for_update_restart
+            .store(true, Ordering::SeqCst);
+        // TS 7686-7688.
+        self.cancel_post_compaction_continue();
+        self.abort_retry();
+        for controller in self.rlm_quiescence_wait_aborts.lock().unwrap().iter() {
+            controller.cancel();
+        }
+        self.cancel_active_rlm_child_runs("Parent session aborted for update restart");
+        // TS 7679-7700 never rejects queued agent-message deliveries or cancels
+        // session actions here: the queued inputs must survive into the restart
+        // manifest. `agent.abort()` (TS 7691) is the only loop stop.
+        self.agent.abort();
+        // Rust-only teardown the restart path already performed.
         self.abort_compaction();
         self.abort_branch_summary();
         let controllers: Vec<CancellationToken> = self.bash_abort_controllers.lock().unwrap().clone();
         for controller in controllers {
             controller.cancel();
         }
+        self.notify_session_input_checkpoint_change();
+        self.emit_queue_update();
     }
 
     /// `_emitModelSelect(nextModel, previousModel, source)`.
@@ -12545,8 +12760,23 @@ impl AgentSession {
         Some(calculate_context_tokens(&assistant_message.usage))
     }
 
-    /// `_checkCompaction(settings)`.
-    async fn check_compaction(self: &Arc<Self>, settings: &CompactionSettings) -> Result<bool, String> {
+    /// `_checkCompaction(assistantMessage, skipAbortedCheck, queueAutonomousContinuation)`.
+    ///
+    /// The Rust port keeps the threshold case here and ports the two cases that
+    /// must run before it (TS 9450-9482): context-overflow recovery and the
+    /// model-requested compaction. Both are driven from `process_agent_event`,
+    /// which owns the terminal assistant message and the agent-end checkpoint.
+    async fn check_compaction(
+        self: &Arc<Self>,
+        settings: &CompactionSettings,
+        queue_autonomous_continuation: bool,
+    ) -> Result<bool, String> {
+        if self.pending_requested_compaction.lock().unwrap().is_some() {
+            // TS 9480-9482: `_pendingRequestedCompaction` returns
+            // `_runAutoCompaction("requested", false)`; this runs before the
+            // enabled/threshold checks and consumes the stored instructions.
+            return Ok(self.run_auto_compaction(COMPACTION_REASON_REQUESTED, false).await);
+        }
         if !settings.enabled || !self.auto_compaction_enabled.load(Ordering::SeqCst) {
             return Ok(false);
         }
@@ -12562,28 +12792,166 @@ impl AgentSession {
         if !should_compact_for_model(tokens, &model, settings) {
             return Ok(false);
         }
-        self.emit(AgentSessionEvent::CompactionUpdate {
-            active: true,
-            reason: Some(COMPACTION_REASON_THRESHOLD.to_string()),
-        });
-        let outcome = self.run_auto_compaction(COMPACTION_REASON_THRESHOLD).await;
-        let outcome_text = outcome.as_deref().unwrap_or("Compaction finished.");
-        self.persist_compaction_outcome(
-            COMPACTION_REASON_THRESHOLD,
-            outcome_text,
-            outcome_text,
-        );
-        self.emit(AgentSessionEvent::CompactionUpdate {
-            active: false,
-            reason: Some(COMPACTION_REASON_THRESHOLD.to_string()),
-        });
-        Ok(true)
+        // TS 9492-9509: the agent-end threshold case queues the RLM child / goal /
+        // autonomous continuations BEFORE compacting so the compaction can resume
+        // them. The pre-turn path passes `queueAutonomousContinuation: false`
+        // (TS 5095), which is expressed by the `queue_autonomous_continuation` flag.
+        if queue_autonomous_continuation {
+            let rlm_outcome = self.handle_rlm_child_turn_outcome(&assistant, true, Some("threshold"));
+            let has_continuation = rlm_outcome
+                .as_ref()
+                .and_then(|outcome| outcome.continuation.clone())
+                .is_some();
+            let terminal = rlm_outcome
+                .as_ref()
+                .map(|outcome| outcome.terminal)
+                .unwrap_or(false);
+            if has_continuation {
+                self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+            } else if !terminal && self.queue_goal_continuation_for_threshold_compaction(&assistant) {
+                self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+            } else if !terminal
+                && self
+                    .queue_autonomous_continuation_for_threshold_compaction(&assistant)
+                    .await
+                    .is_some()
+            {
+                self.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+            }
+        }
+        // TS 9510: `_runAutoCompaction("threshold", false)`.
+        Ok(self.run_auto_compaction(COMPACTION_REASON_THRESHOLD, false).await)
     }
 
-    /// `_persistCompactionOutcome(reason, outcome, message)`.
+    /// `isContextOverflow(assistantMessage, contextWindow)` + `sameModel` +
+    /// `assistantIsFromBeforeCompaction` (agent-session.ts:9434-9457), i.e. Case 1
+    /// of `_checkCompaction` plus the overflow-recovery state machine.
+    ///
+    /// Returns `Some(will_retry)` when the overflow branch ran, and `None` when
+    /// Case 1 does not apply so the caller continues with the requested and
+    /// threshold cases.
+    async fn check_compaction_overflow(
+        self: &Arc<Self>,
+        assistant: &AssistantMessage,
+        settings: &CompactionSettings,
+    ) -> Option<bool> {
+        self.check_compaction_overflow_with(assistant, settings, true).await
+    }
+
+    /// `check_compaction_overflow` with the TS `skipAbortedCheck` flag
+    /// (agent-session.ts:9410-9431): the pre-prompt path passes `false`.
+    async fn check_compaction_overflow_with(
+        self: &Arc<Self>,
+        assistant: &AssistantMessage,
+        settings: &CompactionSettings,
+        skip_aborted_check: bool,
+    ) -> Option<bool> {
+        if assistant.stop_reason == STOP_REASON_ABORTED {
+            // TS 9413-9419: an abort drops any compaction and refine request the
+            // turn made; the turn that would service them never runs.
+            *self.pending_requested_compaction.lock().unwrap() = None;
+            *self.pending_requested_refine.lock().unwrap() = None;
+            // DEVIATION (named): TS 9420-9429 also aborts a serialized refine plan
+            // in flight; the Rust owner of that plan awaits it at its own
+            // checkpoint (agent_session.rs:12169/12257/12297), not here.
+            if skip_aborted_check {
+                return Some(false);
+            }
+        }
+        // TS 9434: `contextWindow = this.model ? getModelInputLimit(this.model) : 0`.
+        let context_window = self.model().map(|model| get_model_input_limit(&model)).unwrap_or(0.0);
+        // TS 9440-9441: skip overflow for a message from a different model.
+        let same_model = self.model().map(|model| {
+            assistant.provider == model.provider && assistant.model == model.id
+        }).unwrap_or(false);
+        if !same_model {
+            return None;
+        }
+        // TS 9446-9448: a stale pre-compaction message never retriggers.
+        let compaction_timestamp = self.active_compaction_timestamp();
+        let assistant_is_from_before_compaction = compaction_timestamp
+            .map(|timestamp| (assistant.timestamp as f64) <= timestamp)
+            .unwrap_or(false);
+        if assistant_is_from_before_compaction {
+            return None;
+        }
+        if !settings.enabled && self.pending_requested_compaction.lock().unwrap().is_none() {
+            return None;
+        }
+        if !is_context_overflow(assistant, Some(context_window)) {
+            return None;
+        }
+        // TS 9458-9468: only one compact-and-retry attempt is allowed.
+        {
+            let mut recovery = self.overflow_recovery.lock().unwrap();
+            if *recovery != "idle" {
+                let reported = *recovery == "attempted";
+                if reported {
+                    *recovery = "reported".to_string();
+                }
+                drop(recovery);
+                if reported {
+                    self.end_compaction_unsuccessfully(
+                        COMPACTION_REASON_OVERFLOW,
+                        "failed",
+                        "Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
+                        false,
+                        None,
+                        None,
+                    );
+                }
+                return Some(false);
+            }
+            *recovery = "attempted".to_string();
+        }
+        // TS 9470-9476: drop the error message from agent state (history keeps it).
+        let mut state = self.agent.state();
+        if state
+            .messages
+            .last()
+            .map(|message| message.role() == "assistant")
+            .unwrap_or(false)
+        {
+            state.messages.pop();
+        }
+        self.agent.set_state(state);
+        // TS 9477.
+        Some(self.run_auto_compaction(COMPACTION_REASON_OVERFLOW, true).await)
+    }
+
+    /// `_endCompactionUnsuccessfully(reason, outcome, message, options)`
+    /// (agent-session.ts:9519-9541).
+    fn end_compaction_unsuccessfully(
+        &self,
+        reason: &str,
+        outcome: &str,
+        message: &str,
+        aborted: bool,
+        error_severity: Option<&str>,
+        custom_instructions: Option<&str>,
+    ) {
+        self.persist_compaction_outcome(reason, outcome, message);
+        self.emit(AgentSessionEvent::CompactionEnd {
+            reason: reason.to_string(),
+            result: None,
+            aborted,
+            will_retry: false,
+            // TS 9537: aborts carry no error message on the event.
+            error_message: if aborted {
+                None
+            } else {
+                Some(message.to_string())
+            },
+            error_severity: error_severity.map(|value| value.to_string()),
+            custom_instructions: custom_instructions.map(|value| value.to_string()),
+        });
+    }
+
+    /// `_persistCompactionOutcome(reason, outcome, message)` (agent-session.ts:9543-9571).
     fn persist_compaction_outcome(&self, reason: &str, outcome: &str, message: &str) {
-        let message = create_compaction_outcome_message(
-            message.to_string(),
+        let outcome_text = message.to_string();
+        let mut message = create_compaction_outcome_message(
+            outcome_text.clone(),
             CompactionOutcomeDetails {
                 reason: reason.to_string(),
                 outcome: outcome.to_string(),
@@ -12591,59 +12959,337 @@ impl AgentSession {
             false,
             now_ms_i64(),
         );
-        let _ = self
+        // TS 9552-9567: persist with rollback, and on a persistence failure keep the
+        // disclosure in memory so a context rebuild cannot drop it.
+        let persisted = self
             .session_manager
             .lock()
             .unwrap()
-            .append_custom_message_entry(
+            .append_custom_message_entry_with_rollback(
                 &message.custom_type,
                 &custom_message_entry_content(&message.content),
                 message.display,
                 message.details.clone(),
             );
-        let mut state = self.agent.state();
-        state.messages.push(AgentMessage::Custom(CustomAgentMessage::Custom {
+        if let Err(persistence_error) = persisted {
+            message = create_compaction_outcome_message(
+                format!(
+                    "{outcome_text}\n\nThis compaction outcome could not be saved to session history: {persistence_error}"
+                ),
+                CompactionOutcomeDetails {
+                    reason: reason.to_string(),
+                    outcome: outcome.to_string(),
+                },
+                false,
+                now_ms_i64(),
+            );
+            self.unpersisted_outcomes.lock().unwrap().push(message.clone());
+        }
+        // TS 9568-9570: message_start AND message_end, unlike a plain append.
+        let agent_message = AgentMessage::Custom(CustomAgentMessage::Custom {
             custom_type: message.custom_type.clone(),
             content: message.content.clone(),
             display: message.display,
             details: message.details.clone(),
             timestamp: message.timestamp,
-        }));
+        });
+        let mut state = self.agent.state();
+        state.messages.push(agent_message.clone());
         self.agent.set_state(state);
+        self.emit(AgentSessionEvent::MessageStart {
+            message: agent_message.clone(),
+        });
         self.emit(AgentSessionEvent::MessageEnd {
-            message: AgentMessage::Custom(CustomAgentMessage::Custom {
-                custom_type: message.custom_type.clone(),
-                content: message.content.clone(),
-                display: message.display,
-                details: message.details.clone(),
-                timestamp: message.timestamp,
-            }),
+            message: agent_message,
         });
     }
 
-    /// `_runAutoCompaction(reason)`.
-    async fn run_auto_compaction(self: &Arc<Self>, reason: &str) -> Option<String> {
+    /// `_runAutoCompaction(reason, willRetry)` (agent-session.ts:9573-9724).
+    ///
+    /// Returns the TS `boolean`: true only for a successful compaction with
+    /// `willRetry` (overflow recovery), which tells the caller to keep the loop.
+    async fn run_auto_compaction(self: &Arc<Self>, reason: &str, will_retry: bool) -> bool {
+        // TS 9579-9590: any compaction consumes a pending model request and honors
+        // its instructions.
+        let custom_instructions = self
+            .pending_requested_compaction
+            .lock()
+            .unwrap()
+            .take()
+            .and_then(|pending| pending.custom_instructions);
+        let should_continue_after_compaction = (reason == COMPACTION_REASON_THRESHOLD
+            || reason == COMPACTION_REASON_REQUESTED)
+            && self.continue_after_threshold_compaction.load(Ordering::SeqCst);
+        let queued_autonomous_continuations_for_this_compaction: Vec<AgentMessage> =
+            if reason == COMPACTION_REASON_THRESHOLD && should_continue_after_compaction {
+                std::mem::take(&mut *self
+                    .pending_threshold_compaction_autonomous_messages
+                    .lock()
+                    .unwrap())
+            } else {
+                Vec::new()
+            };
+        let queued_goal_continuation_for_this_compaction: Option<AgentMessage> =
+            if reason == COMPACTION_REASON_THRESHOLD && should_continue_after_compaction {
+                self.queued_goal_threshold_continuation.lock().unwrap().clone()
+            } else {
+                None
+            };
+        self.continue_after_threshold_compaction.store(false, Ordering::SeqCst);
+
+        // TS 9594-9602.
+        self.queue_pending_rlm_continuation();
+        if (reason == COMPACTION_REASON_REQUESTED || reason == COMPACTION_REASON_THRESHOLD)
+            && (should_continue_after_compaction
+                || self.agent.has_queued_messages()
+                || self.has_pending_session_work())
+        {
+            self.schedule_post_compaction_continue(should_continue_after_compaction);
+        }
+
+        // TS 9604.
+        self.emit(AgentSessionEvent::CompactionStart {
+            reason: reason.to_string(),
+            custom_instructions: custom_instructions.clone(),
+        });
         let controller = CancellationToken::new();
         // agent-session.ts:9606-9610 publishes the in-flight auto compaction so the
         // scheduled post-compaction runner can wait for it (8580-8582) and re-check
         // it (8598) instead of racing a compaction that is still running.
         let compaction_operation = self.begin_compaction_operation();
         *self.auto_compaction_abort_controller.lock().unwrap() = Some(controller.clone());
-        let result = self
-            .perform_compaction_unmeasured(None, controller.clone())
-            .await;
+
+        // TS 9613-9628: the auth pre-check runs before any summary call.
+        let auth = match self.model() {
+            None => Err("no model is selected".to_string()),
+            Some(model) => match self.auth_for_auto_compaction(&model).await {
+                Ok(auth) => Ok(auth),
+                Err(error) => Err(error),
+            },
+        };
+        let mut compaction_succeeded = false;
+        match auth {
+            Err(detail) => {
+                self.end_compaction_unsuccessfully(
+                    reason,
+                    "failed",
+                    &format!("Compaction failed: {detail}"),
+                    false,
+                    None,
+                    custom_instructions.as_deref(),
+                );
+                self.clear_queued_autonomous_continuations_after_skipped_threshold_compaction(
+                    reason == COMPACTION_REASON_THRESHOLD && should_continue_after_compaction,
+                    &queued_autonomous_continuations_for_this_compaction,
+                );
+            }
+            Ok(auth) => {
+                // TS 9630-9636 passes the resolved model, key, headers, the custom
+                // instructions and the auto-compaction signal.
+                let result = self
+                    .perform_compaction_unmeasured_full(
+                        custom_instructions.clone(),
+                        controller.clone(),
+                        Some(auth),
+                    )
+                    .await;
+                match &result {
+                    Ok(compaction_result) => {
+                        compaction_succeeded = true;
+                        // TS 9638-9645.
+                        self.emit(AgentSessionEvent::CompactionEnd {
+                            reason: reason.to_string(),
+                            result: Some(compaction_result.clone()),
+                            aborted: false,
+                            will_retry,
+                            error_message: None,
+                            error_severity: None,
+                            custom_instructions: custom_instructions.clone(),
+                        });
+                        self.queue_pending_rlm_continuation();
+                        let has_queued_messages =
+                            self.agent.has_queued_messages() || self.has_pending_session_work();
+                        let will_continue = will_retry
+                            || should_continue_after_compaction
+                            || has_queued_messages;
+                        if will_retry {
+                            // TS 9651-9657: strip a trailing error assistant message.
+                            let mut state = self.agent.state();
+                            let strip = state
+                                .messages
+                                .last()
+                                .map(|message| match message {
+                                    AgentMessage::Message(Message::Assistant(assistant)) => {
+                                        assistant.stop_reason == STOP_REASON_ERROR
+                                    }
+                                    _ => false,
+                                })
+                                .unwrap_or(false);
+                            if strip {
+                                state.messages.pop();
+                                self.agent.set_state(state);
+                            }
+                            // TS 9658-9659.
+                            self.schedule_post_compaction_continue(true);
+                            self.schedule_auto_refine_after_compaction(will_continue);
+                        } else if should_continue_after_compaction || has_queued_messages {
+                            // TS 9661-9665.
+                            self.schedule_post_compaction_continue(should_continue_after_compaction);
+                            self.schedule_auto_refine_after_compaction(will_continue);
+                        } else {
+                            // TS 9666-9668.
+                            self.schedule_auto_refine_after_compaction(will_continue);
+                        }
+                    }
+                    Err(error) => {
+                        // TS 9670-9714 `catch`.
+                        self.handle_auto_compaction_failure(
+                            reason,
+                            error,
+                            custom_instructions.as_deref(),
+                            should_continue_after_compaction,
+                            &queued_autonomous_continuations_for_this_compaction,
+                            queued_goal_continuation_for_this_compaction.as_ref(),
+                        );
+                    }
+                }
+            }
+        }
         *self.auto_compaction_abort_controller.lock().unwrap() = None;
         // TS 9715-9720 `finally`.
         self.end_compaction_operation(&compaction_operation);
-        self.schedule_auto_refine_after_compaction(false);
-        match result {
-            Ok(()) => Some(format!("Compaction completed ({reason}).")),
-            Err(error) => {
-                if error == COMPACTION_SKIPPED_ERROR_MESSAGE {
-                    return None;
-                }
-                Some(format!("Compaction failed: {error}"))
+        // TS 9660/9669: only a successful willRetry compaction keeps the loop.
+        compaction_succeeded && will_retry
+    }
+
+    /// `_getRequiredRequestAuth` for the auto-compaction pre-check, reported as the
+    /// TS `{ ok, apiKey, error }` detail string (agent-session.ts:9613-9620).
+    async fn auth_for_auto_compaction(
+        self: &Arc<Self>,
+        model: &Model,
+    ) -> Result<RequestAuth, String> {
+        let registry = self.model_registry.clone();
+        let request_model = model.clone();
+        let resolved = crate::core::sdk::with_model_registry(registry, move |registry| {
+            Box::pin(async move { registry.get_api_key_and_headers(&request_model).await })
+        })
+        .await
+        .unwrap_or_else(|error| crate::core::model_registry::ResolvedRequestAuth {
+            ok: false,
+            api_key: None,
+            headers: None,
+            error: Some(error),
+        });
+        if !resolved.ok {
+            return Err(resolved.error.unwrap_or_default());
+        }
+        let api_key = match resolved.api_key.clone() {
+            Some(api_key) if !api_key.is_empty() => api_key,
+            // TS 9619: `authResult.ok ? "no API key is available" : authResult.error`.
+            _ => return Err("no API key is available".to_string()),
+        };
+        Ok(RequestAuth {
+            api_key,
+            headers: resolved.headers.clone().unwrap_or_default(),
+        })
+    }
+
+    /// The TS `catch` arm of `_runAutoCompaction` (agent-session.ts:9670-9714).
+    fn handle_auto_compaction_failure(
+        self: &Arc<Self>,
+        reason: &str,
+        error: &str,
+        custom_instructions: Option<&str>,
+        should_continue_after_compaction: bool,
+        queued_autonomous_continuations_for_this_compaction: &[AgentMessage],
+        queued_goal_continuation_for_this_compaction: Option<&AgentMessage>,
+    ) {
+        // TS 9671-9674.
+        self.clear_queued_autonomous_continuations_after_skipped_threshold_compaction(
+            reason == COMPACTION_REASON_THRESHOLD && should_continue_after_compaction,
+            queued_autonomous_continuations_for_this_compaction,
+        );
+        let aborted = error == COMPACTION_CANCELLED_ERROR_MESSAGE;
+        if aborted {
+            // TS 9679-9689.
+            self.clear_queued_goal_continuation_after_cancelled_threshold_compaction();
+            self.end_compaction_unsuccessfully(
+                reason,
+                "cancelled",
+                &format!(
+                    "{}ompaction cancelled",
+                    if reason == COMPACTION_REASON_REQUESTED {
+                        "Requested c"
+                    } else {
+                        "C"
+                    }
+                ),
+                true,
+                None,
+                custom_instructions,
+            );
+            if !self.session_input_pump_suspended.load(Ordering::SeqCst) {
+                self.resume_auto_compaction_after_failure(
+                    reason,
+                    should_continue_after_compaction,
+                );
             }
+            return;
+        }
+        if error == COMPACTION_SKIPPED_ERROR_MESSAGE {
+            // TS 9691-9702.
+            self.end_compaction_unsuccessfully(
+                reason,
+                "skipped",
+                &format!(
+                    "{} skipped: {error}",
+                    if reason == COMPACTION_REASON_REQUESTED {
+                        "Requested compaction"
+                    } else {
+                        "Auto-compaction"
+                    }
+                ),
+                false,
+                Some("warning"),
+                custom_instructions,
+            );
+            self.resume_auto_compaction_after_failure(reason, should_continue_after_compaction);
+            return;
+        }
+        // TS 9703-9713.
+        self.end_compaction_unsuccessfully(
+            reason,
+            "failed",
+            &format!(
+                "{}: {error}",
+                if reason == COMPACTION_REASON_OVERFLOW {
+                    "Context overflow recovery failed"
+                } else if reason == COMPACTION_REASON_REQUESTED {
+                    "Requested compaction failed"
+                } else {
+                    "Auto-compaction failed"
+                }
+            ),
+            false,
+            None,
+            custom_instructions,
+        );
+        self.resume_auto_compaction_after_failure(reason, should_continue_after_compaction);
+    }
+
+    /// The TS `resumeAfterFailure` closure (agent-session.ts:9594-9602).
+    fn resume_auto_compaction_after_failure(
+        self: &Arc<Self>,
+        reason: &str,
+        should_continue_after_compaction: bool,
+    ) {
+        self.queue_pending_rlm_continuation();
+        if (reason == COMPACTION_REASON_REQUESTED || reason == COMPACTION_REASON_THRESHOLD)
+            && (should_continue_after_compaction
+                || self.agent.has_queued_messages()
+                || self.has_pending_session_work())
+        {
+            self.schedule_post_compaction_continue(should_continue_after_compaction);
         }
     }
 

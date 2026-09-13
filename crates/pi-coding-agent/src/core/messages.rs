@@ -669,6 +669,45 @@ mod tests {
     }
 
     #[test]
+    fn slash_command_result_rejects_a_json_null_error() {
+        // `(message.details.error === undefined || typeof message.details.error === "string")`
+        // (`core/messages.ts:529`): `null` is neither, so the message is not a
+        // terminal slash-command result.
+        let base = serde_json::json!({
+            "role": "custom",
+            "customType": SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
+            "content": "/compact focus",
+            "display": true,
+            "timestamp": 5,
+            "details": {
+                "command": {"name": "compact", "args": "focus", "text": "/compact focus"},
+                "success": true,
+                "severity": "info",
+                "commandEntryId": "entry-1",
+            },
+        });
+        assert!(is_session_slash_command_result_message(&base));
+        let with_string_error = serde_json::json!({
+            "role": "custom",
+            "customType": SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE,
+            "content": "/compact focus",
+            "display": true,
+            "timestamp": 5,
+            "details": {
+                "command": {"name": "compact", "args": "focus", "text": "/compact focus"},
+                "success": false,
+                "severity": "error",
+                "error": "Goal unavailable",
+                "commandEntryId": "entry-1",
+            },
+        });
+        assert!(is_session_slash_command_result_message(&with_string_error));
+        let mut with_null_error = base.clone();
+        with_null_error["details"]["error"] = serde_json::Value::Null;
+        assert!(!is_session_slash_command_result_message(&with_null_error));
+    }
+
+    #[test]
     fn refinement_outcome_validation_checks_edits() {
         assert!(is_refinement_outcome_message(&json!({
             "role": "custom",
@@ -994,8 +1033,11 @@ pub fn is_session_slash_command_result_message(message: &Value) -> bool {
         details.get("severity").and_then(Value::as_str),
         Some("info") | Some("warning") | Some("error")
     );
+    // `(message.details.error === undefined || typeof message.details.error === "string")`
+    // (`core/messages.ts:529`): a missing key passes, a string passes, and JSON
+    // `null` must NOT - `typeof null !== "string"` and `null !== undefined`.
     let error_ok = match details.get("error") {
-        None | Some(Value::Null) => true,
+        None => true,
         Some(Value::String(_)) => true,
         Some(_) => false,
     };

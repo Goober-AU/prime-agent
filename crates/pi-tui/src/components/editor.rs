@@ -2445,11 +2445,31 @@ impl Editor {
     }
 }
 
+/// Move a byte offset that may sit inside a multi-byte character back to the
+/// start of that character, so slicing at the offset can never panic.
+///
+/// Port of the `from` argument of `String.prototype.indexOf` / `lastIndexOf`:
+/// TS (`packages/tui/src/components/editor.ts:2081`) passes `cursorCol + 1`, and
+/// the JS engine accepts it because string indices share the same UTF-16 unit as
+/// the cursor. Rust cursor columns are byte offsets (`insert_character` does
+/// `set_cursor_col(self.state.cursor_col + char.len())`), so an offset derived
+/// from a cursor that sits just before a CJK/emoji character can point into the
+/// middle of that character. `str::floor_char_boundary` is still unstable, so the
+/// same rounding is done here.
+fn floor_to_char_boundary(line: &str, index: usize) -> usize {
+    let mut safe = index.min(line.len());
+    while safe > 0 && !line.is_char_boundary(safe) {
+        safe -= 1;
+    }
+    safe
+}
+
 /// Port of `line.indexOf(char, from)`.
 fn index_of_from(line: &str, needle: &str, from: usize) -> Option<usize> {
     if from > line.len() {
         return None;
     }
+    let from = floor_to_char_boundary(line, from);
     line[from..].find(needle).map(|index| index + from)
 }
 
@@ -2457,7 +2477,7 @@ fn index_of_from(line: &str, needle: &str, from: usize) -> Option<usize> {
 fn last_index_of_from(line: &str, needle: &str, from: Option<usize>) -> Option<usize> {
     match from {
         Some(from) => {
-            let end = (from + needle.len()).min(line.len());
+            let end = floor_to_char_boundary(line, from + needle.len());
             line[..end].rfind(needle)
         }
         None => line.rfind(needle),
@@ -3587,5 +3607,69 @@ mod tests {
         assert_eq!(index_of_from("abc", "b", 9), None);
         assert_eq!(last_index_of_from("abcabc", "b", None), Some(4));
         assert_eq!(last_index_of_from("abcabc", "b", Some(3)), Some(1));
+    }
+
+    /// The cursor column is a byte offset, so `cursor_col + 1` can point inside a
+    /// multi-byte character. `line.indexOf(char, from)` in TS
+    /// (packages/tui/src/components/editor.ts:2081) tolerates any offset; the Rust
+    /// slice must not panic there.
+    #[test]
+    fn index_of_from_clamps_offsets_inside_multibyte_characters() {
+        // "x" + 😀(4 bytes) + "y": offset 2 is inside the emoji.
+        let line = "x\u{1F600}y";
+        assert_eq!(index_of_from(line, "y", 2), Some(5));
+        assert_eq!(index_of_from(line, "x", 2), None);
+        assert_eq!(last_index_of_from(line, "x", Some(2)), Some(0));
+        assert_eq!(last_index_of_from(line, "y", Some(2)), None);
+
+        let cjk = "\u{4F60}\u{597D}";
+        assert_eq!(index_of_from(cjk, "\u{597D}", 1), Some(3));
+        assert_eq!(index_of_from(cjk, "\u{597D}", 3), Some(3));
+        // `lastIndexOf(char, from)` searches backwards from `from` inclusive, so a
+        // mid-character `from` clamps back to the start of that character.
+        assert_eq!(last_index_of_from(cjk, "\u{4F60}", Some(2)), Some(0));
+        assert_eq!(last_index_of_from("abcabc", "b", Some(9)), Some(4));
+    }
+
+    /// Ctrl+] (jumpForward) must never abort the process when the cursor sits
+    /// before a multi-byte character: `jump_to_char` passes `cursor_col + 1`,
+    /// which is a byte offset one past `a` and therefore inside the emoji.
+    #[test]
+    fn jump_to_char_survives_a_cursor_before_a_multibyte_character() {
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(crate::terminal::ProcessTerminal::new()), None)));
+        let mut editor = Editor::new(ui.clone(), test_theme(), EditorOptions::default());
+        editor.set_text("a\u{1F600}y");
+        editor.set_cursor_col(1);
+        assert_eq!(editor.get_cursor(), (0, 1));
+
+        editor.jump_to_char("y", true);
+        assert_eq!(editor.get_cursor(), (0, 5));
+
+        // Backward jump from the same mid-character offset: `cursor_col - 1 == 0`.
+        editor.set_cursor_col(1);
+        editor.jump_to_char("a", false);
+        assert_eq!(editor.get_cursor(), (0, 0));
+
+        // "\u{4F60}\u{597D}x": byte 5 is inside \u{597D}, so the old
+        // `line[from..]` slice aborted the process here.
+        let cjk_ui = Rc::new(RefCell::new(TUI::new(Box::new(crate::terminal::ProcessTerminal::new()), None)));
+        let mut cjk = Editor::new(cjk_ui, test_theme(), EditorOptions::default());
+        cjk.set_text("\u{4F60}\u{597D}x");
+        cjk.set_cursor_col(4);
+        cjk.jump_to_char("x", true);
+        assert_eq!(cjk.get_cursor(), (0, 6));
+    }
+
+    /// Shared theme builder for the editor tests.
+    fn test_theme() -> EditorTheme {
+        EditorTheme {
+            border_color: Rc::new(str::to_string), background_color: None,
+            autocomplete_background_color: None, command_color: None,
+            select_list: SelectListTheme {
+                selected_prefix: Box::new(str::to_string), selected_text: Box::new(str::to_string),
+                description: Box::new(str::to_string), argument_hint: None, source_tag: None,
+                scroll_info: Box::new(str::to_string), no_match: Box::new(str::to_string),
+            },
+        }
     }
 }

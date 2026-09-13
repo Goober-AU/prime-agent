@@ -73,10 +73,23 @@ pub const OPENAI_TOOL_CALL_PROVIDERS: [&str; 3] = ["openai", "openai-codex", "op
 pub const AZURE_MANAGED_COMPACTION_TOOL_CALL_PROVIDERS: [&str; 4] =
     ["openai", "openai-codex", "opencode", "azure-openai-managed"];
 
+/// Owns the SDK-style error JSON so [`RunError::Value`] can borrow it like
+/// `ThrownStreamError::Value(&Value)` does for the other providers.
+struct ThrownValue(Value);
+
+impl ThrownValue {
+    fn value(&self) -> &Value {
+        &self.0
+    }
+}
+
 /// The Rust counterpart of a `throw` inside the TypeScript stream body.
 enum RunError {
     Failure(StreamFailureError),
     Message(String),
+    /// An SDK-style error object (`APIError`) whose fields `extractStreamFailureParts`
+    /// reads (`utils/stream-failure.ts:130-167`).
+    Value(ThrownValue),
 }
 
 impl RunError {
@@ -84,6 +97,7 @@ impl RunError {
         match self {
             RunError::Failure(failure) => ThrownStreamError::Failure(failure),
             RunError::Message(message) => ThrownStreamError::Message(message),
+            RunError::Value(value) => ThrownStreamError::Value(value.value()),
         }
     }
 }
@@ -686,11 +700,59 @@ async fn send_request(
     };
     let response = response.map_err(|error| RunError::Message(error.to_string()))?;
     if !response.status().is_success() {
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        return Err(RunError::Message(format!("{}: {}", status.as_u16(), text)));
+        return Err(RunError::Value(api_error_from_response(response).await));
     }
     Ok(response)
+}
+
+/// The OpenAI SDK `APIError.generate(status, error, message, headers)` failure value.
+///
+/// TS: `client.responses.create(...)` rejects with the SDK `APIError`
+/// (`openai-responses.ts:140`, thrown at `openai-responses.ts:168`), whose `status`, `headers`,
+/// `error` body and `message` are what `extractStreamFailureParts` reads
+/// (`utils/stream-failure.ts:142-167`).
+async fn api_error_from_response(response: reqwest::Response) -> ThrownValue {
+    let status = response.status().as_u16() as i64;
+    let headers = header_map_to_record(response.headers());
+    let text = response.text().await.unwrap_or_default();
+    let body: Option<Value> = serde_json::from_str(&text).ok();
+    // `APIError.makeMessage(status, error, message)`: the parsed body's `error.message`
+    // when present, otherwise the raw text, otherwise "<status> status code (no body)".
+    let error_message = body
+        .as_ref()
+        .and_then(|body| body.get("error"))
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let message = match error_message {
+        Some(message) if !message.is_empty() => format!("{status} {message}"),
+        _ if !text.is_empty() => format!("{status} {text}"),
+        _ => format!("{status} status code (no body)"),
+    };
+    let mut object = Map::new();
+    object.insert("name".to_string(), Value::String("APIError".to_string()));
+    object.insert("message".to_string(), Value::String(message));
+    object.insert("status".to_string(), Value::Number(status.into()));
+    object.insert(
+        "headers".to_string(),
+        Value::Object(
+            headers
+                .iter()
+                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .collect(),
+        ),
+    );
+    // The SDK sets `error` to the body's `error` object when it is one, and otherwise to the
+    // whole response body (`errorFromResponse(errorResponse) ?? errorResponse`), which is what
+    // `extractStreamFailureParts` then reads for the provider type and message.
+    let body_error = body.and_then(|body| match body.get("error") {
+        Some(Value::Object(_)) => body.get("error").cloned(),
+        _ => Some(body.clone()),
+    });
+    if let Some(error) = body_error {
+        object.insert("error".to_string(), error);
+    }
+    ThrownValue(Value::Object(object))
 }
 
 /// Local SSE buffer for the OpenAI Responses transport (`data: ...` frames).

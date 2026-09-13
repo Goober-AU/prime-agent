@@ -850,6 +850,12 @@ impl TUI {
     /// Deliver queued terminal input and resize notifications to the TUI.
     pub fn drain_input(&mut self) {
         let pending: Vec<String> = PENDING_INPUT.with(|queue| std::mem::take(&mut *queue.borrow_mut()));
+        // Unconditional: handle_input() runs sync_overlays() only when input was
+        // actually delivered, but overlay handles (OverlayHandle::hide and
+        // friends) may have been updated from async events with no keypress
+        // queued. TS applies those mutations synchronously in the handle itself
+        // (packages/tui/src/tui.ts:448-461).
+        self.sync_overlays();
         for data in pending {
             self.handle_input(&data);
         }
@@ -1629,17 +1635,22 @@ impl TUI {
             let mut above_marker: Option<AboveMarker> = None;
             if let Some(marker) = options.as_ref().and_then(|o| o.above_marker.clone()) {
                 for line in (0..result.len()).rev() {
+                    // `find` returns a BYTE offset; TS `indexOf`/`slice`
+                    // (packages/tui/src/tui.ts:1210-1218) share UTF-16 units so the
+                    // split is always safe. Split on a byte offset that is derived
+                    // from `char_indices` so multi-byte text before the marker is
+                    // neither leaked nor dropped.
                     let marker_index = match result[line].find(&marker) {
                         Some(marker_index) => marker_index,
                         None => continue,
                     };
-                    let prefix: String = result[line].chars().take(marker_index).collect();
+                    let prefix = &result[line][..marker_index];
                     above_marker = Some(AboveMarker {
                         line,
-                        col: visible_width(&prefix),
+                        col: visible_width(prefix),
                         offset_y: options.as_ref().and_then(|o| o.offset_y).unwrap_or(0),
                     });
-                    let suffix: String = result[line].chars().skip(marker_index + marker.chars().count()).collect();
+                    let suffix = &result[line][marker_index + marker.len()..];
                     result[line] = format!("{prefix}{suffix}");
                     break;
                 }
@@ -1935,17 +1946,25 @@ impl TUI {
         let viewport_top = lines.len().saturating_sub(height);
         for row in (viewport_top..lines.len()).rev() {
             let line = lines[row].clone();
+            // `find` returns a BYTE offset. TS `indexOf`/`slice` share UTF-16 units
+            // (packages/tui/src/tui.ts:1462-1469), so JS splits correctly at any
+            // offset; the Rust port must slice on the byte offset that `find`
+            // returned, never treat it as a char count, or CJK/emoji text before
+            // the marker leaks marker bytes into the frame and drops real text.
             let marker_index = match line.find(CURSOR_MARKER) {
                 Some(index) => index,
                 None => continue,
             };
+            let marker_len = CURSOR_MARKER.len();
+            let (prefix, rest) = line.split_at(marker_index);
+            // `split_at` already guarantees `marker_index` is a char boundary
+            // (it panics otherwise) and CURSOR_MARKER is ASCII, so the suffix
+            // offset is a char boundary too.
+            let suffix = &rest[marker_len.min(rest.len())..];
             // Calculate visual column (width of text before marker)
-            let before_marker: String = line.chars().take(marker_index).collect();
-            let col = visible_width(&before_marker);
+            let col = visible_width(prefix);
 
             // Strip marker from the line
-            let prefix: String = line.chars().take(marker_index).collect();
-            let suffix: String = line.chars().skip(marker_index + CURSOR_MARKER.chars().count()).collect();
             lines[row] = format!("{prefix}{suffix}");
 
             return Some(CursorPosition { row, col });
@@ -2061,6 +2080,13 @@ impl TUI {
         if self.stopped {
             return;
         }
+        // TS `OverlayHandle.hide()` splices `overlayStack` synchronously
+        // (packages/tui/src/tui.ts:448-461), so a hide() issued from an async
+        // event stops compositing on the next frame. The Rust handle can only
+        // record intent, so the stack is reconciled here as well, before the
+        // frame is composed; otherwise a dismissed dialog keeps painting until
+        // the next keypress.
+        self.sync_overlays();
         if self.fullscreen.is_some() {
             self.preserve_viewport_on_next_render = false;
             self.render_fullscreen();
@@ -2942,6 +2968,42 @@ mod tests {
         assert!(!tui.has_overlay());
     }
 
+    /// A hide() issued from an async event must be applied by the render path,
+    /// not only by the next keypress: TS `OverlayHandle.hide()` splices the stack
+    /// synchronously (packages/tui/src/tui.ts:448-461), so the dismissed overlay
+    /// is gone from the very next frame.
+    #[test]
+    fn render_applies_a_pending_overlay_hide_without_input() {
+        let terminal = Rc::new(RefCell::new(FakeTerminal::new(80, 24)));
+        let mut tui = TUI::new(Box::new(SharedTerminal(terminal.clone())), Some(false));
+        tui.add_child(Rc::new(RefCell::new(Line("base"))));
+        let overlay = Rc::new(RefCell::new(Line("DISMISSED"))) as Rc<RefCell<dyn Component>>;
+        let handle = tui.show_overlay(
+            overlay,
+            OverlayOptions {
+                non_capturing: true,
+                ..OverlayOptions::default()
+            },
+        );
+
+        tui.do_render();
+        assert!(terminal.borrow().written.contains("DISMISSED"));
+
+        // Async dismissal: no keypress, just the handle and a frame.
+        handle.hide();
+        terminal.borrow_mut().written.clear();
+        tui.do_render();
+        assert!(!tui.has_overlay());
+        assert!(
+            !terminal.borrow().written.contains("DISMISSED"),
+            "a dismissed overlay must not be composited"
+        );
+
+        terminal.borrow_mut().written.clear();
+        tui.drain_input();
+        assert!(terminal.borrow().written.is_empty());
+    }
+
     #[test]
     fn cursor_marker_is_extracted_and_stripped() {
         let mut tui = TUI::new(Box::new(FakeTerminal::new(80, 24)), Some(false));
@@ -2950,6 +3012,52 @@ mod tests {
         assert_eq!(position.row, 0);
         assert_eq!(position.col, 2);
         assert_eq!(lines, vec!["abcd".to_string()]);
+    }
+
+    /// The marker offset is a byte offset, so CJK text before it must not make
+    /// `extract_cursor_position` paint marker bytes and drop the real suffix
+    /// (packages/tui/src/tui.ts:1462-1469 indexes in UTF-16 units).
+    #[test]
+    fn cursor_marker_is_extracted_after_multibyte_text() {
+        let mut tui = TUI::new(Box::new(FakeTerminal::new(80, 24)), Some(false));
+        let mut lines = vec![format!("\u{4F60}\u{597D}{CURSOR_MARKER}x")];
+        let position = tui.extract_cursor_position(&mut lines, 24).unwrap();
+        assert_eq!(position.row, 0);
+        assert_eq!(position.col, 4);
+        assert_eq!(lines, vec!["\u{4F60}\u{597D}x".to_string()]);
+
+        let mut emoji = vec![format!("\u{1F600}{CURSOR_MARKER}tail")];
+        let position = tui.extract_cursor_position(&mut emoji, 24).unwrap();
+        assert_eq!(position.col, 2);
+        assert_eq!(emoji, vec!["\u{1F600}tail".to_string()]);
+    }
+
+    /// Same contract for the `aboveMarker` strip in `composite_overlays`
+    /// (packages/tui/src/tui.ts:1210-1218).
+    #[test]
+    fn above_marker_is_stripped_after_multibyte_text() {
+        let mut tui = TUI::new(Box::new(FakeTerminal::new(40, 10)), Some(false));
+        tui.add_child(Rc::new(RefCell::new(Line("\u{4F60}\u{597D}anchor"))));
+        tui.add_child(Rc::new(RefCell::new(Line("body"))));
+        let component = Rc::new(RefCell::new(Line("OVERLAY"))) as Rc<RefCell<dyn Component>>;
+        let _handle = tui.show_overlay(
+            component,
+            OverlayOptions {
+                above_marker: Some("anchor".to_string()),
+                non_capturing: true,
+                ..OverlayOptions::default()
+            },
+        );
+        let base_lines = tui.container.render(40.0);
+        let composed = tui.composite_overlays(&base_lines, 40, 10);
+        assert!(
+            composed.iter().all(|line| !line.contains("anchor")),
+            "marker text must be stripped: {composed:?}"
+        );
+        assert!(
+            composed.iter().any(|line| line.contains("\u{4F60}\u{597D}")),
+            "text before the marker must survive: {composed:?}"
+        );
     }
 
     #[test]

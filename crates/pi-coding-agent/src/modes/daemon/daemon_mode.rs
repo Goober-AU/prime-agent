@@ -41,7 +41,8 @@ use crate::core::agent_messages::{
     AgentFamilyRelationship, AgentFamilyRosterResult, AgentSessionMessageAgentSummary,
     AgentSessionMessageController, AgentSessionMessageDeliveryStatus, AgentSessionMessageEndpoint,
     AgentSessionMessageListResult, AgentSessionMessagePayload, AgentSessionMessageRateLimiter,
-    AgentSessionMessageReceipt, AgentSessionMessageSender, AgentSessionNameAvailabilityInput,
+    AgentSessionMessageReceipt, AgentSessionMessageSendInput, AgentSessionMessageSender,
+    AgentSessionNameAvailabilityInput,
     AgentSessionNameScope, RateLimitResult, AGENT_FAMILY_REACH_ERROR, AGENT_MESSAGE_SOURCE,
     DEFAULT_AGENT_MESSAGE_MAX_CHARS, DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION,
     DEFAULT_AGENT_MESSAGE_RATE_LIMIT_CAPACITY, DEFAULT_AGENT_MESSAGE_RATE_LIMIT_REFILL_MS,
@@ -6504,6 +6505,73 @@ impl AgentDaemon {
                 Box::pin(self.create_runtime(command, runtime_open_guard.clone())).await?;
             }
         }
+        // `const passiveSubagent = sessionPath ? await this.findPassiveRlmSubagent(sessionPath) : undefined`
+        // (`daemon-mode.ts:1839-1871`): a `sessionPath` that names a passive RLM
+        // child is hydrated through the whole parent chain instead of being opened
+        // as a plain top-level runtime.
+        let passive_subagent = match &resolved_session_path {
+            Some(session_path) => self.find_passive_rlm_subagent(session_path, false).await,
+            None => None,
+        };
+        if let Some(passive_subagent) = passive_subagent {
+            if let Some(guard) = &runtime_open_guard {
+                if !guard().await {
+                    return Err(RuntimeOpenCancelledError.to_string());
+                }
+            }
+            if let Some(name) = body.get("name").and_then(Value::as_str) {
+                let normalized_name = name.trim().to_string();
+                if normalized_name.is_empty() {
+                    return Err("Session name cannot be empty".to_string());
+                }
+                // `parentSessionPath: entry.parentSessionFile ?? chain.at(-2)?.sessionFile ?? rootParentState...sessionFile ?? rootInfo?.path`
+                // and `depth: info.rlmDepth ?? entry.rlmDepth ?? 1`.
+                let parent_session_path = passive_subagent
+                    .entry
+                    .parent_session_file
+                    .clone()
+                    .or_else(|| {
+                        passive_subagent
+                            .chain
+                            .iter()
+                            .rev()
+                            .nth(1)
+                            .map(|entry| entry.session_file.clone())
+                    })
+                    .or_else(|| match &passive_subagent.root {
+                        PassiveRlmRoot::Resident(state) => self.session_of(state).session_file(),
+                        PassiveRlmRoot::Saved(info) => Some(info.path.clone()),
+                    });
+                self.assert_family_session_name_available(
+                    &AgentSessionNameAvailabilityInput {
+                        parent_session_id: Some(passive_subagent.entry.parent_session_id.clone()),
+                        parent_session_path,
+                        depth: passive_subagent.info.rlm_depth as f64,
+                        name: normalized_name,
+                        ignore_session_id: Some(passive_subagent.info.id.clone()),
+                    },
+                    None,
+                    false,
+                )
+                .await?;
+            }
+            let state = self
+                .hydrate_passive_rlm_subagent(passive_subagent.clone(), client_env.clone())
+                .await?;
+            if let Some(guard) = &runtime_open_guard {
+                if !guard().await {
+                    return Err(RuntimeOpenCancelledError.to_string());
+                }
+            }
+            if let Some(name) = body.get("name").and_then(Value::as_str) {
+                self.set_state_session_name(&state, name).await?;
+            }
+            if let PassiveRlmRoot::Resident(root_parent) = &passive_subagent.root {
+                self.adopt_client_env(root_parent, client_env.clone());
+            }
+            self.adopt_client_env(&state, client_env);
+            return Ok(state);
+        }
         if let Some(guard) = &runtime_open_guard {
             if !guard().await {
                 return Err(RuntimeOpenCancelledError.to_string());
@@ -6569,10 +6637,38 @@ impl AgentDaemon {
         runtime_open_guard: Option<RuntimeOpenGuard>,
     ) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
         let session_manager = Arc::new(StdMutex::new(session_manager));
+        // The state is published during `addRuntime`, which runs after the factory
+        // returns, so the controller closures read it through this slot - exactly
+        // like the TypeScript `stateRef` (`daemon-mode.ts:1955`, `:2007-2008`).
+        let state_ref: Arc<StdMutex<Option<Arc<StdMutex<ActiveSessionState>>>>> =
+            Arc::new(StdMutex::new(None));
         let session_config = crate::core::agent_session_config::merge_agent_session_runtime_config(
             &serde_json::from_value(serde_json::to_value(&self.options.default_session_config).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?,
             command.body.get("config").map(|config| serde_json::from_value(config.clone())).transpose().map_err(|error| error.to_string())?.as_ref(),
         );
+        // `sessionOptions: { rlmHeartbeatController: {...}, agentMessageController:
+        // this.createAgentMessageController(() => stateRef), agentObserveController:
+        // this.createAgentObserveController(() => stateRef) }`
+        // (`daemon-mode.ts:1967-1996`). All three closures read the state slot above,
+        // like the TypeScript `stateRef`.
+        let get_current_state: Arc<
+            dyn Fn() -> Option<Arc<StdMutex<ActiveSessionState>>> + Send + Sync,
+        > = {
+            let state_ref = Arc::clone(&state_ref);
+            Arc::new(move || state_ref.lock().expect("session state slot poisoned").clone())
+        };
+        let session_options = SessionRuntimeOptions {
+            model: None,
+            rlm_heartbeat_controller: Some(self.create_rlm_heartbeat_controller(Arc::clone(
+                &get_current_state,
+            ))),
+            agent_message_controller: Some(
+                self.create_agent_message_controller(Arc::clone(&get_current_state)),
+            ),
+            agent_observe_controller: Some(
+                self.create_agent_observe_controller(Arc::clone(&get_current_state)),
+            ),
+        };
         let input = CreateAgentSessionRuntimeInput {
             factory: Value::Null,
             cwd: session_manager
@@ -6581,7 +6677,7 @@ impl AgentDaemon {
                 .get_cwd(),
             agent_dir: session_config.agent_dir.clone(),
             session_manager: Arc::clone(&session_manager),
-            session_options: SessionRuntimeOptions::default(),
+            session_options,
             session_config: Some(session_config),
             runtime_metadata: None,
         };
@@ -6592,7 +6688,13 @@ impl AgentDaemon {
                 return Err(RuntimeOpenCancelledError.to_string());
             }
         }
+        // The `(state) => { stateRef = state; }` callback (`daemon-mode.ts:2007-2008`).
+        let state_ref_for_callback = Arc::clone(&state_ref);
         self.add_runtime(runtime, desired_active_session_id, Some(Arc::new(move |state| {
+            {
+                let mut slot = state_ref_for_callback.lock().expect("session state slot poisoned");
+                *slot = Some(Arc::clone(state));
+            }
             state.lock().expect("active session poisoned").client_env = client_env.clone();
         })), None).await
     }
@@ -10933,12 +11035,14 @@ impl AgentDaemon {
                 .get("streamingBehavior")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            queue_if_busy: Some(
-                body.get("queueIfBusy")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                    || body.get("streamingBehavior").is_some(),
-            ),
+            // `command.queueIfBusy ?? command.streamingBehavior !== undefined`
+            // (`daemon-mode.ts:4495`): `??` only falls back on null/undefined, so an
+            // explicit `queueIfBusy: false` stays false even with a
+            // streamingBehavior, instead of being coerced to queue-if-busy.
+            queue_if_busy: Some(match body.get("queueIfBusy").and_then(Value::as_bool) {
+                Some(queue_if_busy) => queue_if_busy,
+                None => body.get("streamingBehavior").is_some(),
+            }),
             resume_if_idle: Some(body.get("streamingBehavior").is_some()),
             expand_prompt_templates: body.get("expandPromptTemplates").and_then(Value::as_bool),
             skip_input_handlers: (body.get("expandPromptTemplates").and_then(Value::as_bool)
@@ -14116,20 +14220,48 @@ impl AgentDaemon {
             );
             Value::Object(object)
         };
+        // The same three-controller `sessionOptions` as `createRuntime`, from the
+        // `rehydrateCompletedRlmSubagent` literal (`daemon-mode.ts:3261-3290`):
+        // `stateRef` is the `let stateRef` at `:3239`, assigned at `:3324-3326`.
+        let state_ref: Arc<StdMutex<Option<Arc<StdMutex<ActiveSessionState>>>>> =
+            Arc::new(StdMutex::new(None));
+        let get_current_state: Arc<
+            dyn Fn() -> Option<Arc<StdMutex<ActiveSessionState>>> + Send + Sync,
+        > = {
+            let state_ref = Arc::clone(&state_ref);
+            Arc::new(move || state_ref.lock().expect("session state slot poisoned").clone())
+        };
+        let session_options = SessionRuntimeOptions {
+            model: None,
+            rlm_heartbeat_controller: Some(self.create_rlm_heartbeat_controller(Arc::clone(
+                &get_current_state,
+            ))),
+            agent_message_controller: Some(
+                self.create_agent_message_controller(Arc::clone(&get_current_state)),
+            ),
+            agent_observe_controller: Some(
+                self.create_agent_observe_controller(Arc::clone(&get_current_state)),
+            ),
+        };
         let input = CreateAgentSessionRuntimeInput {
             factory: Value::Null,
             cwd,
             agent_dir: self.options.default_session_config.agent_dir.clone(),
             session_manager: Arc::new(StdMutex::new(session_manager)),
-            session_options: SessionRuntimeOptions::default(),
+            session_options,
             session_config: Some(serde_json::from_value(serde_json::to_value(&self.options.default_session_config).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?),
             // `runtimeMetadata` is handed to the factory as the same object the
             // TypeScript builds, so it stays a value here.
             runtime_metadata: Some(metadata.clone()),
         };
         let runtime = super::daemon_client_env::with_client_env(hydration_env.as_ref(), || (self.options.create_runtime)(input)).await?;
+        let state_ref_for_callback = Arc::clone(&state_ref);
         let state = self
             .add_runtime(runtime.clone(), restore_active_session_id, Some(Arc::new(move |state| {
+                {
+                    let mut slot = state_ref_for_callback.lock().expect("session state slot poisoned");
+                    *slot = Some(Arc::clone(state));
+                }
                 state.lock().expect("active session poisoned").client_env = hydration_env.clone();
             })), None)
             .await?;
@@ -15588,6 +15720,28 @@ impl AgentDaemon {
         self.set_state_session_name(state, name).await
     }
 
+    /// `createAgentMessageController(getCurrentState)` (`daemon-mode.ts:3363-3386`).
+    fn create_agent_message_controller(
+        self: &Arc<Self>,
+        get_current_state: Arc<dyn Fn() -> Option<Arc<StdMutex<ActiveSessionState>>> + Send + Sync>,
+    ) -> Arc<dyn AgentSessionMessageController> {
+        Arc::new(DaemonAgentMessageController {
+            daemon: Arc::clone(self),
+            get_current_state,
+        })
+    }
+
+    /// The `rlmHeartbeatController` literal from `daemon-mode.ts:1968-1993`.
+    fn create_rlm_heartbeat_controller(
+        self: &Arc<Self>,
+        get_current_state: Arc<dyn Fn() -> Option<Arc<StdMutex<ActiveSessionState>>> + Send + Sync>,
+    ) -> Arc<dyn crate::core::cron_jobs::AgentRlmHeartbeatController> {
+        Arc::new(DaemonAgentRlmHeartbeatController {
+            daemon: Arc::clone(self),
+            get_current_state,
+        })
+    }
+
     /// `createAgentObserveController(getCurrentState)`.
     fn create_agent_observe_controller(
         self: &Arc<Self>,
@@ -15669,5 +15823,162 @@ impl AgentObserveController for DaemonAgentObserveController {
                 .create_agent_observe_recent_messages(&current, input)
                 .await
         })
+    }
+}
+
+/// The `AgentSessionMessageController` the daemon hands to a session runtime
+/// (`daemon-mode.ts:3363-3386`).
+struct DaemonAgentMessageController {
+    daemon: Arc<AgentDaemon>,
+    get_current_state: Arc<dyn Fn() -> Option<Arc<StdMutex<ActiveSessionState>>> + Send + Sync>,
+}
+
+impl DaemonAgentMessageController {
+    /// `requireCurrentState()` (`daemon-mode.ts:3366-3372`).
+    fn require_current_state(&self) -> Result<Arc<StdMutex<ActiveSessionState>>, String> {
+        (self.get_current_state)()
+            .ok_or_else(|| "Agent message state is not ready for this session yet".to_string())
+    }
+}
+
+impl AgentSessionMessageController for DaemonAgentMessageController {
+    /// `roster: () => this.createAgentFamilyRoster(requireCurrentState())`
+    /// (`daemon-mode.ts:3375`).
+    fn roster(
+        &self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentFamilyRosterResult, String>> + Send>,
+    > {
+        let daemon = Arc::clone(&self.daemon);
+        let current = self.require_current_state();
+        Box::pin(async move {
+            let current = current?;
+            daemon.create_agent_family_roster(&current).await
+        })
+    }
+
+    /// The TypeScript daemon controller has no `awaitPendingChildPublication`
+    /// member (`daemon-mode.ts:3373-3385`); the session supplies it at the wrapper
+    /// (`agent-session.ts:10278`), and its absence makes the call site treat the
+    /// publication as unresolved - `awaitPromise` is skipped and `publishedId`
+    /// stays `undefined` (`core/agent-messages.ts:593-596`). `None` is that value.
+    ///
+    /// UNRESOLVED for the session side: `AgentSession::await_pending_rlm_child_publication`
+    /// (`core/agent_session/runtime_members.rs:924`, TS `_awaitPendingRlmChildPublication`
+    /// at `agent-session.ts:10641-10651`) owns the real lookup, and it is not exposed
+    /// on the `DaemonSession` seam (`daemon_mode.rs:3080-3200`), so this file cannot
+    /// forward to it. Add `await_pending_child_publication` to `DaemonSession` and
+    /// forward here once that owner exposes it.
+    fn await_pending_child_publication(
+        &self,
+        _selector: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send>>
+    {
+        Box::pin(async move { Ok(None) })
+    }
+
+    /// `sendAgentMessage: (input) => this.sendAgentSessionMessage({
+    /// targetSelector: input.target, message: input.message,
+    /// fromState: requireCurrentState(), origin: "agent" })`
+    /// (`daemon-mode.ts:3378-3384`).
+    fn send_agent_message(
+        &self,
+        input: AgentSessionMessageSendInput,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<AgentSessionMessageReceipt, String>> + Send>,
+    > {
+        let daemon = Arc::clone(&self.daemon);
+        let current = self.require_current_state();
+        Box::pin(async move {
+            let from_state = current?;
+            daemon
+                .send_agent_session_message(SendAgentMessageInput {
+                    target_selector: input.target,
+                    message: input.message,
+                    from_state: Some(from_state),
+                    sender: None,
+                    client_id: None,
+                    sender_key: None,
+                    origin: "agent".to_string(),
+                })
+                .await
+        })
+    }
+}
+
+/// The `rlmHeartbeatController` literal handed to the session runtime
+/// (`daemon-mode.ts:1968-1993`): every member reads the current state and
+/// forwards to the daemon's `cronStore`-backed helpers.
+struct DaemonAgentRlmHeartbeatController {
+    daemon: Arc<AgentDaemon>,
+    get_current_state: Arc<dyn Fn() -> Option<Arc<StdMutex<ActiveSessionState>>> + Send + Sync>,
+}
+
+impl DaemonAgentRlmHeartbeatController {
+    /// `if (!stateRef) throw new Error("RLM heartbeat state is not ready for this
+    /// session yet")` (`daemon-mode.ts:1970-1972`, repeated at `:1976-1978`,
+    /// `:1982-1984`, `:1988-1990`). `list_rlm_heartbeats`/`create_rlm_heartbeat`/
+    /// `update_rlm_heartbeat`/`delete_rlm_heartbeat` return no `Result`
+    /// (`core/cron_jobs.rs:186-191`), so the throw is mirrored with the identical
+    /// message, like the store mirror at `core/cron_jobs.rs:1538-1541`. The guard
+    /// is unreachable in practice: the controller is only reachable from a live
+    /// session, whose state the daemon publishes before the first prompt.
+    fn require_current_state(&self) -> Arc<StdMutex<ActiveSessionState>> {
+        (self.get_current_state)()
+            .unwrap_or_else(|| panic!("RLM heartbeat state is not ready for this session yet"))
+    }
+}
+
+impl crate::core::cron_jobs::AgentRlmHeartbeatController for DaemonAgentRlmHeartbeatController {
+    /// `listRlmHeartbeats: (options) => this.cronStore.listRlmHeartbeats(
+    /// stateRef.activeSessionId, options)` (`daemon-mode.ts:1969-1974`).
+    fn list_rlm_heartbeats(
+        &self,
+        options: Option<crate::core::cron_jobs::RlmHeartbeatListOptions>,
+    ) -> Vec<AgentCronJob> {
+        let state = self.require_current_state();
+        let active_session_id = state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        self.daemon
+            .cron_store
+            .list_rlm_heartbeats(&active_session_id, options)
+    }
+
+    /// `createRlmHeartbeat: (input) => this.createRlmHeartbeatForState(stateRef,
+    /// input)` (`daemon-mode.ts:1975-1980`). `createRlmHeartbeatForState` throws
+    /// on a missing session file or a rejected schedule (`daemon-mode.ts:2187-2191`,
+    /// `core/cron-jobs.ts:365-371`), which the store reports as `Err`; the trait
+    /// member cannot return an error, so the message is raised as a panic.
+    fn create_rlm_heartbeat(
+        &self,
+        input: RlmHeartbeatCreateInput,
+    ) -> AgentCronJob {
+        let state = self.require_current_state();
+        match self.daemon.create_rlm_heartbeat_for_state(&state, &input) {
+            Ok(job) => job,
+            Err(error) => panic!("{error}"),
+        }
+    }
+
+    /// `updateRlmHeartbeat: (input) => this.updateRlmHeartbeatForState(stateRef,
+    /// input)` (`daemon-mode.ts:1981-1986`); the TS signature is
+    /// `AgentCronJob | undefined` (`core/cron-jobs.ts:134`).
+    fn update_rlm_heartbeat(
+        &self,
+        input: RlmHeartbeatUpdateInput,
+    ) -> Option<AgentCronJob> {
+        let state = self.require_current_state();
+        self.daemon.update_rlm_heartbeat_for_state(&state, &input)
+    }
+
+    /// `deleteRlmHeartbeat: (id) => this.deleteRlmHeartbeatForState(stateRef, id)`
+    /// (`daemon-mode.ts:1987-1992`); `AgentCronJob | undefined`
+    /// (`core/cron-jobs.ts:135`).
+    fn delete_rlm_heartbeat(&self, id: &str) -> Option<AgentCronJob> {
+        let state = self.require_current_state();
+        self.daemon.delete_rlm_heartbeat_for_state(&state, id)
     }
 }

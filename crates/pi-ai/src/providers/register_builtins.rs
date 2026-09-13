@@ -6,10 +6,15 @@
 //! override, the registration order) is preserved.
 use std::sync::{Arc, OnceLock, RwLock};
 
-use crate::api_registry::{clear_api_providers, get_api_providers, register_api_provider, ApiProvider};
+use crate::api_registry::{
+	clear_api_providers, get_api_providers, register_api_provider_simple, ApiProviderSimple,
+};
 use crate::compaction::CompactionOptions;
 use crate::types::CompactFunction;
-use crate::types::{AssistantMessage, Context, Model, StreamFunction, StreamOptions, Usage};
+use crate::api_registry::SimpleStreamFunction;
+use crate::types::{
+	AssistantMessage, Context, Model, SimpleStreamOptions, StreamFunction, StreamOptions, Usage,
+};
 use crate::utils::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 
 use super::amazon_bedrock::{stream_bedrock, stream_simple_bedrock, BedrockOptions};
@@ -45,10 +50,18 @@ use super::openai_responses::{
 pub struct LazyProviderModule {
 	pub compact: Option<CompactFunction>,
 	pub stream: StreamFunction,
-	pub stream_simple: StreamFunction,
+	/// TS types this `TSimpleOptions` (register-builtins.ts:33-37), so the caller's
+	/// `SimpleStreamOptions` reach the provider unchanged.
+	pub stream_simple: SimpleStreamFunction,
 }
 
 /// TS: `BedrockResponsesProviderModule`
+///
+/// TS types `streamSimpleBedrockResponses` as `StreamFunction<Api, SimpleStreamOptions>`
+/// (register-builtins.ts:82-85). The Rust field stays base-shaped because the only
+/// implementer, `crates/pi-coding-agent/src/bun/register_bedrock.rs:25-29`, is outside this
+/// file and still declares `Option<&StreamOptions>`; [`as_simple_stream`] adapts it and the
+/// `reasoning`/`thinkingBudgets` of that override path are lost until that file is updated.
 #[derive(Clone)]
 pub struct BedrockResponsesProviderModule {
 	pub stream_bedrock_responses: StreamFunction,
@@ -56,6 +69,8 @@ pub struct BedrockResponsesProviderModule {
 }
 
 /// TS: `BedrockProviderModule`
+/// TS: `BedrockProviderModule` (register-builtins.ts:87-95). See
+/// [`BedrockResponsesProviderModule`] for why `stream_simple_bedrock` stays base-shaped.
 #[derive(Clone)]
 pub struct BedrockProviderModule {
 	pub responses: Option<BedrockResponsesProviderModule>,
@@ -143,21 +158,27 @@ impl FromBaseOptions for MistralOptions {
 	}
 }
 
-impl FromBaseOptions for crate::types::SimpleStreamOptions {
-	fn from_base_options(base: &StreamOptions) -> Self {
-		crate::types::SimpleStreamOptions {
-			stream: base.clone(),
-			reasoning: None,
-			thinking_budgets: None,
-		}
-	}
-}
-
 fn typed_options<T>(options: Option<&StreamOptions>) -> Option<T>
 where
 	T: FromBaseOptions,
 {
 	options.map(T::from_base_options)
+}
+
+/// TS: `streamSimple: (model, context, options?: TSimpleOptions) => ...`
+/// (register-builtins.ts:33-37). The TypeScript hands the caller's `SimpleStreamOptions`
+/// object straight to the provider, so `reasoning` / `thinkingBudgets` must survive:
+/// `wrapStreamSimple` only checks the api (api-registry.ts:63-68).
+fn simple_options(options: Option<&SimpleStreamOptions>) -> Option<SimpleStreamOptions> {
+	options.cloned()
+}
+
+/// Adapts a base-shaped `streamSimple` to the faithful `SimpleStreamOptions` signature.
+/// Only the bedrock module override still uses it (see [`BedrockProviderModule`]).
+fn as_simple_stream(stream: StreamFunction) -> SimpleStreamFunction {
+	Arc::new(move |model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+		stream(model, context, options.map(|options| &options.stream))
+	})
 }
 
 /// TS: `supportsCompaction` guard used by `registerApiProvider` for the responses apis.
@@ -196,7 +217,7 @@ fn load_bedrock_responses_module() -> LazyProviderModule {
 		return LazyProviderModule {
 			compact: None,
 			stream: module.stream_bedrock_responses,
-			stream_simple: module.stream_simple_bedrock_responses,
+			stream_simple: as_simple_stream(module.stream_simple_bedrock_responses),
 		};
 	}
 	LazyProviderModule {
@@ -204,12 +225,8 @@ fn load_bedrock_responses_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_bedrock_responses_with_options(model, context, typed_options::<BedrockResponsesOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_bedrock_responses_with_options(
-				model,
-				context,
-				typed_options::<crate::types::SimpleStreamOptions>(options),
-			)
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_bedrock_responses_with_options(model, context, simple_options(options))
 		}),
 	}
 }
@@ -220,7 +237,7 @@ pub fn stream_bedrock_responses() -> StreamFunction {
 }
 
 /// TS: `streamSimpleBedrockResponses`
-pub fn stream_simple_bedrock_responses_lazy() -> StreamFunction {
+pub fn stream_simple_bedrock_responses_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_bedrock_responses_module)
 }
 
@@ -235,7 +252,7 @@ pub fn set_bedrock_provider_module(module: BedrockProviderModule) {
 	*bedrock_provider_module_override().write().unwrap() = Some(LazyProviderModule {
 		compact: None,
 		stream: stream_bedrock,
-		stream_simple: stream_simple_bedrock,
+		stream_simple: as_simple_stream(stream_simple_bedrock),
 	});
 }
 
@@ -276,9 +293,10 @@ fn create_lazy_stream(load_module: fn() -> LazyProviderModule) -> StreamFunction
 	})
 }
 
-/// TS: `createLazySimpleStream(loadModule)`
-fn create_lazy_simple_stream(load_module: fn() -> LazyProviderModule) -> StreamFunction {
-	Arc::new(move |model: &Model, context: &Context, options: Option<&StreamOptions>| {
+/// TS: `createLazySimpleStream(loadModule)` (register-builtins.ts:218-239) - the
+/// module's `streamSimple` is invoked with the caller's `SimpleStreamOptions`.
+fn create_lazy_simple_stream(load_module: fn() -> LazyProviderModule) -> SimpleStreamFunction {
+	Arc::new(move |model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
 		let outer = create_assistant_message_event_stream();
 		let module = load_module();
 		let inner = (module.stream_simple)(model, context, options);
@@ -293,8 +311,8 @@ fn load_anthropic_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_anthropic_provider(model, context, typed_options::<AnthropicOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_anthropic(model, context, typed_options::<crate::types::SimpleStreamOptions>(options))
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_anthropic(model, context, simple_options(options))
 		}),
 	}
 }
@@ -305,12 +323,8 @@ fn load_azure_openai_responses_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_azure_openai_responses_provider(model, context, typed_options::<AzureOpenAIResponsesOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_azure_openai_responses(
-				model,
-				context,
-				typed_options::<crate::types::SimpleStreamOptions>(options),
-			)
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_azure_openai_responses(model, context, simple_options(options))
 		}),
 	}
 }
@@ -321,8 +335,8 @@ fn load_google_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_google_provider(model, context, typed_options::<GoogleOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_google(model, context, typed_options::<crate::types::SimpleStreamOptions>(options))
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_google(model, context, simple_options(options))
 		}),
 	}
 }
@@ -333,8 +347,8 @@ fn load_google_vertex_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_google_vertex_provider(model, context, typed_options::<GoogleVertexOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_google_vertex(model, context, typed_options::<crate::types::SimpleStreamOptions>(options))
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_google_vertex(model, context, simple_options(options))
 		}),
 	}
 }
@@ -345,8 +359,8 @@ fn load_mistral_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_mistral_provider(model, context, typed_options::<MistralOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_mistral(model, context, typed_options::<crate::types::SimpleStreamOptions>(options))
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_mistral(model, context, simple_options(options))
 		}),
 	}
 }
@@ -357,12 +371,8 @@ fn load_openai_codex_responses_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_openai_codex_responses_provider(model, context, typed_options::<OpenAICodexResponsesOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_openai_codex_responses(
-				model,
-				context,
-				typed_options::<crate::types::SimpleStreamOptions>(options),
-			)
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_openai_codex_responses(model, context, simple_options(options))
 		}),
 	}
 }
@@ -373,8 +383,8 @@ fn load_openai_completions_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_openai_completions_provider(model, context, typed_options::<OpenAICompletionsOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_openai_completions(model, context, typed_options::<crate::types::SimpleStreamOptions>(options))
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_openai_completions(model, context, simple_options(options))
 		}),
 	}
 }
@@ -385,8 +395,8 @@ fn load_openai_responses_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_openai_responses_provider(model, context, typed_options::<OpenAIResponsesOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_openai_responses(model, context, typed_options::<crate::types::SimpleStreamOptions>(options))
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_openai_responses(model, context, simple_options(options))
 		}),
 	}
 }
@@ -400,8 +410,8 @@ fn load_bedrock_provider_module() -> LazyProviderModule {
 		stream: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
 			stream_bedrock(model, context, typed_options::<BedrockOptions>(options))
 		}),
-		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&StreamOptions>| {
-			stream_simple_bedrock(model, context, typed_options::<crate::types::SimpleStreamOptions>(options))
+		stream_simple: Arc::new(|model: &Model, context: &Context, options: Option<&SimpleStreamOptions>| {
+			stream_simple_bedrock(model, context, simple_options(options))
 		}),
 	}
 }
@@ -412,7 +422,7 @@ pub fn stream_anthropic() -> StreamFunction {
 }
 
 /// TS: `streamSimpleAnthropic`
-pub fn stream_simple_anthropic_lazy() -> StreamFunction {
+pub fn stream_simple_anthropic_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_anthropic_provider_module)
 }
 
@@ -422,7 +432,7 @@ pub fn stream_azure_openai_responses() -> StreamFunction {
 }
 
 /// TS: `streamSimpleAzureOpenAIResponses`
-pub fn stream_simple_azure_openai_responses_lazy() -> StreamFunction {
+pub fn stream_simple_azure_openai_responses_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_azure_openai_responses_provider_module)
 }
 
@@ -432,7 +442,7 @@ pub fn stream_google() -> StreamFunction {
 }
 
 /// TS: `streamSimpleGoogle`
-pub fn stream_simple_google_lazy() -> StreamFunction {
+pub fn stream_simple_google_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_google_provider_module)
 }
 
@@ -442,7 +452,7 @@ pub fn stream_google_vertex() -> StreamFunction {
 }
 
 /// TS: `streamSimpleGoogleVertex`
-pub fn stream_simple_google_vertex_lazy() -> StreamFunction {
+pub fn stream_simple_google_vertex_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_google_vertex_provider_module)
 }
 
@@ -452,7 +462,7 @@ pub fn stream_mistral() -> StreamFunction {
 }
 
 /// TS: `streamSimpleMistral`
-pub fn stream_simple_mistral_lazy() -> StreamFunction {
+pub fn stream_simple_mistral_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_mistral_provider_module)
 }
 
@@ -462,7 +472,7 @@ pub fn stream_openai_codex_responses() -> StreamFunction {
 }
 
 /// TS: `streamSimpleOpenAICodexResponses`
-pub fn stream_simple_openai_codex_responses_lazy() -> StreamFunction {
+pub fn stream_simple_openai_codex_responses_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_openai_codex_responses_provider_module)
 }
 
@@ -472,7 +482,7 @@ pub fn stream_openai_completions() -> StreamFunction {
 }
 
 /// TS: `streamSimpleOpenAICompletions`
-pub fn stream_simple_openai_completions_lazy() -> StreamFunction {
+pub fn stream_simple_openai_completions_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_openai_completions_provider_module)
 }
 
@@ -482,7 +492,7 @@ pub fn stream_openai_responses() -> StreamFunction {
 }
 
 /// TS: `streamSimpleOpenAIResponses`
-pub fn stream_simple_openai_responses_lazy() -> StreamFunction {
+pub fn stream_simple_openai_responses_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_openai_responses_provider_module)
 }
 
@@ -490,20 +500,20 @@ fn stream_bedrock_lazy() -> StreamFunction {
 	create_lazy_stream(load_bedrock_provider_module)
 }
 
-fn stream_simple_bedrock_lazy() -> StreamFunction {
+fn stream_simple_bedrock_lazy() -> SimpleStreamFunction {
 	create_lazy_simple_stream(load_bedrock_provider_module)
 }
 
 /// TS: `registerBuiltInApiProviders()`
 pub fn register_built_in_api_providers() {
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "bedrock-responses".to_string(),
 		stream: stream_bedrock_responses(),
 		stream_simple: stream_simple_bedrock_responses_lazy(),
 		compact: None,
 		supports_compaction: None,
 	}, None);
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "anthropic-messages".to_string(),
 		stream: stream_anthropic(),
 		stream_simple: stream_simple_anthropic_lazy(),
@@ -511,7 +521,7 @@ pub fn register_built_in_api_providers() {
 		supports_compaction: None,
 	}, None);
 
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "openai-completions".to_string(),
 		stream: stream_openai_completions(),
 		stream_simple: stream_simple_openai_completions_lazy(),
@@ -519,7 +529,7 @@ pub fn register_built_in_api_providers() {
 		supports_compaction: None,
 	}, None);
 
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "mistral-conversations".to_string(),
 		stream: stream_mistral(),
 		stream_simple: stream_simple_mistral_lazy(),
@@ -527,7 +537,7 @@ pub fn register_built_in_api_providers() {
 		supports_compaction: None,
 	}, None);
 
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "openai-responses".to_string(),
 		supports_compaction: Some(compaction_api_guard("openai-responses", supports_openai_compaction)),
 		stream: stream_openai_responses(),
@@ -535,7 +545,7 @@ pub fn register_built_in_api_providers() {
 		compact: Some(compact_openai_responses_guarded()),
 	}, None);
 
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "azure-openai-responses".to_string(),
 		stream: stream_azure_openai_responses(),
 		stream_simple: stream_simple_azure_openai_responses_lazy(),
@@ -543,7 +553,7 @@ pub fn register_built_in_api_providers() {
 		supports_compaction: None,
 	}, None);
 
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "openai-codex-responses".to_string(),
 		supports_compaction: Some(compaction_api_guard("openai-codex-responses", supports_openai_compaction)),
 		stream: stream_openai_codex_responses(),
@@ -551,7 +561,7 @@ pub fn register_built_in_api_providers() {
 		compact: Some(compact_openai_codex_responses_guarded()),
 	}, None);
 
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "google-generative-ai".to_string(),
 		stream: stream_google(),
 		stream_simple: stream_simple_google_lazy(),
@@ -559,7 +569,7 @@ pub fn register_built_in_api_providers() {
 		supports_compaction: None,
 	}, None);
 
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "google-vertex".to_string(),
 		stream: stream_google_vertex(),
 		stream_simple: stream_simple_google_vertex_lazy(),
@@ -567,7 +577,7 @@ pub fn register_built_in_api_providers() {
 		supports_compaction: None,
 	}, None);
 
-	register_api_provider(ApiProvider {
+	register_api_provider_simple(ApiProviderSimple {
 		api: "bedrock-converse-stream".to_string(),
 		stream: stream_bedrock_lazy(),
 		stream_simple: stream_simple_bedrock_lazy(),
@@ -713,11 +723,26 @@ mod tests {
 		assert_eq!(typed.stream.api_key.as_deref(), Some("key"));
 		// `signal` is not serialisable, so it must survive by cloning the base options.
 		assert!(typed.stream.signal.is_some());
-		let simple = typed_options::<crate::types::SimpleStreamOptions>(Some(&options)).expect("simple options");
-		assert_eq!(simple.stream.temperature, Some(0.5));
-		assert!(simple.reasoning.is_none());
-		assert!(simple.thinking_budgets.is_none());
 		assert!(typed_options::<AnthropicOptions>(None).is_none());
+		// The simple path passes the caller's `SimpleStreamOptions` through unchanged
+		// (api-registry.ts:63-68), so `reasoning` and `thinkingBudgets` survive.
+		let mut simple = crate::types::SimpleStreamOptions {
+			stream: options.clone(),
+			reasoning: Some("high".to_string()),
+			thinking_budgets: Some(crate::types::ThinkingBudgets {
+				high: Some(4096.0),
+				..Default::default()
+			}),
+		};
+		simple.stream.temperature = Some(0.5);
+		let passed = simple_options(Some(&simple)).expect("simple options");
+		assert_eq!(passed.stream.temperature, Some(0.5));
+		assert_eq!(passed.reasoning.as_deref(), Some("high"));
+		assert_eq!(
+			passed.thinking_budgets.as_ref().and_then(|budgets| budgets.high),
+			Some(4096.0)
+		);
+		assert!(simple_options(None).is_none());
 	}
 
 	#[tokio::test]

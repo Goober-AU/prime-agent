@@ -1802,6 +1802,39 @@ impl MainEntryDaemonTransport {
 }
 
 impl ConnectionTransport for MainEntryDaemonTransport {
+    /// `requestData(command, timeoutMs, options)` forwards `options.recoverable`
+    /// (`daemon-agent-connection.ts:379/:498`; consumed at `daemon-client.ts:418`). Without this
+    /// override the transport hardcodes `DaemonClientRequestOptions::default()`, so a caller's
+    /// `recoverable: false` would never reach the client.
+    fn request_with_recoverable(
+        &self,
+        command: Value,
+        timeout_ms: Option<u64>,
+        recoverable: bool,
+    ) -> pi_ai::types::BoxFuture<Result<ConnectionResponse, String>> {
+        let options = DaemonClientRequestOptions {
+            recoverable: Some(recoverable),
+            ..Default::default()
+        };
+        let client = Arc::clone(&self.client);
+        Box::pin(async move {
+            let body: DaemonCommandBody = command
+                .as_object()
+                .cloned()
+                .ok_or_else(|| "Daemon command must be a JSON object".to_string())?;
+            let response = client
+                .request(body, timeout_ms, options)
+                .await
+                .map_err(|error| error.message())?;
+            Ok(ConnectionResponse {
+                success: response.success,
+                data: response.data.unwrap_or(Value::Null),
+                error: response.error,
+                error_code: response.error_info.map(|info| info.code().to_string()),
+            })
+        })
+    }
+
     fn request(&self, command: Value, timeout_ms: Option<u64>) -> pi_ai::types::BoxFuture<Result<ConnectionResponse, String>> {
         let client = Arc::clone(&self.client);
         Box::pin(async move {
