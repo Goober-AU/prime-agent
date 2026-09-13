@@ -1350,6 +1350,18 @@ struct StreamError {
 	value: Value,
 }
 
+/// `openai@6.47.0` `OpenAI.DEFAULT_TIMEOUT = 600000; // 10 minutes`, applied when the
+/// caller passes no `options.timeoutMs` (TS: `options?.timeoutMs !== undefined`).
+const DEFAULT_TIMEOUT_MS: f64 = 600_000.0;
+
+/// The deadline the SDK waits for RESPONSE HEADERS:
+/// `options.timeout = options.timeout ?? this.timeout` (`client.js` buildRequest) fed to
+/// `fetchWithTimeout`, whose `finally { clearTimeout(timeout) }` runs as soon as `fetch`
+/// resolves. The body that follows has no deadline in either implementation.
+fn resolve_header_timeout(timeout_ms: Option<f64>) -> std::time::Duration {
+	std::time::Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).max(0.0) as u64)
+}
+
 /// Lets `?` convert the provider-helper `Result<_, String>` errors (e.g. the
 /// `No API key for provider` / compaction-checkpoint errors) into a thrown error.
 impl From<String> for StreamError {
@@ -1365,33 +1377,70 @@ impl StreamError {
 		Self { message, value }
 	}
 
-	/// The OpenAI SDK `APIError.makeMessage(status, error, message)` text.
-	fn api_error(status: u16, error: Option<&Value>, message: Option<&str>, headers: &IndexMap<String, String>) -> Self {
-		let from_error = error.and_then(|error| error.get("message")).map(|value| match value {
-			Value::String(text) => text.clone(),
-			other => other.to_string(),
-		});
-		let msg = from_error
-			.or_else(|| error.map(|error| error.to_string()))
+	/// TS SDK `APIError.makeMessage(status, error, message)` text.
+	fn api_error_message(status: Option<u16>, error: Option<&Value>, message: Option<&str>) -> String {
+		// `const msg = error?.message ? typeof error.message === 'string' ? error.message :
+		// JSON.stringify(error.message) : error ? JSON.stringify(error) : message;`
+		let msg = error
+			.and_then(|error| error.get("message"))
+			.filter(|value| js_truthy(value))
+			.map(|value| match value {
+				Value::String(text) => text.clone(),
+				other => other.to_string(),
+			})
+			.or_else(|| error.filter(|error| js_truthy(error)).map(|error| error.to_string()))
 			.or_else(|| message.map(str::to_string));
-		let text = match (msg, status) {
-			(Some(msg), _) if !msg.is_empty() => format!("{status} {msg}"),
-			(_, status) => format!("{status} status code (no body)"),
-		};
+		match (msg, status) {
+			(Some(msg), Some(status)) if !msg.is_empty() => format!("{status} {msg}"),
+			(_, Some(status)) => format!("{status} status code (no body)"),
+			(Some(msg), None) => msg,
+			(None, None) => "(no status code or body)".to_string(),
+		}
+	}
+
+	/// The `headers` property of a thrown SDK error (`Headers` -> record).
+	fn error_headers_value(headers: &IndexMap<String, String>) -> Value {
+		let mut header_map = Map::new();
+		for (name, header_value) in headers {
+			header_map.insert(name.clone(), Value::String(header_value.clone()));
+		}
+		Value::Object(header_map)
+	}
+
+	/// The OpenAI SDK `APIError.generate(status, errorResponse, message, headers)` throw.
+	///
+	/// `generate` replaces the whole parsed body with the nested error first
+	/// (`const error = errorResponse?.['error'];`) and `APIError` stores that same value as
+	/// `this.error`, so `error.error.metadata.raw` (the OpenRouter detail the TS catch appends)
+	/// stays reachable while `errorMessage` is the nested `error.message`.
+	fn api_error(status: u16, error_response: Option<&Value>, message: Option<&str>, headers: &IndexMap<String, String>) -> Self {
+		let payload = error_response.and_then(|body| body.get("error"));
+		let text = Self::api_error_message(Some(status), payload, message);
 		let mut value = json!({
 			"name": "Error",
-			"message": text,
+			"message": text.clone(),
 			"status": status,
 		});
-		if let Some(error) = error {
-			value["error"] = error.clone();
+		if let Some(payload) = payload {
+			value["error"] = payload.clone();
 		}
 		if let Some(object) = value.as_object_mut() {
-			let mut header_map = Map::new();
-			for (name, header_value) in headers {
-				header_map.insert(name.clone(), Value::String(header_value.clone()));
-			}
-			object.insert("headers".to_string(), Value::Object(header_map));
+			object.insert("headers".to_string(), Self::error_headers_value(headers));
+		}
+		Self { message: text, value }
+	}
+
+	/// The SDK's in-stream error throw (`Stream.fromSSEResponse`):
+	/// `if (data && data.error) throw new APIError(undefined, data.error, undefined, response.headers);`
+	fn in_stream_api_error(error: &Value, headers: &IndexMap<String, String>) -> Self {
+		let text = Self::api_error_message(None, Some(error), None);
+		let mut value = json!({
+			"name": "Error",
+			"message": text.clone(),
+			"error": error.clone(),
+		});
+		if let Some(object) = value.as_object_mut() {
+			object.insert("headers".to_string(), Self::error_headers_value(headers));
 		}
 		Self { message: text, value }
 	}
@@ -1577,25 +1626,27 @@ async fn post_chat_completions(
 		}
 	}
 	builder = builder.json(body);
-	if let Some(timeout_ms) = timeout_ms {
-		if timeout_ms > 0.0 {
-			builder = builder.timeout(std::time::Duration::from_millis(timeout_ms as u64));
-		}
-	}
+
+	// TS: `...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {})`
+	// -> the openai@6.47.0 SDK falls back to `OpenAI.DEFAULT_TIMEOUT = 600000` (10 minutes),
+	// and `fetchWithTimeout` clears that timer in its `finally` once `fetch` resolves, so
+	// the deadline covers CONNECT + RESPONSE HEADERS only. It must never be a reqwest
+	// `RequestBuilder::timeout` (a TOTAL deadline) because that aborts a long-lived stream.
+	let header_timeout = resolve_header_timeout(timeout_ms);
 
 	let request = builder.send();
 	let response = match signal {
 		Some(signal) => {
 			tokio::select! {
-				result = request => result,
+				result = tokio::time::timeout(header_timeout, request) => result,
 				_ = signal.cancelled() => return Err(abort_error()),
 			}
 		}
-		None => request.await,
+		None => tokio::time::timeout(header_timeout, request).await,
 	};
 	let response = match response {
-		Ok(response) => response,
-		Err(error) => {
+		Ok(Ok(response)) => response,
+		Ok(Err(error)) => {
 			if is_cancelled(signal) {
 				return Err(abort_error());
 			}
@@ -1604,17 +1655,28 @@ async fn post_chat_completions(
 			}
 			return Err(StreamError::new(format!("Connection error: {error}")));
 		}
+		// `APIConnectionTimeoutError`: `Request timed out.`
+		Err(_elapsed) => {
+			if is_cancelled(signal) {
+				return Err(abort_error());
+			}
+			return Err(StreamError::new("Request timed out."));
+		}
 	};
 
 	let status = response.status().as_u16();
 	if status >= 400 {
 		let headers_record = crate::utils::headers::header_map_to_record(response.headers());
 		let text = response.text().await.unwrap_or_default();
+		// SDK: `const errJSON = safeJSON(errText); const errMessage = errJSON ? undefined : errText;`
+		// (`safeJSON` returns `undefined` for unparseable text), then
+		// `makeStatusError(status, errJSON, errMessage, response.headers)`.
 		let parsed: Option<Value> = serde_json::from_str(&text).ok();
-		let message = if parsed.is_some() { None } else { Some(text.as_str()) };
+		let error_response = parsed.as_ref().filter(|value| js_truthy(value));
+		let message = if error_response.is_some() { None } else { Some(text.as_str()) };
 		return Err(StreamError::api_error(
 			status,
-			parsed.as_ref(),
+			error_response,
 			message,
 			&headers_record,
 		));
@@ -1628,15 +1690,37 @@ async fn post_chat_completions(
 // ---------------------------------------------------------------------------
 
 /// The TypeScript async IIFE body, minus the try/catch (the caller adds it).
+///
+/// `output` is the accumulator the CALLER owns, exactly like the TS `output` const the
+/// catch reuses (`stream.push({ type: "error", reason: output.stopReason, error: output })`),
+/// so an `Err` leaves the partial content/usage/responseId the stream already produced.
 async fn run_stream(
 	model: &Model,
 	context: &Context,
 	options: Option<OpenAICompletionsOptions>,
+	output: &mut AssistantMessage,
 	stream: &AssistantMessageEventStream,
 ) -> Result<(), StreamError> {
-	let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
-	output.usage = crate::types::Usage::zero();
+	let mut state = StreamState::new();
+	let result = run_stream_body(model, context, options, output, &mut state, stream).await;
+	if result.is_err() {
+		// TS: the catch iterates `output.content`, which aliases the live `blocks`
+		// array, and strips the streaming scratch buffers (which never reach
+		// `StreamState::content`).
+		output.content = state.content();
+	}
+	result
+}
 
+/// TS: the body of the `async () => { try { ... } }` IIFE.
+async fn run_stream_body(
+	model: &Model,
+	context: &Context,
+	options: Option<OpenAICompletionsOptions>,
+	output: &mut AssistantMessage,
+	state: &mut StreamState,
+	stream: &AssistantMessageEventStream,
+) -> Result<(), StreamError> {
 	let options_ref = options.as_ref();
 	let api_key = options_ref
 		.and_then(|options| options.stream.api_key.clone())
@@ -1688,7 +1772,10 @@ async fn run_stream(
 		partial: output.clone(),
 	});
 
-	let mut state = StreamState::new();
+	// The SDK throws the in-stream error with `response.headers`
+	// (`throw new APIError(undefined, data.error, undefined, response.headers)`), so the
+	// headers must be captured while the response is still owned here.
+	let response_headers = crate::utils::headers::header_map_to_record(response.headers());
 
 	let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Result<String, StreamError>>();
 	tokio::spawn(read_sse_data(response, signal.clone(), sender));
@@ -1699,6 +1786,13 @@ async fn run_stream(
 		};
 		if !chunk.is_object() {
 			continue;
+		}
+
+		// SDK `Stream.fromSSEResponse`: `if (data && data.error) throw new APIError(...)`,
+		// so an error event delivered inside the SSE body fails the stream instead of
+		// being silently skipped and reported as a successful run.
+		if let Some(error) = chunk.get("error").filter(|error| js_truthy(error)) {
+			return Err(StreamError::in_stream_api_error(error, &response_headers));
 		}
 
 		// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
@@ -1749,11 +1843,11 @@ async fn run_stream(
 			let content = delta.get("content").and_then(Value::as_str);
 			if let Some(content) = content {
 				if !content.is_empty() {
-					let index = ensure_text_block(&mut state, &output, stream);
+					let index = ensure_text_block(state, output, stream);
 					if let StreamingBlock::Text(block) = &mut state.blocks[index] {
 						block.text.push_str(content);
 					}
-					let partial = partial_message(&output, &state);
+					let partial = partial_message(output, state);
 					stream.push(AssistantMessageEvent::TextDelta {
 						content_index: index,
 						delta: content.to_string(),
@@ -1780,11 +1874,11 @@ async fn run_stream(
 			if let Some(found_reasoning_field) = found_reasoning_field {
 				if let Some(delta_text) = delta.get(found_reasoning_field).and_then(Value::as_str) {
 					if !delta_text.is_empty() {
-						let index = ensure_thinking_block(&mut state, &output, stream, found_reasoning_field);
+						let index = ensure_thinking_block(state, output, stream, found_reasoning_field);
 						if let StreamingBlock::Thinking(block) = &mut state.blocks[index] {
 							block.thinking.push_str(delta_text);
 						}
-						let partial = partial_message(&output, &state);
+						let partial = partial_message(output, state);
 						stream.push(AssistantMessageEvent::ThinkingDelta {
 							content_index: index,
 							delta: delta_text.to_string(),
@@ -1796,7 +1890,7 @@ async fn run_stream(
 
 			if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
 				for tool_call in tool_calls {
-					let index = ensure_tool_call_block(&mut state, &output, stream, tool_call);
+					let index = ensure_tool_call_block(state, output, stream, tool_call);
 					let tool_call_id = tool_call.get("id").and_then(Value::as_str);
 					let tool_call_name = tool_call
 						.get("function")
@@ -1834,7 +1928,7 @@ async fn run_stream(
 							block.tool_call.arguments = parsed.as_object().cloned().unwrap_or_default();
 						}
 					}
-					let partial = partial_message(&output, &state);
+					let partial = partial_message(output, state);
 					stream.push(AssistantMessageEvent::ToolCallDelta {
 						content_index: index,
 						delta: delta_text,
@@ -1895,7 +1989,7 @@ async fn run_stream(
 							state.blocks.push(StreamingBlock::Thinking(block));
 							let index = state.blocks.len() - 1;
 							state.reasoning_details_block = Some(index);
-							let partial = partial_message(&output, &state);
+							let partial = partial_message(output, state);
 							stream.push(AssistantMessageEvent::ThinkingStart {
 								content_index: index,
 								partial,
@@ -1918,7 +2012,7 @@ async fn run_stream(
 	}
 
 	for index in 0..state.blocks.len() {
-		finish_block(&mut state, index, &output, stream);
+		finish_block(state, index, output, stream);
 	}
 	if is_cancelled(signal.as_ref()) {
 		return Err(StreamError::new("Request was aborted"));
@@ -1939,7 +2033,7 @@ async fn run_stream(
 	output.content = state.content();
 	stream.push(AssistantMessageEvent::Done {
 		reason: output.stop_reason.clone(),
-		message: output,
+		message: output.clone(),
 	});
 	stream.end(None);
 	Ok(())
@@ -2121,9 +2215,11 @@ pub fn stream_openai_completions(
 	tokio::spawn(async move {
 		let signal = options.as_ref().and_then(|options| options.stream.signal.clone());
 
-		if let Err(error) = run_stream(&model, &context, options.clone(), &out).await {
-			let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
-			output.usage = crate::types::Usage::zero();
+		// TS: `const output: AssistantMessage = { ... }` lives OUTSIDE the try, so the catch
+		// keeps the partial content and the usage parsed before the failure.
+		let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
+		output.usage = crate::types::Usage::zero();
+		if let Err(error) = run_stream(&model, &context, options.clone(), &mut output, &out).await {
 			output.stop_reason = if is_cancelled(signal.as_ref()) {
 				"aborted".to_string()
 			} else {
@@ -2206,9 +2302,11 @@ pub fn stream_simple_openai_completions(
 			},
 		};
 
-		if let Err(error) = run_stream(&model, &context, Some(typed), &out).await {
-			let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
-			output.usage = crate::types::Usage::zero();
+		// TS: `const output` is created before the try, so the catch keeps the partial
+		// content and the usage parsed before the failure.
+		let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), crate::utils::now_ms());
+		output.usage = crate::types::Usage::zero();
+		if let Err(error) = run_stream(&model, &context, Some(typed), &mut output, &out).await {
 			let signal = options.as_ref().and_then(|options| options.stream.signal.clone());
 			output.stop_reason = if is_cancelled(signal.as_ref()) {
 				"aborted".to_string()
@@ -2297,6 +2395,186 @@ mod tests {
 	use super::tests_support::*;
 	use super::*;
 	use crate::types::OpenAICompletionsCompat;
+
+	// ------------------------------------------------------------------
+	// A4-06: SDK APIError text/shape, and the in-stream `data.error` throw
+	// ------------------------------------------------------------------
+
+	#[test]
+	fn api_error_unwraps_the_nested_error_like_api_error_generate() {
+		// SDK `APIError.generate`: `const error = errorResponse?.['error'];`
+		// -> message is the NESTED `error.message`, and `this.error` is that same payload.
+		let headers = IndexMap::new();
+		let body = json!({ "error": { "message": "Incorrect API key provided" } });
+		let error = StreamError::api_error(401, Some(&body), None, &headers);
+		assert_eq!(error.message, "401 Incorrect API key provided");
+		assert_eq!(error.value["error"], json!({ "message": "Incorrect API key provided" }));
+
+		// The OpenRouter raw-metadata append (`error.error.metadata.raw`) stays reachable.
+		let body = json!({
+			"error": { "message": "Provider error", "metadata": { "raw": "RAW DETAIL" } }
+		});
+		let error = StreamError::api_error(500, Some(&body), None, &headers);
+		assert_eq!(error.message, "500 Provider error");
+		assert_eq!(error.value["error"]["metadata"]["raw"], json!("RAW DETAIL"));
+
+		// No nested `error`: `error` itself is `undefined`, so `makeMessage` falls through
+		// to the raw text (`errJSON ? undefined : errText`) and then to `(no body)`.
+		let body = json!({ "message": "plain message" });
+		assert_eq!(StreamError::api_error(401, Some(&body), None, &headers).message, "401 status code (no body)");
+		assert_eq!(StreamError::api_error(401, None, None, &headers).message, "401 status code (no body)");
+		assert_eq!(StreamError::api_error(401, None, Some("not json"), &headers).message, "401 not json");
+		// `typeof error.message === 'string'` is false for a number -> JSON.stringify path.
+		let body = json!({ "error": "oops" });
+		assert_eq!(StreamError::api_error(500, Some(&body), None, &headers).message, "500 \"oops\"");
+	}
+
+	#[test]
+	fn in_stream_error_event_matches_the_sdk_throw() {
+		// SDK: `throw new APIError(undefined, data.error, undefined, response.headers)`
+		// with `status === undefined`, so `makeMessage` has no status prefix.
+		let mut headers = IndexMap::new();
+		headers.insert("x-request-id".to_string(), "req_1".to_string());
+		let payload = json!({ "message": "boom" });
+		let error = StreamError::in_stream_api_error(&payload, &headers);
+		assert_eq!(error.message, "boom");
+		assert_eq!(error.value["error"], payload);
+		assert!(error.value.get("status").is_none());
+		assert_eq!(error.value["headers"]["x-request-id"], json!("req_1"));
+
+		let payload = json!({ "metadata": { "raw": "RAW" } });
+		let error = StreamError::in_stream_api_error(&payload, &headers);
+		assert_eq!(error.message, "{\"metadata\":{\"raw\":\"RAW\"}}");
+		let payload = json!(null);
+		let error = StreamError::in_stream_api_error(&payload, &headers);
+		assert_eq!(error.message, "(no status code or body)");
+	}
+
+	/// An explicit key so `create_client` never reads the ambient environment.
+	fn keyed_options() -> OpenAICompletionsOptions {
+		OpenAICompletionsOptions {
+			stream: StreamOptions {
+				api_key: Some("fixture-key".to_string()),
+				..Default::default()
+			},
+			..Default::default()
+		}
+	}
+
+	/// A minimal one-response fixture server: reads the request, writes one HTTP
+	/// response, then closes.
+	async fn serve_http(status: &'static str, body: &'static str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			loop {
+				let mut buffer = [0u8; 4096];
+				let count = socket.read(&mut buffer).await.unwrap();
+				if count == 0 {
+					return;
+				}
+				request.extend_from_slice(&buffer[..count]);
+				if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+					let headers = std::str::from_utf8(&request[..end]).unwrap();
+					let length = headers
+						.lines()
+						.filter_map(|line| line.split_once(':'))
+						.find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+						.map(|(_, value)| value.trim().parse::<usize>().unwrap())
+						.unwrap();
+					if request.len() >= end + 4 + length {
+						break;
+					}
+				}
+			}
+			let response = format!(
+				"HTTP/1.1 {status}\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+				body.len()
+			);
+			socket.write_all(response.as_bytes()).await.unwrap();
+			socket.flush().await.unwrap();
+		});
+		(address, server)
+	}
+
+	#[tokio::test]
+	async fn in_stream_error_event_fails_the_stream_and_keeps_partial_output() {
+		// SDK `Stream.fromSSEResponse` throws on `data.error`, so a mid-stream error event
+		// must produce an `error` event, not a silent `done`.
+		let body = concat!(
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"repro-model\",\"choices\":[{\"delta\":{\"content\":\"partial text\"}}]}\n\n",
+			"data: {\"error\":{\"message\":\"boom\",\"metadata\":{\"raw\":\"RAW DETAIL\"}}}\n\n",
+			"data: [DONE]\n\n"
+		);
+		let (address, server) = serve_http("200 OK", body).await;
+		let mut model = base_model();
+		model.base_url = format!("http://{address}");
+		let options = keyed_options();
+		let stream = stream_openai_completions(&model, &context(vec![user_text("hi")]), Some(options));
+		let mut events = Vec::new();
+		while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+			.await
+			.expect("stream event timeout")
+		{
+			events.push(event);
+		}
+		let error = events
+			.iter()
+			.find_map(|event| match event {
+				AssistantMessageEvent::Error { reason, error } => Some((reason.clone(), error.clone())),
+				_ => None,
+			})
+			.expect("error event");
+		assert_eq!(error.0, "error");
+		assert_eq!(error.1.stop_reason, "error");
+		// A4-10: the partial text streamed before the failure is preserved, and the
+		// OpenRouter raw metadata is appended (`error.error.metadata.raw`).
+		assert_eq!(error.1.error_message.as_deref(), Some("boom\nRAW DETAIL"));
+		assert_eq!(
+			error.1.content,
+			vec![ContentBlock::Text(TextContent::new("partial text"))]
+		);
+		assert!(events.iter().all(|event| !matches!(event, AssistantMessageEvent::Done { .. })));
+		tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+	}
+
+	#[tokio::test]
+	async fn error_status_reports_the_nested_sdk_message() {
+		// `APIError.generate` unwraps `body.error`, so the message is not the whole JSON body.
+		let body = "{\"error\":{\"message\":\"Incorrect API key provided\"}}";
+		let (address, server) = serve_http("400 Bad Request", body).await;
+		let mut model = base_model();
+		model.base_url = format!("http://{address}");
+		let options = keyed_options();
+		let stream = stream_openai_completions(&model, &context(vec![user_text("hi")]), Some(options));
+		let mut events = Vec::new();
+		while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+			.await
+			.expect("stream event timeout")
+		{
+			events.push(event);
+		}
+		let error = events
+			.iter()
+			.find_map(|event| match event {
+				AssistantMessageEvent::Error { error, .. } => Some(error.clone()),
+				_ => None,
+			})
+			.expect("error event");
+		assert_eq!(error.error_message.as_deref(), Some("400 Incorrect API key provided"));
+		assert!(error.content.is_empty());
+		tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+	}
+
+	#[test]
+	fn header_timeout_defaults_to_the_sdk_ten_minutes() {
+		assert_eq!(resolve_header_timeout(None), std::time::Duration::from_millis(600_000));
+		assert_eq!(resolve_header_timeout(Some(1_500.0)), std::time::Duration::from_millis(1_500));
+		assert_eq!(resolve_header_timeout(Some(0.0)), std::time::Duration::from_millis(0));
+	}
 
 	// ------------------------------------------------------------------
 	// detectCompat / getCompat

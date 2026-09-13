@@ -100,6 +100,17 @@ pub fn supports_openai_compaction(model: &Model) -> bool {
 		|| validated_native_compaction_endpoint(model).is_some()
 }
 
+/// `headersToRecord` output reshaped into the `Value` `parse_retry_after_ms` reads,
+/// mirroring the `Headers`-shaped input the TypeScript passes it.
+fn header_record_to_value(headers: &IndexMap<String, String>) -> Value {
+	Value::Object(
+		headers
+			.iter()
+			.map(|(name, value)| (name.clone(), Value::String(value.clone())))
+			.collect(),
+	)
+}
+
 /// TS: `record(value)`
 fn record(value: &Value) -> Option<&Map<String, Value>> {
 	match value {
@@ -240,6 +251,13 @@ pub async fn request_openai_compaction(
 		.await;
 	}
 
+	// TS: `parseRetryAfterMs(response.headers)` is read as a `Headers` getter, so the
+	// Retry-After / Retry-After-Ms values are captured before the failure branch below
+	// may consume the body (or `decode` may drop the response).
+	let retry_after_ms = parse_retry_after_ms(Some(&header_record_to_value(&header_map_to_record(
+		response.headers(),
+	))));
+
 	let status = response.status().as_u16() as i64;
 	if matches!(status, 404 | 405 | 501) {
 		return Ok(None);
@@ -266,7 +284,7 @@ pub async fn request_openai_compaction(
 		return Err(CompactionRequestError::new(
 			format!("Server compaction failed (HTTP {status})"),
 			status,
-			parse_retry_after_ms(None),
+			retry_after_ms,
 		));
 	}
 
@@ -613,6 +631,26 @@ mod tests {
 		)
 		.await;
 		assert!(result.is_err());
+	}
+
+	#[test]
+	fn header_record_to_value_feeds_parse_retry_after_ms() {
+		// TS: `parseRetryAfterMs(response.headers)` reads the `Retry-After` getter.
+		let mut headers = IndexMap::new();
+		headers.insert("retry-after".to_string(), "3".to_string());
+		assert_eq!(
+			parse_retry_after_ms(Some(&header_record_to_value(&headers))),
+			Some(3000.0)
+		);
+
+		let mut headers = IndexMap::new();
+		headers.insert("Retry-After-Ms".to_string(), "1500".to_string());
+		assert_eq!(
+			parse_retry_after_ms(Some(&header_record_to_value(&headers))),
+			Some(1500.0)
+		);
+
+		assert_eq!(parse_retry_after_ms(Some(&header_record_to_value(&IndexMap::new()))), None);
 	}
 
 	#[test]
