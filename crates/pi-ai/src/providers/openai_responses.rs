@@ -24,8 +24,8 @@ use crate::providers::openai_responses_shared::{
 use crate::providers::opencode_headers::with_opencode_headers;
 use crate::providers::simple_options::build_base_options;
 use crate::types::{
-    AssistantMessage, AssistantMessageEvent, CacheRetention, Context, Model, ProviderResponse, SimpleStreamOptions,
-    StreamOptions, Usage,
+    AssistantMessage, AssistantMessageEvent, CacheRetention, Context, Model, ProviderResponse, ServiceTier,
+    SimpleStreamOptions, StreamOptions, Usage,
 };
 use crate::utils::event_stream::{
     create_assistant_message_event_stream, AssistantMessageEventStream,
@@ -50,19 +50,43 @@ pub struct OpenAIResponsesOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_summary: Option<Option<String>>,
     /// `serviceTier?: ResponseCreateParamsStreaming["service_tier"]`
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
+    ///
+    /// openai-responses.ts:97 re-declares `serviceTier?: ... | null` on
+    /// `OpenAIResponsesOptions extends StreamOptions`; it is ONE property (types.ts:73
+    /// `ServiceTier = ... | null`, types.ts:103), which `streamSimpleOpenAIResponses`
+    /// (openai-responses.ts:188-195) carries through `{...base}` from
+    /// `buildBaseOptions` (simple-options.ts:10 `serviceTier: options?.serviceTier`).
+    /// `service_tier` is the same nullable shape: `None` = key absent, `Some(None)` = explicit
+    /// JSON `null` (types.ts:195-197).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_service_tier")]
+    pub service_tier: ServiceTier,
+}
+
+/// `null` must stay an explicit `null`, not collapse into "absent"
+/// (`deserialize_optional_nullable`, types.rs:199-205).
+fn deserialize_service_tier<'de, D>(deserializer: D) -> Result<ServiceTier, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(deserializer)?))
 }
 
 impl OpenAIResponsesOptions {
     /// TS: the caller passes `StreamOptions & Record<string, unknown>`; this keeps the
     /// non-serializable fields (signal, on_payload, on_response, on_usage_observation).
+    ///
+    /// openai-responses.ts:192-195 spreads the base options into the provider options, so the
+    /// inherited `serviceTier` (simple-options.ts:10) must survive here: `buildParams` reads
+    /// `options?.serviceTier` off those same options (openai-responses.ts:279-281). Hardcoding
+    /// `None` dropped the tier on every request (`build_params` then omitted `service_tier`,
+    /// which the API reads as "auto"), including the explicit `"default"` the agent always sets
+    /// (agent.ts:78).
     pub fn from_base(base: &StreamOptions) -> Self {
         Self {
             stream: base.clone(),
             reasoning_effort: None,
             reasoning_summary: None,
-            service_tier: None,
+            service_tier: base.service_tier.clone(),
         }
     }
 }
@@ -312,7 +336,7 @@ async fn run_openai_responses(
         options.stream.session_id.as_deref(),
     )?;
 
-    let mut params = build_params(model, context, Some(options));
+    let mut params = build_params(model, context, Some(options)).map_err(RunError::Message)?;
     if let Some(on_payload) = options.stream.on_payload.clone() {
         let next_params = on_payload(Value::Object(params.clone()), model).await;
         if let Some(next_params) = next_params {
@@ -361,7 +385,10 @@ async fn run_openai_responses(
 
     let stream_options = OpenAIResponsesStreamOptions {
         on_output_item_done: None,
-        service_tier: options.service_tier.clone(),
+        // openai-responses.ts:147 `serviceTier: options?.serviceTier`: the request-side tier the
+        // process loop falls back to (`response?.service_tier ?? options.serviceTier`,
+        // openai-responses-shared.ts:526). A `null` tier prices at 1x either way.
+        service_tier: options.service_tier.clone().flatten(),
         resolve_service_tier: None,
         apply_service_tier_pricing: Some(Arc::new({
             let model = model.clone();
@@ -549,14 +576,24 @@ pub fn create_client(
 }
 
 /// `buildParams(model, context, options?)`.
-pub fn build_params(model: &Model, context: &Context, options: Option<&OpenAIResponsesOptions>) -> Map<String, Value> {
+///
+/// openai-responses.ts:256 calls `convertResponsesMessages(model, context, ...)` inside the
+/// stream IIFE, so a thrown conversion error (the mismatched compaction checkpoint of
+/// transform-messages.ts:77) propagates into the catch at openai-responses.ts:161-172: the turn
+/// fails with that exact text as `errorMessage` and NO request is sent. The port surfaces the
+/// same failure as `Err` (like `build_params` in amazon_bedrock_responses.rs:236-292) instead of
+/// defaulting to an empty `input`, which silently dropped the whole conversation context.
+pub fn build_params(
+    model: &Model,
+    context: &Context,
+    options: Option<&OpenAIResponsesOptions>,
+) -> Result<Map<String, Value>, String> {
     let messages = convert_responses_messages(
         model,
         context,
         &|provider: &str| OPENAI_TOOL_CALL_PROVIDERS.contains(&provider),
         None,
-    )
-    .unwrap_or_default();
+    )?;
 
     let cache_retention = resolve_cache_retention(options.and_then(|options| options.stream.cache_retention.as_ref()));
     let (_send_session_id_header, supports_long_cache_retention) = get_compat(model);
@@ -598,11 +635,19 @@ pub fn build_params(model: &Model, context: &Context, options: Option<&OpenAIRes
         );
     }
 
+    // openai-responses.ts:277-281:
+    // `if (options?.serviceTier !== undefined && model.provider !== "github-copilot") {
+    //    params.service_tier = options.serviceTier; }`
     // GitHub Copilot rejects the service_tier FIELD itself (400) for every value.
     // Elsewhere it is always sent: absence means "auto" (project tier), not "default".
-    if let Some(service_tier) = options.and_then(|options| options.service_tier.clone()) {
-        if model.provider != "github-copilot" {
-            params.insert("service_tier".to_string(), Value::String(service_tier));
+    // `!== undefined` is true for an explicit `null`, and `JSON.stringify` keeps that key, so
+    // `Some(None)` must be written as JSON `null` rather than dropped.
+    if model.provider != "github-copilot" {
+        if let Some(service_tier) = options.and_then(|options| options.service_tier.clone()) {
+            params.insert(
+                "service_tier".to_string(),
+                service_tier.map(Value::String).unwrap_or(Value::Null),
+            );
         }
     }
 
@@ -647,7 +692,7 @@ pub fn build_params(model: &Model, context: &Context, options: Option<&OpenAIRes
         }
     }
 
-    params
+    Ok(params)
 }
 
 /// `getServiceTierCostMultiplier(model, serviceTier)`.
@@ -893,7 +938,7 @@ mod tests {
             ))],
             None,
         );
-        let params = build_params(&model, &context, None);
+        let params = build_params(&model, &context, None).unwrap();
         assert_eq!(params["model"], json!("gpt-5.4"));
         assert_eq!(params["stream"], json!(true));
         assert_eq!(params["store"], json!(false));
@@ -912,15 +957,125 @@ mod tests {
         let mut model = model();
         let context = Context::default();
         let options = OpenAIResponsesOptions {
-            service_tier: Some("flex".to_string()),
+            service_tier: Some(Some("flex".to_string())),
             ..Default::default()
         };
-        let params = build_params(&model, &context, Some(&options));
+        let params = build_params(&model, &context, Some(&options)).unwrap();
         assert_eq!(params["service_tier"], json!("flex"));
 
         model.provider = "github-copilot".to_string();
-        let params = build_params(&model, &context, Some(&options));
+        let params = build_params(&model, &context, Some(&options)).unwrap();
         assert!(!params.contains_key("service_tier"));
+    }
+
+    /// openai-responses.ts:277-281 + simple-options.ts:10: the tier the agent always sets
+    /// (agent.ts:78 default `"default"`) must survive `from_base` and reach the wire, and an
+    /// explicit `null` must stay on the wire as `null` (`!== undefined` is true for null), while
+    /// an absent tier leaves the key off entirely.
+    #[test]
+    fn from_base_forwards_service_tier_onto_the_main_request() {
+        let model = model();
+        let context = Context::default();
+
+        let base = StreamOptions {
+            // The agent sets this every turn (pi-agent-core/src/agent.rs:922).
+            service_tier: Some(Some("default".to_string())),
+            ..Default::default()
+        };
+        let options = OpenAIResponsesOptions::from_base(&base);
+        assert_eq!(options.service_tier, Some(Some("default".to_string())));
+        let params = build_params(&model, &context, Some(&options)).unwrap();
+        // Absence would mean "auto" (project tier), so an explicit "default" must stay on the wire.
+        assert_eq!(params["service_tier"], json!("default"));
+
+        let flex = OpenAIResponsesOptions::from_base(&StreamOptions {
+            service_tier: Some(Some("flex".to_string())),
+            ..Default::default()
+        });
+        assert_eq!(
+            build_params(&model, &context, Some(&flex)).unwrap()["service_tier"],
+            json!("flex")
+        );
+
+        // `serviceTier: null` is the explicit reset TS serializes as `"service_tier": null`.
+        let reset = OpenAIResponsesOptions::from_base(&StreamOptions {
+            service_tier: Some(None),
+            ..Default::default()
+        });
+        let params = build_params(&model, &context, Some(&reset)).unwrap();
+        assert!(params.contains_key("service_tier"));
+        assert_eq!(params["service_tier"], json!(null));
+
+        // Absent stays absent.
+        let absent = OpenAIResponsesOptions::from_base(&StreamOptions::default());
+        assert!(!build_params(&model, &context, Some(&absent)).unwrap().contains_key("service_tier"));
+
+        // ...but github-copilot rejects the FIELD for every value, including an explicit null.
+        let mut copilot = model;
+        copilot.provider = "github-copilot".to_string();
+        assert!(!build_params(&copilot, &context, Some(&reset)).unwrap().contains_key("service_tier"));
+    }
+
+    /// The wire shape of `serviceTier` on the provider options: an explicit `null` deserializes to
+    /// `Some(None)` (never "absent"), an absent key stays `None`, and only `None` is skipped when
+    /// re-serialized (types.rs:195-197 / openai-responses.ts:97).
+    #[test]
+    fn service_tier_round_trips_through_the_provider_options() {
+        let explicit_null: OpenAIResponsesOptions = serde_json::from_value(json!({ "serviceTier": null })).unwrap();
+        assert_eq!(explicit_null.service_tier, Some(None));
+        assert_eq!(
+            serde_json::to_value(&explicit_null).unwrap().get("serviceTier"),
+            Some(&Value::Null)
+        );
+
+        let absent: OpenAIResponsesOptions = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(absent.service_tier, None);
+        assert!(serde_json::to_value(&absent).unwrap().get("serviceTier").is_none());
+
+        let tiered: OpenAIResponsesOptions = serde_json::from_value(json!({ "serviceTier": "priority" })).unwrap();
+        assert_eq!(tiered.service_tier, Some(Some("priority".to_string())));
+    }
+
+    /// openai-responses.ts:256/161-172: a `throw` from `convertResponsesMessages`
+    /// (transform-messages.ts:77 mismatched compaction checkpoint) fails the turn with that exact
+    /// message; Rust must return `Err` rather than defaulting to an empty `input`, which silently
+    /// dropped the whole conversation context and queried the model with an empty prompt.
+    #[test]
+    fn build_params_propagates_a_foreign_compaction_checkpoint() {
+        use crate::compaction::ProviderCompactionCheckpoint;
+        let model = model();
+        let checkpoint = ProviderCompactionCheckpoint {
+            version: 1,
+            provider: "other-provider".to_string(),
+            api: "other-api".to_string(),
+            model: "other-model".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            endpoint: None,
+            items: vec![Map::new()],
+            estimated_tokens: 1.0,
+        };
+        let context = Context::new(
+            None,
+            vec![crate::types::Message::user(crate::types::UserMessage {
+                role: crate::types::ROLE_USER.to_string(),
+                content: crate::types::UserContent::Text("hi".to_string()),
+                provider_context: Some(checkpoint),
+                timestamp: 0,
+            })],
+            None,
+        );
+        let error = match build_params(&model, &context, None) {
+            Ok(params) => panic!(
+                "build_params swallowed the foreign compaction checkpoint error and returned Ok; the \
+                 request would be sent with input = {}",
+                params.get("input").map(Value::to_string).unwrap_or_default()
+            ),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "Compaction checkpoint belongs to another model or provider; rebuild context from the session transcript"
+        );
     }
 
     #[test]
@@ -939,7 +1094,7 @@ mod tests {
             reasoning_effort: Some("high".to_string()),
             ..Default::default()
         };
-        let params = build_params(&model, &context, Some(&options));
+        let params = build_params(&model, &context, Some(&options)).unwrap();
         assert_eq!(params["reasoning"], json!({ "effort": "high-value", "summary": "auto" }));
         assert_eq!(params["include"], json!(["reasoning.encrypted_content"]));
 
@@ -948,7 +1103,7 @@ mod tests {
             reasoning_summary: Some(Some("concise".to_string())),
             ..Default::default()
         };
-        let params = build_params(&model, &context, Some(&options));
+        let params = build_params(&model, &context, Some(&options)).unwrap();
         assert_eq!(params["reasoning"], json!({ "effort": "medium", "summary": "concise" }));
     }
 
@@ -956,7 +1111,7 @@ mod tests {
     fn build_params_omits_reasoning_when_off_is_null() {
         let mut model = model();
         model.thinking_level_map = Some([("off".to_string(), None)].into_iter().collect());
-        let params = build_params(&model, &Context::default(), None);
+        let params = build_params(&model, &Context::default(), None).unwrap();
         assert!(!params.contains_key("reasoning"));
     }
 
@@ -981,7 +1136,7 @@ mod tests {
             },
             ..Default::default()
         };
-        let params = build_params(&model, &context, Some(&options));
+        let params = build_params(&model, &context, Some(&options)).unwrap();
         assert_eq!(params["max_output_tokens"], json!(4096.0));
         assert_eq!(params["temperature"], json!(0.5));
         assert_eq!(params["prompt_cache_key"], json!("session-1"));

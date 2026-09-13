@@ -11,6 +11,7 @@ use crate::types::{
 };
 use crate::utils::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use futures::future::BoxFuture;
+use futures::FutureExt;
 use indexmap::IndexMap;
 
 const DEFAULT_API: &str = "faux";
@@ -757,54 +758,78 @@ pub fn register_faux_provider(options: Option<RegisterFauxProviderOptions>) -> F
 		let model_id = request_model.id.clone();
 
 		tokio::spawn(async move {
-			if let Some(on_response) = stream_options.as_ref().and_then(|o| o.on_response.clone()) {
-				on_response(
-					crate::types::ProviderResponse {
-						status: 200,
-						headers: IndexMap::new(),
-					},
-					&request_model,
+			// TS faux.ts:436-462 wraps the whole task body in `try { ... } catch (error) { ... }`,
+			// so an unexpected failure ENDS the stream with an `error` event instead of leaving
+			// `next()`/`result()` callers waiting forever. Rust has no `throw`: the equivalent
+			// unexpected failure is a panic inside the task, and an uncaught panic would kill
+			// the task without ending the stream.
+			let body = async {
+				if let Some(on_response) = stream_options.as_ref().and_then(|o| o.on_response.clone()) {
+					on_response(
+						crate::types::ProviderResponse {
+							status: 200,
+							headers: IndexMap::new(),
+						},
+						&request_model,
+					)
+					.await;
+				}
+
+				let step = match step {
+					Some(step) => step,
+					None => {
+						let mut message = create_error_message("No more faux responses queued", &api, &provider, &model_id);
+						message = with_usage_estimate(
+							message,
+							&context,
+							stream_options.as_ref(),
+							&prompt_cache,
+						);
+						task_stream.push(AssistantMessageEvent::Error {
+							reason: "error".to_string(),
+							error: message.clone(),
+						});
+						task_stream.end(Some(message));
+						return;
+					}
+				};
+
+				let resolved = match step {
+					FauxResponseStep::Message(message) => message,
+					FauxResponseStep::Factory(factory) => {
+						factory(&context, stream_options.as_ref(), &state, &request_model).await
+					}
+				};
+				let mut message = clone_message(&resolved, &api, &provider, &model_id);
+				message = with_usage_estimate(message, &context, stream_options.as_ref(), &prompt_cache);
+				let signal = stream_options.as_ref().and_then(|o| o.signal.clone());
+				stream_with_deltas(
+					&task_stream,
+					message,
+					min_token_size,
+					max_token_size,
+					tokens_per_second,
+					signal,
 				)
 				.await;
+			};
+			if let Err(panic) = std::panic::AssertUnwindSafe(body).catch_unwind().await {
+				// faux.ts:457-460: the catch-all builds `createErrorMessage(error, api, provider, modelId)`,
+				// pushes `{ type: "error", reason: "error", error: message }` and calls `outer.end(message)`.
+				// faux.ts:275 maps the unknown error with `error instanceof Error ? error.message : String(error)`;
+				// the panic payload carries that same message text.
+				let panic_text = panic
+					.downcast_ref::<&str>()
+					.map(|message| (*message).to_string())
+					.or_else(|| panic.downcast_ref::<String>().cloned())
+					.unwrap_or_else(|| "unknown panic".to_string());
+				let message = create_error_message(&panic_text, &api, &provider, &model_id);
+				task_stream.push(AssistantMessageEvent::Error {
+					reason: "error".to_string(),
+					error: message.clone(),
+				});
+				task_stream.end(Some(message));
 			}
-
-			let step = match step {
-				Some(step) => step,
-				None => {
-					let mut message = create_error_message("No more faux responses queued", &api, &provider, &model_id);
-					message = with_usage_estimate(
-						message,
-						&context,
-						stream_options.as_ref(),
-						&prompt_cache,
-					);
-					task_stream.push(AssistantMessageEvent::Error {
-						reason: "error".to_string(),
-						error: message.clone(),
-					});
-					task_stream.end(Some(message));
-					return;
-				}
-			};
-
-			let resolved = match step {
-				FauxResponseStep::Message(message) => message,
-				FauxResponseStep::Factory(factory) => {
-					factory(&context, stream_options.as_ref(), &state, &request_model).await
-				}
-			};
-			let mut message = clone_message(&resolved, &api, &provider, &model_id);
-			message = with_usage_estimate(message, &context, stream_options.as_ref(), &prompt_cache);
-			let signal = stream_options.as_ref().and_then(|o| o.signal.clone());
-			stream_with_deltas(
-				&task_stream,
-				message,
-				min_token_size,
-				max_token_size,
-				tokens_per_second,
-				signal,
-			)
-			.await;
 		});
 
 		outer
@@ -1235,6 +1260,96 @@ mod tests {
 		assert_eq!(kinds.first(), Some(&"start"));
 		assert_eq!(kinds.last(), Some(&"done"));
 		assert_eq!(delta_text, "abcdefgh");
+		registration.unregister();
+	}
+
+	/// TS faux.ts:436-462 wraps the whole stream task body in `try { ... } catch (error) { ... }`.
+	/// When the body fails, the catch builds `createErrorMessage(...)` (faux.ts:457-458), pushes
+	/// `{ type: "error", reason: "error", error: message }` and calls `outer.end(message)`
+	/// (faux.ts:459-460), so a caller awaiting `next()`/`result()` always terminates.
+	///
+	/// The Rust equivalent of an unexpected failure is a panic inside the task: an uncaught panic
+	/// kills the task, so the stream is never ended and the caller hangs forever.
+	///
+	/// Every wait below is bounded, so a hang FAILS the test instead of blocking the harness.
+	#[tokio::test]
+	async fn faux_stream_ends_with_error_when_the_response_factory_panics() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+			provider: Some("faux-test-panic-factory".to_string()),
+			..Default::default()
+		}));
+		let model = registration.get_model();
+		registration.set_responses(vec![FauxResponseStep::Factory(Arc::new(|_, _, _, _| {
+			Box::pin(async move { panic!("faux factory exploded") })
+		}))]);
+		let stream = crate::api_registry::get_api_provider(&registration.api).expect("registered");
+		let out = (stream.stream)(&model, &Context::default(), None);
+
+		let mut events = Vec::new();
+		loop {
+			match tokio::time::timeout(std::time::Duration::from_secs(10), out.next()).await {
+				Ok(Some(event)) => events.push(event),
+				Ok(None) => break,
+				Err(_) => panic!("faux stream never ended after the task body panicked (caller hangs)"),
+			}
+		}
+
+		match events.last() {
+			Some(AssistantMessageEvent::Error { reason, error }) => {
+				assert_eq!(reason, "error");
+				assert_eq!(error.stop_reason, "error");
+				// faux.ts:275: `error instanceof Error ? error.message : String(error)`.
+				assert_eq!(error.error_message.as_deref(), Some("faux factory exploded"));
+			}
+			other => panic!("expected the stream to end with an error event, got {other:?}"),
+		}
+
+		// `result()` must resolve too: `outer.end(message)` in the TS catch-all (faux.ts:460).
+		let final_message = tokio::time::timeout(std::time::Duration::from_secs(10), out.result())
+			.await
+			.expect("faux stream result() hung after the task body panicked");
+		assert_eq!(final_message.stop_reason, "error");
+		assert_eq!(final_message.error_message.as_deref(), Some("faux factory exploded"));
+		registration.unregister();
+	}
+
+	/// The TS `try` block also covers `await streamOptions?.onResponse?.(...)` (faux.ts:437-438),
+	/// so a throwing hook ends the stream with an error event instead of hanging it.
+	#[tokio::test]
+	async fn faux_stream_ends_with_error_when_the_on_response_hook_panics() {
+		let _guard = API_REGISTRY_TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+		let registration = register_faux_provider(Some(RegisterFauxProviderOptions {
+			provider: Some("faux-test-panic-hook".to_string()),
+			..Default::default()
+		}));
+		let model = registration.get_model();
+		registration.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+			FauxAssistantContent::Text("never streamed".to_string()),
+			None,
+		))]);
+		let options = StreamOptions {
+			on_response: Some(Arc::new(|_, _| Box::pin(async { panic!("faux onResponse exploded") }))),
+			..Default::default()
+		};
+		let stream = crate::api_registry::get_api_provider(&registration.api).expect("registered");
+		let out = (stream.stream)(&model, &Context::default(), Some(&options));
+
+		let first = tokio::time::timeout(std::time::Duration::from_secs(10), out.next())
+			.await
+			.expect("faux stream never ended after the onResponse hook panicked (caller hangs)");
+		match first {
+			Some(AssistantMessageEvent::Error { reason, error }) => {
+				assert_eq!(reason, "error");
+				assert_eq!(error.error_message.as_deref(), Some("faux onResponse exploded"));
+			}
+			other => panic!("expected an error event first, got {other:?}"),
+		}
+
+		let after = tokio::time::timeout(std::time::Duration::from_secs(10), out.next())
+			.await
+			.expect("faux stream did not end after the onResponse hook panicked");
+		assert!(after.is_none(), "expected the stream to be finished, got {after:?}");
 		registration.unregister();
 	}
 }

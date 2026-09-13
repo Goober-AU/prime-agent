@@ -33,8 +33,8 @@ use crate::providers::openai_responses_shared::{
 use crate::providers::simple_options::build_base_options;
 use crate::session_resources::register_session_resource_cleanup;
 use crate::types::{
-    AssistantMessage, AssistantMessageEvent, BoxFuture, Context, Model, ProviderResponse, SimpleStreamOptions,
-    StreamOptions, Usage,
+    AssistantMessage, AssistantMessageEvent, BoxFuture, Context, Model, ProviderResponse, ServiceTier,
+    SimpleStreamOptions, StreamOptions, Usage,
 };
 use crate::utils::diagnostics::{
     format_thrown_value, now_millis, AssistantMessageDiagnostic, DiagnosticErrorInfo, ThrownValue,
@@ -73,8 +73,15 @@ pub struct OpenAICodexResponsesOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_summary: Option<Option<String>>,
     /// `serviceTier?: ResponseCreateParamsStreaming["service_tier"]`
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_tier: Option<String>,
+    ///
+    /// openai-codex-responses.ts:149 re-declares `serviceTier?: ... | null` on
+    /// `OpenAICodexResponsesOptions extends StreamOptions`; it is ONE nullable property
+    /// (types.ts:73 `ServiceTier = ... | null`, types.ts:103), carried through `{...base}` in
+    /// `streamSimpleOpenAICodexResponses` (openai-codex-responses.ts:354-361) from
+    /// `buildBaseOptions` (simple-options.ts:10). `None` = key absent, `Some(None)` = explicit
+    /// JSON `null` (types.ts:195-197).
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_service_tier")]
+    pub service_tier: ServiceTier,
     /// `textVerbosity?: "low" | "medium" | "high"`
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_verbosity: Option<String>,
@@ -91,11 +98,26 @@ impl OpenAICodexResponsesOptions {
             stream: base.clone(),
             reasoning_effort: None,
             reasoning_summary: None,
-            service_tier: None,
+            // openai-codex-responses.ts:358-361 spreads the base options into the provider
+            // options, so the inherited `serviceTier` (simple-options.ts:10) must survive:
+            // `buildRequestBody` reads `options?.serviceTier` off those same options
+            // (openai-codex-responses.ts:390-392). Hardcoding `None` dropped the tier on every
+            // request, so "flex"/"priority" (and the explicit-"default" reset) never reached the
+            // server and the response-tier pricing multiplier was lost.
+            service_tier: base.service_tier.clone(),
             text_verbosity: None,
             on_output_item_done: None,
         }
     }
+}
+
+/// `null` must stay an explicit `null`, not collapse into "absent"
+/// (`deserialize_optional_nullable`, types.rs:199-205).
+fn deserialize_service_tier<'de, D>(deserializer: D) -> Result<ServiceTier, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(deserializer)?))
 }
 
 /// `type CodexResponseStatus`.
@@ -376,11 +398,18 @@ pub fn resolve_codex_web_socket_url(base_url: Option<&str>) -> String {
 }
 
 /// `buildRequestBody(model, context, options?)`.
+///
+/// openai-codex-responses.ts:369-371 calls `convertResponsesMessages(model, context, ...)` inside
+/// the stream IIFE, so a thrown conversion error (the mismatched compaction checkpoint of
+/// transform-messages.ts:77) reaches the catch at openai-codex-responses.ts:328-337: the turn ends
+/// with `stopReason` "error" and that exact message, and NO request is sent. The port returns the
+/// same failure as `Err`, like `build_params` in amazon_bedrock_responses.rs:236-292, instead of
+/// defaulting to an empty `input`, which silently dropped the whole conversation context.
 pub fn build_request_body(
     model: &Model,
     context: &Context,
     options: Option<&OpenAICodexResponsesOptions>,
-) -> RequestBody {
+) -> Result<RequestBody, String> {
     let messages = convert_responses_messages(
         model,
         context,
@@ -388,8 +417,7 @@ pub fn build_request_body(
         Some(&ConvertResponsesMessagesOptions {
             include_system_prompt: Some(false),
         }),
-    )
-    .unwrap_or_default();
+    )?;
 
     let mut body = Map::new();
     body.insert("model".to_string(), Value::String(model.id.clone()));
@@ -431,8 +459,15 @@ pub fn build_request_body(
         }
     }
 
+    // openai-codex-responses.ts:390-392:
+    // `if (options?.serviceTier !== undefined) { body.service_tier = options.serviceTier; }`
+    // `!== undefined` is true for an explicit `null`, and `JSON.stringify` keeps that key, so
+    // `Some(None)` must be written as JSON `null` rather than dropped.
     if let Some(service_tier) = options.and_then(|options| options.service_tier.clone()) {
-        body.insert("service_tier".to_string(), Value::String(service_tier));
+        body.insert(
+            "service_tier".to_string(),
+            service_tier.map(Value::String).unwrap_or(Value::Null),
+        );
     }
 
     if let Some(tools) = context.tools.as_ref() {
@@ -481,7 +516,7 @@ pub fn build_request_body(
         }
     }
 
-    body
+    Ok(body)
 }
 
 /// `compactOpenAICodexResponses: CompactFunction<"openai-codex-responses">`.
@@ -542,12 +577,11 @@ pub async fn try_compact_openai_codex_responses(
         // CompactionOptions extends SimpleStreamOptions, so the caller's tier must survive here;
         // the pricing below (openai-codex-responses.ts) already prices that tier.
         service_tier: options
-            .and_then(|options| options.simple.stream.service_tier.clone())
-            .flatten(),
+            .and_then(|options| options.simple.stream.service_tier.clone()),
         text_verbosity: None,
         on_output_item_done: None,
     };
-    let body = build_request_body(model, &compaction_context, Some(&typed));
+    let body = build_request_body(model, &compaction_context, Some(&typed))?;
     let input: Vec<Value> = body
         .get("input")
         .and_then(Value::as_array)
@@ -763,7 +797,7 @@ async fn run_openai_codex_responses(
     }
 
     let account_id = extract_account_id(&api_key)?;
-    let mut body = build_request_body(model, context, Some(options));
+    let mut body = build_request_body(model, context, Some(options)).map_err(CodexThrown::error)?;
     if let Some(on_payload) = options.stream.on_payload.clone() {
         let next_body = on_payload(Value::Object(body.clone()), model).await;
         if let Some(next_body) = next_body {
@@ -1019,7 +1053,11 @@ async fn process_stream(
     ));
     let stream_options = OpenAIResponsesStreamOptions {
         on_output_item_done: options.on_output_item_done.clone(),
-        service_tier: options.service_tier.clone(),
+        // openai-codex-responses.ts:478 `serviceTier: options?.serviceTier`: the request-side tier
+        // the process loop falls back to (`response?.service_tier ?? options.serviceTier`,
+        // openai-responses-shared.ts:526) before `resolveServiceTier` (codex line 479-480) maps a
+        // "default" response back onto a requested "flex"/"priority".
+        service_tier: options.service_tier.clone().flatten(),
         resolve_service_tier: Some(Arc::new(|response_tier, request_tier| {
             resolve_codex_service_tier(response_tier, request_tier)
         })),
@@ -2514,7 +2552,8 @@ async fn process_web_socket_stream(
 
     let stream_options = OpenAIResponsesStreamOptions {
         on_output_item_done: options.on_output_item_done.clone(),
-        service_tier: options.service_tier.clone(),
+        // openai-codex-responses.ts:1231 `serviceTier: options?.serviceTier`.
+        service_tier: options.service_tier.clone().flatten(),
         resolve_service_tier: Some(Arc::new(|response_tier, request_tier| {
             resolve_codex_service_tier(response_tier, request_tier)
         })),
@@ -2684,7 +2723,7 @@ mod tests {
     #[test]
     fn build_request_body_matches_typescript_defaults() {
         let model = model();
-        let body = build_request_body(&model, &context(), None);
+        let body = build_request_body(&model, &context(), None).unwrap();
         assert_eq!(body["model"], json!("gpt-5.1-codex"));
         assert_eq!(body["store"], json!(false));
         assert_eq!(body["stream"], json!(true));
@@ -2708,7 +2747,7 @@ mod tests {
             vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 1))],
             None,
         );
-        let body = build_request_body(&model, &context, None);
+        let body = build_request_body(&model, &context, None).unwrap();
         assert_eq!(body["instructions"], json!("You are a helpful assistant."));
     }
 
@@ -2720,7 +2759,7 @@ mod tests {
             reasoning_effort: Some("none".to_string()),
             ..Default::default()
         };
-        let body = build_request_body(&model, &context(), Some(&options));
+        let body = build_request_body(&model, &context(), Some(&options)).unwrap();
         assert_eq!(body["reasoning"], json!({ "effort": "none", "summary": "auto" }));
 
         let options = OpenAICodexResponsesOptions {
@@ -2728,7 +2767,7 @@ mod tests {
             reasoning_summary: Some(Some("concise".to_string())),
             ..Default::default()
         };
-        let body = build_request_body(&model, &context(), Some(&options));
+        let body = build_request_body(&model, &context(), Some(&options)).unwrap();
         assert_eq!(body["reasoning"], json!({ "effort": "high", "summary": "concise" }));
     }
 
@@ -2744,7 +2783,7 @@ mod tests {
             reasoning_effort: Some("none".to_string()),
             ..Default::default()
         };
-        let body = build_request_body(&model, &context(), Some(&options));
+        let body = build_request_body(&model, &context(), Some(&options)).unwrap();
         assert_eq!(body["reasoning"], json!({ "effort": "none", "summary": "auto" }));
 
         // No thinkingLevelMap at all: `?.off` is undefined and `?? "none"` still yields "none".
@@ -2756,7 +2795,7 @@ mod tests {
         // reached through its path-qualified name here.
         let mut plain = self::model();
         plain.thinking_level_map = None;
-        let body = build_request_body(&plain, &context(), Some(&options));
+        let body = build_request_body(&plain, &context(), Some(&options)).unwrap();
         assert_eq!(body["reasoning"], json!({ "effort": "none", "summary": "auto" }));
     }
 
@@ -2773,14 +2812,123 @@ mod tests {
             }]),
         );
         let options = OpenAICodexResponsesOptions {
-            service_tier: Some("flex".to_string()),
+            service_tier: Some(Some("flex".to_string())),
             text_verbosity: Some("high".to_string()),
             ..Default::default()
         };
-        let body = build_request_body(&model, &context, Some(&options));
+        let body = build_request_body(&model, &context, Some(&options)).unwrap();
         assert_eq!(body["tools"][0]["strict"], json!(null));
         assert_eq!(body["service_tier"], json!("flex"));
         assert_eq!(body["text"]["verbosity"], json!("high"));
+    }
+
+    /// openai-codex-responses.ts:390-392 + simple-options.ts:10: the tier must survive `from_base`
+    /// (the Codex response-tier pricing multiplier depends on it: an absent field makes the service
+    /// pick "auto"/project tier while TS sends the literal "default"), an explicit `null` stays on
+    /// the wire, and an absent tier leaves the key off.
+    #[test]
+    fn from_base_forwards_service_tier_onto_the_codex_request() {
+        let model = model();
+        let context = context();
+
+        let base = StreamOptions {
+            // The agent sets this every turn (pi-agent-core/src/agent.rs:922).
+            service_tier: Some(Some("default".to_string())),
+            ..Default::default()
+        };
+        let options = OpenAICodexResponsesOptions::from_base(&base);
+        assert_eq!(options.service_tier, Some(Some("default".to_string())));
+        assert_eq!(
+            build_request_body(&model, &context, Some(&options)).unwrap()["service_tier"],
+            json!("default")
+        );
+
+        let priority = OpenAICodexResponsesOptions::from_base(&StreamOptions {
+            service_tier: Some(Some("priority".to_string())),
+            ..Default::default()
+        });
+        assert_eq!(
+            build_request_body(&model, &context, Some(&priority)).unwrap()["service_tier"],
+            json!("priority")
+        );
+
+        // `serviceTier: null` is the explicit reset TS serializes as `"service_tier": null`.
+        let reset = OpenAICodexResponsesOptions::from_base(&StreamOptions {
+            service_tier: Some(None),
+            ..Default::default()
+        });
+        let body = build_request_body(&model, &context, Some(&reset)).unwrap();
+        assert!(body.contains_key("service_tier"));
+        assert_eq!(body["service_tier"], json!(null));
+
+        let absent = OpenAICodexResponsesOptions::from_base(&StreamOptions::default());
+        assert!(!build_request_body(&model, &context, Some(&absent))
+            .unwrap()
+            .contains_key("service_tier"));
+    }
+
+    /// The wire shape of `serviceTier` on the provider options: an explicit `null` deserializes to
+    /// `Some(None)` (never "absent"), an absent key stays `None`, and only `None` is skipped when
+    /// re-serialized (types.rs:195-197 / openai-codex-responses.ts:149).
+    #[test]
+    fn service_tier_round_trips_through_the_provider_options() {
+        let explicit_null: OpenAICodexResponsesOptions =
+            serde_json::from_value(json!({ "serviceTier": null })).unwrap();
+        assert_eq!(explicit_null.service_tier, Some(None));
+        assert_eq!(
+            serde_json::to_value(&explicit_null).unwrap().get("serviceTier"),
+            Some(&Value::Null)
+        );
+
+        let absent: OpenAICodexResponsesOptions = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(absent.service_tier, None);
+        assert!(serde_json::to_value(&absent).unwrap().get("serviceTier").is_none());
+
+        let tiered: OpenAICodexResponsesOptions =
+            serde_json::from_value(json!({ "serviceTier": "flex" })).unwrap();
+        assert_eq!(tiered.service_tier, Some(Some("flex".to_string())));
+    }
+
+    /// openai-codex-responses.ts:369-371/328-337: a `throw` from `convertResponsesMessages`
+    /// (transform-messages.ts:77 mismatched compaction checkpoint) ends the turn with that exact
+    /// message; Rust must return `Err` rather than defaulting to an empty `input`, which silently
+    /// dropped the whole conversation context.
+    #[test]
+    fn build_request_body_propagates_a_foreign_compaction_checkpoint() {
+        use crate::compaction::ProviderCompactionCheckpoint;
+        let model = model();
+        let checkpoint = ProviderCompactionCheckpoint {
+            version: 1,
+            provider: "other-provider".to_string(),
+            api: "other-api".to_string(),
+            model: "other-model".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            endpoint: None,
+            items: vec![Map::new()],
+            estimated_tokens: 1.0,
+        };
+        let context = Context::new(
+            None,
+            vec![crate::types::Message::user(crate::types::UserMessage {
+                role: crate::types::ROLE_USER.to_string(),
+                content: crate::types::UserContent::Text("hi".to_string()),
+                provider_context: Some(checkpoint),
+                timestamp: 0,
+            })],
+            None,
+        );
+        let error = match build_request_body(&model, &context, None) {
+            Ok(body) => panic!(
+                "build_request_body swallowed the foreign compaction checkpoint error and returned Ok; \
+                 the request would be sent with input = {}",
+                body.get("input").map(Value::to_string).unwrap_or_default()
+            ),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            "Compaction checkpoint belongs to another model or provider; rebuild context from the session transcript"
+        );
     }
 
     #[test]
