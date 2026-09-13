@@ -11,7 +11,9 @@ use crate::core::agent_messages::AgentSessionMessageController;
 use crate::core::agent_observe::AgentObserveController;
 use crate::core::agent_session::{ResourceLoader, SubagentRuntimeHost};
 use crate::core::agent_session_config::AgentExecutionMode;
-use crate::core::agent_traces::{install_agent_trace_upload, AgentTraceUploadInstallOptions};
+use crate::core::agent_traces::{
+    install_agent_trace_upload_for_session_manager, AgentTraceUploadInstallOptions,
+};
 use crate::core::auth_storage::AuthStorage;
 use crate::core::autonomous::AgentAutonomousConfig;
 use crate::core::cron_jobs::AgentRlmHeartbeatController;
@@ -477,7 +479,50 @@ pub async fn create_agent_session_from_services(
         .lock()
         .expect("session manager poisoned")
         .get_session_artifact_dir();
-    let _upload = install_agent_trace_upload(AgentTraceUploadInstallOptions {
+    // `installAgentTraceUpload(options.sessionManager, {...})` -
+    // agent-session-services.ts:234 passes the session manager as argument 1, so
+    // `sessionManager.onPersist(controller.schedule)` is registered
+    // (agent-traces.ts:1169) and every transcript persist schedules an upload.
+    // The options-only `install_agent_trace_upload` registers no listener, which
+    // left automatic trace upload dead, so this call passes the manager held by
+    // `options.session_manager` - the same value handed to `createAgentSession`
+    // below (agent-session-services.ts:250).
+    let session_manager = Arc::clone(&options.session_manager);
+    // The persist listener runs while the persist caller still holds the session
+    // manager's guard: `notify_persist_listeners` is called from `rewrite_file`
+    // (session_manager.rs:3436) and `persist` (session_manager.rs:3606) inside
+    // `flush_now`/`append_*`, which hold the guard. `Mutex` is not reentrant, so a
+    // `get_session_file` closure that always locked the manager would self-deadlock
+    // the very persist that triggers the schedule - a hang the TypeScript cannot
+    // have, because there `sessionManager.getSessionFile()` (agent-traces.ts:1088)
+    // is a plain object read. Cache the path instead: re-read it live under
+    // `try_lock` whenever the guard is free, and fall back to the last known path
+    // while a persist holds it (the manager cannot switch files mid-persist).
+    let cached_session_file = Arc::new(Mutex::new(
+        session_manager
+            .lock()
+            .expect("session manager poisoned")
+            .get_session_file(),
+    ));
+    // `notify_persist_listeners` hands the listener the manager's current session
+    // file (session_manager.rs:3439-3450), so this listener keeps the cache exact at
+    // the moment of every persist without touching the manager's guard. It is
+    // registered BEFORE the install below: listeners run in registration order
+    // (session_manager.rs:3447), so the cache is already current when
+    // `schedule()` (agent-traces.ts:1081) reads the path. The returned unsubscribe is
+    // deliberately dropped, like the TypeScript discarding `onPersist`'s return
+    // (agent-traces.ts:1169), so the listener lives as long as the manager.
+    let _session_file_cache_listener = {
+        let cached = Arc::clone(&cached_session_file);
+        session_manager
+            .lock()
+            .expect("session manager poisoned")
+            .on_persist(Box::new(move |session_file: &str| {
+                *cached.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                    Some(session_file.to_string());
+            }))
+    };
+    let trace_upload_options = AgentTraceUploadInstallOptions {
         auth_storage: Arc::clone(&options.services.auth_storage),
         base_url: None,
         config_path: None,
@@ -504,9 +549,28 @@ pub async fn create_agent_session_from_services(
         },
         get_session_file: {
             let manager = Arc::clone(&options.session_manager);
-            Arc::new(move || manager.lock().expect("session manager poisoned").get_session_file())
+            let cached = Arc::clone(&cached_session_file);
+            Arc::new(move || {
+                if let Ok(manager) = manager.try_lock() {
+                    let session_file = manager.get_session_file();
+                    *cached
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = session_file.clone();
+                    return session_file;
+                }
+                cached
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+            })
         },
-    });
+    };
+    // The lock guard must be released here: `create_agent_session` below locks the
+    // same manager, so the guard cannot be held across the call.
+    let _upload = {
+        let manager = session_manager.lock().expect("session manager poisoned");
+        install_agent_trace_upload_for_session_manager(&manager, trace_upload_options)
+    };
     let telemetry_disabled = options.creation.telemetry_disabled;
     let creation = options.creation;
     let result = crate::core::sdk::create_agent_session(crate::core::sdk::CreateAgentSessionOptions {
@@ -640,6 +704,199 @@ mod tests {
             .await;
         assert!(auth.ok);
         assert_eq!(auth.api_key.as_deref(), Some("cli-key"));
+    }
+
+    /// `createAgentSessionFromServices` must call
+    /// `installAgentTraceUpload(options.sessionManager, {...})`
+    /// (agent-session-services.ts:234), which registers
+    /// `sessionManager.onPersist(controller.schedule)` (agent-traces.ts:1169). The
+    /// audit found this call site used the options-only install, which registers no
+    /// listener, so a persisted session never scheduled an upload.
+    ///
+    /// `schedule()` is observable without network access: it marks upload intent in
+    /// the outbox (`markAgentTraceOutboxPendingSync`, agent-traces.ts:1092). The
+    /// install runs before `createAgentSession` (agent-session-services.ts:234 vs
+    /// :242), so the assertion holds even if the later creation steps fail.
+    #[tokio::test]
+    async fn a_persist_after_create_agent_session_from_services_schedules_a_trace_upload() {
+        use pi_ai::providers::faux::{register_faux_provider, RegisterFauxProviderOptions};
+        use std::path::Path;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+
+        let mut manager =
+            SessionManager::create(&cwd, Some(&session_dir.to_string_lossy())).unwrap();
+        let session_file = manager.new_session(None).unwrap().expect("session file");
+        let session_manager = Arc::new(Mutex::new(manager));
+
+        let provider = register_faux_provider(Some(RegisterFauxProviderOptions {
+            provider: Some(format!("session-services-{}", uuid::Uuid::new_v4())),
+            tokens_per_second: Some(0.0),
+            ..Default::default()
+        }));
+        let model = provider.get_model();
+        let mut registry_auth = AuthStorage::in_memory(Default::default(), None);
+        registry_auth.set_runtime_api_key(&model.provider, "synthetic-faux-key");
+        let settings = Arc::new(Mutex::new(SettingsManager::in_memory(
+            serde_json::json!({
+                "agentTraces": {"enabled": true},
+                "autoRefine": {"enabled": false},
+                "retry": {"enabled": false},
+                "compaction": {"enabled": false},
+                "telemetryEnabled": false,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )));
+        assert!(
+            settings.lock().expect("settings manager poisoned").get_agent_traces_enabled(),
+            "the schedule() path only records intent while sharing is enabled"
+        );
+
+        // `installAgentTraceUpload` runs the one-shot startup catch-up
+        // (`catchUpTriggered`, agent-traces.ts:1154-1160) in whichever process
+        // installs first. Consume that one-shot here with tracing disabled against a
+        // throwaway manager, so the sweep cannot read, upload or re-cursor any entry
+        // in the real outbox directory; `agent_traces_enabled: false` makes
+        // `catchUpAgentTraceUploads` return before it touches a file
+        // (agent-traces.rs:1116-1118).
+        {
+            let sink = SessionManager::in_memory(Some(&cwd), None).unwrap();
+            let _sink_controller = install_agent_trace_upload_for_session_manager(
+                &sink,
+                AgentTraceUploadInstallOptions {
+                    auth_storage: Arc::new(tokio::sync::Mutex::new(AuthStorage::in_memory(
+                        Default::default(),
+                        None,
+                    ))),
+                    base_url: None,
+                    config_path: None,
+                    fetch_fn: None,
+                    request_timeout_ms: None,
+                    semantic_edges_ledger_path: None,
+                    agent_traces_enabled: Arc::new(|| false),
+                    reload_settings: Arc::new(|| Box::pin(async { Ok(()) })),
+                    get_session_file: Arc::new(|| None),
+                },
+            );
+        }
+
+        let services = create_agent_session_services(CreateAgentSessionServicesOptions {
+            cwd: cwd.clone(),
+            agent_dir: Some(cwd.clone()),
+            auth_storage: Some(Arc::new(tokio::sync::Mutex::new(AuthStorage::in_memory(
+                Default::default(),
+                None,
+            )))),
+            settings_manager: Some(Arc::clone(&settings)),
+            model_registry: Some(Arc::new(Mutex::new(ModelRegistry::in_memory(registry_auth)))),
+            extension_flag_values: None,
+            no_builtin_herdr_reporter: Some(true),
+            telemetry_disabled: Some(true),
+            resource_loader_options: Some(DefaultResourceLoaderOptions {
+                no_extensions: true,
+                no_skills: true,
+                no_prompt_templates: true,
+                no_themes: true,
+                no_context_files: true,
+                ..DefaultResourceLoaderOptions::new(&cwd, &cwd)
+            }),
+        })
+        .await
+        .expect("services");
+
+        let created = create_agent_session_from_services(CreateAgentSessionFromServicesOptions {
+            services: Arc::new(services),
+            session_manager: Arc::clone(&session_manager),
+            session_start_event: None,
+            creation: AgentSessionCreationOptions {
+                model: Some(model),
+                no_tools: Some("all".to_string()),
+                prewarm_ipython_kernel: Some(false),
+                telemetry_disabled: Some(true),
+                ..Default::default()
+            },
+        })
+        .await;
+
+        // Outbox entries live under `getAgentDir()`, which agent_traces.rs resolves
+        // from the home directory (agent_traces.rs:974-987). Only entries naming this
+        // temp session file are touched.
+        let outbox_dir = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".prime")
+            .join("agent")
+            .join("agent-traces-outbox");
+        let ledger_path = crate::core::semantic_edges::semantic_edge_ledger_path(
+            None,
+            session_manager
+                .lock()
+                .expect("session manager poisoned")
+                .get_session_artifact_dir()
+                .as_deref(),
+        );
+        let entries_for = |key: &str| -> Vec<std::path::PathBuf> {
+            let Ok(read_dir) = std::fs::read_dir(&outbox_dir) else {
+                return Vec::new();
+            };
+            read_dir
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    std::fs::read_to_string(path)
+                        .ok()
+                        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+                        .and_then(|value| {
+                            value.get("sessionFile").and_then(Value::as_str).map(str::to_string)
+                        })
+                        .as_deref()
+                        == Some(key)
+                })
+                .collect()
+        };
+        for entry in entries_for(&session_file) {
+            let _ = std::fs::remove_file(entry);
+        }
+        assert!(
+            entries_for(&session_file).is_empty(),
+            "no upload intent before the first persist"
+        );
+
+        // A real transcript persist: `flushNow()` -> `_rewriteFile()` ->
+        // `_notifyPersistListeners()` (session-manager.ts:2003-2008, 1912).
+        session_manager.lock().expect("session manager poisoned").flush_now();
+        assert!(
+            Path::new(&session_file).exists(),
+            "the persist must write the session file"
+        );
+
+        let recorded = entries_for(&session_file);
+        assert!(
+            !recorded.is_empty(),
+            "a persist after createAgentSessionFromServices must schedule an upload: \
+             sessionManager.onPersist(controller.schedule) is registered by \
+             installAgentTraceUpload(options.sessionManager, ...) \
+             (agent-session-services.ts:234) and the listener marks upload intent for \
+             {session_file} (agent-traces.ts:1169)"
+        );
+
+        // Leave no outbox entries behind for this temp session.
+        for entry in recorded {
+            let _ = std::fs::remove_file(entry);
+        }
+        if let Some(ledger_path) = ledger_path.as_deref() {
+            for entry in entries_for(ledger_path) {
+                let _ = std::fs::remove_file(entry);
+            }
+        }
+        if let Ok(created) = created {
+            created.session.dispose_async(Some(false)).await;
+        }
+        provider.unregister();
     }
 
     #[test]
