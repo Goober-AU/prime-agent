@@ -40,6 +40,12 @@ impl LocalModel {
                         if !peer.ip().is_loopback() {
                             return Err("Non-loopback model client".into());
                         }
+                        // Windows accept() makes the accepted socket inherit the listener's
+                        // non-blocking mode (Unix does not). Leaving it non-blocking makes
+                        // serve_completion fail with WSAEWOULDBLOCK (os error 10035) whenever the
+                        // request bytes have not landed yet, which kills this accept loop and
+                        // fails the test intermittently. The fixture is a blocking HTTP server.
+                        stream.set_nonblocking(false).unwrap();
                         let body = serve_completion(stream)?;
                         received.lock().unwrap().push(body);
                     }
