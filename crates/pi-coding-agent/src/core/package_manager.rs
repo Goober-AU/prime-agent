@@ -14,7 +14,10 @@ use crate::core::diagnostics::{
 };
 use crate::core::output_guard::is_stdout_taken_over;
 use crate::core::settings_manager::{FilteredPackageSource, PackageSource, SettingsManager, Settings};
-use crate::utils::child_process::{should_use_windows_shell, spawn_hidden, spawn_sync_hidden, wait_for_child_process, SpawnOptions};
+use crate::utils::child_process::{
+    should_use_windows_shell, signal_process_group_or_process, spawn_hidden, spawn_sync_hidden,
+    wait_for_child_process, Signal, SpawnOptions,
+};
 use crate::utils::git::{parse_git_url, GitSource};
 use crate::utils::paths::{canonicalize_path, is_local_path};
 
@@ -41,6 +44,8 @@ fn get_bundled_skills_dir() -> String {
 }
 
 pub const NETWORK_TIMEOUT_MS: f64 = 10000.0;
+/// Node's `setTimeout` cap (`TIMEOUT_MAX` = 2**31 - 1).
+const MAX_TIMEOUT_MS: f64 = 2_147_483_647.0;
 pub const UPDATE_CHECK_CONCURRENCY: usize = 4;
 pub const GIT_UPDATE_CONCURRENCY: usize = 4;
 
@@ -3053,23 +3058,58 @@ impl DefaultPackageManager {
         .map_err(|error| error.to_string())?;
         let mut child = handle.child;
 
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stdout.take() {
+        // `child.stdout?.on("data", ...)` / `child.stderr?.on("data", ...)` stream both pipes
+        // concurrently and the promise settles on `close` (package-manager.ts:2389-2413), so a
+        // child that fills stderr while stdout stays open must not block and the timeout covers
+        // the whole run. Reading the pipes one after the other deadlocks that case.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        // Both `"data"` listeners drain their pipe at the same time (package-manager.ts:2389-2394).
+        let read_stdout = async move {
             use tokio::io::AsyncReadExt;
             let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer).await;
-            stdout = String::from_utf8_lossy(&buffer).to_string();
-        }
-        if let Some(mut pipe) = child.stderr.take() {
+            if let Some(mut pipe) = stdout_pipe {
+                let _ = pipe.read_to_end(&mut buffer).await;
+            }
+            String::from_utf8_lossy(&buffer).to_string()
+        };
+        let read_stderr = async move {
             use tokio::io::AsyncReadExt;
             let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer).await;
-            stderr = String::from_utf8_lossy(&buffer).to_string();
-        }
+            if let Some(mut pipe) = stderr_pipe {
+                let _ = pipe.read_to_end(&mut buffer).await;
+            }
+            String::from_utf8_lossy(&buffer).to_string()
+        };
+        // Read the pid before the capture future borrows the child.
+        let pid = child.id().map(|pid| pid as i32);
+        let capture = async {
+            let (stdout, stderr, status) = tokio::join!(read_stdout, read_stderr, wait_for_child_process(child));
+            (stdout, stderr, status)
+        };
 
-        let code = wait_for_child_process(child).await.map_err(|error| error.to_string())?;
-        let _ = timeout_ms;
+        // `const timeout = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs)`
+        // (package-manager.ts:2381-2387); the `close` handler then rejects with
+        // `${command} ${args.join(" ")} timed out after ${options?.timeoutMs}ms` (2392-2397).
+        let outcome = match capture_timeout_duration(timeout_ms) {
+            Some(duration) => tokio::time::timeout(duration, capture).await,
+            None => Ok(capture.await),
+        };
+        let (stdout, stderr, code) = match outcome {
+            Ok((stdout, stderr, status)) => (stdout, stderr, status.map_err(|error| error.to_string())?),
+            Err(_) => {
+                // `child.kill()`: SIGTERM on POSIX, TerminateProcess on Windows.
+                if let Some(pid) = pid {
+                    signal_process_group_or_process(pid, Signal::Term);
+                }
+                return Err(format!(
+                    "{} {} timed out after {}ms",
+                    command,
+                    args.join(" "),
+                    js_number_text(timeout_ms.expect("the timer exists only for a numeric timeoutMs"))
+                ));
+            }
+        };
         match code {
             Some(0) => Ok(stdout.trim().to_string()),
             Some(code) => Err(format!(
@@ -3154,6 +3194,29 @@ impl DefaultPackageManager {
 // =============================================================================
 // Small helpers (the port of node:path and friends)
 // =============================================================================
+
+/// The `setTimeout(..., options.timeoutMs)` delay: absent for a missing `timeoutMs`
+/// (`typeof options?.timeoutMs === "number"`, package-manager.ts:2384), otherwise the
+/// delay Node accepts, clamped to `TIMEOUT_MAX` (larger delays fire immediately in Node;
+/// NaN and negative delays behave like 0).
+fn capture_timeout_duration(timeout_ms: Option<f64>) -> Option<std::time::Duration> {
+    let timeout_ms = timeout_ms?;
+    let clamped = if timeout_ms.is_nan() {
+        0.0
+    } else {
+        timeout_ms.max(0.0).min(MAX_TIMEOUT_MS)
+    };
+    Some(std::time::Duration::from_millis(clamped.floor() as u64))
+}
+
+/// JS `String(number)` for the timeout text: integers print without a fractional part.
+fn js_number_text(value: f64) -> String {
+    if value.is_finite() && value.fract() == 0.0 && value.abs() < 1e21 {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
+}
 
 #[derive(Debug, Clone)]
 struct NpmCommand {
@@ -4078,5 +4141,38 @@ mod tests {
         });
         let value = serde_json::to_value(&source).unwrap();
         assert_eq!(package_source_string(&value), "./x");
+    }
+
+    // `${command} ${args.join(" ")} timed out after ${options?.timeoutMs}ms`
+    // (package-manager.ts:2381-2403). Startup probes pass NETWORK_TIMEOUT_MS, so an
+    // unbounded child would hang headless `--print` startup forever.
+    #[tokio::test]
+    async fn run_command_capture_times_out_and_kills_the_child() {
+        let cwd = temp_dir("capture-timeout");
+        let manager = manager(&cwd, &cwd, serde_json::json!({}));
+        let command = if cfg!(windows) { "cmd" } else { "sh" };
+        // Far longer than the 150ms timeout, short enough that a killed child cannot
+        // keep the test binary waiting on its inherited pipes.
+        let args = if cfg!(windows) {
+            vec!["/c".to_string(), "ping -n 12 127.0.0.1 > NUL".to_string()]
+        } else {
+            vec!["-c".to_string(), "sleep 12".to_string()]
+        };
+
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            manager.run_command_capture(command, &args, Some(&cwd), Some(150.0), None),
+        )
+        .await
+        .expect("run_command_capture ignored its timeout: it did not return within 20s");
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            result,
+            Err(format!("{command} {} timed out after 150ms", args.join(" ")))
+        );
+        assert!(elapsed < std::time::Duration::from_secs(10), "timeout was not prompt: {elapsed:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 }

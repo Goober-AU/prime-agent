@@ -112,6 +112,16 @@ pub struct AgentCronDispatch {
 }
 
 /// `interface AgentCronSchedulerHooks`.
+///
+/// TS `runJob` may reject, and `catch (runError)` records the error and calls `onError`
+/// (cron-jobs.ts:1010-1015). `run_job` cannot reject, so the throwing form is supplied through
+/// `AgentCronScheduler::enable_run_job_errors` instead of a new field here: this struct's single
+/// non-test literal lives in another slice (`AgentDaemon::start_cron_scheduler`,
+/// modes/daemon/daemon_mode.rs:7035). Blocked owner symbol: `AgentDaemon::run_cron_job`
+/// (modes/daemon/daemon_mode.rs:10441) returns `Option<AgentCronJobRunResult>` and must return
+/// `Result<Option<AgentCronJobRunResult>, String>` (it drops the queued-prompt error at
+/// daemon_mode.rs:10482-10491, where daemon-mode.ts:2100-2105 rethrows) before the daemon can
+/// supply that closure.
 pub struct AgentCronSchedulerHooks {
     pub run_job: Arc<dyn Fn(AgentCronJob) -> BoxFuture<Option<AgentCronJobRunResult>> + Send + Sync>,
     /// `beginDispatch?: (dispatch) => (() => void) | undefined`.
@@ -394,19 +404,23 @@ fn with_cron_jobs_state_locks<T>(paths: &[String], action: impl FnOnce() -> T) -
 }
 
 /// `readJobsState(path)`.
-fn read_jobs_state(path: &str) -> CronJobsState {
+///
+/// The parse error is returned to the caller, which records a `SettingsError`-style diagnostic and
+/// treats the state as empty; a corrupt file is copied to `<path>.corrupt` first so the next
+/// `writeJobsState` (cron-jobs.ts:1552-1555) can never be the thing that deletes every cron job.
+fn read_jobs_state(path: &str) -> Result<CronJobsState, String> {
     if !Path::new(path).exists() {
-        return CronJobsState::default();
+        return Ok(CronJobsState::default());
     }
-    let text = std::fs::read_to_string(path).unwrap_or_default();
-    let parsed: CronJobsFile = match serde_json::from_str::<Value>(&text) {
-        Ok(value) => CronJobsFile {
-            jobs: value.get("jobs").cloned(),
-            dispatches: value.get("dispatches").cloned(),
-        },
-        Err(_) => CronJobsFile::default(),
+    // `JSON.parse(readFileSync(path, "utf-8"))` throws (cron-jobs.ts:1537); the empty state is
+    // returned only when the file does not exist at all (1534-1536).
+    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let value: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    let parsed: CronJobsFile = CronJobsFile {
+        jobs: value.get("jobs").cloned(),
+        dispatches: value.get("dispatches").cloned(),
     };
-    CronJobsState {
+    Ok(CronJobsState {
         jobs: parsed
             .jobs
             .as_ref()
@@ -419,16 +433,48 @@ fn read_jobs_state(path: &str) -> CronJobsState {
             .and_then(|value| value.as_array())
             .map(|array| array.iter().filter_map(is_agent_cron_dispatch_record).collect())
             .unwrap_or_default(),
+    })
+}
+
+/// State for reading callers: a corrupt file is preserved and reported, then read as empty so the
+/// command that reads it still answers (`JSON.parse` would have thrown, cron-jobs.ts:1537).
+fn read_jobs_state_lossy(path: &str) -> CronJobsState {
+    match read_jobs_state(path) {
+        Ok(state) => state,
+        Err(error) => {
+            preserve_corrupt_jobs_file(path, Some(&error));
+            CronJobsState::default()
+        }
+    }
+}
+
+/// Keep the unparsable jobs file next to the original (`<path>.corrupt`) so the jobs it still
+/// holds survive the empty-state fallback that `JSON.parse` would have prevented (cron-jobs.ts:1537).
+fn preserve_corrupt_jobs_file(path: &str, reason: Option<&str>) {
+    let backup = format!("{path}.corrupt");
+    if Path::new(&backup).exists() {
+        return;
+    }
+    if std::fs::copy(path, &backup).is_err() {
+        return;
+    }
+    if let Some(reason) = reason {
+        let note = format!("Cron jobs file could not be parsed; kept at {backup}: {reason}\n");
+        let _ = std::fs::write(format!("{backup}.reason"), note);
     }
 }
 
 /// `writeJobsState(path, state)`.
-fn write_jobs_state(path: &str, state: &CronJobsState) {
+///
+/// `writeFileAtomicSync` throws, so a failed write must not look like a successful one
+/// (cron-jobs.ts:1552-1555): the claim/recover cycle would otherwise proceed as if the
+/// dispatch had been persisted.
+fn write_jobs_state(path: &str, state: &CronJobsState) -> Result<(), String> {
     if let Some(parent) = Path::new(path).parent() {
         mkdir_recursive_mode_700(parent);
     }
     let serialized = serde_json::to_string_pretty(&state_to_value(state)).unwrap_or_else(|_| "{}".to_string());
-    let _ = write_file_atomic_sync(
+    write_file_atomic_sync(
         path,
         &format!("{serialized}\n"),
         WriteFileAtomicOptions {
@@ -437,7 +483,8 @@ fn write_jobs_state(path: &str, state: &CronJobsState) {
             fsync_dir: true,
             before_rename: None,
         },
-    );
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn state_to_value(state: &CronJobsState) -> Value {
@@ -466,8 +513,8 @@ fn state_to_value(state: &CronJobsState) -> Value {
 }
 
 /// `writeJobsFile(path, jobs, mergeCurrent)`.
-fn write_jobs_file(path: &str, jobs: &[AgentCronJob], merge_current: bool) {
-    let current = read_jobs_state(path);
+fn write_jobs_file(path: &str, jobs: &[AgentCronJob], merge_current: bool) -> Result<(), String> {
+    let current = read_jobs_state(path)?;
     write_jobs_state(
         path,
         &CronJobsState {
@@ -478,7 +525,7 @@ fn write_jobs_file(path: &str, jobs: &[AgentCronJob], merge_current: bool) {
             },
             dispatches: current.dispatches,
         },
-    );
+    )
 }
 
 fn is_agent_cron_job(value: &Value) -> Option<AgentCronJob> {
@@ -628,11 +675,13 @@ impl AgentCronJobStore {
         let Some(path) = path else {
             return Vec::new();
         };
-        let mut state = read_jobs_state(&path);
+        let mut state = read_jobs_state_lossy(&path);
         let mut recovered: Vec<AgentCronJob> = Vec::new();
         if !state.dispatches.is_empty() {
             recover_interrupted_in_state(&mut state, now_ms, &mut recovered, None);
-            write_jobs_state(&path, &state);
+            if let Err(error) = write_jobs_state(&path, &state) {
+            Self::report_cron_write_failure(error);
+        }
         }
         recovered
     }
@@ -676,7 +725,7 @@ impl AgentCronJobStore {
         };
         let mut jobs = self.read_jobs();
         jobs.push(job.clone());
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(job)
     }
 
@@ -710,7 +759,9 @@ impl AgentCronJobStore {
             })
             .collect();
         if !rebound.is_empty() {
-            self.write_jobs(&jobs);
+            if let Err(error) = self.write_jobs(&jobs) {
+                Self::report_cron_write_failure(error);
+            }
         }
         rebound
     }
@@ -809,7 +860,7 @@ impl AgentCronJobStore {
         };
         let mut jobs = existing;
         jobs.push(job.clone());
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(job)
     }
 
@@ -879,7 +930,7 @@ impl AgentCronJobStore {
         };
         let mut jobs = self.read_jobs();
         jobs.push(job.clone());
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(job)
     }
 
@@ -975,7 +1026,7 @@ impl AgentCronJobStore {
             return Err(failure);
         }
         if matched && updated.is_some() {
-            self.write_jobs(&jobs);
+            self.write_jobs(&jobs)?;
         }
         Ok(updated)
     }
@@ -1003,7 +1054,9 @@ impl AgentCronJobStore {
             })
             .collect();
         if deleted.is_some() {
-            self.write_jobs(&jobs);
+            if let Err(error) = self.write_jobs(&jobs) {
+                Self::report_cron_write_failure(error);
+            }
         }
         deleted
     }
@@ -1031,7 +1084,9 @@ impl AgentCronJobStore {
             })
             .collect();
         if !cancelled.is_empty() {
-            self.write_jobs(&jobs);
+            if let Err(error) = self.write_jobs(&jobs) {
+                Self::report_cron_write_failure(error);
+            }
         }
         cancelled
     }
@@ -1071,7 +1126,9 @@ impl AgentCronJobStore {
             })
             .collect();
         if !cancelled.is_empty() {
-            self.write_jobs(&jobs);
+            if let Err(error) = self.write_jobs(&jobs) {
+                Self::report_cron_write_failure(error);
+            }
         }
         cancelled
     }
@@ -1097,7 +1154,9 @@ impl AgentCronJobStore {
                 next
             })
             .collect();
-        self.write_jobs(&jobs);
+        if let Err(error) = self.write_jobs(&jobs) {
+            Self::report_cron_write_failure(error);
+        }
         paused
     }
 
@@ -1127,7 +1186,7 @@ impl AgentCronJobStore {
                 next
             })
             .collect();
-        self.write_jobs(&jobs);
+        self.write_jobs(&jobs)?;
         Ok(resumed)
     }
 
@@ -1152,7 +1211,9 @@ impl AgentCronJobStore {
                 next
             })
             .collect();
-        self.write_jobs(&jobs);
+        if let Err(error) = self.write_jobs(&jobs) {
+            Self::report_cron_write_failure(error);
+        }
         cleared
     }
 
@@ -1216,7 +1277,7 @@ impl AgentCronJobStore {
             return Err(failure);
         }
         if updated.is_some() {
-            self.write_jobs(&jobs);
+            self.write_jobs(&jobs)?;
         }
         Ok(updated)
     }
@@ -1242,7 +1303,9 @@ impl AgentCronJobStore {
             })
             .collect();
         if cancelled.is_some() {
-            self.write_jobs(&jobs);
+            if let Err(error) = self.write_jobs(&jobs) {
+                Self::report_cron_write_failure(error);
+            }
         }
         cancelled
     }
@@ -1291,7 +1354,9 @@ impl AgentCronJobStore {
             })
             .collect();
         if updated.is_some() {
-            self.write_jobs(&jobs);
+            if let Err(error) = self.write_jobs(&jobs) {
+                Self::report_cron_write_failure(error);
+            }
         }
         updated
     }
@@ -1325,7 +1390,9 @@ impl AgentCronJobStore {
             })
             .collect();
         if updated.is_some() {
-            self.write_jobs(&jobs);
+            if let Err(error) = self.write_jobs(&jobs) {
+                Self::report_cron_write_failure(error);
+            }
         }
         updated
     }
@@ -1484,9 +1551,9 @@ impl AgentCronJobStore {
                 .values()
                 .cloned()
                 .collect();
-            return paths.into_iter().map(|path| read_jobs_state(&path)).collect();
+            return paths.into_iter().map(|path| read_jobs_state_lossy(&path)).collect();
         }
-        vec![read_jobs_state(&self.require_file_path())]
+        vec![read_jobs_state_lossy(&self.require_file_path())]
     }
 
     fn mutate_states(
@@ -1508,23 +1575,30 @@ impl AgentCronJobStore {
         let dispatches = with_cron_jobs_state_locks(&paths, || {
             let mut dispatches: Vec<AgentCronDispatch> = Vec::new();
             for path in &paths {
-                let mut state = read_jobs_state(path);
+                let mut state = read_jobs_state(path)?;
                 let before = serde_json::to_string(&state_to_value(&state)).unwrap_or_default();
                 dispatches.extend(mutator(&mut state));
                 if serde_json::to_string(&state_to_value(&state)).unwrap_or_default() != before {
-                    write_jobs_state(path, &state);
+                    // `writeFileAtomicSync` throws (cron-jobs.ts:1552-1555).
+                    write_jobs_state(path, &state)?;
                     changed = true;
                 }
             }
-            dispatches
-        })?;
+            Ok::<_, String>(dispatches)
+        })??;
         if changed && heartbeat_catalog_signature(&self.read_jobs()) != previous_heartbeats {
             self.notify_heartbeat_change();
         }
         Ok(dispatches)
     }
 
-    fn write_jobs(&self, jobs: &[AgentCronJob]) {
+    /// `writeJobsState` throws, so the store write reports failure instead of pretending the
+    /// jobs were persisted (cron-jobs.ts:1552-1555). Callers whose signature is not `Result`
+    /// (`rebind_session_jobs`, `delete_rlm_heartbeat`, `cancel_rlm_heartbeats_for_session`,
+    /// `cancel_jobs_for_session`, `pause_heartbeat`, `clear_heartbeat`, `cancel`,
+    /// `record_run_result`, `record_skip_result`, `recover_session_artifact`) report through
+    /// `report_cron_write_failure` until their daemon/rpc callers accept a `Result`.
+    fn write_jobs(&self, jobs: &[AgentCronJob]) -> Result<(), String> {
         let previous_heartbeats = heartbeat_catalog_signature(&self.read_jobs());
         if self.session_artifact_mode {
             let registered: BTreeSet<String> = self
@@ -1551,7 +1625,7 @@ impl AgentCronJobStore {
             with_cron_jobs_state_locks(&paths, || {
                 let current_by_session: Vec<(String, CronJobsState)> = pairs
                     .iter()
-                    .map(|(session_id, path)| (session_id.clone(), read_jobs_state(path)))
+                    .map(|(session_id, path)| (session_id.clone(), read_jobs_state_lossy(path)))
                     .collect();
                 let mut merged_by_session: Vec<(String, Vec<AgentCronJob>)> = Vec::new();
                 for (session_id, current) in &current_by_session {
@@ -1606,24 +1680,31 @@ impl AgentCronJobStore {
                     let current_text = serde_json::to_string(&state_to_value(&current)).unwrap_or_default();
                     let next_text = serde_json::to_string(&state_to_value(&next_state)).unwrap_or_default();
                     if current_text != next_text {
-                        write_jobs_state(path, &next_state);
+                        write_jobs_state(path, &next_state)?;
                     }
                 }
+                Ok::<(), String>(())
             })
-            .expect("artifact write locks");
+            .expect("artifact write locks")?;
             if heartbeat_catalog_signature(&self.read_jobs()) != previous_heartbeats {
                 self.notify_heartbeat_change();
             }
-            return;
+            return Ok(());
         }
         let path = self.require_file_path();
         with_cron_jobs_state_locks(std::slice::from_ref(&path), || {
-            write_jobs_file(&path, jobs, true);
+            write_jobs_file(&path, jobs, true)
         })
-        .expect("cron jobs write locks");
+        .expect("cron jobs write locks")?;
         if heartbeat_catalog_signature(&self.read_jobs()) != previous_heartbeats {
             self.notify_heartbeat_change();
         }
+        Ok(())
+    }
+
+    /// A failed store write for a caller whose signature cannot carry a `Result` yet.
+    fn report_cron_write_failure(error: String) {
+        eprintln!("Cron jobs write failed: {error}");
     }
 
     fn notify_heartbeat_change(&self) {
@@ -1653,7 +1734,7 @@ pub fn migrate_legacy_cron_jobs_to_session_artifacts(
     is_session_owned: Option<Arc<dyn Fn(&AgentCronJob) -> bool + Send + Sync>>,
     now_ms: f64,
 ) -> Result<f64, String> {
-    let mut legacy_state = read_jobs_state(file_path);
+    let mut legacy_state = read_jobs_state(file_path)?;
     recover_interrupted_in_state(&mut legacy_state, now_ms, &mut Vec::new(), None);
     let jobs: Vec<AgentCronJob> = legacy_state
         .jobs
@@ -1687,7 +1768,7 @@ pub fn migrate_legacy_cron_jobs_to_session_artifacts(
         }
     }
     for (artifact_path, artifact_jobs) in &jobs_by_artifact {
-        write_jobs_file(artifact_path, artifact_jobs, true);
+        write_jobs_file(artifact_path, artifact_jobs, true)?;
     }
     let migrated = format!("{file_path}.migrated-{}", now_millis() as i64);
     std::fs::rename(file_path, &migrated).map_err(|error| error.to_string())?;
@@ -1698,8 +1779,15 @@ pub fn migrate_legacy_cron_jobs_to_session_artifacts(
 pub struct AgentCronScheduler {
     store: Arc<AgentCronJobStore>,
     hooks: Arc<AgentCronSchedulerHooks>,
+    /// Set by `enable_run_job_errors`; see `AgentCronSchedulerHooks`. Shared so the timer's
+    /// rebuilt scheduler keeps the same throwing `runJob`.
+    run_job_error: Arc<Mutex<Option<CronRunJob>>>,
     state: Arc<Mutex<AgentCronSchedulerState>>,
 }
+
+pub type CronRunJob = Arc<
+    dyn Fn(AgentCronJob) -> BoxFuture<Result<Option<AgentCronJobRunResult>, String>> + Send + Sync,
+>;
 
 #[derive(Default)]
 struct AgentCronSchedulerState {
@@ -1716,11 +1804,19 @@ impl AgentCronScheduler {
         Self {
             store,
             hooks,
+            run_job_error: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(AgentCronSchedulerState {
                 stopped: true,
                 ..Default::default()
             })),
         }
+    }
+
+    /// Supply the throwing `runJob(job)`: its `Err` is the TS `runError` that
+    /// `onError` receives and that `recordDispatchResult` stores as `lastError`
+    /// (cron-jobs.ts:1010-1020, 739).
+    pub fn enable_run_job_errors(&self, run_job: CronRunJob) {
+        *self.run_job_error.lock().expect("run job poisoned") = Some(run_job);
     }
 
     /// `start()`.
@@ -1868,18 +1964,37 @@ impl AgentCronScheduler {
                 return Some(RUN_RESULT_SKIPPED.to_string());
             }
         };
-        let run_result = match (self.hooks.run_job)(job.clone()).await {
-            result => result,
+        // `let runResult; let error; try { runResult = await this.hooks.runJob(job) }
+        // catch (runError) { error = runError; this.hooks.onError?.(job, runError) }`
+        // (cron-jobs.ts:1008-1015).
+        let mut run_result: Option<AgentCronJobRunResult> = None;
+        let mut error: Option<String> = None;
+        let throwing = self.run_job_error.lock().expect("run job poisoned").clone();
+        let outcome = match throwing {
+            Some(run_job) => run_job(job.clone()).await,
+            None => Ok((self.hooks.run_job)(job.clone()).await),
         };
+        match outcome {
+            Ok(result) => run_result = result,
+            Err(run_error) => {
+                if let Some(on_error) = &self.hooks.on_error {
+                    on_error(&job, run_error.clone());
+                }
+                error = Some(run_error);
+            }
+        }
+        // `recordDispatchResult(..., { outcome: runResult === "skipped" && error === undefined
+        // ? "skipped" : "ran", error })` (cron-jobs.ts:1016-1020); `error` becomes `lastError`
+        // through `recordDispatchResult` (cron-jobs.ts:739).
         let _ = self.store.record_dispatch_result(
             &dispatch.id,
             self.now(),
-            if run_result.as_deref() == Some(RUN_RESULT_SKIPPED) {
+            if run_result.as_deref() == Some(RUN_RESULT_SKIPPED) && error.is_none() {
                 RUN_RESULT_SKIPPED
             } else {
                 RUN_RESULT_RAN
             },
-            None,
+            error,
         );
         if let Some(end_dispatch) = end_dispatch {
             end_dispatch();
@@ -1904,12 +2019,14 @@ impl AgentCronScheduler {
         let delay = next_delay.min(MAX_TIMEOUT_MS);
         let store = self.store.clone();
         let hooks = self.hooks.clone();
+        let run_job_error = Arc::clone(&self.run_job_error);
         let state_handle = self.state_handle();
         let timer = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(delay.max(0.0) as u64)).await;
             let scheduler = AgentCronScheduler {
                 store,
                 hooks,
+                run_job_error,
                 state: state_handle,
             };
             let _ = scheduler.run_due(None).await;
@@ -2359,14 +2476,20 @@ struct CronFields {
 }
 
 /// `nextCronRunAfter(expression, after)`.
+///
+/// The walk happens in LOCAL wall time: `new Date(after.getTime())`, `setSeconds(0, 0)`,
+/// `setMinutes(getMinutes() + 1)` and the `getMinutes`/`getHours`/`getDate`/`getMonth`/`getDay`
+/// test (cron-jobs.ts:1367-1377, 1447-1457) all read and write the machine's local zone, so
+/// `0 9 * * *` fires at 09:00 local time. `millis_from_civil` returns UTC, so the local offset is
+/// applied when the wall time is converted back to an instant.
 fn next_cron_run_after(expression: &str, after_ms: f64) -> Result<f64, String> {
     let fields = parse_cron_expression(expression)?;
-    let mut components = civil_from_millis(after_ms);
+    let mut components = local_civil_from_millis(after_ms);
     components.second = 0;
     components.millisecond = 0;
     components.minute += 1;
     normalize_civil(&mut components);
-    let mut candidate = millis_from_civil(&components);
+    let mut candidate = millis_from_local_civil(&components);
     let deadline = candidate + 366.0 * 24.0 * 60.0 * ONE_MINUTE_MS;
     while candidate <= deadline {
         if matches_cron_fields(&components, &fields) {
@@ -2374,7 +2497,7 @@ fn next_cron_run_after(expression: &str, after_ms: f64) -> Result<f64, String> {
         }
         components.minute += 1;
         normalize_civil(&mut components);
-        candidate = millis_from_civil(&components);
+        candidate = millis_from_local_civil(&components);
     }
     Err(format!("Cron schedule did not match within one year: {expression}"))
 }
@@ -2865,6 +2988,42 @@ fn civil_from_millis(millis: f64) -> CivilComponents {
     }
 }
 
+/// The local UTC offset at an instant, in milliseconds (the negation of
+/// `Date.getTimezoneOffset()`, which the TypeScript never calls because it reads local getters).
+fn local_offset_millis(millis: f64) -> f64 {
+    use chrono::TimeZone as _;
+    match chrono::Local.timestamp_opt(millis.floor() as i64, 0) {
+        chrono::LocalResult::Single(value) | chrono::LocalResult::Ambiguous(value, _) => {
+            chrono::Offset::fix(value.offset()).local_minus_utc() as f64 * 1000.0
+        }
+        chrono::LocalResult::None => 0.0,
+    }
+}
+
+/// `new Date(ms)` broken into LOCAL components, the space `matchesCronFields` tests.
+fn local_civil_from_millis(millis: f64) -> CivilComponents {
+    civil_from_millis(millis + local_offset_millis(millis))
+}
+
+/// `new Date(localComponents).getTime()`: the local wall time back as an instant. The offset is
+/// resolved twice so a candidate that crosses a DST change still lands on the intended wall time.
+fn millis_from_local_civil(components: &CivilComponents) -> f64 {
+    let as_utc = millis_from_civil(components);
+    let once = as_utc - local_offset_millis(as_utc);
+    as_utc - local_offset_millis(once)
+}
+
+/// `date.toLocaleString()` in local wall time (cron-jobs.ts `toLocaleString()` call sites).
+fn local_locale_string(value: &str) -> String {
+    match chrono::DateTime::parse_from_rfc3339(value) {
+        Ok(parsed) => parsed
+            .with_timezone(&chrono::Local)
+            .format("%m/%d/%Y, %I:%M:%S %p")
+            .to_string(),
+        Err(_) => value.to_string(),
+    }
+}
+
 /// `Date.getTime()` from UTC components.
 fn millis_from_civil(components: &CivilComponents) -> f64 {
     let days = days_from_civil(components.year, components.month, components.day);
@@ -2933,11 +3092,11 @@ pub fn iso_string(millis: f64) -> String {
 }
 
 /// `date.toLocaleString()`.
+///
+/// `toLocaleString()` renders the machine's local zone, so the UTC instant parsed from the ISO
+/// string is converted before formatting (C2-15).
 fn format_locale_string(value: &str) -> String {
-    match chrono::DateTime::parse_from_rfc3339(value) {
-        Ok(parsed) => parsed.format("%m/%d/%Y, %I:%M:%S %p").to_string(),
-        Err(_) => value.to_string(),
-    }
+    local_locale_string(value)
 }
 
 /// `String(number)` for integers, matching the TypeScript template output.
@@ -3294,6 +3453,117 @@ mod tests {
         let mut cancelled = heartbeat.clone();
         cancelled.status = STATUS_CANCELLED.to_string();
         assert_eq!(heartbeat_catalog_signature(std::slice::from_ref(&cancelled)), "[]");
+    }
+
+    #[test]
+    fn corrupt_jobs_file_is_preserved_before_the_state_falls_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.json").to_string_lossy().to_string();
+        let store = AgentCronJobStore::new(Some(path.clone()), false).unwrap();
+        let job = store
+            .create(&CreateAgentCronJobInput {
+                prompt: "keep going".to_string(),
+                schedule_text: "every 10m".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().contains(&job.id));
+
+        // A corrupt file must be kept, not destroyed by the next write (cron-jobs.ts:1537).
+        std::fs::write(&path, "{not json").unwrap();
+        let corrupt = format!("{path}.corrupt");
+        let listed = store.list();
+        assert_eq!(listed.len(), 0);
+        assert!(Path::new(&corrupt).exists(), "the unparsable jobs file was not preserved");
+        assert_eq!(std::fs::read_to_string(&corrupt).unwrap(), "{not json");
+        assert!(read_jobs_state(&path).is_err(), "a corrupt jobs file must not read as valid state");
+    }
+
+    #[test]
+    fn scheduler_records_a_run_error_and_calls_on_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.json").to_string_lossy().to_string();
+        let store = Arc::new(AgentCronJobStore::new(Some(path), false).unwrap());
+        let job = store
+            .create(&CreateAgentCronJobInput {
+                prompt: "keep going".to_string(),
+                schedule_text: "every 10m".to_string(),
+                now: Some(0.0),
+                ..Default::default()
+            })
+            .unwrap();
+        let failures: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&failures);
+        let hooks = Arc::new(AgentCronSchedulerHooks {
+            run_job: Arc::new(|_job: AgentCronJob| Box::pin(async { Some(RUN_RESULT_RAN.to_string()) })),
+            begin_dispatch: None,
+            now: None,
+            on_error: Some(Arc::new(move |_job: &AgentCronJob, error: String| {
+                sink.lock().expect("sink").push(error);
+            })),
+        });
+        let scheduler = AgentCronScheduler::new(Arc::clone(&store), hooks);
+        scheduler.enable_run_job_errors(Arc::new(|_job: AgentCronJob| {
+            Box::pin(async { Err("cron run exploded".to_string()) })
+        }));
+
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let dispatches = store.claim_due(600_000.0, 600_000.0).unwrap();
+        assert_eq!(dispatches.len(), 1);
+        let _ = runtime.block_on(scheduler.run_dispatch(dispatches[0].clone(), None));
+
+        // `catch (runError) { error = runError; this.hooks.onError?.(job, runError) }`
+        // (cron-jobs.ts:1012-1015) and `lastError: errorMessage(result.error)` (739).
+        assert_eq!(failures.lock().expect("sink").as_slice(), ["cron run exploded"]);
+        let recorded = store.list().into_iter().find(|candidate| candidate.id == job.id).unwrap();
+        assert_eq!(recorded.last_error.as_deref(), Some("cron run exploded"));
+    }
+
+    #[test]
+    fn cron_matches_the_local_clock_not_utc() {
+        // `0 9 * * *` at local 09:00 (cron-jobs.ts:1369-1373 walks local Date getters).
+        use chrono::TimeZone as _;
+        let start = chrono::Local
+            .with_ymd_and_hms(2026, 3, 5, 8, 30, 0)
+            .single()
+            .expect("local 08:30 exists");
+        let next = next_cron_run_after("0 9 * * *", start.timestamp_millis() as f64).unwrap();
+        let next_local = chrono::Local
+            .timestamp_opt((next / 1000.0) as i64, 0)
+            .single()
+            .expect("local timestamp");
+        assert_eq!(
+            next_local.format("%Y-%m-%d %H:%M").to_string(),
+            "2026-03-05 09:00",
+            "the cron schedule fired at the wrong wall-clock time"
+        );
+    }
+
+    #[test]
+    fn write_failures_are_not_silent() {
+        // `writeJobsState` throws when the store cannot write (cron-jobs.ts:1552-1555).
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("jobs.json").to_string_lossy().to_string();
+        let store = AgentCronJobStore::new(Some(path.clone()), false).unwrap();
+        crate::utils::atomic_file::write_file_atomic_sync(
+            &path,
+            "{}",
+            WriteFileAtomicOptions {
+                mode: Some(0o600),
+                fsync: true,
+                fsync_dir: true,
+                before_rename: None,
+            },
+        )
+        .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(store.create(&CreateAgentCronJobInput {
+            prompt: "x".to_string(),
+            schedule_text: "every 10m".to_string(),
+            ..Default::default()
+        })
+        .is_err());
     }
 
     #[test]
