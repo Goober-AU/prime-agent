@@ -72,8 +72,20 @@ pub struct MathToken {
     pub text: String,
 }
 
-/// Port of `BLOCK_MATH_REGEX`: leading indentation, `$$...$$` or `\[...\]`, trailing
-/// indentation and a newline or end of input.
+/// Port of `BLOCK_MATH_REGEX` (packages/tui/src/components/markdown.ts:45):
+/// `/^[ \t]*(?:\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\])[ \t]*(?:\n|$)/`.
+///
+/// Two details of that regex are load-bearing and were missing here:
+/// * the trailing `[ \t]*(?:\n|$)` - display math only wins when the closing
+///   delimiter is followed by the end of the line. `$$x=2$$. Therefore y=3` does
+///   NOT match, so the inline `inlineMath` extension handles it and the trailing
+///   prose survives (TUIR-22).
+/// * `([\s\S]+?)` needs at least one body character, so `$$$$` stays literal
+///   text instead of becoming an empty block-math token (TUIR-28).
+///
+/// `([\s\S]+?)` is lazy but the regex engine backtracks, so `$$a=1$$ and $$b=2$$`
+/// ends up matching up to the LAST `$$` with body `a=1$$ and $$b=2`; the loop below
+/// reproduces that backtracking instead of blindly taking the first closing `$$`.
 fn match_block_math(src: &str) -> Option<(String, String)> {
     let mut rest = src;
     let mut indent = String::new();
@@ -86,33 +98,43 @@ fn match_block_math(src: &str) -> Option<(String, String)> {
         }
     }
 
-    let (raw_body, text) = if let Some(body) = rest.strip_prefix("$$") {
-        let end = body.find("$$")?;
-        (format!("$${}$$", &body[..end]), body[..end].to_string())
-    } else if let Some(body) = rest.strip_prefix("\\[") {
-        let end = body.find("\\]")?;
-        (format!("\\[{}\\]", &body[..end]), body[..end].to_string())
+    let (open, close) = if rest.starts_with("$$") {
+        ("$$", "$$")
+    } else if rest.starts_with("\\[") {
+        ("\\[", "\\]")
     } else {
         return None;
     };
+    let after_open = &rest[open.len()..];
 
-    let after_body = &rest[raw_body.len()..];
-    let mut trailing = String::new();
-    let mut after = after_body;
-    for ch in after_body.chars() {
-        if ch == ' ' || ch == '\t' {
-            trailing.push(ch);
-            after = &after[ch.len_utf8()..];
-        } else {
-            break;
+    let mut search_from = 0usize;
+    while let Some(relative) = after_open[search_from..].find(close) {
+        let end = search_from + relative;
+        let body = &after_open[..end];
+        let after_body = &after_open[end + close.len()..];
+        // `[ \t]*(?:\n|$)`
+        let mut trailing = String::new();
+        let mut after = after_body;
+        for ch in after_body.chars() {
+            if ch == ' ' || ch == '\t' {
+                trailing.push(ch);
+                after = &after[ch.len_utf8()..];
+            } else {
+                break;
+            }
         }
+        // `([\s\S]+?)` requires a non-empty body; the regex engine then extends the
+        // body until this tail test succeeds.
+        if !body.is_empty() && (after.is_empty() || after.starts_with('\n')) {
+            let trailing_newline = if after.starts_with('\n') { "\n" } else { "" };
+            return Some((
+                format!("{indent}{open}{body}{close}{trailing}{trailing_newline}"),
+                body.trim().to_string(),
+            ));
+        }
+        search_from = end + close.len();
     }
-    let trailing_newline = if after.starts_with('\n') { "\n" } else { "" };
-
-    Some((
-        format!("{indent}{raw_body}{trailing}{trailing_newline}"),
-        text.trim().to_string(),
-    ))
+    None
 }
 
 /// Port of `INLINE_MATH_PATTERNS`.
@@ -177,6 +199,340 @@ fn match_inline_math(src: &str) -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// Raw-source math spans: the port's stand-in for marked's tokenizer extensions.
+///
+/// The TypeScript registers `blockMath` / `inlineMath` as marked extensions
+/// (packages/tui/src/components/markdown.ts:54-111). marked runs extensions on the
+/// RAW source, before its escape handling and before the codespan tokenizer - which
+/// is why its own comment says math "must tokenize before marked's escape/emphasis
+/// handling, or \[ collapses to [ and underscores inside formulas become italics"
+/// (markdown.ts:40-44).
+///
+/// pulldown-cmark instead hands `TokenBuilder` already escape-processed `Text`
+/// payloads: `\(` / `\[` lose their backslash and `\\` collapses to `\`, so the math
+/// matchers could never see the original delimiters (TUIR-21). This pre-pass lifts
+/// the spans out of the raw source and swaps each one for an opaque placeholder that
+/// survives lexing intact; `TokenBuilder` turns the placeholders back into
+/// `inlineMath` / `blockMath` tokens.
+const MATH_MARKER: char = '\u{e000}';
+
+/// One raw math span found before pulldown-cmark lexing.
+#[derive(Clone)]
+struct RawMathSpan {
+    /// `raw` as marked reports it, delimiters included. A span that satisfies
+    /// `BLOCK_MATH_REGEX` also carries the trailing `[ \t]*(?:\n|$)` the regex
+    /// consumes (markdown.ts:45,73).
+    raw: String,
+    /// LaTeX body, `.trim()`ed like the TS extensions do (markdown.ts:73,105).
+    text: String,
+    /// The span matched `BLOCK_MATH_REGEX` (markdown.ts:45) and starts its block
+    /// content, so it becomes a `blockMath` token instead of `inlineMath`. This is
+    /// what stops `$$x=2$$. Therefore y=3` from swallowing the trailing prose: its
+    /// closing `$$` is not followed by `\n` or end of input, so the span is
+    /// inline-only and the tail survives (TUIR-22).
+    block_ok: bool,
+}
+
+/// Placeholder standing in for span `index` in the rewritten source.
+fn math_placeholder(index: usize) -> String {
+    format!("{MATH_MARKER}{index}{MATH_MARKER}")
+}
+
+/// If `text` starts with a math placeholder, return `(index, placeholder length)`.
+fn marker_at(text: &str) -> Option<(usize, usize)> {
+    let digits = text.strip_prefix(MATH_MARKER)?;
+    let count = digits.chars().take_while(|c| c.is_ascii_digit()).count();
+    if count == 0 {
+        return None;
+    }
+    let (number, rest) = digits.split_at(count);
+    rest.strip_prefix(MATH_MARKER)?;
+    Some((number.parse::<usize>().ok()?, MATH_MARKER.len_utf8() * 2 + count))
+}
+
+/// How the text before a math opener on its line relates to the block it opens.
+///
+/// marked runs `blockMathExtension` ahead of its paragraph tokenizer, on source cut
+/// at the index reported by `blockMathExtension.start`
+/// (packages/tui/src/components/markdown.ts:59-63). That cut only happens on the
+/// paragraph path, which the fixtures in .port-env/tmp/wts_full.json, wts_mid.out and
+/// wts_place.json.out pin down:
+///
+/// * `$$x=2$$`, `  $$x=2$$`, `- $$y=2$$`, `> $$x=1$$`, `text\n$$x=1$$` -> block math
+///   (the opener starts the block content),
+/// * `text $$x=2$$`, `see $$E=mc^2$$` -> `blockMath` with the preceding text kept in
+///   its own paragraph token of raw `"text "` (wts_mid `M3_text_then_math_eol`,
+///   wts_full `AC_math_after_text_sameline`),
+/// * `- item $$x=1$$`, `# $$x=1$$`, a table row -> INLINE math: the enclosing item /
+///   heading / table already claimed the line (wts_full `S_list_math`, wts_place
+///   `P18_math_in_heading`, wts_mid `M13_table_math_cell`).
+#[derive(PartialEq, Clone, Copy)]
+enum MathPrefixKind {
+    /// Nothing but indentation (or nothing at all) precedes the opener.
+    Indent,
+    /// A bare block marker (`> `, `- `, `> > `, `1. `) precedes the opener.
+    Marker,
+    /// Ordinary text precedes the opener, with no block marker on the line.
+    PlainText,
+    /// A block marker followed by text (`- item `), or a heading/table line.
+    MarkerText,
+}
+
+/// Classify the text before a math opener on its line. See [`MathPrefixKind`].
+fn math_prefix_kind(prefix: &str) -> MathPrefixKind {
+    let mut rest = prefix.trim_matches([' ', '\t']);
+    if rest.is_empty() {
+        return MathPrefixKind::Indent;
+    }
+    if rest.starts_with('#') || rest.contains('|') {
+        return MathPrefixKind::MarkerText;
+    }
+    let mut saw_marker = false;
+    loop {
+        let mut advanced = false;
+        if let Some(after) = rest.strip_prefix('>') {
+            rest = after.trim_matches([' ', '\t']);
+            saw_marker = true;
+            advanced = true;
+        } else if let Some(after) = rest
+            .strip_prefix('-')
+            .or_else(|| rest.strip_prefix('+'))
+            .or_else(|| rest.strip_prefix('*'))
+        {
+            if after.is_empty() || after.starts_with([' ', '\t']) {
+                rest = after.trim_matches([' ', '\t']);
+                saw_marker = true;
+                advanced = true;
+            }
+        } else {
+            let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+            if digits > 0 {
+                let tail = &rest[digits..];
+                if tail.starts_with(". ") || tail.starts_with(") ") {
+                    rest = tail[2..].trim_matches([' ', '\t']);
+                    saw_marker = true;
+                    advanced = true;
+                }
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+    match (saw_marker, rest.is_empty()) {
+        (false, _) => MathPrefixKind::PlainText,
+        (true, true) => MathPrefixKind::Marker,
+        (true, false) => MathPrefixKind::MarkerText,
+    }
+}
+
+/// Inline code spans: the math extensions sit before marked's codespan tokenizer
+/// (marked.esm.js `inline()`: extensions -> escape -> tag -> link -> reflink ->
+/// emStrong -> codespan), so `\(a\)` inside a code span stays literal text
+/// (`R_code_with_math` in .port-env/tmp/wts_full.json). Returns the end offset, or
+/// `None` for an unclosed backtick run, which CommonMark also leaves literal.
+fn skip_code_span(src: &str, index: usize) -> Option<usize> {
+    let bytes = src.as_bytes();
+    let fence = bytes[index..].iter().take_while(|b| **b == b'`').count();
+    if fence == 0 {
+        return None;
+    }
+    let mut at = index + fence;
+    while at < bytes.len() {
+        if bytes[at] == b'`' {
+            let run = bytes[at..].iter().take_while(|b| **b == b'`').count();
+            if run == fence {
+                return Some(at + run);
+            }
+            at += run;
+            continue;
+        }
+        at += 1;
+    }
+    None
+}
+
+/// Lift every math span out of the raw source, replacing it with a placeholder.
+///
+/// Opener order follows `BLOCK_MATH_REGEX` (markdown.ts:45) then
+/// `INLINE_MATH_PATTERNS` (markdown.ts:81-86): `$$`, `\[`, `\(`, `$`. Code spans and
+/// fenced code blocks are skipped, because the TS extensions never see them.
+fn extract_math_spans(source: &str) -> (String, Vec<RawMathSpan>) {
+    let mut spans: Vec<RawMathSpan> = Vec::new();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0usize;
+    let mut fence: Option<(char, usize)> = None;
+    let mut line_start = 0usize;
+
+    while index < source.len() {
+        let rest = &source[index..];
+        let ch = rest.chars().next().unwrap();
+
+        // Fenced code blocks (` ``` ` / `~~~`, >= 3 chars) are verbatim, exactly as
+        // pulldown-cmark lexes them.
+        if index == line_start {
+            let indent = rest.chars().take_while(|c| *c == ' ').count();
+            let body = &rest[indent..];
+            if let Some(fence_char) = body.chars().next().filter(|c| *c == '`' || *c == '~') {
+                let run = body.chars().take_while(|c| *c == fence_char).count();
+                if run >= 3 {
+                    match fence {
+                        Some((open_char, open_run)) if open_char == fence_char && open_run == run => {
+                            fence = None;
+                        }
+                        None => fence = Some((fence_char, run)),
+                        _ => {}
+                    }
+                    let end = index + indent + run;
+                    out.push_str(&source[index..end]);
+                    index = end;
+                    continue;
+                }
+            }
+        }
+
+        if fence.is_some() {
+            out.push(ch);
+            index += ch.len_utf8();
+            if ch == '\n' {
+                line_start = index;
+            }
+            continue;
+        }
+
+        if ch == '\n' {
+            out.push(ch);
+            index += 1;
+            line_start = index;
+            continue;
+        }
+
+        if ch == '`' {
+            if let Some(end) = skip_code_span(source, index) {
+                // `blockMathExtension.start` scans the paragraph text for `$$` / `\[`
+                // before marked's codespan tokenizer runs, so a code span does not hide
+                // a display-math opener from the block scan (wts_place
+                // `P11_inline_code_dollars`, where the backtick stays literal text).
+                let span = &source[index..end];
+                let hides_block = !span.contains("$$") && !span.contains("\\[");
+                if hides_block {
+                    out.push_str(span);
+                    index = end;
+                    continue;
+                }
+            }
+        }
+
+        let opener: Option<&str> = if rest.starts_with("$$") {
+            Some("$$")
+        } else if rest.starts_with("\\[") {
+            Some("\\[")
+        } else if rest.starts_with("\\(") {
+            Some("\\(")
+        } else if ch == '$' {
+            Some("$")
+        } else {
+            None
+        };
+
+        if let Some(open) = opener {
+            // A `$$` / `\[` span whose closing delimiter is followed by
+            // `[ \t]*(?:\n|$)` is display math (BLOCK_MATH_REGEX, markdown.ts:45);
+            // everything else uses the inline patterns (INLINE_MATH_PATTERNS,
+            // markdown.ts:81-86). `match_block_math` already backtracks, so
+            // `$$a=1$$ and $$b=2$$` is one block spanning to the LAST `$$`, while
+            // `$$x=2$$. Therefore y=3` is not a block at all and keeps its tail
+            // (TUIR-22).
+            let block_span = if open == "$$" || open == "\\[" {
+                match_block_math(rest)
+            } else {
+                None
+            };
+            let (raw, math_text, block_ok) = match block_span {
+                Some((raw, math_text)) => (raw, math_text, true),
+                None => match match_inline_math(rest) {
+                    Some((raw, math_text)) => (raw, math_text, false),
+                    None => (String::new(), String::new(), false),
+                },
+            };
+            if !raw.is_empty() {
+                let line_prefix = &source[line_start..index];
+                let prefix_kind = math_prefix_kind(line_prefix);
+                // A span inside a list item that already holds text stays inline: the
+                // item consumed the line before the extension could run (wts_full
+                // `S_list_math`, whose second item `- $$y=2$$` *is* a block).
+                let block_ok = block_ok && prefix_kind != MathPrefixKind::MarkerText;
+                // BLOCK_MATH_REGEX consumes the leading `[ \t]*` (markdown.ts:45). The
+                // indentation already written to the output must therefore go: left in
+                // place it would make pulldown-cmark lex the placeholder as an indented
+                // code block (TUIR-27, wts_place `J_indented_math`).
+                if block_ok && prefix_kind == MathPrefixKind::Indent {
+                    out.truncate(out.len() - line_prefix.len());
+                }
+                // marked's `blockMathExtension.start` reports the math index to
+                // `block()`, which cuts the pending paragraph there (markdown.ts:59-63):
+                // preceding text on the same line closes as its own paragraph.
+                let cut_allowed = matches!(
+                    prefix_kind,
+                    MathPrefixKind::PlainText | MathPrefixKind::Marker
+                );
+                if block_ok && cut_allowed && prefix_kind == MathPrefixKind::PlainText {
+                    // Plain text before the math: the cut splits the paragraph in two.
+                    out.push('\n');
+                    out.push('\n');
+                } else if !block_ok
+                    && cut_allowed
+                    && (open == "$$" || open == "\\[")
+                {
+                    // Same cut, but the paragraph continues: marked keeps both chunks in
+                    // one paragraph joined by a newline (wts_mid `M2_midline_inline`
+                    // renders `a` and `` `b` c `` on separate lines).
+                    out.push('\n');
+                }
+                spans.push(RawMathSpan {
+                    raw: raw.clone(),
+                    text: math_text.trim().to_string(),
+                    block_ok,
+                });
+                out.push_str(&math_placeholder(spans.len() - 1));
+                // `BLOCK_MATH_REGEX` ends on the newline after the closing delimiter
+                // (markdown.ts:45,73), so that newline is consumed by the span. Re-emit
+                // it to keep the line structure: without it the next line's block marker
+                // (`> text`) would be glued onto the math line (wts_full `T_quote_math`).
+                // `TokenBuilder::after_block_math` drops the resulting blank line in front
+                // of the paragraph that follows.
+                if raw.ends_with('\n') {
+                    out.push('\n');
+                }
+                index += raw.len();
+                // The span may have consumed its line's newline; without this the next
+                // line would be measured against the previous line's prefix and lose its
+                // block-marker classification (e.g. the second `- $$y=2$$` item).
+                line_start = index;
+                continue;
+            }
+        }
+
+        // A backslash escape of ASCII punctuation is literal text (marked's escape
+        // tokenizer runs after its extensions, so this only applies when no math
+        // delimiter was recognised above).
+        if ch == '\\' {
+            if let Some(next) = rest.chars().nth(1) {
+                if next.is_ascii_punctuation() {
+                    out.push_str(&source[index..index + 1 + next.len_utf8()]);
+                    index += 1 + next.len_utf8();
+                    continue;
+                }
+            }
+        }
+
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+
+    (out, spans)
 }
 
 /// Port of `pickMarkdownParser`.
@@ -279,8 +635,11 @@ pub fn lex(text: &str) -> LexResult {
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     let use_math = has_math(text);
-    let parser = Parser::new_ext(text, options);
-    let mut builder = TokenBuilder::new(use_math);
+    // Marked's math tokenizers run on the raw source; pulldown-cmark lexes
+    // escape-processed text, so math spans are lifted out first (TUIR-21).
+    let (lex_source, math_spans) = extract_math_spans(text);
+    let parser = Parser::new_ext(&lex_source, options);
+    let mut builder = TokenBuilder::new(use_math, math_spans);
     for event in parser {
         builder.handle(event);
     }
@@ -382,17 +741,164 @@ struct Frame {
 struct TokenBuilder {
     stack: Vec<Frame>,
     use_math: bool,
+    /// Math spans lifted from the raw source, indexed by the placeholder number
+    /// that stands in for them in the lexed text.
+    math_spans: Vec<RawMathSpan>,
+    /// Set right after a block-math split so the next text event can drop the blank
+    /// line the split left in front of the following paragraph.
+    after_block_math: bool,
 }
 
 impl TokenBuilder {
-    fn new(use_math: bool) -> Self {
+    fn new(use_math: bool, math_spans: Vec<RawMathSpan>) -> Self {
         Self {
             stack: vec![Frame {
                 kind: FrameKind::Root,
                 tokens: Vec::new(),
             }],
             use_math,
+            math_spans,
+            after_block_math: false,
         }
+    }
+
+    /// Emit a `blockMath` token for `span`, splitting the enclosing paragraph the way
+    /// marked does.
+    ///
+    /// `blockMathExtension.start` (packages/tui/src/components/markdown.ts:59-63)
+    /// reports the math index to marked's `block()` loop, which cuts the pending
+    /// paragraph there (`paragraph(i)` with `i` ending at the math position). The
+    /// preceding text therefore closes as its own paragraph, the math token lands in
+    /// the enclosing block, and the text that follows starts a fresh paragraph -
+    /// visible in the fixtures as `paragraph raw="text\n"`, `blockMath`,
+    /// `paragraph raw="more"` (.port-env/tmp/wts_place.json.out `P1_text_then_math_line`).
+    /// Suppressing the empty trailing paragraph matches marked, which emits no
+    /// paragraph token at all for `$$x=2$$` on its own.
+    fn split_paragraph_for_block_math(&mut self, span: RawMathSpan) {
+        if matches!(
+            self.stack.last().map(|frame| &frame.kind),
+            Some(FrameKind::Paragraph)
+        ) {
+            let mut frame = self.stack.pop().unwrap();
+            // The line break that put the math on its own line is part of the
+            // paragraph in pulldown-cmark but only of `token.raw` in marked, whose
+            // `Text` token stops at `"text"` (wts_place `P1_text_then_math_line`).
+            while matches!(
+                frame.tokens.last(),
+                Some(Token::Text { text, tokens: None }) if text.trim().is_empty()
+            ) {
+                frame.tokens.pop();
+            }
+            if !frame.tokens.is_empty() {
+                self.push_token(Token::Paragraph { tokens: frame.tokens });
+            }
+        }
+        self.push_token(Token::BlockMath(MathToken {
+            r#type: "blockMath".to_string(),
+            raw: span.raw,
+            text: span.text,
+        }));
+        self.stack.push(Frame {
+            kind: FrameKind::Paragraph,
+            tokens: Vec::new(),
+        });
+        self.after_block_math = true;
+    }
+
+    /// Port of marked's inline math extensions (markdown.ts:81-111): each placeholder
+    /// written by `extract_math_spans` becomes `inlineMath` (or `blockMath` when the
+    /// span satisfied `BLOCK_MATH_REGEX`) carrying the raw source text, so neither
+    /// `raw` nor `text` is ever escape-processed.
+    fn token_text(&mut self, text: &str) {
+        // Inside a code block the raw text is collected verbatim and math never runs:
+        // the TS math extensions are unreachable from a fenced code block
+        // (wts_full `U_fence_math` renders `  $$x=1$$` unchanged).
+        if matches!(
+            self.stack.last().map(|frame| &frame.kind),
+            Some(FrameKind::CodeBlock { .. })
+        ) {
+            self.text(text);
+            return;
+        }
+        // The blank line left by a block-math split is consumed in `text`; anything
+        // still flagged here is real content, so only the flag is cleared.
+        let text = if self.after_block_math {
+            self.after_block_math = false;
+            text.trim_start_matches('\n')
+        } else {
+            text
+        };
+        let mut pending = String::new();
+        let mut index = 0usize;
+        while index < text.len() {
+            let rest = &text[index..];
+            let mut matched = false;
+            if rest.starts_with(MATH_MARKER) {
+                if let Some((span_index, length)) = marker_at(rest) {
+                    // Take an owned copy first: `split_paragraph_for_block_math` needs
+                    // `&mut self`, so no borrow of `self.math_spans` may stay alive.
+                    let span = self.math_spans.get(span_index).cloned();
+                    if let Some(span) = span {
+                        // Text before the math stays in the paragraph marked cut off.
+                        let preceding = std::mem::take(&mut pending);
+                        if !preceding.is_empty() {
+                            self.push_token(Token::Text {
+                                text: preceding,
+                                tokens: None,
+                            });
+                        }
+                        if span.block_ok {
+                            // marked cut the paragraph here, so the math closes it.
+                            self.split_paragraph_for_block_math(span);
+                        } else {
+                            self.push_token(Token::InlineMath(MathToken {
+                                r#type: "inlineMath".to_string(),
+                                raw: span.raw,
+                                text: span.text,
+                            }));
+                        }
+                        index += length;
+                        matched = true;
+                    }
+                }
+            }
+            if matched {
+                continue;
+            }
+            let ch = rest.chars().next().unwrap();
+            pending.push(ch);
+            index += ch.len_utf8();
+        }
+        flush_text(&mut pending, &mut |token| self.push_token(token));
+    }
+
+    /// Put the original math source back where a placeholder landed in verbatim text
+    /// (HTML blocks and inline HTML), which the math extensions never rewrite.
+    fn restore_math_placeholders(&self, text: &str) -> String {
+        if !text.contains(MATH_MARKER) {
+            return text.to_string();
+        }
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(offset) = rest.find(MATH_MARKER) {
+            out.push_str(&rest[..offset]);
+            rest = &rest[offset..];
+            match marker_at(rest) {
+                Some((index, length)) => {
+                    match self.math_spans.get(index) {
+                        Some(span) => out.push_str(&span.raw),
+                        None => out.push_str(&rest[..length]),
+                    }
+                    rest = &rest[length..];
+                }
+                None => {
+                    out.push(MATH_MARKER);
+                    rest = &rest[MATH_MARKER.len_utf8()..];
+                }
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     fn push_token(&mut self, token: Token) {
@@ -405,13 +911,23 @@ impl TokenBuilder {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
-            Event::Text(text) => self.text(&text),
+            // Math spans are lifted out of the raw source before lexing
+            // (`extract_math_spans`). A `BLOCK_MATH_REGEX` match is emitted as a
+            // `blockMath` token here, mirroring marked's `blockMathExtension` firing
+            // at a block boundary (markdown.ts:54-76); all other placeholders are
+            // turned into `inlineMath` by `token_text`.
+            Event::Text(text) => self.token_text(&text),
             Event::Code(text) => self.push_token(Token::Codespan {
                 text: text.to_string(),
             }),
-            Event::Html(raw) | Event::InlineHtml(raw) => self.push_token(Token::Html {
-                raw: raw.to_string(),
-            }),
+            Event::Html(raw) | Event::InlineHtml(raw) => {
+                // An HTML block is tokenized by marked's `html` tokenizer, so its raw
+                // source is preserved verbatim and never reaches the math extensions
+                // (wts_place `P19_math_html_block` keeps `$$x=1$$` inside the block).
+                self.push_token(Token::Html {
+                    raw: self.restore_math_placeholders(&raw),
+                })
+            }
             Event::SoftBreak => self.text("\n"),
             Event::HardBreak => self.push_token(Token::Br),
             Event::Rule => self.push_token(Token::Hr),
@@ -518,6 +1034,11 @@ impl TokenBuilder {
         let token = match frame.kind {
             FrameKind::Root => return,
             FrameKind::Paragraph => {
+                // The math split can leave an empty paragraph frame behind; marked
+                // emits no paragraph token for it, so it must not render a blank line.
+                if frame.tokens.is_empty() {
+                    return;
+                }
                 if let Some(token) = self.block_math_from_paragraph(&frame.tokens) {
                     token
                 } else {
@@ -603,6 +1124,15 @@ impl TokenBuilder {
             code.push_str(text);
             return;
         }
+
+        // The line break that followed a block-math span carries no content: marked's
+        // paragraph tokenizer drops it (wts_place `P9_math_then_blank` renders
+        // `paragraph raw="text"`, not `"\ntext"`).
+        if self.after_block_math && text.trim().is_empty() {
+            self.after_block_math = false;
+            return;
+        }
+        self.after_block_math = false;
 
         let mut pending = String::new();
         let mut index = 0usize;
@@ -1367,6 +1897,25 @@ impl Markdown {
         style_context: Option<&InlineStyleContext>,
     ) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
+
+        // marked wraps a TIGHT item's content in a single `text` token carrying child
+        // tokens, so `renderListItem` renders the whole item on one line
+        // (packages/tui/src/components/markdown.ts:731-737). pulldown-cmark emits the
+        // inline tokens directly, so a list of only-inline tokens is merged here.
+        let all_inline = !tokens.is_empty()
+            && tokens.iter().all(|token| {
+                !matches!(
+                    token,
+                    Token::List { .. } | Token::Paragraph { .. } | Token::Code { .. } | Token::BlockMath(_)
+                )
+            });
+        if all_inline {
+            let rendered = self.render_inline_tokens(tokens, style_context);
+            if !rendered.is_empty() {
+                lines.push(rendered);
+            }
+            return lines;
+        }
 
         for token in tokens {
             match token {
@@ -2189,6 +2738,67 @@ mod tests {
             },
         );
         assert_eq!(md.render(5.0), vec!["x-5  ".to_string()]);
+    }
+
+    /// TUIR-22: `BLOCK_MATH_REGEX` requires `[ \t]*(?:\n|$)` after the closing `$$`
+    /// (packages/tui/src/components/markdown.ts:45), so display math on a line with a
+    /// text tail falls back to the inline pattern
+    /// (`INLINE_MATH_PATTERNS[0]`, markdown.ts:82) and the tail survives. The previous
+    /// port returned `Some` from `match_block_math` unconditionally and replaced the
+    /// whole paragraph with `BlockMath`, silently dropping `. Therefore y=3`.
+    #[test]
+    fn block_math_requires_line_end_so_trailing_text_survives() {
+        let mut md = markdown("$$x=2$$. Therefore y=3");
+        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        assert_eq!(
+            lines,
+            vec!["`x=2`. Therefore y=3".to_string()],
+            "the trailing prose must survive as inline math + text"
+        );
+
+        // `then y=3` after the delimiter behaves the same way.
+        let mut md = markdown("$$x=2$$ then y=3");
+        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        assert_eq!(lines, vec!["`x=2` then y=3".to_string()]);
+    }
+
+    /// TUIR-21: marked's math extensions see the RAW source
+    /// (packages/tui/src/components/markdown.ts:40-44, 81-111), but pulldown-cmark
+    /// strips the backslash of `\(` / `\[` before `match_inline_math` ever runs, so
+    /// those delimiters were never recognised and the text rendered literally.
+    #[test]
+    fn paren_and_bracket_math_delimiters_are_recognised() {
+        // `\(...\)` -> INLINE_MATH_PATTERNS[2] (markdown.ts:84).
+        let mut md = markdown("value \\(a+b\\) end");
+        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        assert_eq!(
+            lines,
+            vec!["value `a+b` end".to_string()],
+            "\\(...\\) must become inline math, not literal text"
+        );
+
+        // `\[...\]` at the end of its own line -> BLOCK_MATH_REGEX (markdown.ts:45).
+        let mut md = markdown("\\[a+b\\]\n");
+        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        assert_eq!(
+            lines,
+            vec!["  a+b".to_string()],
+            "\\[...\\] alone on a line must become display math"
+        );
+    }
+
+    /// TUIR-21 (second symptom): pulldown-cmark collapses `\\` to `\`, which killed
+    /// latex's row separator (`ESCAPES`, packages/tui/src/latex.ts:277). The TS reads
+    /// the raw source, so `$$a=b \\ c=d$$` renders as two aligned rows.
+    #[test]
+    fn double_backslash_row_separator_survives_in_display_math() {
+        let mut md = markdown("$$a=b \\\\ c=d$$");
+        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        assert_eq!(
+            lines,
+            vec!["  a=b".to_string(), "  c=d".to_string()],
+            "the `\\\\` row separator must produce two rows"
+        );
     }
 
     #[test]
