@@ -310,10 +310,14 @@ fn parse_model_pattern(
     result
 }
 
+/// `minimatch(value, pattern, { nocase: true })` from model-resolver.ts:279.
+/// minimatch matches path segments, so `*` never crosses `/`; globset's default
+/// `literal_separator(false)` would let `*anthropic*` reach into the model id and
+/// scope models the TypeScript refuses.
 fn glob_matches(pattern: &str, value: &str) -> bool {
     GlobBuilder::new(pattern)
         .case_insensitive(true)
-        .literal_separator(false)
+        .literal_separator(true)
         .backslash_escape(false)
         .build()
         .map(|glob| glob.compile_matcher().is_match(value))
@@ -863,4 +867,55 @@ pub async fn restore_model_from_session(
 /// `THINKING_LEVELS` re-export so callers of this module can validate a level.
 pub fn thinking_levels() -> &'static [&'static str] {
     &THINKING_LEVELS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn model(provider: &str, id: &str) -> Model {
+        Model::new(
+            id,
+            id,
+            "openai-completions",
+            provider,
+            "https://example.invalid",
+        )
+    }
+
+    fn scoped_ids(pattern: &str, models: &[Model]) -> Vec<(String, String)> {
+        resolve_model_scope_from_models(&[pattern.to_string()], models)
+            .into_iter()
+            .map(|scoped| (scoped.model.provider.clone(), scoped.model.id.clone()))
+            .collect()
+    }
+
+    /// model-resolver.ts:277-279 matches with
+    /// `minimatch(value, globPattern, { nocase: true })`, which is
+    /// segment-bound: `*` never crosses `/`. `literal_separator(false)` let
+    /// `*anthropic*` reach across `provider/id` and scope models the TypeScript
+    /// leaves out. `modelsAreEqual` is a `provider/id` equality check
+    /// (model-resolver.ts:288-290), so the scoped set is directly observable.
+    #[test]
+    fn a_glob_star_does_not_cross_the_provider_separator() {
+        let models = vec![
+            model("anthropic", "claude-opus-4-7"),
+            model("openai", "anthropic-compat"),
+        ];
+
+        // minimatch("anthropic/claude-opus-4-7", "*anthropic*") is false, and
+        // minimatch("claude-opus-4-7", "*anthropic*") is false too, so only the
+        // model whose id literally contains "anthropic" stays in scope.
+        assert_eq!(
+            scoped_ids("*anthropic*", &models),
+            vec![("openai".to_string(), "anthropic-compat".to_string())],
+            "`*` crossed the provider separator and scoped extra models"
+        );
+
+        // A glob that is meant to cross the separator states the separator.
+        assert_eq!(
+            scoped_ids("anthropic/*", &models),
+            vec![("anthropic".to_string(), "claude-opus-4-7".to_string())]
+        );
+    }
 }

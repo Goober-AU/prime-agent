@@ -10,7 +10,8 @@ use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::utils::child_process::{
-    signal_process_group_or_process, spawn_hidden, wait_for_child_process, Signal, SpawnOptions,
+    signal_process_group_if_held, signal_process_group_or_process, spawn_hidden,
+    wait_for_child_process, Signal, SpawnOptions,
 };
 
 /// Options for executing shell commands.
@@ -103,11 +104,16 @@ pub async fn exec_command(
     });
 
     let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // `proc.exitCode`/`proc.signalCode` (exec.ts:81): the delayed SIGKILL is only
+    // sent while the child has not exited. Set as soon as the wait observes
+    // termination, so a reused PID can never be signalled.
+    let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let child_id = child.id();
 
     // killProcess(): SIGTERM now, SIGKILL after 5s if the child is still alive.
     let kill_process = {
         let killed = Arc::clone(&killed);
+        let exited = Arc::clone(&exited);
         move || {
             if killed.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return;
@@ -116,11 +122,12 @@ pub async fn exec_command(
                 signal_process_group_or_process(pid as i32, Signal::Term);
             }
             let killed_inner = Arc::clone(&killed);
+            let exited_inner = Arc::clone(&exited);
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(5000)).await;
                 if killed_inner.load(std::sync::atomic::Ordering::SeqCst) {
                     if let Some(pid) = child_id {
-                        signal_process_group_or_process(pid as i32, Signal::Kill);
+                        force_kill_still_live_child(pid, &exited_inner);
                     }
                 }
             });
@@ -153,6 +160,8 @@ pub async fn exec_command(
     // Wait for process termination without hanging on inherited stdio handles
     // held open by detached descendants.
     let code = wait_for_child_process(child).await.unwrap_or(Some(1));
+    // The child is gone: any later force kill must be withheld.
+    exited.store(true, std::sync::atomic::Ordering::SeqCst);
     if let Some(task) = timeout_task {
         task.abort();
     }
@@ -172,6 +181,19 @@ pub async fn exec_command(
         code: code.unwrap_or(0) as i64,
         killed: killed.load(std::sync::atomic::Ordering::SeqCst),
     }
+}
+
+/// exec.ts:81: `proc.exitCode === null && proc.signalCode === null` — the delayed
+/// SIGKILL only runs while the child has NOT exited. A child that already exited
+/// can have its pid (and process group) reused, so signalling it blindly could
+/// kill an unrelated process. `signal_process_group_if_held` is the existing
+/// owner of the "only signal while provably still the target" guard
+/// (child-process.ts:162-168). Returns whether a signal was sent.
+fn force_kill_still_live_child(pid: u32, exited: &std::sync::atomic::AtomicBool) -> bool {
+    if exited.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+    }
+    signal_process_group_if_held(pid as i32, Signal::Kill)
 }
 
 #[cfg(test)]
@@ -238,6 +260,59 @@ mod tests {
         )
         .await;
         assert!(result.killed);
+    }
+
+    /// exec.ts:79-84 — the delayed force kill runs only while the child has not
+    /// exited (`proc.exitCode === null && proc.signalCode === null`). Without
+    /// that liveness guard the reused pid/process group of an exited child could
+    /// be signalled and an unrelated process killed.
+    #[tokio::test]
+    async fn a_delayed_force_kill_never_reaches_an_exited_child() {
+        let (command, args) = if cfg!(windows) {
+            (
+                "cmd".to_string(),
+                vec!["/c".to_string(), "ping -n 30 127.0.0.1 >NUL".to_string()],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "sleep 30".to_string()],
+            )
+        };
+        let mut handle = spawn_hidden(
+            &command,
+            &args,
+            SpawnOptions {
+                capture_stdout: true,
+                capture_stderr: true,
+                ..Default::default()
+            },
+        )
+        .expect("spawn stand-in for a reused pid");
+        let pid = handle.child.id().expect("child pid");
+
+        // The child has exited: the force kill must be withheld.
+        let exited = std::sync::atomic::AtomicBool::new(true);
+        assert!(
+            !force_kill_still_live_child(pid, &exited),
+            "a delayed force kill reached a child that had already exited (pid {pid})"
+        );
+        // The stand-in is untouched, which is the observable symptom of a kill
+        // that PID reuse would have aimed at an unrelated process.
+        assert!(
+            crate::utils::child_process::is_process_alive(pid as i32),
+            "an exited child was force-killed anyway"
+        );
+
+        // While the child is still live the delayed kill is still delivered.
+        let running = std::sync::atomic::AtomicBool::new(false);
+        assert!(
+            force_kill_still_live_child(pid, &running),
+            "a delayed force kill was withheld from a live child (pid {pid})"
+        );
+
+        signal_process_group_or_process(pid as i32, Signal::Kill);
+        let _ = wait_for_child_process(handle.child).await;
     }
 
     #[test]

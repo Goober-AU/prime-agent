@@ -8,7 +8,8 @@ use crate::core::rlm_continuation::{
     RlmContinuationState, RlmParentTask, RlmPendingContinuation, RlmPendingResult,
 };
 
-pub const LEGACY_RLM_CONTINUATION_STATE_CUSTOM_TYPE: &str = "prime-agent.rlm-continuation-state-v091";
+pub const LEGACY_RLM_CONTINUATION_STATE_CUSTOM_TYPE: &str =
+    "prime-agent.rlm-continuation-state-v091";
 
 fn is_record(value: &Value) -> bool {
     value.is_object()
@@ -24,18 +25,29 @@ pub fn parse_legacy_rlm_continuation_state(
     if !is_record(value) || value.get("version").and_then(|version| version.as_f64()) != Some(1.0) {
         return None;
     }
-    if !value.get("replySent").map(|sent| sent.is_boolean()).unwrap_or(false) {
+    if !value
+        .get("replySent")
+        .map(|sent| sent.is_boolean())
+        .unwrap_or(false)
+    {
         return None;
     }
     let delivered_task_ids = value.get("deliveredTaskIds")?.as_array()?;
     if !delivered_task_ids.iter().all(|id| id.is_string()) {
         return None;
     }
-    let task = value.get("currentTask").filter(|task| !task.is_null());
+    // legacy-rlm-continuation.ts:26-27 and :36-42 test `!== undefined`, not
+    // "not null": a JSON null member is PRESENT and invalid, so the whole v091
+    // ledger is rejected instead of silently authorizing legacy replay.
+    let task = value.get("currentTask");
     if let Some(task) = task {
         if !is_record(task)
             || !task.get("id").map(|id| id.is_string()).unwrap_or(false)
-            || task.get("id").and_then(|id| id.as_str()).map(str::is_empty).unwrap_or(true)
+            || task
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::is_empty)
+                .unwrap_or(true)
             || !task
                 .get("receivedAt")
                 .and_then(|received_at| received_at.as_f64())
@@ -45,11 +57,15 @@ pub fn parse_legacy_rlm_continuation_state(
             return None;
         }
     }
-    let pending = value.get("pendingContinuation").filter(|pending| !pending.is_null());
+    let pending = value.get("pendingContinuation");
     if let Some(pending) = pending {
         let valid = is_record(pending)
             && matches!(
-                pending.get("phase").map(|phase| phase.to_string()).unwrap_or_default().trim_matches('"'),
+                pending
+                    .get("phase")
+                    .map(|phase| phase.to_string())
+                    .unwrap_or_default()
+                    .trim_matches('"'),
                 "reserved" | "queued" | "continuation_hook"
             );
         if !valid {
@@ -61,7 +77,9 @@ pub fn parse_legacy_rlm_continuation_state(
         return None;
     }
     if let Some(pending) = pending {
-        if let Some(task_id) = pending.get("taskId").filter(|task_id| !task_id.is_null()) {
+        // legacy-rlm-continuation.ts:45: `pending.taskId !== undefined` then a
+        // strict comparison against `task.id`; null can never equal a task id.
+        if let Some(task_id) = pending.get("taskId") {
             if Some(task_id) != task.and_then(|task| task.get("id")) {
                 return None;
             }
@@ -69,8 +87,12 @@ pub fn parse_legacy_rlm_continuation_state(
     }
     let started = match pending {
         Some(pending) => messages.iter().any(|message| {
-            if message.role() != "user" || Some(agent_message_timestamp(message))
-                != pending.get("messageTimestamp").and_then(|value| value.as_f64()) {
+            if message.role() != "user"
+                || Some(agent_message_timestamp(message))
+                    != pending
+                        .get("messageTimestamp")
+                        .and_then(|value| value.as_f64())
+            {
                 return false;
             }
             let text = match message {
@@ -91,14 +113,17 @@ pub fn parse_legacy_rlm_continuation_state(
         }),
         None => false,
     };
-    let task_id = task.and_then(|task| task.get("id")).and_then(|id| id.as_str());
+    let task_id = task
+        .and_then(|task| task.get("id"))
+        .and_then(|id| id.as_str());
     let tasks: Vec<RlmParentTask> = match task {
         None => Vec::new(),
         Some(task) => {
-            let replied = value.get("replySent").and_then(|sent| sent.as_bool()).unwrap_or(false)
-                || delivered_task_ids
-                    .iter()
-                    .any(|id| id.as_str() == task_id);
+            let replied = value
+                .get("replySent")
+                .and_then(|sent| sent.as_bool())
+                .unwrap_or(false)
+                || delivered_task_ids.iter().any(|id| id.as_str() == task_id);
             vec![RlmParentTask {
                 id: task_id.unwrap_or_default().to_string(),
                 received_at: task["receivedAt"].as_f64().unwrap_or(0.0),
@@ -169,7 +194,10 @@ pub fn parse_legacy_rlm_continuation_state(
         status: if incomplete {
             "failed".to_string()
         } else {
-            state.terminal_status.clone().unwrap_or_else(|| "failed".to_string())
+            state
+                .terminal_status
+                .clone()
+                .unwrap_or_else(|| "failed".to_string())
         },
         text: bounded_rlm_visible_text(
             if visible_text.is_empty() {
@@ -202,8 +230,12 @@ pub fn parse_legacy_rlm_continuation_state(
 fn agent_message_timestamp(message: &AgentMessage) -> f64 {
     match message {
         AgentMessage::Message(pi_ai::types::Message::User(user)) => user.timestamp as f64,
-        AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) => assistant.timestamp as f64,
-        AgentMessage::Message(pi_ai::types::Message::ToolResult(tool_result)) => tool_result.timestamp as f64,
+        AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) => {
+            assistant.timestamp as f64
+        }
+        AgentMessage::Message(pi_ai::types::Message::ToolResult(tool_result)) => {
+            tool_result.timestamp as f64
+        }
         AgentMessage::Custom(_) => f64::NAN,
     }
 }
@@ -220,15 +252,19 @@ mod tests {
     use serde_json::json;
 
     fn assistant(timestamp: i64, stop_reason: &str, text: &str) -> AgentMessage {
-        AgentMessage::Message(pi_ai::types::Message::Assistant(pi_ai::types::AssistantMessage {
-            stop_reason: stop_reason.to_string(),
-            timestamp,
-            content: vec![
-                pi_ai::types::ContentBlock::Thinking(pi_ai::types::ThinkingContent::new("private reasoning")),
-                pi_ai::types::ContentBlock::Text(pi_ai::types::TextContent::new(text)),
-            ],
-            ..Default::default()
-        }))
+        AgentMessage::Message(pi_ai::types::Message::Assistant(
+            pi_ai::types::AssistantMessage {
+                stop_reason: stop_reason.to_string(),
+                timestamp,
+                content: vec![
+                    pi_ai::types::ContentBlock::Thinking(pi_ai::types::ThinkingContent::new(
+                        "private reasoning",
+                    )),
+                    pi_ai::types::ContentBlock::Text(pi_ai::types::TextContent::new(text)),
+                ],
+                ..Default::default()
+            },
+        ))
     }
 
     fn user(timestamp: i64, text: &str) -> AgentMessage {
@@ -259,16 +295,33 @@ mod tests {
         })
     }
 
+    /// `pendingContinuation` absent, as the TypeScript object literal passes it
+    /// (`pendingContinuation: undefined` at legacy-rlm-continuation.ts:79-88).
+    /// A JSON null member is PRESENT and invalid, so it must not be used here.
+    fn without_member(value: &Value, key: &str) -> Value {
+        let mut value = value.clone();
+        value.as_object_mut().expect("record").remove(key);
+        value
+    }
+
     #[test]
     fn unstarted_recovery_phases_are_preserved_without_spending_an_attempt() {
         for phase in ["reserved", "queued", "continuation_hook"] {
             let mut value = record();
             value["pendingContinuation"]["phase"] = json!(phase);
-            let state = parse_legacy_rlm_continuation_state(&value, &[assistant(20, "length", "partial")])
-                .expect("valid state");
+            let state =
+                parse_legacy_rlm_continuation_state(&value, &[assistant(20, "length", "partial")])
+                    .expect("valid state");
             assert_eq!(state.continuation_count, 1.0);
-            assert_eq!(state.last_source_key.as_deref(), Some("20:length:7:partial"));
-            let expected = if phase == "continuation_hook" { "reserved" } else { phase };
+            assert_eq!(
+                state.last_source_key.as_deref(),
+                Some("20:length:7:partial")
+            );
+            let expected = if phase == "continuation_hook" {
+                "reserved"
+            } else {
+                phase
+            };
             assert_eq!(state.pending_continuation.as_ref().unwrap().phase, expected);
             assert_eq!(state.tasks.len(), 1);
             assert!(!state.tasks[0].replied);
@@ -282,7 +335,10 @@ mod tests {
             user(30, "RLM child length recovery 1/3."),
         ];
         let state = parse_legacy_rlm_continuation_state(&record(), &messages).unwrap();
-        assert_eq!(state.pending_continuation.as_ref().unwrap().phase, "started");
+        assert_eq!(
+            state.pending_continuation.as_ref().unwrap().phase,
+            "started"
+        );
 
         let messages = vec![
             assistant(20, "length", "partial"),
@@ -297,10 +353,15 @@ mod tests {
         for reply_sent in [true, false] {
             let mut value = record();
             value["replySent"] = json!(reply_sent);
-            value["deliveredTaskIds"] = if reply_sent { json!([]) } else { json!(["task-1"]) };
-            value["pendingContinuation"] = Value::Null;
-            let state = parse_legacy_rlm_continuation_state(&value, &[assistant(20, "length", "partial")])
-                .expect("valid state");
+            value["deliveredTaskIds"] = if reply_sent {
+                json!([])
+            } else {
+                json!(["task-1"])
+            };
+            let value = without_member(&value, "pendingContinuation");
+            let state =
+                parse_legacy_rlm_continuation_state(&value, &[assistant(20, "length", "partial")])
+                    .expect("valid state");
             assert!(state.tasks[0].replied);
             assert!(state.pending_result.is_none());
         }
@@ -309,9 +370,10 @@ mod tests {
     #[test]
     fn missing_recovery_reports_a_bounded_partial_failure() {
         let mut value = record();
-        value["pendingContinuation"] = Value::Null;
-        let state = parse_legacy_rlm_continuation_state(&value, &[assistant(20, "length", "partial")])
-            .expect("valid state");
+        let value = without_member(&value, "pendingContinuation");
+        let state =
+            parse_legacy_rlm_continuation_state(&value, &[assistant(20, "length", "partial")])
+                .expect("valid state");
         assert_eq!(state.terminal_status.as_deref(), Some("failed"));
         let result = state.pending_result.as_ref().expect("pending result");
         assert_eq!(result.status, "failed");
@@ -325,11 +387,13 @@ mod tests {
     #[test]
     fn valid_terminal_status_is_retained_for_this_task_only() {
         let mut value = record();
-        value["pendingContinuation"] = Value::Null;
+        let value = without_member(&value, "pendingContinuation");
+        let mut value = value;
         value["terminalStatus"] = json!("blocked");
         value["lastStopReason"] = json!("stop");
-        let state = parse_legacy_rlm_continuation_state(&value, &[assistant(20, "stop", "partial")])
-            .expect("valid state");
+        let state =
+            parse_legacy_rlm_continuation_state(&value, &[assistant(20, "stop", "partial")])
+                .expect("valid state");
         let result = state.pending_result.expect("pending result");
         assert_eq!(result.status, "blocked");
         assert_eq!(result.text, "partial");
@@ -337,8 +401,9 @@ mod tests {
 
         let mut other = value.clone();
         other["currentTask"] = json!({ "id": "new-task", "receivedAt": 21 });
-        let state = parse_legacy_rlm_continuation_state(&other, &[assistant(20, "stop", "partial")])
-            .expect("valid state");
+        let state =
+            parse_legacy_rlm_continuation_state(&other, &[assistant(20, "stop", "partial")])
+                .expect("valid state");
         assert_ne!(state.pending_result.unwrap().text, "partial");
     }
 
@@ -348,8 +413,9 @@ mod tests {
         uncorrelated["pendingContinuation"]["taskId"] = json!("other-task");
         let mut unknown_phase = record();
         unknown_phase["pendingContinuation"]["phase"] = json!("unknown");
-        let mut missing_task = record();
-        missing_task["currentTask"] = Value::Null;
+        // legacy-rlm-continuation.ts:36-44: `pendingContinuation !== undefined`
+        // with no task identity is rejected.
+        let missing_task = without_member(&record(), "currentTask");
         let mut bad_count = record();
         bad_count["continuationCount"] = json!(2);
         let mut bad_ids = record();
@@ -366,7 +432,39 @@ mod tests {
             uncorrelated,
             unknown_phase,
         ] {
-            assert!(parse_legacy_rlm_continuation_state(&value, &[]).is_none(), "{value}");
+            assert!(
+                parse_legacy_rlm_continuation_state(&value, &[]).is_none(),
+                "{value}"
+            );
         }
+    }
+
+    /// The TypeScript tests every optional member with `!== undefined`
+    /// (legacy-rlm-continuation.ts:26, :36, :45), so a JSON null member is
+    /// PRESENT and invalid and must reject the whole v091 ledger. Rust used to
+    /// filter null to "absent" and authorize legacy continuation/replay.
+    #[test]
+    fn a_null_member_is_present_and_invalid_like_the_typescript() {
+        for key in ["currentTask", "pendingContinuation"] {
+            let mut value = record();
+            value[key] = Value::Null;
+            assert!(
+                parse_legacy_rlm_continuation_state(&value, &[assistant(20, "length", "partial")])
+                    .is_none(),
+                "null {key} must reject the ledger, got {value}"
+            );
+        }
+
+        let mut null_task_id = record();
+        null_task_id["pendingContinuation"]["taskId"] = Value::Null;
+        assert!(
+            parse_legacy_rlm_continuation_state(&null_task_id, &[]).is_none(),
+            "null pendingContinuation.taskId must reject the ledger"
+        );
+
+        // Absent members are still valid: this is the control that proves the
+        // test above fails on the null case and not on the shape.
+        let control = without_member(&record(), "pendingContinuation");
+        assert!(parse_legacy_rlm_continuation_state(&control, &[]).is_some());
     }
 }
