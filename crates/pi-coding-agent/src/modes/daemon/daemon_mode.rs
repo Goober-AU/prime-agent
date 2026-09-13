@@ -5054,7 +5054,7 @@ impl AgentDaemon {
                     let _ = side_question_daemon.write_public_value(
                         &run_client,
                         &Value::Object(object),
-                        "side_question_run",
+                        "side_question_event",
                     );
                     if event.get("status").and_then(Value::as_str) != Some("running") {
                         if let Some(event_id) = event.get("id").and_then(Value::as_str) {
