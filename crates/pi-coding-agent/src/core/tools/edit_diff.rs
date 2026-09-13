@@ -3,6 +3,7 @@
 //! Shared diff computation utilities for the edit tool.
 //! Used by both edit.rs (for execution) and tool-execution.ts (for preview rendering).
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -140,7 +141,11 @@ pub fn fuzzy_find_text(content: &str, old_text: &str) -> FuzzyMatchResult {
         return FuzzyMatchResult {
             found: true,
             index: char_index(content, exact_index) as i64,
-            match_length: old_text.chars().count(),
+            // TS `matchLength: oldText.length` (edit-diff.ts:91) counts UTF-16 code
+            // units, the same index space `String.prototype.substring` uses at
+            // edit-diff.ts:236-239; `chars().count()` would be code points and land
+            // the replacement end offset inside a surrogate pair for non-BMP text.
+            match_length: utf16_len(old_text),
             used_fuzzy_match: false,
             content_for_replacement: content.to_string(),
         };
@@ -166,16 +171,22 @@ pub fn fuzzy_find_text(content: &str, old_text: &str) -> FuzzyMatchResult {
     FuzzyMatchResult {
         found: true,
         index: char_index(&fuzzy_content, fuzzy_index) as i64,
-        match_length: fuzzy_old_text.chars().count(),
+        // TS `matchLength: fuzzyOldText.length` (edit-diff.ts:117), UTF-16 code units.
+        match_length: utf16_len(&fuzzy_old_text),
         used_fuzzy_match: true,
         content_for_replacement: fuzzy_content,
     }
 }
 
 /// JavaScript string indices are UTF-16 code units; the port keeps the same
-/// index space so `substring`-style slicing stays compatible for BMP text.
+/// index space so `substring`-style slicing stays compatible.
 fn char_index(text: &str, byte_index: usize) -> usize {
     text[..byte_index].encode_utf16().count()
+}
+
+/// JavaScript `str.length`: the number of UTF-16 code units, not code points.
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
 }
 
 fn slice_by_index(text: &str, start: usize, end: usize) -> String {
@@ -208,7 +219,9 @@ fn count_occurrences(content: &str, old_text: &str) -> usize {
     let fuzzy_content = normalize_for_fuzzy_match(content);
     let fuzzy_old_text = normalize_for_fuzzy_match(old_text);
     if fuzzy_old_text.is_empty() {
-        return fuzzy_content.chars().count() + 1;
+        // TS `fuzzyContent.split("").length - 1` (edit-diff.ts:131) counts UTF-16
+        // code units; code points would differ for non-BMP content.
+        return utf16_len(&fuzzy_content);
     }
     fuzzy_content.matches(&fuzzy_old_text).count()
 }
@@ -341,7 +354,7 @@ pub fn apply_edits_to_normalized_content(
 }
 
 // ---------------------------------------------------------------------------
-// Line diff (port of the `diff` package's diffLines, LCS over lines)
+// Line diff (port of the `diff` package's diffLines: Myers O(ND))
 // ---------------------------------------------------------------------------
 
 struct DiffPart {
@@ -350,57 +363,287 @@ struct DiffPart {
     removed: bool,
 }
 
-/// Port of `Diff.diffLines(oldContent, newContent)` for the edit-tool input shape.
+/// One run of tokens in the edit script: the port of the `component` objects
+/// that jsdiff's `Diff.addToPath` / `Diff.extractCommon` build
+/// (`diff@9.0.0` libesm/diff/base.js).
 ///
-/// The `diff` package compares lines (keeping their trailing newline) with an
-/// LCS; the parts below are emitted in the same order and with the same
-/// `added`/`removed` flags the renderer relies on.
-fn diff_lines(old_content: &str, new_content: &str) -> Vec<DiffPart> {
-    let old_lines = split_keeping_newlines(old_content);
-    let new_lines = split_keeping_newlines(new_content);
+/// jsdiff links components with `previousComponent` object references; the port
+/// stores an index into [`DiffGraph::components`] instead, so a 20k-line edit
+/// script cannot blow the stack when the chain is dropped.
+struct DiffComponent {
+    count: usize,
+    added: bool,
+    removed: bool,
+    previous: Option<usize>,
+}
 
-    let n = old_lines.len();
-    let m = new_lines.len();
-    // lcs[i][j] = length of the longest common subsequence of old_lines[i..] and new_lines[j..]
-    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            lcs[i][j] = if old_lines[i] == new_lines[j] {
-                lcs[i + 1][j + 1] + 1
-            } else {
-                std::cmp::max(lcs[i + 1][j], lcs[i][j + 1])
-            };
+/// The component arena plus one search path of the Myers edit graph
+/// (`bestPath[diagonalPath]` in jsdiff holds `{ oldPos, lastComponent }`).
+struct DiffGraph {
+    components: Vec<DiffComponent>,
+}
+
+/// jsdiff `{ oldPos, lastComponent }`.
+#[derive(Clone, Copy)]
+struct EditPath {
+    old_pos: isize,
+    last_component: Option<usize>,
+}
+
+impl DiffGraph {
+    fn new() -> Self {
+        DiffGraph {
+            components: Vec::new(),
         }
     }
+
+    fn push_component(
+        &mut self,
+        count: usize,
+        added: bool,
+        removed: bool,
+        previous: Option<usize>,
+    ) -> usize {
+        self.components.push(DiffComponent {
+            count,
+            added,
+            removed,
+            previous,
+        });
+        self.components.len() - 1
+    }
+
+    /// jsdiff `Diff.addToPath` (base.js): extend `path` by one added or removed
+    /// token, merging with the previous component when the change type repeats.
+    fn add_to_path(
+        &mut self,
+        path: EditPath,
+        added: bool,
+        removed: bool,
+        old_pos_inc: isize,
+    ) -> EditPath {
+        if let Some(last) = path.last_component.map(|index| &self.components[index]) {
+            if last.added == added && last.removed == removed {
+                let count = last.count + 1;
+                let previous = last.previous;
+                return EditPath {
+                    old_pos: path.old_pos + old_pos_inc,
+                    last_component: Some(self.push_component(count, added, removed, previous)),
+                };
+            }
+        }
+        EditPath {
+            old_pos: path.old_pos + old_pos_inc,
+            last_component: Some(self.push_component(1, added, removed, path.last_component)),
+        }
+    }
+
+    /// jsdiff `Diff.extractCommon` (base.js): consume the run of equal tokens
+    /// that follows `base_path` on `diagonal_path` and return the new `newPos`.
+    fn extract_common(
+        &mut self,
+        base_path: &mut EditPath,
+        new_tokens: &[&str],
+        old_tokens: &[&str],
+        diagonal_path: isize,
+    ) -> isize {
+        let new_len = new_tokens.len() as isize;
+        let old_len = old_tokens.len() as isize;
+        let mut old_pos = base_path.old_pos;
+        let mut new_pos = old_pos - diagonal_path;
+        let mut common_count: usize = 0;
+        while new_pos + 1 < new_len
+            && old_pos + 1 < old_len
+            && old_tokens[(old_pos + 1) as usize] == new_tokens[(new_pos + 1) as usize]
+        {
+            new_pos += 1;
+            old_pos += 1;
+            common_count += 1;
+        }
+        if common_count > 0 {
+            base_path.last_component =
+                Some(self.push_component(common_count, false, false, base_path.last_component));
+        }
+        base_path.old_pos = old_pos;
+        new_pos
+    }
+
+    /// jsdiff `Diff.diffWithOptionsObj` (base.js) for the default option set the
+    /// edit tool uses: Myers O(ND) with jsdiff's edge-tracking optimization,
+    /// O(D) live paths instead of an O(n*m) DP matrix, and jsdiff's exact
+    /// tie-breaking (`!canRemove || (canAdd && removePath.oldPos < addPath.oldPos)`)
+    /// so the part order matches `Diff.diffLines(oldContent, newContent)`
+    /// (edit-diff.ts:259).
+    ///
+    /// Returns the component index of the edit-script head, or `None` for the
+    /// empty diff (jsdiff's `buildValues(undefined, ...)`).
+    fn diff_components(&mut self, old_tokens: &[&str], new_tokens: &[&str]) -> Option<usize> {
+        let new_len = new_tokens.len() as isize;
+        let old_len = old_tokens.len() as isize;
+        let max_edit_length = new_len + old_len;
+
+        let mut best_path: HashMap<isize, EditPath> = HashMap::new();
+        best_path.insert(
+            0,
+            EditPath {
+                old_pos: -1,
+                last_component: None,
+            },
+        );
+
+        // Seed editLength = 0: the content starts with the same values.
+        let mut new_pos = {
+            let mut seed = *best_path.get(&0).expect("seed path exists");
+            let new_pos = self.extract_common(&mut seed, new_tokens, old_tokens, 0);
+            best_path.insert(0, seed);
+            new_pos
+        };
+        {
+            let seed = best_path.get(&0).expect("seed path exists");
+            if seed.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
+                return seed.last_component;
+            }
+        }
+
+        // `-Infinity` / `Infinity` in jsdiff: half the range keeps `± 1` in bounds.
+        let mut min_diagonal_to_consider = isize::MIN / 2;
+        let mut max_diagonal_to_consider = isize::MAX / 2;
+
+        let mut edit_length: isize = 1;
+        while edit_length <= max_edit_length {
+            let mut diagonal_path = std::cmp::max(min_diagonal_to_consider, -edit_length);
+            let last_diagonal = std::cmp::min(max_diagonal_to_consider, edit_length);
+            while diagonal_path <= last_diagonal {
+                // Read both neighbours before clearing the one that is consumed.
+                let remove_path = best_path.get(&(diagonal_path - 1)).copied();
+                let add_path = best_path.get(&(diagonal_path + 1)).copied();
+                if remove_path.is_some() {
+                    best_path.remove(&(diagonal_path - 1));
+                }
+
+                let mut can_add = false;
+                if let Some(add_path) = add_path {
+                    let add_path_new_pos = add_path.old_pos - diagonal_path;
+                    can_add = add_path_new_pos >= 0 && add_path_new_pos < new_len;
+                }
+                let can_remove = remove_path.is_some_and(|path| path.old_pos + 1 < old_len);
+
+                if !can_add && !can_remove {
+                    best_path.remove(&diagonal_path);
+                    diagonal_path += 2;
+                    continue;
+                }
+
+                // Pick the branch whose position in the old text is farthest
+                // from the origin, exactly like jsdiff's comparison order.
+                let prefer_add = !can_remove
+                    || (can_add
+                        && remove_path.expect("canRemove implies a path").old_pos
+                            < add_path.expect("canAdd implies a path").old_pos);
+                let mut base_path = if prefer_add {
+                    self.add_to_path(add_path.expect("canAdd implies a path"), true, false, 0)
+                } else {
+                    self.add_to_path(
+                        remove_path.expect("canRemove implies a path"),
+                        false,
+                        true,
+                        1,
+                    )
+                };
+
+                new_pos =
+                    self.extract_common(&mut base_path, new_tokens, old_tokens, diagonal_path);
+                if base_path.old_pos + 1 >= old_len && new_pos + 1 >= new_len {
+                    return base_path.last_component;
+                }
+
+                let reached_old_end = base_path.old_pos + 1 >= old_len;
+                let reached_new_end = new_pos + 1 >= new_len;
+                best_path.insert(diagonal_path, base_path);
+                // Past the edge of the edit graph no farther diagonal can help.
+                if reached_old_end {
+                    max_diagonal_to_consider =
+                        std::cmp::min(max_diagonal_to_consider, diagonal_path - 1);
+                }
+                if reached_new_end {
+                    min_diagonal_to_consider =
+                        std::cmp::max(min_diagonal_to_consider, diagonal_path + 1);
+                }
+                diagonal_path += 2;
+            }
+            edit_length += 1;
+        }
+        None
+    }
+}
+
+/// jsdiff `Diff.buildValues` (base.js): walk the component chain from the head
+/// back to the tail, reverse it, and materialize each component's token run.
+/// `LineDiff.useLongestToken` is false, so the unchanged/added components always
+/// take the new-text branch.
+fn build_diff_parts(
+    graph: &DiffGraph,
+    last_component: Option<usize>,
+    old_tokens: &[&str],
+    new_tokens: &[&str],
+) -> Vec<DiffPart> {
+    let mut components: Vec<&DiffComponent> = Vec::new();
+    let mut next = last_component;
+    while let Some(index) = next {
+        let component = &graph.components[index];
+        next = component.previous;
+        components.push(component);
+    }
+    components.reverse();
 
     let mut parts: Vec<DiffPart> = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < n && j < m {
-        if old_lines[i] == new_lines[j] {
-            push_part(&mut parts, &old_lines[i], false, false);
-            i += 1;
-            j += 1;
-        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
-            push_part(&mut parts, &old_lines[i], false, true);
-            i += 1;
+    let mut new_pos = 0usize;
+    let mut old_pos = 0usize;
+    for component in components {
+        let value = if !component.removed {
+            let value = new_tokens[new_pos..new_pos + component.count].concat();
+            new_pos += component.count;
+            if !component.added {
+                old_pos += component.count;
+            }
+            value
         } else {
-            push_part(&mut parts, &new_lines[j], true, false);
-            j += 1;
-        }
-    }
-    while i < n {
-        push_part(&mut parts, &old_lines[i], false, true);
-        i += 1;
-    }
-    while j < m {
-        push_part(&mut parts, &new_lines[j], true, false);
-        j += 1;
+            let value = old_tokens[old_pos..old_pos + component.count].concat();
+            old_pos += component.count;
+            value
+        };
+        push_part(&mut parts, &value, component.added, component.removed);
     }
     parts
 }
 
+/// Port of `Diff.diffLines(oldContent, newContent)` (edit-diff.ts:259) for the
+/// edit-tool input shape: jsdiff's `tokenize` (lines keep their trailing
+/// newline) plus `removeEmpty`, then the Myers edit script. The parts are
+/// emitted in jsdiff's order with the `added`/`removed` flags the renderer
+/// relies on.
+fn diff_lines(old_content: &str, new_content: &str) -> Vec<DiffPart> {
+    let old_lines = split_keeping_newlines(old_content);
+    let new_lines = split_keeping_newlines(new_content);
+    let old_tokens: Vec<&str> = old_lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let new_tokens: Vec<&str> = new_lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    let mut graph = DiffGraph::new();
+    let last_component = graph.diff_components(&old_tokens, &new_tokens);
+    build_diff_parts(&graph, last_component, &old_tokens, &new_tokens)
+}
+
 /// JavaScript `splitLines` semantics: the trailing newline stays with its line
-/// and a trailing newline does not create an extra empty line.
+/// and a trailing newline does not create an extra empty line. Matches jsdiff's
+/// `tokenize` (`value.split(/(\n|\r\n)/)` with the separators merged back).
 fn split_keeping_newlines(content: &str) -> Vec<String> {
     if content.is_empty() {
         return Vec::new();
@@ -733,6 +976,89 @@ mod tests {
         assert_eq!(applied.new_content, "AA b CC");
     }
 
+    #[test]
+    fn fuzzy_find_text_counts_match_length_in_utf16_units() {
+        // TS `matchLength: oldText.length` (edit-diff.ts:91) is the UTF-16 length:
+        // "a\u{1F600}" is 3 code units, not 2 code points.
+        let result = fuzzy_find_text("a\u{1F600}b", "a\u{1F600}");
+        assert!(result.found);
+        assert!(!result.used_fuzzy_match);
+        assert_eq!(result.index, 0);
+        assert_eq!(result.match_length, 3);
+    }
+
+    #[test]
+    fn apply_edits_replaces_non_bmp_text_without_corruption() {
+        // TS edit-diff.ts:236-239 slices with `substring(matchIndex, matchIndex +
+        // matchLength)` in UTF-16 units, so an edit whose oldText ends with an
+        // astral character replaces exactly those units and leaves the rest of the
+        // file untouched. A code-point matchLength lands inside the surrogate pair
+        // and writes U+FFFD instead of the tail of the file.
+        let edits = vec![Edit {
+            old_text: "a\u{1F600}".to_string(),
+            new_text: "X".to_string(),
+        }];
+        let applied = apply_edits_to_normalized_content("a\u{1F600}b", &edits, "f.txt").expect("applied");
+        assert_eq!(applied.base_content, "a\u{1F600}b");
+        assert_eq!(applied.new_content, "Xb");
+        assert!(!applied.new_content.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn apply_edits_detects_overlap_after_non_bmp_text() {
+        // The overlap check (TS edit-diff.ts:226) compares
+        // `previous.matchIndex + previous.matchLength` in UTF-16 units. With a
+        // code-point matchLength the first edit spans 3 units instead of 4, so
+        // `3 > 3` is false and the overlapping second edit is applied silently.
+        let edits = vec![
+            Edit {
+                old_text: "\u{1F600}ab".to_string(),
+                new_text: "x".to_string(),
+            },
+            Edit {
+                old_text: "b".to_string(),
+                new_text: "y".to_string(),
+            },
+        ];
+        let error = apply_edits_to_normalized_content("\u{1F600}ab", &edits, "f.txt")
+            .expect_err("must reject");
+        assert_eq!(
+            error,
+            "edits[0] and edits[1] overlap in f.txt. Merge them into one edit or target disjoint regions."
+        );
+    }
+
+    #[test]
+    fn generate_diff_string_matches_jsdiff_part_order() {
+        // `Diff.diffLines` (jsdiff ^9.0.0, edit-diff.ts:259) runs Myers O(ND) with
+        // its own tie-breaking, so this edit script puts the added line first; the
+        // previous LCS DP emitted "-1 a / +1 b /  2 a" instead.
+        let (diff, first_changed_line) = generate_diff_string("a\na\n", "b\na\n", 4, 1);
+        assert_eq!(diff, "+1 b\n 1 a\n-2 a");
+        assert_eq!(first_changed_line, Some(1));
+    }
+
+    #[test]
+    fn diff_lines_handles_large_inputs_without_a_quadratic_matrix() {
+        // A 20k-line edit must not allocate the (n+1)x(m+1) DP matrix (20001^2
+        // usize cells ~= 3.2 GB) that the previous implementation built.
+        let old: String = (0..20_000)
+            .map(|index| format!("line {index} {{ \"k\": {index} }}\n"))
+            .collect();
+        let mut new = old.clone();
+        new = new.replace("line 0 {", "line 0 changed {");
+        new = new.replace("line 19999 {", "line 19999 changed {");
+        let (diff, first_changed_line) = generate_diff_string(&old, &new, 4, 1);
+        assert_eq!(first_changed_line, Some(1));
+        let removed_first = format!("-{} line 0 {{", pad_start("1", 5, ' '));
+        let added_first = format!("+{} line 0 changed {{", pad_start("1", 5, ' '));
+        let removed_last = "-20000 line 19999 {".to_string();
+        let added_last = "+20000 line 19999 changed {".to_string();
+        assert!(diff.contains(&removed_first), "missing removed first line in:\n{diff}");
+        assert!(diff.contains(&added_first), "missing added first line in:\n{diff}");
+        assert!(diff.contains(&removed_last), "missing removed last line in:\n{diff}");
+        assert!(diff.contains(&added_last), "missing added last line in:\n{diff}");
+    }
     #[test]
     fn apply_edits_rejects_empty_old_text() {
         let edits = vec![Edit {
