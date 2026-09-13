@@ -59,7 +59,7 @@ use crate::core::model_resolver::{
     find_initial_model, models_are_equal, resolve_cli_model, resolve_model_scope, FindInitialModelOptions,
     ResolveCliModelOptions, ScopedModel,
 };
-use crate::core::output_guard::{restore_stdout, take_over_stdout};
+use crate::core::output_guard::{restore_stdout, take_over_stdout, write_stdout};
 use crate::core::resource_loader::DefaultResourceLoaderOptions;
 use crate::core::sdk::{parse_thinking_level, CreateAgentSessionOptions};
 use crate::core::session_cwd::{
@@ -139,8 +139,20 @@ pub async fn read_piped_stdin() -> Option<String> {
         return None;
     }
 
-    let mut data = String::new();
-    let _ = std::io::stdin().read_to_string(&mut data);
+    let mut bytes = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut bytes);
+    decode_piped_stdin(&bytes)
+}
+
+/// `process.stdin.setEncoding("utf8")` + `data += chunk` + `resolve(data.trim() || undefined)`
+/// (`packages/coding-agent/src/main.ts:136-147`).
+///
+/// The TypeScript decodes each chunk as UTF-8 with U+FFFD replacement, so invalid
+/// bytes keep the content (mangled, but present). `read_to_string` instead fails
+/// with `InvalidData` and leaves the buffer empty or partial, which silently drops
+/// piped input, so the bytes are decoded lossily here.
+pub fn decode_piped_stdin(bytes: &[u8]) -> Option<String> {
+    let data = String::from_utf8_lossy(bytes);
     let trimmed = data.trim();
     if trimmed.is_empty() {
         None
@@ -314,6 +326,32 @@ pub fn should_ensure_interactive_daemon_for_startup(use_daemon_interactive: bool
     use_daemon_interactive && attach_agent.is_none()
 }
 
+/// The `daemonReady` gate of `packages/coding-agent/src/main.ts:1281`, resolved
+/// from the same `shouldUseDaemonClientRuntime(...)` decision the TypeScript
+/// computes at `main.ts:1259`:
+///
+/// ```ts
+/// const useDaemonClient = shouldUseDaemonClientRuntime({ appMode, ... });
+/// const useDaemonInteractive = useDaemonClient && appMode === "interactive";
+/// // ...
+/// let daemonReady = shouldEnsureInteractiveDaemonForStartup(useDaemonClient, publicCommand.attachAgent)
+/// ```
+///
+/// The gate is called with `useDaemonClient`, which is TRUE for print, json, rpc
+/// and acp (`shouldUseDaemonClient` only excludes daemon mode, the startup
+/// benchmark, `--help` and `--list-models`), so those modes also start the
+/// daemon and AWAIT it at `main.ts:1602` before `createDaemonClientConnection`.
+/// Gating them on `useDaemonInteractive` instead left `daemon_ready` as `None`,
+/// which made `await_daemon_ready` a no-op and raced the fire-and-forget
+/// `maybe_start_daemon_early`, so headless `--print` failed with exit 1 whenever
+/// the daemon was not already bound.
+pub fn should_start_daemon_ready_for_startup(
+    decision: &DaemonClientRuntimeDecision,
+    attach_agent: Option<&str>,
+) -> bool {
+    should_ensure_interactive_daemon_for_startup(should_use_daemon_client_runtime(decision), attach_agent)
+}
+
 #[derive(Clone)]
 pub struct AgentsViewStartupDecision {
     pub use_daemon_interactive: bool,
@@ -425,9 +463,10 @@ pub async fn prepare_initial_message(
 /// Prompt user for yes/no confirmation.
 pub fn prompt_confirm(message: &str) -> bool {
     crate::cli::daemon_stop_confirm::prompt_yes_no(message, &|prompt: &str| {
-        use std::io::Write;
-        print!("{prompt}");
-        let _ = std::io::stdout().flush();
+        // `createInterface({ input: process.stdin, output: process.stdout })`
+        // (`cli/daemon-stop-confirm.ts:20-28`): the question goes to the taken-over
+        // stdout, so it reaches stderr in --mode json instead of the JSON stream.
+        write_stdout(prompt);
         let mut answer = String::new();
         let _ = std::io::stdin().read_line(&mut answer);
         answer
@@ -464,9 +503,8 @@ async fn take_over_stale_daemon_or_exit(socket_path: &str) -> Arc<DaemonReadyHan
             stdin_is_tty: stdin_is_tty(),
             error: &|message: &str| eprintln!("{message}"),
             read_line: &|prompt: &str| {
-                use std::io::Write;
-                print!("{prompt}");
-                let _ = std::io::stdout().flush();
+                // Same guarded question stream as `prompt_confirm` above.
+                write_stdout(prompt);
                 let mut answer = String::new();
                 let _ = std::io::stdin().read_line(&mut answer);
                 answer
@@ -760,10 +798,16 @@ pub async fn create_session_manager(
             }
 
             crate::core::session_resolver::ResolvedSession::Global { path, cwd: resolved_cwd } => {
-                println!("{}", yellow(&format!("Session found in different project: {resolved_cwd}")));
+                // `main.ts:509-515` uses `console.log`, which the taken-over
+                // stdout (`core/output-guard.ts:18-27`) routes to stderr in
+                // --mode json, so these lines are routed through the same guard.
+                write_stdout(&format!(
+                    "{}\n",
+                    yellow(&format!("Session found in different project: {resolved_cwd}"))
+                ));
                 let should_fork = prompt_confirm("Fork this session into current directory?");
                 if !should_fork {
-                    println!("{}", dim("Aborted."));
+                    write_stdout(&format!("{}\n", dim("Aborted.")));
                     std::process::exit(0);
                 }
                 return Ok(fork_session_or_exit(&path, cwd, session_dir));
@@ -1170,7 +1214,7 @@ pub fn create_default_runtime_factory(
                     .as_ref()
                     .map(create_agent_session_options_from_creation),
             })
-            .await;
+            .await?;
             let PreparedRuntimeServices { services, session_options, diagnostics, .. } = prepared;
             let resolved_session_options =
                 resolve_runtime_session_options(&session_options, runtime_session_options.as_ref());
@@ -1225,7 +1269,15 @@ pub struct PrepareRuntimeServicesOptions {
 }
 
 /// `prepareRuntimeServices(options)`.
-pub async fn prepare_runtime_services(options: PrepareRuntimeServicesOptions) -> PreparedRuntimeServices {
+///
+/// The TypeScript returns a promise that REJECTS when
+/// `createAgentSessionServices` throws (`packages/coding-agent/src/main.ts:824-847`
+/// has no try/catch), so the failure travels out through
+/// `createAgentSessionRuntime` to `main()` and the CLI exits 1. The port returns
+/// the same rejection as `Err(String)` instead of panicking on it.
+pub async fn prepare_runtime_services(
+    options: PrepareRuntimeServicesOptions,
+) -> Result<PreparedRuntimeServices, String> {
     let config = options.config;
     let effective_agent_dir = config.agent_dir.clone().unwrap_or_else(|| options.agent_dir.clone());
     let auth_storage = AuthStorage::create(
@@ -1270,7 +1322,7 @@ pub async fn prepare_runtime_services(options: PrepareRuntimeServicesOptions) ->
         resource_loader_options: Some(resource_loader_options),
     })
     .await
-    .unwrap_or_else(|error| panic!("createAgentSessionServices failed: {error}"));
+    .map_err(|error| format!("createAgentSessionServices failed: {error}"))?;
 
     let mut diagnostics: Vec<AgentSessionRuntimeDiagnostic> = services.diagnostics.clone();
     diagnostics.extend(collect_settings_diagnostics(
@@ -1303,7 +1355,11 @@ pub async fn prepare_runtime_services(options: PrepareRuntimeServicesOptions) ->
                 Box::pin(async move { resolve_model_scope(&model_patterns, registry).await })
             })
             .await
-            .unwrap_or_default()
+            // `main.ts:858-860`: `await resolveModelScope(modelPatterns, modelRegistry)`
+            // has no try/catch, so a registry failure rejects out of
+            // `prepareRuntimeServices` and the CLI exits 1 rather than silently
+            // continuing with an empty model scope.
+            .map_err(|error| format!("resolveModelScope failed: {error}"))?
         }
         _ => Vec::new(),
     };
@@ -1357,13 +1413,13 @@ pub async fn prepare_runtime_services(options: PrepareRuntimeServicesOptions) ->
         }
     }
 
-    PreparedRuntimeServices {
+    Ok(PreparedRuntimeServices {
         services: Arc::new(services),
         scoped_models,
         session_options: built.options,
         cli_thinking_from_model: built.cli_thinking_from_model,
         diagnostics,
-    }
+    })
 }
 
 /// `resolvePreparedStartupModel(options)`.
@@ -2680,13 +2736,15 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
         take_over_stdout();
     }
 
+    // `main.ts:1200-1207`: these `console.log` calls run AFTER `takeOverStdout`
+    // (`main.ts:1195-1198`), so while the takeover is active they reach stderr.
     if parsed.version == Some(true) {
-        println!("{VERSION}");
+        write_stdout(&format!("{VERSION}\n"));
         host.exit(0);
         return;
     }
     if parsed.help == Some(true) {
-        println!("{}", format_top_level_help());
+        write_stdout(&format!("{}\n", format_top_level_help()));
         host.exit(0);
         return;
     }
@@ -2705,7 +2763,8 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
                 return;
             }
         };
-        println!("Exported to: {result}");
+        // `main.ts:1219`: `console.log("Exported to: ...")` under the takeover.
+        write_stdout(&format!("Exported to: {result}\n"));
         host.exit(0);
         return;
     }
@@ -2767,11 +2826,12 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
         .as_ref()
         .map(|factories| !factories.is_empty())
         .unwrap_or(false);
-    let use_daemon_client = should_use_daemon_client_runtime(&DaemonClientRuntimeDecision {
+    let daemon_client_runtime_decision = DaemonClientRuntimeDecision {
         decision: daemon_client_startup_decision(&parsed, &app_mode, startup_benchmark),
         owned_session_worker: host.is_owned_session_worker_process(),
         has_process_local_extension_factories,
-    });
+    };
+    let use_daemon_client = should_use_daemon_client_runtime(&daemon_client_runtime_decision);
     let use_daemon_interactive = use_daemon_client && app_mode == APP_MODE_INTERACTIVE;
 
     // Decide the final runtime cwd before creating cwd-bound runtime services.
@@ -2788,8 +2848,11 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
     let daemon_socket_path = parsed.daemon_socket.clone().unwrap_or_else(default_daemon_socket_path);
     // Kick off daemon spawn/readiness immediately so it overlaps session-manager
     // and runtime-services preparation; attach only connects to an existing daemon.
-    let mut daemon_ready = if should_ensure_interactive_daemon_for_startup(
-        use_daemon_interactive,
+    let mut daemon_ready = if should_start_daemon_ready_for_startup(
+        // packages/coding-agent/src/main.ts:1281 passes `useDaemonClient` (not the
+        // interactive-only variant) so print/json/rpc/acp also start and await the
+        // daemon before createDaemonClientConnection.
+        &daemon_client_runtime_decision,
         public_outcome.attach_agent.as_deref(),
     ) {
         Some(DaemonReadyHandle::start(&daemon_socket_path))
@@ -2998,7 +3061,9 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
         return;
     }
     if use_daemon_interactive {
-        let prepared = prepare_runtime_services(PrepareRuntimeServicesOptions {
+        // `main.ts:1404-1410` has no try/catch here, so a services-creation
+        // failure rejects out of `main()` and the CLI exits 1.
+        let prepared = match prepare_runtime_services(PrepareRuntimeServicesOptions {
             config: default_session_config.clone(),
             cwd: session_manager_cwd.clone(),
             agent_dir: agent_dir.clone(),
@@ -3006,7 +3071,15 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
             extension_factories: options.extension_factories.clone(),
             session_options_override: None,
         })
-        .await;
+        .await
+        {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                eprintln!("{message}");
+                host.exit(1);
+                return;
+            }
+        };
         let services = Arc::clone(&prepared.services);
         let scoped_models = prepared.scoped_models.clone();
         let settings_manager = Arc::clone(&services.settings_manager);
@@ -3388,11 +3461,14 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
                 models: registry.get_available(),
             }
         };
+        // `list-models.ts` prints its table with `console.log`, which the
+        // taken-over stdout (`core/output-guard.ts:18-27`, active for every
+        // non-interactive mode via `main.ts:1195-1198`) routes to stderr.
         list_models(
             &adapter,
             search_pattern.as_deref(),
             &ListModelsIo {
-                log: &|message: &str| println!("{message}"),
+                log: &|message: &str| write_stdout(&format!("{message}\n")),
                 error: &|message: &str| eprintln!("{message}"),
             },
         );
@@ -3773,6 +3849,85 @@ mod tests {
         assert!(should_ensure_interactive_daemon_for_startup(true, None));
         assert!(!should_ensure_interactive_daemon_for_startup(true, Some("a1")));
         assert!(!should_ensure_interactive_daemon_for_startup(false, None));
+    }
+
+    #[test]
+    fn print_mode_ensures_the_daemon_like_the_typescript() {
+        // `main.ts:1281` gates `daemonReady` on `useDaemonClient`, so the headless
+        // --print path starts the daemon and AWAITS it at `main.ts:1602` before
+        // `createDaemonClientConnection`. Gating on `useDaemonInteractive` leaves
+        // print mode with `daemonReady === undefined`, which makes
+        // `awaitDaemonReady` (main.ts:419) a no-op and lets the connect race the
+        // fire-and-forget `maybeStartDaemonEarly`.
+        let decision = |app_mode: &str| DaemonClientRuntimeDecision {
+            decision: DaemonClientStartupDecision {
+                app_mode: app_mode.to_string(),
+                startup_benchmark: false,
+                no_session: None,
+                help: None,
+                list_models: None,
+            },
+            owned_session_worker: false,
+            has_process_local_extension_factories: false,
+        };
+
+        for app_mode in ["print", "json", "rpc", "acp", "interactive"] {
+            assert!(
+                should_start_daemon_ready_for_startup(&decision(app_mode), None),
+                "{app_mode} must start and await the daemon"
+            );
+            // `attachAgent !== undefined` keeps the existing-daemon-only contract.
+            assert!(!should_start_daemon_ready_for_startup(&decision(app_mode), Some("a1")));
+        }
+
+        // The interactive-only variant is FALSE for every headless mode, which is
+        // what made the old gate a no-op. If the gate regresses to it, the
+        // assertions above fail with "print must start and await the daemon".
+        for app_mode in ["print", "json", "rpc", "acp"] {
+            let runtime_decision = decision(app_mode);
+            let use_daemon_client = should_use_daemon_client_runtime(&runtime_decision);
+            let use_daemon_interactive =
+                use_daemon_client && runtime_decision.decision.app_mode == APP_MODE_INTERACTIVE;
+            assert!(use_daemon_client, "{app_mode} uses the daemon client");
+            assert!(
+                !should_ensure_interactive_daemon_for_startup(use_daemon_interactive, None),
+                "{app_mode} must not be gated on the interactive-only flag"
+            );
+        }
+
+        // Daemon mode, the benchmark, --help, --list-models and an owned session
+        // worker never start a daemon for themselves.
+        assert!(!should_start_daemon_ready_for_startup(&decision(APP_MODE_DAEMON), None));
+        let mut benchmark = decision("print");
+        benchmark.decision.startup_benchmark = true;
+        assert!(!should_start_daemon_ready_for_startup(&benchmark, None));
+        let mut help = decision("print");
+        help.decision.help = Some(true);
+        assert!(!should_start_daemon_ready_for_startup(&help, None));
+        let mut owned_worker = decision("print");
+        owned_worker.owned_session_worker = true;
+        assert!(!should_start_daemon_ready_for_startup(&owned_worker, None));
+        let mut list_models = decision("print");
+        list_models.decision.list_models = Some(ListModelsValue::All);
+        assert!(!should_start_daemon_ready_for_startup(&list_models, None));
+    }
+
+    #[test]
+    fn non_utf8_piped_stdin_is_decoded_lossily_not_dropped() {
+        // `main.ts:136-147`: `setEncoding("utf8")` keeps the chunk content, so
+        // the invalid bytes become U+FFFD instead of vanishing.
+        assert_eq!(decode_piped_stdin(b"hello \xff world"), Some("hello \u{fffd} world".to_string()));
+        assert_eq!(decode_piped_stdin(b"\xff\xfe"), Some("\u{fffd}\u{fffd}".to_string()));
+        // Surrounding ASCII survives so the prompt is not empty.
+        assert!(decode_piped_stdin(b"before \x80 after")
+            .expect("content is kept")
+            .starts_with("before "));
+        // The `data.trim() || undefined` falsy check still yields None.
+        assert_eq!(decode_piped_stdin(b""), None);
+        assert_eq!(decode_piped_stdin(b"   \n"), None);
+        // Trim runs AFTER the lossy decode, so an invalid byte is content even
+        // with surrounding whitespace.
+        assert_eq!(decode_piped_stdin(b" \xff "), Some("\u{fffd}".to_string()));
     }
 
     #[test]
