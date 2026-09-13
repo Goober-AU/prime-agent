@@ -350,14 +350,24 @@ fn stringify_settings(settings: &Settings) -> String {
     serde_json::to_string_pretty(&Value::Object(settings.clone())).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// `JSON.parse` restricted to the object shape the settings file must have.
+/// The throw `SettingsManager.migrateSettings(JSON.parse(content))` raises for a
+/// JSON document that is not an object: `"queueMode" in 5` is a TypeError
+/// (settings-manager.ts:411-412, 428), so `tryLoadFromStorage` records
+/// "failed to parse" instead of silently using defaults
+/// (settings-manager.ts:419-423).
+const NON_OBJECT_SETTINGS_ERROR: &str = "Cannot use 'in' operator to search for 'queueMode' in settings: JSON.parse result is not an object";
+
+/// `JSON.parse` widened to the object shape the settings file must have.
+///
+/// A valid JSON value of another shape (`null`, `5`, `"x"`, `[]`) is an error
+/// here, matching the `migrateSettings` TypeError it raises in the reference.
 fn parse_settings(content: &str) -> Result<Settings, SettingsErrorValue> {
     let value: Value = serde_json::from_str(content).map_err(|error| SettingsErrorValue {
         message: error.to_string(),
     })?;
     match value {
         Value::Object(map) => Ok(map),
-        _ => Ok(Map::new()),
+        _ => Err(SettingsErrorValue::new(NON_OBJECT_SETTINGS_ERROR)),
     }
 }
 
@@ -432,7 +442,33 @@ fn deep_merge_settings(base: &Settings, overrides: &Settings) -> Settings {
 pub trait SettingsStorage: Send + Sync {
     /// `withLock(scope, fn)` - `fn` receives the current file content and returns
     /// the next content, or `None` to leave the file untouched.
-    fn with_lock(&self, scope: &str, update: &mut dyn FnMut(Option<&str>) -> Option<String>);
+    ///
+    /// The reference `withLock` throws when the callback, the read or the write
+    /// throws (settings-manager.ts:281-313, inside a `try` whose `finally`
+    /// releases the lock). That throw has no Rust equivalent for a `FnMut`
+    /// callback, so it is reported instead: the failure is parked with
+    /// [`SettingsStorage::record_failure`] (what the reference `enqueueWrite`
+    /// `.catch` turns into a settings error, settings-manager.ts:583-585) and
+    /// `false` is returned.
+    ///
+    /// `true` means the callback ran and its content (if any) reached the file.
+    fn with_lock(&self, scope: &str, update: &mut dyn FnMut(Option<&str>) -> Option<String>) -> bool;
+
+    /// Records a failure raised while no `SettingsManager` could observe it.
+    ///
+    /// The reference has no analogue because its `withLock` throws synchronously
+    /// into the caller (settings-manager.ts:289); here the failure is parked on
+    /// this storage and replayed by the next
+    /// [`SettingsManager::drain_errors`] for that scope.
+    fn record_failure(&self, scope: &str, error: SettingsErrorValue);
+
+    /// Takes the parked failures of `scope`, in the order they happened.
+    fn take_failures(&self, scope: &str) -> Vec<SettingsErrorValue>;
+}
+
+/// `Failed to acquire settings lock for ${path}: ${error}` as a settings error.
+fn lock_error(path: &str, error: &std::io::Error) -> SettingsErrorValue {
+    SettingsErrorValue::new(format!("Failed to acquire settings lock for {path}: {error}"))
 }
 
 /// Release guard for the local `proper-lockfile` emulation.
@@ -451,6 +487,7 @@ impl Drop for LockRelease {
 pub struct FileSettingsStorage {
     global_settings_path: String,
     project_settings_path: String,
+    failures: Mutex<Vec<SettingsError>>,
 }
 
 impl FileSettingsStorage {
@@ -458,7 +495,39 @@ impl FileSettingsStorage {
         FileSettingsStorage {
             global_settings_path: join_path(agent_dir, "settings.json"),
             project_settings_path: join_path(&join_path(cwd, CONFIG_DIR_NAME), "settings.json"),
+            failures: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Records a lock/read/write failure raised while no `SettingsManager`
+    /// could observe it; the reference throws into `withLock`'s caller instead
+    /// (settings-manager.ts:289) and the caller records it
+    /// (settings-manager.ts:583-585).
+    fn record_failure(&self, scope: &str, error: SettingsErrorValue) {
+        self.failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(SettingsError {
+                scope: scope.to_string(),
+                error,
+            });
+    }
+
+    fn take_failures(&self, scope: &str) -> Vec<SettingsErrorValue> {
+        let mut parked = self
+            .failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut taken: Vec<SettingsErrorValue> = Vec::new();
+        parked.retain(|entry| {
+            if entry.scope == scope {
+                taken.push(entry.error.clone());
+                false
+            } else {
+                true
+            }
+        });
+        taken
     }
 
     fn path_for(&self, scope: &str) -> &str {
@@ -472,9 +541,16 @@ impl FileSettingsStorage {
     /// `acquireLockSyncWithRetry`: `proper-lockfile` creates `<file>.lock` and
     /// throws ELOCKED while it exists; this retries ELOCKED 10 times, 20ms apart.
     ///
+    /// The reference rethrows any non-ELOCKED error and the last ELOCKED error
+    /// (settings-manager.ts:261-278: `if (code !== "ELOCKED" || attempt ===
+    /// maxAttempts) { throw error; }`), so this returns the error instead of
+    /// panicking: the load path turns it into a recorded `SettingsError` and the
+    /// write path turns it into a recorded failure (settings-manager.ts:419-423
+    /// `catch (error) { return { settings: {}, error: error as Error }; }`).
+    ///
     /// `onCompromised` has no equivalent here (the lock directory is only ever
     /// removed by its owner), so a compromised lock can never be observed.
-    fn acquire_lock_sync_with_retry(path: &str) -> LockRelease {
+    fn acquire_lock_sync_with_retry(path: &str) -> Result<LockRelease, SettingsErrorValue> {
         const MAX_ATTEMPTS: u32 = 10;
         const DELAY_MS: u64 = 20;
         let lock_path = PathBuf::from(format!("{path}.lock"));
@@ -482,11 +558,11 @@ impl FileSettingsStorage {
 
         for attempt in 1..=MAX_ATTEMPTS {
             match std::fs::create_dir(&lock_path) {
-                Ok(()) => return LockRelease { path: lock_path },
+                Ok(()) => return Ok(LockRelease { path: lock_path }),
                 Err(error) => {
                     let locked = error.kind() == std::io::ErrorKind::AlreadyExists;
                     if !locked || attempt == MAX_ATTEMPTS {
-                        panic!("Failed to acquire settings lock for {path}: {error}");
+                        return Err(lock_error(path, &error));
                     }
                     last_error = Some(error);
                     let start = std::time::Instant::now();
@@ -498,22 +574,40 @@ impl FileSettingsStorage {
             }
         }
 
-        match last_error {
-            Some(error) => panic!("Failed to acquire settings lock for {path}: {error}"),
-            None => panic!("Failed to acquire settings lock"),
-        }
+        Err(match last_error {
+            Some(error) => lock_error(path, &error),
+            None => SettingsErrorValue::new("Failed to acquire settings lock"),
+        })
     }
 }
 
 impl SettingsStorage for FileSettingsStorage {
-    fn with_lock(&self, scope: &str, update: &mut dyn FnMut(Option<&str>) -> Option<String>) {
+    fn record_failure(&self, scope: &str, error: SettingsErrorValue) {
+        FileSettingsStorage::record_failure(self, scope, error);
+    }
+
+    fn take_failures(&self, scope: &str) -> Vec<SettingsErrorValue> {
+        FileSettingsStorage::take_failures(self, scope)
+    }
+
+    fn with_lock(&self, scope: &str, update: &mut dyn FnMut(Option<&str>) -> Option<String>) -> bool {
         let path = self.path_for(scope).to_string();
         let dir = parent_dir(&path);
 
         let mut release: Option<LockRelease> = None;
         let file_exists = Path::new(&path).exists();
         if file_exists {
-            release = Some(FileSettingsStorage::acquire_lock_sync_with_retry(&path));
+            match FileSettingsStorage::acquire_lock_sync_with_retry(&path) {
+                Ok(guard) => release = Some(guard),
+                Err(error) => {
+                    // `proper-lockfile` throws out of `withLock`
+                    // (settings-manager.ts:289); the caller turns that into a
+                    // settings error (settings-manager.ts:419-423) and the file
+                    // is left untouched.
+                    self.record_failure(scope, error);
+                    return false;
+                }
+            }
         }
         let current = if file_exists {
             std::fs::read_to_string(&path).ok()
@@ -526,7 +620,13 @@ impl SettingsStorage for FileSettingsStorage {
                 let _ = std::fs::create_dir_all(&dir);
             }
             if release.is_none() {
-                release = Some(FileSettingsStorage::acquire_lock_sync_with_retry(&path));
+                match FileSettingsStorage::acquire_lock_sync_with_retry(&path) {
+                    Ok(guard) => release = Some(guard),
+                    Err(error) => {
+                        self.record_failure(scope, error);
+                        return false;
+                    }
+                }
                 // The first-write read ran unlocked; a racing first writer may have landed since.
                 if Path::new(&path).exists() {
                     next = update(std::fs::read_to_string(&path).ok().as_deref());
@@ -543,11 +643,13 @@ impl SettingsStorage for FileSettingsStorage {
                         ..Default::default()
                     },
                 ) {
-                    panic!("{error}");
+                    self.record_failure(scope, SettingsErrorValue::new(error.to_string()));
+                    return false;
                 }
             }
         }
         drop(release);
+        true
     }
 }
 
@@ -556,6 +658,7 @@ impl SettingsStorage for FileSettingsStorage {
 pub struct InMemorySettingsStorage {
     global: Mutex<Option<String>>,
     project: Mutex<Option<String>>,
+    failures: Mutex<Vec<SettingsError>>,
 }
 
 impl InMemorySettingsStorage {
@@ -566,7 +669,34 @@ impl InMemorySettingsStorage {
 }
 
 impl SettingsStorage for InMemorySettingsStorage {
-    fn with_lock(&self, scope: &str, update: &mut dyn FnMut(Option<&str>) -> Option<String>) {
+    fn record_failure(&self, scope: &str, error: SettingsErrorValue) {
+        self.failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(SettingsError {
+                scope: scope.to_string(),
+                error,
+            });
+    }
+
+    fn take_failures(&self, scope: &str) -> Vec<SettingsErrorValue> {
+        let mut parked = self
+            .failures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut taken: Vec<SettingsErrorValue> = Vec::new();
+        parked.retain(|entry| {
+            if entry.scope == scope {
+                taken.push(entry.error.clone());
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
+    fn with_lock(&self, scope: &str, update: &mut dyn FnMut(Option<&str>) -> Option<String>) -> bool {
         let slot = if scope == SETTINGS_SCOPE_GLOBAL {
             &self.global
         } else {
@@ -579,6 +709,7 @@ impl SettingsStorage for InMemorySettingsStorage {
                 *guard = Some(next);
             }
         }
+        true
     }
 }
 
@@ -604,10 +735,11 @@ fn join_path(base: &str, leaf: &str) -> String {
 }
 
 /// `getAgentDir()` from config.ts (slice ca-root) - private until that slice lands.
+///
+/// `const envDir = process.env[ENV_AGENT_DIR];` reads only the piConfig-derived
+/// var (config.ts:523-528), so `PI_CODING_AGENT_DIR` is not a fallback.
 fn get_agent_dir() -> String {
-    let env_dir = std::env::var("PRIME_AGENT_CODING_AGENT_DIR")
-        .or_else(|_| std::env::var("PI_CODING_AGENT_DIR"))
-        .unwrap_or_default();
+    let env_dir = std::env::var("PRIME_AGENT_CODING_AGENT_DIR").unwrap_or_default();
     if !env_dir.is_empty() {
         return expand_tilde_path(&env_dir);
     }
@@ -735,7 +867,8 @@ pub struct SettingsManager {
     /// Track if project settings file had parse errors.
     project_settings_load_error: Option<SettingsErrorValue>,
     /// Pending writes. TypeScript chains promises eagerly; this port keeps the
-    /// same order and runs each task at `flush()`/`reload()`.
+    /// same order and runs each task here at enqueue time, like the
+    /// `.then()` continuation the reference enqueues.
     write_queue: Vec<WriteTask>,
     errors: Vec<SettingsError>,
 }
@@ -817,10 +950,21 @@ impl SettingsManager {
 
     fn load_from_storage(storage: &dyn SettingsStorage, scope: &str) -> Result<Settings, SettingsErrorValue> {
         let mut content: Option<String> = None;
-        storage.with_lock(scope, &mut |current| {
+        let completed = storage.with_lock(scope, &mut |current| {
             content = current.map(|value| value.to_string());
             None
         });
+
+        // A failed lock or read surfaces as the error of the scope:
+        // `loadFromStorage` throws there (settings-manager.ts:289) and
+        // `tryLoadFromStorage` catches it (settings-manager.ts:419-423).
+        if !completed {
+            return Err(storage
+                .take_failures(scope)
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| SettingsErrorValue::new("Failed to read settings")));
+        }
 
         let Some(content) = content else {
             return Ok(Settings::new());
@@ -1051,12 +1195,24 @@ impl SettingsManager {
         modified_fields: &BTreeSet<String>,
         modified_nested_fields: &NestedModifiedFields,
     ) {
+        let failure_sink: Arc<dyn SettingsStorage> = Arc::clone(storage);
         storage.with_lock(scope, &mut |current| {
             let current_file_settings = match current {
-                Some(current) if !current.is_empty() => match parse_settings(current) {
-                    Ok(parsed) => SettingsManager::migrate_settings(parsed),
-                    Err(_) => Settings::new(),
-                },
+                Some(current) if !current.is_empty() => {
+                    match parse_settings(current) {
+                        Ok(parsed) => SettingsManager::migrate_settings(parsed),
+                        Err(error) => {
+                            // settings-manager.ts:602-605 runs
+                            // `SettingsManager.migrateSettings(JSON.parse(current))`
+                            // inside the `withLock` callback, so the parse throw
+                            // aborts the write and the corrupt file is preserved
+                            // for repair; the throw is recorded by the
+                            // `enqueueWrite` `.catch` (settings-manager.ts:583-585).
+                            failure_sink.record_failure(scope, error);
+                            return None;
+                        }
+                    }
+                }
                 _ => Settings::new(),
             };
             let mut merged_settings: Settings = current_file_settings.clone();
@@ -1123,6 +1279,11 @@ impl SettingsManager {
                 );
             }),
         );
+        // settings-manager.ts:577-585 chains the write at microtask time
+        // (`this.writeQueue = this.writeQueue.then(() => { task(); ... })`), so
+        // the file is written when `save()` runs and does not wait for an
+        // explicit `flush()`.
+        self.flush_sync();
     }
 
     fn save_project_settings(&mut self, settings: Settings) {
@@ -1157,6 +1318,9 @@ impl SettingsManager {
                 );
             }),
         );
+        // settings-manager.ts:649-669 saves project settings through the same
+        // eager `enqueueWrite` chain, so the write runs here too.
+        self.flush_sync();
     }
 
     /// Runs the queued writes in order. A failing write is recorded as a
@@ -1168,33 +1332,84 @@ impl SettingsManager {
     pub(crate) fn flush_sync(&mut self) {
         let queue = std::mem::take(&mut self.write_queue);
         for WriteTask { scope, task } in queue {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()));
-            match result {
-                Ok(()) => self.clear_modified_scope(&scope),
-                Err(payload) => {
-                    let message = payload
-                        .downcast_ref::<String>()
-                        .cloned()
-                        .or_else(|| payload.downcast_ref::<&str>().map(|value| value.to_string()))
-                        .unwrap_or_else(|| "settings write failed".to_string());
-                    self.record_error(&scope, SettingsErrorValue::new(message));
+            self.run_write_task(&scope, task);
+        }
+    }
+
+    /// Runs one queued write: it clears the modified tracking of its scope on
+    /// success and records a settings error instead of propagating on failure,
+    /// like the reference `enqueueWrite` `.then(...).catch(...)` pair
+    /// (settings-manager.ts:578-585) whose `.catch` calls
+    /// `this.recordError(scope, error)`.
+    ///
+    /// The reference chains the task at microtask time
+    /// (`this.writeQueue = this.writeQueue.then(() => { task(); ... })`,
+    /// settings-manager.ts:578-581), so a `save()`-triggered write reaches the
+    /// file without any explicit `flush()` call. This port is synchronous:
+    /// running the task here is that microtask continuation.
+    fn run_write_task(&mut self, scope: &str, task: Box<dyn FnOnce() + Send + Sync>) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task()));
+        match result {
+            Ok(()) => {
+                // A storage failure is the reference `.catch(recordError)`
+                // (settings-manager.ts:583-585); the modified tracking is kept
+                // because the `.then` that clears it only runs after `task()`
+                // returned without throwing (settings-manager.ts:579-581).
+                let failures = self.storage.take_failures(scope);
+                if failures.is_empty() {
+                    self.clear_modified_scope(scope);
+                } else {
+                    for error in failures {
+                        self.record_error(scope, error);
+                    }
                 }
+            }
+            Err(payload) => {
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| payload.downcast_ref::<&str>().map(|value| value.to_string()))
+                    .unwrap_or_else(|| "settings write failed".to_string());
+                self.record_error(scope, SettingsErrorValue::new(message));
             }
         }
     }
 
+    /// `drainErrors(scope?)` (settings-manager.ts:675-684). It also replays the
+    /// failures parked on the storage by [`SettingsStorage::record_failure`],
+    /// which is where this port keeps the errors the reference records on `this`
+    /// from its `.catch` (settings-manager.ts:583-585).
     pub fn drain_errors(&mut self, scope: Option<&str>) -> Vec<SettingsError> {
         let Some(scope) = scope else {
-            let drained = std::mem::take(&mut self.errors);
+            let mut drained: Vec<SettingsError> = Vec::new();
+            for error in self.storage.take_failures(SETTINGS_SCOPE_GLOBAL) {
+                drained.push(SettingsError {
+                    scope: SETTINGS_SCOPE_GLOBAL.to_string(),
+                    error,
+                });
+            }
+            drained.extend(self.errors.drain(..));
+            for error in self.storage.take_failures(SETTINGS_SCOPE_PROJECT) {
+                drained.push(SettingsError {
+                    scope: SETTINGS_SCOPE_PROJECT.to_string(),
+                    error,
+                });
+            }
             return drained;
         };
-        let drained: Vec<SettingsError> = self
-            .errors
-            .iter()
-            .filter(|entry| entry.scope == scope)
-            .cloned()
+        let mut drained: Vec<SettingsError> = self
+            .storage
+            .take_failures(scope)
+            .into_iter()
+            .map(|error| SettingsError {
+                scope: scope.to_string(),
+                error,
+            })
             .collect();
-        self.errors.retain(|entry| entry.scope != scope);
+        let (matching, rest): (Vec<SettingsError>, Vec<SettingsError>) =
+            self.errors.drain(..).partition(|entry| entry.scope == scope);
+        drained.extend(matching);
+        self.errors = rest;
         drained
     }
 }
@@ -1410,9 +1625,10 @@ impl SettingsManager {
         self.save();
     }
 
+    /// `this.settings.defaultServiceTier ?? "default"` (settings-manager.ts:791):
+    /// `??` only falls back on `null`/`undefined`, so `""` is returned as-is.
     pub fn get_default_service_tier(&self) -> String {
         top_string(&self.settings, keys::DEFAULT_SERVICE_TIER)
-            .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "default".to_string())
     }
 
@@ -1487,9 +1703,10 @@ impl SettingsManager {
         self.save();
     }
 
+    /// `this.settings.transport ?? "auto"` (settings-manager.ts:826):
+    /// `??` only falls back on `null`/`undefined`, so `""` is returned as-is.
     pub fn get_transport(&self) -> TransportSetting {
         top_string(&self.settings, keys::TRANSPORT)
-            .filter(|value| !value.is_empty())
             .unwrap_or_else(|| pi_ai::types::TRANSPORT_AUTO.to_string())
     }
 
@@ -2486,6 +2703,127 @@ mod tests {
             read_json(&join_path(&agent_dir, "settings.json"))["onboardingShown"],
             Value::Bool(true)
         );
+    }
+
+    /// settings-manager.ts:577-585 chains each persisted write at microtask
+    /// time, so a setter that calls `save()` reaches the file without any
+    /// explicit `flush()`. The whole file must be on disk after the setter.
+    #[test]
+    fn save_writes_global_settings_without_an_explicit_flush() {
+        let temp = TempDir::new();
+        let agent_dir = temp.child("agent");
+        let project_dir = temp.child("project");
+        let settings_path = join_path(&agent_dir, "settings.json");
+        let mut manager = SettingsManager::create(&project_dir, Some(&agent_dir));
+
+        manager.set_onboarding_shown(true);
+        manager.set_default_model_and_provider("anthropic", "claude-sonnet-4-5");
+
+        let persisted = std::fs::read_to_string(&settings_path)
+            .expect("save() must persist the settings file before the process exits");
+        let saved = parse_settings(&persisted).expect("persisted settings stay parseable");
+        assert_eq!(saved["onboardingShown"], Value::Bool(true));
+        assert_eq!(saved["defaultProvider"], Value::String("anthropic".to_string()));
+        assert_eq!(saved["defaultModel"], Value::String("claude-sonnet-4-5".to_string()));
+    }
+
+    /// settings-manager.ts:649-669 saves project settings through the same
+    /// eager `enqueueWrite` chain.
+    #[test]
+    fn project_save_writes_settings_without_an_explicit_flush() {
+        let temp = TempDir::new();
+        let agent_dir = temp.child("agent");
+        let project_dir = temp.child("project");
+        let project_settings_path = join_path(&join_path(&project_dir, CONFIG_DIR_NAME), "settings.json");
+        let mut manager = SettingsManager::create(&project_dir, Some(&agent_dir));
+
+        manager.set_project_packages(vec![serde_json::json!({"source": "npm:eager-pkg"})]);
+
+        let saved = read_json(&project_settings_path);
+        assert_eq!(saved["packages"], serde_json::json!([{"source": "npm:eager-pkg"}]));
+    }
+
+    /// settings-manager.ts:602-605 parses the file inside the `withLock`
+    /// callback, so a corrupt file aborts the write and survives for repair
+    /// (the throw is recorded by the `.catch` at settings-manager.ts:583-585).
+    #[test]
+    fn corrupt_settings_file_is_preserved_and_reported_instead_of_replaced() {
+        let temp = TempDir::new();
+        let agent_dir = temp.child("agent");
+        let project_dir = temp.child("project");
+        let settings_path = join_path(&agent_dir, "settings.json");
+        std::fs::write(&settings_path, r#"{"theme":"dark"}"#).unwrap();
+        let mut manager = SettingsManager::create(&project_dir, Some(&agent_dir));
+        assert!(manager.drain_errors(None).is_empty());
+
+        // An external writer (or a partial write) corrupts the file afterwards.
+        std::fs::write(&settings_path, r#"{"theme":"dark","other":"kept"#).unwrap();
+        manager.set_rlm_max_depth(3.0);
+
+        assert_eq!(
+            std::fs::read_to_string(&settings_path).unwrap(),
+            r#"{"theme":"dark","other":"kept"#,
+            "a corrupt settings file must be preserved for repair"
+        );
+        let errors = manager.drain_errors(None);
+        assert!(
+            errors.iter().any(|entry| entry.scope == SETTINGS_SCOPE_GLOBAL),
+            "the aborted write must be reported for the global scope: {errors:?}"
+        );
+    }
+
+    /// settings-manager.ts:411-424 records a load error for a settings file
+    /// whose JSON is not an object (`"queueMode" in 5` is a TypeError), and
+    /// settings-manager.ts:261-278 rethrows a lock failure instead of hanging.
+    #[test]
+    fn non_object_settings_json_records_a_load_error() {
+        let temp = TempDir::new();
+        let agent_dir = temp.child("agent");
+        let project_dir = temp.child("project");
+        std::fs::write(join_path(&agent_dir, "settings.json"), "5").unwrap();
+
+        let mut manager = SettingsManager::create(&project_dir, Some(&agent_dir));
+        let errors = manager.drain_errors(Some(SETTINGS_SCOPE_GLOBAL));
+        assert_eq!(errors.len(), 1, "expected one recorded global load error");
+        assert_eq!(manager.get_theme(), None);
+    }
+
+    /// settings-manager.ts:267-268 rethrows the lock error; the load path
+    /// catches it and keeps running with defaults plus a recorded error
+    /// (settings-manager.ts:419-423). The lock directory left behind by a
+    /// killed process must therefore never panic the process.
+    #[test]
+    fn a_stale_settings_lock_records_an_error_instead_of_panicking() {
+        let temp = TempDir::new();
+        let agent_dir = temp.child("agent");
+        let project_dir = temp.child("project");
+        let settings_path = join_path(&agent_dir, "settings.json");
+        std::fs::write(&settings_path, r#"{"theme":"dark"}"#).unwrap();
+        std::fs::create_dir_all(format!("{settings_path}.lock")).unwrap();
+
+        let mut manager = SettingsManager::create(&project_dir, Some(&agent_dir));
+        let errors = manager.drain_errors(Some(SETTINGS_SCOPE_GLOBAL));
+        assert_eq!(errors.len(), 1, "expected the lock failure to be recorded");
+        assert!(
+            errors[0].error.message.contains("Failed to acquire settings lock"),
+            "unexpected message: {}",
+            errors[0].error.message
+        );
+    }
+
+    /// settings-manager.ts:790-792 and 825-827 use `??`, which keeps an empty
+    /// string; only an absent (or `null`) value falls back to the default.
+    #[test]
+    fn empty_string_service_tier_and_transport_are_returned_as_is() {
+        let manager = SettingsManager::in_memory(settings_from(
+            r#"{"defaultServiceTier":"","transport":""}"#,
+        ));
+        assert_eq!(manager.get_default_service_tier(), "");
+        assert_eq!(manager.get_transport(), "");
+
+        let absent = SettingsManager::in_memory(settings_from(r#"{"defaultServiceTier":null}"#));
+        assert_eq!(absent.get_default_service_tier(), "default");
+        assert_eq!(absent.get_transport(), pi_ai::types::TRANSPORT_AUTO);
     }
 
     #[test]
