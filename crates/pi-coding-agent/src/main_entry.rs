@@ -1485,7 +1485,10 @@ pub async fn find_active_daemon_session_summary(
     selector: &str,
 ) -> Result<Option<SessionSummary>, String> {
     let client = DaemonClient::create(socket_path);
-    client.connect(250).await.map_err(|error| error.message())?;
+    client
+        .connect(DAEMON_PROBE_CONNECT_TIMEOUT_MS)
+        .await
+        .map_err(|error| error.message())?;
 
     let mut command: DaemonCommandBody = serde_json::Map::from_iter([(
         "type".to_string(),
@@ -2189,7 +2192,11 @@ pub struct CreateDaemonClientConnectionOptions {
 }
 
 /// `await client.connect(250)`.
-pub const DEFAULT_DAEMON_CONNECT_TIMEOUT_MS: u64 = 250;
+/// `connect(timeoutMs = 3000)` - the `DaemonClient.connect` default
+/// (`daemon-client.ts:215`). The 250 ms value belongs to the version probe only.
+pub const DEFAULT_DAEMON_CONNECT_TIMEOUT_MS: u64 = 3000;
+/// `ensureInteractiveDaemonRunning`'s short probe (`main.ts:1000`).
+pub const DAEMON_PROBE_CONNECT_TIMEOUT_MS: u64 = 250;
 /// `await client.waitForHello()`.
 pub const DEFAULT_DAEMON_HELLO_TIMEOUT_MS: u64 = 10_000;
 

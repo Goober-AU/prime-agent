@@ -4147,10 +4147,12 @@ impl AgentDaemon {
                 }
                 let command_id = command.id.clone();
                 let progress_client = Arc::clone(client);
+                let progress_daemon = Arc::clone(self);
                 let progress_active_session_id = active_session_id.clone();
                 let on_progress: Option<Arc<dyn Fn(i64, i64) + Send + Sync>> =
                     command_id.as_ref().map(|command_id| -> Arc<dyn Fn(i64, i64) + Send + Sync> {
                         let client = Arc::clone(&progress_client);
+                        let daemon = Arc::clone(&progress_daemon);
                         let active_session_id = progress_active_session_id.clone();
                         let command_id = command_id.clone();
                         Arc::new(move |loaded: i64, total: i64| {
@@ -4172,16 +4174,20 @@ impl AgentDaemon {
                             }
                             object.insert("loaded".to_string(), Value::from(loaded));
                             object.insert("total".to_string(), Value::from(total));
-                            let _ = client
-                                .writer
-                                .write(serialize_json_line(&Value::Object(object)));
+                            let _ = daemon.write_public_value(
+                                &client,
+                                &Value::Object(object),
+                                "session_list_progress",
+                            );
                         })
                     });
                 let item_client = Arc::clone(client);
+                let item_daemon = Arc::clone(self);
                 let item_active_session_id = active_session_id.clone();
                 let on_session: Option<Arc<dyn Fn(&SessionInfo) + Send + Sync>> =
                     command_id.as_ref().map(|command_id| -> Arc<dyn Fn(&SessionInfo) + Send + Sync> {
                         let client = Arc::clone(&item_client);
+                        let daemon = Arc::clone(&item_daemon);
                         let active_session_id = item_active_session_id.clone();
                         let command_id = command_id.clone();
                         Arc::new(move |session: &SessionInfo| {
@@ -4206,9 +4212,11 @@ impl AgentDaemon {
                                 serde_json::to_value(serialize_saved_session_info(session))
                                     .unwrap_or(Value::Null),
                             );
-                            let _ = client
-                                .writer
-                                .write(serialize_json_line(&Value::Object(object)));
+                            let _ = daemon.write_public_value(
+                                &client,
+                                &Value::Object(object),
+                                "session_list_item",
+                            );
                         })
                     });
                 let scope_current = body.get("scope").and_then(Value::as_str) == Some("current");
@@ -5023,6 +5031,7 @@ impl AgentDaemon {
                 }
                 let session = self.session_of(&state);
                 let runs = Arc::clone(self);
+                let side_question_daemon = Arc::clone(self);
                 let run_client = Arc::clone(client);
                 let on_event_state = Arc::clone(&state);
                 let on_event: Arc<dyn Fn(&Value) + Send + Sync> = Arc::new(move |event: &Value| {
@@ -5042,9 +5051,11 @@ impl AgentDaemon {
                         ),
                     );
                     object.insert("event".to_string(), event.clone());
-                    let _ = run_client
-                        .writer
-                        .write(serialize_json_line(&Value::Object(object)));
+                    let _ = side_question_daemon.write_public_value(
+                        &run_client,
+                        &Value::Object(object),
+                        "side_question_run",
+                    );
                     if event.get("status").and_then(Value::as_str) != Some("running") {
                         if let Some(event_id) = event.get("id").and_then(Value::as_str) {
                             runs.side_question_runs
@@ -7714,6 +7725,37 @@ impl AgentDaemon {
         DaemonOutbound::Raw(value)
     }
 
+
+    /// `write(client, message)` for a raw value: the TypeScript routes every caller through
+    /// `writeSerialized`, which wraps a `private-framed` client's payload in
+    /// `encodePrivateFrame` (`daemon-mode.ts:7636`). Writing the bare line here would
+    /// desynchronize the peer's frame decoder.
+    fn write_public_value(
+        self: &Arc<Self>,
+        client: &Arc<DaemonClientHandle>,
+        value: &Value,
+        outbound_type: &str,
+    ) -> bool {
+        let line = serialize_json_line(value);
+        let private_framed = client
+            .state
+            .lock()
+            .expect("daemon client poisoned")
+            .transport
+            .as_deref()
+            == Some("private-framed");
+        if private_framed {
+            let header = serde_json::json!({ "kind": "outbound", "outboundType": outbound_type });
+            match encode_private_frame(&header, line.as_bytes()) {
+                Ok(frame) => return client.writer.write_bytes(frame),
+                Err(error) => {
+                    self.log(&format!("Daemon private frame encode failed: {error}"));
+                    return false;
+                }
+            }
+        }
+        client.writer.write(line)
+    }
     /// `write(client, message)`.
     fn write(self: &Arc<Self>, client: &Arc<DaemonClientHandle>, message: &DaemonOutbound) -> bool {
         let compact_allowed = {
@@ -8926,7 +8968,12 @@ impl AgentDaemon {
                     chunk_count
                 );
             }
-            if !client.writer.write(line) {
+            // The chunk is a `session_snapshot_chunk` outbound; route it through the same
+            // `writeSerialized` path as its neighbours (`daemon-mode.ts:5660` calls
+            // `writeWorkerSnapshotBuffer`, which frames for a private-framed client).
+            let chunk_value: Value = serde_json::from_str(line.trim())
+                .unwrap_or_else(|_| Value::Null);
+            if !self.write_worker_snapshot_record(client, &chunk_value, None) {
                 client.set_backpressured(true);
                 if transfer_signal.is_cancelled() {
                     let message = format!("Snapshot {stream_id} was aborted");

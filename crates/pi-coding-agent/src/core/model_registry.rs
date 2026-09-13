@@ -47,7 +47,13 @@ fn get_models(provider: &str) -> Vec<Model> {
 
 /// `resetApiProviders()` from packages/ai/src/api-registry.ts.
 fn reset_api_providers() {
+    // `resetApiProviders` (providers/register-builtins.ts:449-452) CLEARS and then
+    // re-registers the built-ins. Clearing alone leaves the registry empty, and since
+    // the `--print` path can refresh the model registry before it streams, every
+    // provider resolution would then panic with
+    // "No API provider registered for api: ...".
     pi_ai::api_registry::clear_api_providers();
+    pi_ai::providers::register_builtins::register_built_in_api_providers();
 }
 
 // ---------------------------------------------------------------------------
