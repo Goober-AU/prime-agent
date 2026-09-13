@@ -1027,16 +1027,31 @@ impl Supervisor {
     async fn create_for_owner(self: &Arc<Self>, owner: String, body: &Map<String, Value>) -> Result<Value, String> {
         let _opening = self.opening.lock().await;
         if let Some(path) = body.get("sessionPath").and_then(Value::as_str) {
+            // `matchWorkers(command.sessionPath)` (daemon-supervisor.ts:3044) is counted before
+            // any reuse: when more than one worker claims the file the TS throws
+            // `Ambiguous active session "<path>"` (:3051-3053) instead of attaching to an
+            // arbitrary one.
             let workers: Vec<_> = self.workers.lock().unwrap().values().cloned().collect();
+            let mut matches: Vec<(Arc<Worker>, SessionSummary)> = Vec::new();
             for worker in workers {
                 if !visible(&worker, &owner) { continue; }
                 // The refresh republishes the worker's rows, so the summary that
                 // answers a reuse is the roster's, matched on the canonical path.
                 self.refresh(&worker).await?;
                 if let Some(summary) = self.find_summary_in_worker(&worker, path) {
-                    return Ok(serde_json::to_value(self.public_summary(&worker, summary)).unwrap_or(Value::Null));
+                    matches.push((worker, summary));
                 }
             }
+            if matches.len() > 1 { return Err(format!("Ambiguous active session \"{path}\"")); }
+            if let Some((worker, summary)) = matches.into_iter().next() {
+                return Ok(serde_json::to_value(self.public_summary(&worker, summary)).unwrap_or(Value::Null));
+            }
+            // blocked_on: `reclaimStaleWorkerRegistration(worker, freshCreate)`
+            // (daemon-supervisor.ts:3190-3239) is not ported; its owners
+            // `scheduleWorkerStopFinalization`, `recoverUncertainWorkerOperations`,
+            // `invalidateWorkerSessionInputPauses` and `deleteWorkerDescriptor` have no symbol in
+            // this crate. A single match is therefore always reused here, and a stale
+            // registration is only reclaimed through the `launch_worker` fallback below.
         }
         self.launch_worker(body, owner, None).await
     }

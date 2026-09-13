@@ -2,7 +2,7 @@
 //!
 //! CLI argument parsing and help display.
 
-use std::collections::BTreeMap;
+use indexmap::IndexMap;
 
 use pi_agent_core::types::ThinkingLevel;
 
@@ -65,9 +65,9 @@ pub struct Args {
     pub file_args: Vec<String>,
     /// Unknown flags (potentially extension flags) - map of flag name to value.
     ///
-    /// `BTreeMap` keeps iteration deterministic; the TypeScript `Map` preserves
-    /// insertion order and only lookups are observable here.
-    pub unknown_flags: BTreeMap<String, UnknownFlagValue>,
+    /// `IndexMap` is insertion-ordered, matching the TypeScript `Map` (args.ts:59)
+    /// so `extension_flag_values` keeps CLI order.
+    pub unknown_flags: IndexMap<String, UnknownFlagValue>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
