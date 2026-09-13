@@ -835,6 +835,23 @@ fn empty_custom_models_result(error: Option<String>) -> CustomModelsResult {
     }
 }
 
+/// `Model.compat` normalised to the shape selected by `api`.
+///
+/// `Model<TApi>.compat` (packages/ai/src/types.ts:494-500) is chosen by the
+/// model's own `api`, so the TypeScript always holds the compat object in the
+/// shape that `api` selects. The Rust `Compat` enum instead picks its variant by
+/// sniffing keys during `Deserialize`, so a compat object that omits the
+/// discriminating keys is classified as `OpenAICompletionsCompat` even when the
+/// model's `api` is `anthropic-messages` or `openai-responses`. Every consumer
+/// then reads the wrong accessor and silently falls back to its defaults.
+///
+/// This re-shapes the value through `pi_ai::types::parse_compat_for_api` so the
+/// Rust matches the TypeScript's type-directed shape selection.
+fn compat_for_api(api: &str, compat: Option<&Compat>) -> Option<Compat> {
+    let value = serde_json::to_value(compat?).ok()?;
+    pi_ai::types::parse_compat_for_api(api, value)
+}
+
 /// `mergeCompat(baseCompat, overrideCompat)`.
 ///
 /// The TypeScript does `{ ...base, ...override }` on the (already narrowed)
@@ -943,7 +960,13 @@ pub fn apply_model_override(model: &Model, override_value: &ModelOverride) -> Mo
         };
     }
 
-    result.compat = merge_compat(model.compat.as_ref(), override_value.compat.as_ref());
+    // TS `applyModelOverride` (model-registry.ts:415) assigns the merge of two
+    // `Model<TApi>.compat` values, which are already in the shape `model.api`
+    // selects. Re-shape by `api` so the Rust result matches that layering.
+    result.compat = compat_for_api(
+        &model.api,
+        merge_compat(model.compat.as_ref(), override_value.compat.as_ref()).as_ref(),
+    );
 
     result
 }
@@ -1420,8 +1443,17 @@ impl ModelRegistry {
                     if let Some(base_url) = &provider_override.base_url {
                         configured_model.base_url = base_url.clone();
                     }
-                    configured_model.compat =
-                        merge_compat(configured_model.compat.as_ref(), provider_override.compat.as_ref());
+                    // TS `loadBuiltInModels` (model-registry.ts:665) merges the
+                    // provider override into the built-in model's compat, both of
+                    // them `Model<TApi>` values shaped by the model's `api`.
+                    configured_model.compat = compat_for_api(
+                        &configured_model.api,
+                        merge_compat(
+                            configured_model.compat.as_ref(),
+                            provider_override.compat.as_ref(),
+                        )
+                        .as_ref(),
+                    );
                 }
 
                 match per_model_overrides.and_then(|overrides| overrides.get(&model.id)) {
@@ -1663,7 +1695,17 @@ impl ModelRegistry {
                     .or_else(|| built_in_defaults.as_ref().map(|defaults| defaults.1.clone()));
                 let Some(base_url) = base_url else { continue };
 
-                let compat = merge_compat(provider_config.compat.as_ref(), model_def.compat.as_ref());
+                // TS `parseModels` (model-registry.ts:829) merges the provider
+                // config compat with the model definition compat. Both sides are
+                // typed `ProviderCompatSchema` (model-registry.ts:159-163) and the
+                // result is assigned to a `Model<Api>`, whose compat shape `Api`
+                // selects (packages/ai/src/types.ts:494-500). Deriving the shape
+                // from the resolved `api` here is what makes a `models.json` model
+                // that omits `compat` still end up with the TS's resolved compat.
+                let compat = compat_for_api(
+                    &api,
+                    merge_compat(provider_config.compat.as_ref(), model_def.compat.as_ref()).as_ref(),
+                );
                 self.store_model_headers(&provider_name, &model_def.id, model_def.headers.as_ref());
 
                 models.push(Model {
@@ -3263,6 +3305,86 @@ mod tests {
         let compat = serde_json::to_value(updated.compat.unwrap()).unwrap();
         assert_eq!(compat.get("supportsStore"), Some(&json!(false)));
         assert_eq!(compat.get("maxTokensField"), Some(&json!("max_tokens")));
+    }
+
+    /// TS: `parseModels` (model-registry.ts:829) `compat: mergeCompat(providerConfig.compat, modelDef.compat)`
+    /// assigned into a `Model<Api>` whose compat shape `Api` selects
+    /// (packages/ai/src/types.ts:494-500). A `models.json` entry whose `api` is
+    /// `anthropic-messages` and whose compat omits `supportsEagerToolInputStreaming`
+    /// must still arrive as `AnthropicMessagesCompat`; otherwise
+    /// `getAnthropicCompat` (providers/anthropic.ts:178-183) reads
+    /// `compat_anthropic()` as `None` and silently returns the wrong defaults.
+    #[test]
+    fn custom_model_compat_is_shaped_by_api_not_by_key_sniffing() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry_with_config(
+            dir.path(),
+            r#"{
+                "providers": {
+                    "proxy": {
+                        "baseUrl": "https://proxy.test",
+                        "apiKey": "PROXY_KEY",
+                        "compat": {"supportsLongCacheRetention": false},
+                        "models": [
+                            {"id": "claude-sonnet-4-5", "api": "anthropic-messages"}
+                        ]
+                    }
+                }
+            }"#,
+        );
+        assert!(registry.get_error().is_none(), "{:?}", registry.get_error());
+
+        let model = registry.find("proxy", "claude-sonnet-4-5").unwrap();
+        assert_eq!(model.api, "anthropic-messages");
+        // The provider-level compat carries no `supportsEagerToolInputStreaming`,
+        // so key-sniffing classified it as `OpenAICompletionsCompat` and dropped it.
+        // Plain `expect` (not a formatting closure): the message names the compat
+        // key that key-sniffing dropped, so a broken shape selection reports the
+        // real symptom instead of a bare `None`.
+        let compat = model
+            .compat_anthropic()
+            .expect("compat must be AnthropicMessagesCompat so supportsLongCacheRetention is readable");
+        assert_eq!(
+            compat.supports_long_cache_retention,
+            Some(false),
+            "compat.supportsLongCacheRetention must survive the api-directed shape selection"
+        );
+    }
+
+    /// Same divergence for `openai-responses`: `getCompat`
+    /// (providers/openai-responses.ts:80-85) reads
+    /// `model.compat?.sendSessionIdHeader`, which is only reachable through
+    /// `compat_responses()`. A provider compat object that carries no
+    /// `sendSessionIdHeader` key must still land in `OpenAIResponsesCompat`.
+    #[test]
+    fn custom_model_responses_compat_is_shaped_by_api() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = registry_with_config(
+            dir.path(),
+            r#"{
+                "providers": {
+                    "proxy": {
+                        "baseUrl": "https://proxy.test",
+                        "apiKey": "PROXY_KEY",
+                        "compat": {"supportsLongCacheRetention": false},
+                        "models": [
+                            {"id": "gpt-5", "api": "openai-responses"}
+                        ]
+                    }
+                }
+            }"#,
+        );
+        assert!(registry.get_error().is_none(), "{:?}", registry.get_error());
+
+        let model = registry.find("proxy", "gpt-5").unwrap();
+        let compat = model
+            .compat_responses()
+            .expect("compat must be OpenAIResponsesCompat for api openai-responses");
+        assert_eq!(
+            compat.supports_long_cache_retention,
+            Some(false),
+            "compat.supportsLongCacheRetention must survive the api-directed shape selection"
+        );
     }
 
     #[test]

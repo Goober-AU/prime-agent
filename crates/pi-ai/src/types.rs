@@ -1273,6 +1273,42 @@ impl Compat {
     }
 }
 
+/// Parse a `compat` value for a model whose `api` is `api`.
+///
+/// `Model<TApi>` (packages/ai/src/types.ts:494-500) picks the compat interface
+/// from `api`:
+///   - `"openai-completions"`                              -> `OpenAICompletionsCompat`
+///   - `"openai-responses"` / `"openai-codex-responses"`   -> `OpenAIResponsesCompat`
+///   - `"anthropic-messages"`                              -> `AnthropicMessagesCompat`
+///   - any other `api`                                     -> `never`
+///
+/// TypeScript gets this for free from the type parameter, so a `models.json`
+/// entry may omit the discriminator keys and still receive the right shape. The
+/// Rust port has no type parameter, so it must derive the shape from `api`. The
+/// `None` arm reproduces TS `never`: a compat object is not a valid value for any
+/// other `api`, so it is rejected instead of being silently coerced into
+/// `OpenAICompletionsCompat`.
+pub fn parse_compat_for_api(api: &str, value: Value) -> Option<Compat> {
+    let expected = match api {
+        "openai-completions" => Compat::Completions(OpenAICompletionsCompat::default()),
+        "openai-responses" | "openai-codex-responses" => {
+            Compat::Responses(OpenAIResponsesCompat::default())
+        }
+        "anthropic-messages" => Compat::Anthropic(AnthropicMessagesCompat::default()),
+        _ => return None,
+    };
+    coerce_compat(expected, value)
+}
+
+/// Re-shape `value` into the same compat variant as `target`.
+fn coerce_compat(target: Compat, value: Value) -> Option<Compat> {
+    match target {
+        Compat::Completions(_) => serde_json::from_value(value).ok().map(Compat::Completions),
+        Compat::Responses(_) => serde_json::from_value(value).ok().map(Compat::Responses),
+        Compat::Anthropic(_) => serde_json::from_value(value).ok().map(Compat::Anthropic),
+    }
+}
+
 /// OpenRouter provider routing preferences.
 /// Controls which upstream providers OpenRouter routes requests to.
 /// Sent as the `provider` field in the OpenRouter API request body.
