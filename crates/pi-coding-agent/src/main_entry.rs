@@ -1336,6 +1336,18 @@ pub async fn prepare_runtime_services(options: PrepareRuntimeServicesOptions) ->
                     .lock()
                     .await
                     .set_runtime_api_key(&model.provider, api_key);
+                // `main.ts:882 authStorage.setRuntimeApiKey(effectiveSessionModel.provider, config.apiKey)`
+                // writes to the single instance that `ModelRegistry.create(authStorage, ...)`
+                // shares (`agent-session-services.ts:150-152`,
+                // `model-registry.ts:525 readonly authStorage: AuthStorage`), so request auth
+                // (`getApiKeyAndHeaders`) resolves the CLI key. This port's `ModelRegistry`
+                // owns its `AuthStorage` by value, so the same override must be written
+                // through the registry as well.
+                services
+                    .model_registry
+                    .lock()
+                    .expect("model registry poisoned")
+                    .set_runtime_api_key(&model.provider, api_key);
             }
             None => diagnostics.push(AgentSessionRuntimeDiagnostic {
                 type_: DIAGNOSTIC_ERROR.to_string(),

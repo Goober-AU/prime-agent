@@ -272,6 +272,26 @@ pub async fn create_agent_session_services(
         .settings_manager
         .clone()
         .unwrap_or_else(|| Arc::new(Mutex::new(SettingsManager::create(&cwd, Some(&agent_dir)))));
+    // A1 (audit round 3, GLM-AGENT-CORE.md) - resolved in main_entry.rs.
+    //
+    // TS builds `authStorage` once and hands that SAME instance to the registry, so
+    // the CLI runtime override is visible to request auth:
+    //   agent-session-services.ts:150
+    //     `const authStorage = options.authStorage ?? AuthStorage.create(join(agentDir, "auth.json"));`
+    //   agent-session-services.ts:152
+    //     `const modelRegistry = options.modelRegistry ?? ModelRegistry.create(authStorage, join(agentDir, "models.json"));`
+    //   model-registry.ts:525 `readonly authStorage: AuthStorage,`
+    //   main.ts:882 `authStorage.setRuntimeApiKey(effectiveSessionModel.provider, config.apiKey);`
+    //
+    // The call below gives the registry its own `AuthStorage` because the Rust
+    // `ModelRegistry` owns `auth_storage: AuthStorage` by value (model_registry.rs:1146)
+    // and has no constructor taking a shared handle. Instead of sharing the instance,
+    // main_entry.rs applies the CLI override to BOTH stores through
+    // `ModelRegistry::set_runtime_api_key` (model_registry.rs), which delegates to
+    // `AuthStorage::set_runtime_api_key` (auth_storage.rs:709) on the instance that
+    // `get_api_key_and_headers` resolves request auth from. Keep the two writes in
+    // main_entry.rs together; this constructor has no access to the override.
+
     let model_registry = options.model_registry.clone().unwrap_or_else(|| {
         Arc::new(Mutex::new(ModelRegistry::create(
             AuthStorage::create(Some(join_path(&agent_dir, "auth.json")), None),
@@ -543,6 +563,83 @@ mod tests {
 
     fn runtime() -> ExtensionRuntime {
         ExtensionRuntime::new(ExtensionRuntimeState::default())
+    }
+
+    /// A1 repro (`--print --model X --api-key K`).
+    ///
+    /// `main.ts:882` writes the CLI override to the auth storage that
+    /// `ModelRegistry.create(authStorage, ...)` received
+    /// (`agent-session-services.ts:150-152`, `model-registry.ts:525`), so request
+    /// auth (`getApiKeyAndHeaders`) resolves it. This port's `ModelRegistry` owns a
+    /// separate `AuthStorage` by value, so the override must also be written through
+    /// `ModelRegistry::set_runtime_api_key`; the registry is deliberately left to
+    /// `create_agent_session_services` here to reproduce the two-instance setup.
+    #[tokio::test]
+    async fn runtime_api_key_reaches_model_registry_request_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_string_lossy().to_string();
+        let auth_storage = Arc::new(tokio::sync::Mutex::new(AuthStorage::in_memory(
+            indexmap::IndexMap::new(),
+            Some(crate::core::auth_storage::AuthStorageOptions {
+                prime_cli_config_path: None,
+                use_prime_cli_config: false,
+            }),
+        )));
+        let services = create_agent_session_services(CreateAgentSessionServicesOptions {
+            cwd: cwd.clone(),
+            agent_dir: Some(cwd.clone()),
+            auth_storage: Some(Arc::clone(&auth_storage)),
+            settings_manager: None,
+            model_registry: None,
+            extension_flag_values: None,
+            no_builtin_herdr_reporter: Some(true),
+            telemetry_disabled: Some(true),
+            resource_loader_options: Some(DefaultResourceLoaderOptions {
+                no_extensions: true,
+                no_skills: true,
+                no_prompt_templates: true,
+                no_themes: true,
+                no_context_files: true,
+                ..DefaultResourceLoaderOptions::new(&cwd, &cwd)
+            }),
+        })
+        .await
+        .expect("services");
+        let provider = "anthropic";
+        let model = services
+            .model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .get_all()
+            .into_iter()
+            .find(|model| model.provider == provider)
+            .expect("anthropic model in the built-in catalog");
+
+        // The two writes main_entry.rs performs for one `--api-key` flag.
+        services
+            .auth_storage
+            .lock()
+            .await
+            .set_runtime_api_key(provider, "cli-key");
+        services
+            .model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .set_runtime_api_key(provider, "cli-key");
+
+        assert!(services
+            .model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .has_configured_auth(&model));
+        let auth = services
+            .model_registry
+            .lock()
+            .expect("model registry poisoned")
+            .get_api_key_and_headers(&model)
+            .await;
+        assert!(auth.ok);
+        assert_eq!(auth.api_key.as_deref(), Some("cli-key"));
     }
 
     #[test]

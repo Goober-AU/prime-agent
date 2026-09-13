@@ -1226,6 +1226,20 @@ impl ModelRegistry {
         Self::new(auth_storage, None)
     }
 
+    /// Set a runtime API key override on the registry's own `AuthStorage`.
+    ///
+    /// `auth-storage.ts:307 setRuntimeApiKey(provider, apiKey)` is what
+    /// `main.ts:882` calls on the instance the registry shares
+    /// (`model-registry.ts:525 \`readonly authStorage: AuthStorage\`,
+    /// `agent-session-services.ts:152 ModelRegistry.create(authStorage, ...)`).
+    /// The Rust registry owns its `AuthStorage` by value, so the CLI runtime
+    /// override reaches request auth through this passthrough
+    /// (`model-registry.ts` resolves request auth via the same instance in
+    /// `getApiKeyAndHeaders`).
+    pub fn set_runtime_api_key(&mut self, provider: &str, api_key: &str) {
+        self.auth_storage.set_runtime_api_key(provider, api_key);
+    }
+
     pub fn set_fetch_fn(&mut self, fetch_fn: Option<FetchFn>) {
         self.fetch_fn = fetch_fn;
     }

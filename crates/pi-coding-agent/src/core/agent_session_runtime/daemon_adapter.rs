@@ -740,10 +740,11 @@ impl DaemonSession for AgentSessionDaemonAdapter {
     }
 
     fn resume_queued_work(&self) -> bool {
-        let session = self.session();
-        let pending = session.has_pending_session_work();
-        session.resume_queued_work();
-        pending
+        // `AgentSession::resumeQueuedWork()` returns `_hasSelectableSessionInput()`
+        // AFTER resuming (packages/coding-agent/src/core/agent-session.ts:7516-7521),
+        // and `daemon-mode.ts:4633` turns a false result into "No queued work to
+        // resume". Reading the pre-resume value here answered with the stale state.
+        self.session().resume_queued_work()
     }
 
     fn clear_queued_agent_messages(&self) -> Value {
