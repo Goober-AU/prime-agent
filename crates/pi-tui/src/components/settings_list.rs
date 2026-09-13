@@ -201,13 +201,20 @@ impl SettingsList {
 
         if start_index > 0 || end_index < display_items.len() {
             let scroll_text = format!("  ({}/{})", self.selected_index + 1, display_items.len());
-            lines.push((self.theme.hint)(&truncate_to_width(&scroll_text, (width - 2) as f64, "", false)));
+            // TS: truncateToWidth(scrollText, width - 2, "") (settings-list.ts:140) yields "" when the
+            // passed maxWidth is negative (utils.ts:1052). saturating_sub keeps the arithmetic from
+            // underflowing (debug panic) and 0 makes utils.rs:1454 return "".
+            lines.push((self.theme.hint)(&truncate_to_width(&scroll_text, width.saturating_sub(2) as f64, "", false)));
         }
 
         let selected_item = display_items.get(self.selected_index).and_then(|i| self.items.get(*i));
         if let Some(description) = selected_item.and_then(|item| item.description.as_deref()) {
             lines.push(String::new());
-            let wrapped_desc = wrap_text_with_ansi(description, width - 4);
+            // TS: wrapTextWithAnsi(description, width - 4) (settings-list.ts:146) receives a negative
+            // width for width < 4; breakLongWord then breaks after every grapheme (utils.ts:993-1005
+            // `currentWidth + graphemeWidth > width` is true for the first grapheme). saturating_sub
+            // removes the usize underflow panic and width 0 reproduces that one-grapheme-per-line wrap.
+            let wrapped_desc = wrap_text_with_ansi(description, width.saturating_sub(4));
             for line in wrapped_desc {
                 lines.push((self.theme.description)(&format!("  {line}")));
             }
@@ -551,5 +558,78 @@ mod tests {
         assert_eq!(list.items()[0].current_value, "picked");
         assert_eq!(*changes.borrow(), vec![("m".to_string(), "picked".to_string())]);
         assert!(list.render(20.0)[0].starts_with("› "));
+    }
+
+    #[test]
+    fn narrow_width_scroll_info_does_not_panic() {
+        // Regression for TUIR-4: settings-list.ts:140 `truncateToWidth(scrollText, width - 2, "")`
+        // passes a negative maxWidth for width < 2 and truncateToWidth returns "" (utils.ts:1052-1054).
+        // The port computed `(width - 2)` on a usize and panicked ("attempt to subtract with
+        // overflow") in debug builds; in release it wrapped and rendered the hint untruncated.
+        // maxVisible = 1 with 2 items makes the list overflow, so the scroll-info line is emitted
+        // (settings-list.ts:138). Lines are: item, scroll info, blank + hint (addHintLine).
+        let mut list = SettingsList::new(
+            vec![item("a", "Alpha", None), item("b", "Beta", None)],
+            1,
+            theme(),
+            Box::new(|_, _| {}),
+            Box::new(|| {}),
+            SettingsListOptions::default(),
+        );
+
+        for width in [0.0, 1.0, 2.0, 3.0] {
+            let lines = list.render(width);
+            assert_eq!(lines.len(), 4, "width {width}: item + scroll info + hint: {lines:?}");
+            if width <= 2.0 {
+                // width - 2 <= 0 -> truncateToWidth returns "" (utils.ts:1052).
+                assert_eq!(lines[1], "", "width {width} must yield an empty scroll line");
+            }
+        }
+    }
+
+    #[test]
+    fn narrow_width_description_wrap_does_not_panic() {
+        // Regression for TUIR-3: settings-list.ts:146 `wrapTextWithAnsi(selectedItem.description,
+        // width - 4)` receives a negative width for width < 4; breakLongWord (utils.ts:993-1005)
+        // then breaks after every grapheme, so TS degrades to one grapheme per line, each line
+        // keeping the two-space prefix added at settings-list.ts:148. The port computed `width - 4`
+        // on a usize and panicked in debug builds; in release the huge width emitted one long line.
+        // One item with maxVisible = 1 does not overflow, so no scroll-info line is emitted and only
+        // the description branch runs.
+        let mut items = vec![item("a", "Alpha", None)];
+        items[0].description = Some("wordy".to_string());
+        let mut list = SettingsList::new(
+            items,
+            1,
+            theme(),
+            Box::new(|_, _| {}),
+            Box::new(|| {}),
+            SettingsListOptions::default(),
+        );
+
+        for width in [0.0, 1.0, 2.0, 3.0] {
+            let lines = list.render(width);
+            // item line + blank + wrapped description lines + blank + hint line
+            assert!(lines.len() >= 4, "width {width} rendered too few lines: {lines:?}");
+
+            // At width < 4 the wrap width is <= 0, so every grapheme is its own line and the
+            // whole description must survive, one grapheme per description line.
+            let description_lines = &lines[2..lines.len() - 2];
+            let rebuilt: String = description_lines
+                .iter()
+                .map(|line| line.strip_prefix("  ").unwrap_or(line))
+                .collect();
+            assert_eq!(rebuilt, "wordy", "width {width}: description degraded wrong: {lines:?}");
+
+            // Nothing may exceed `width`, except a description line, which keeps its two-space
+            // prefix plus one grapheme (TS behaviour at a non-positive wrap width).
+            let bound = std::cmp::max(width as usize, 3);
+            for line in &lines {
+                assert!(
+                    visible_width(line) <= bound,
+                    "width {width}: line wider than {bound}: {line:?}"
+                );
+            }
+        }
     }
 }

@@ -410,7 +410,11 @@ impl Component for SelectList {
             } else {
                 format!("  ({}/{})", self.selected_index + 1, self.filtered_items.len())
             };
-            lines.push((self.theme.scroll_info)(&truncate_to_width(&scroll_text, (width - 2) as f64, "", false)));
+            // TS: truncateToWidth(scrollText, width - 2, "") (select-list.ts:108) hands a NEGATIVE
+            // maxWidth for width < 2 and truncateToWidth returns "" (utils.ts:1052). Mirror that with
+            // saturating_sub so the arithmetic never underflows (debug panic) and 0 hits the
+            // `max_width <= 0.0` guard in utils.rs:1454.
+            lines.push((self.theme.scroll_info)(&truncate_to_width(&scroll_text, width.saturating_sub(2) as f64, "", false)));
         }
 
         if self.layout.show_selected_description {
@@ -579,5 +583,31 @@ mod tests {
         assert!(lines[0].contains("/help"), "{:?}", lines[0]);
         assert!(lines[0].contains("<topic>"), "{:?}", lines[0]);
         assert!(lines[0].contains("core"), "{:?}", lines[0]);
+    }
+
+    #[test]
+    fn narrow_width_does_not_panic_when_list_overflows() {
+        // Regression for TUIR-2: select-list.ts:108 calls
+        // `truncateToWidth(scrollText, width - 2, "")`; for width < 2 that maxWidth is negative and
+        // truncateToWidth returns "" (utils.ts:1052-1054). The port used `(width - 2) as f64` on a
+        // usize, which panicked ("attempt to subtract with overflow") in debug builds and wrapped to
+        // ~1.8e19 in release, rendering the scroll text untruncated.
+        let mut list = SelectList::new(items(), 1, theme(), SelectListLayoutOptions::default());
+        list.set_selected_index(1);
+
+        for width in [0.0, 1.0, 2.0, 3.0] {
+            let lines = list.render(width);
+            assert_eq!(lines.len(), 2, "width {width} should render one item + scroll info: {lines:?}");
+            if width <= 2.0 {
+                // maxWidth <= 0 -> "" in TS.
+                assert_eq!(lines[1], "", "width {width} must yield an empty scroll line");
+            } else {
+                assert!(
+                    visible_width(&lines[1]) <= width as usize,
+                    "width {width} scroll line too wide: {:?}",
+                    lines[1]
+                );
+            }
+        }
     }
 }
