@@ -5,6 +5,13 @@
 //! Rust links those modules at build time, so the lazy handles are plain
 //! functions; the observable behaviour (env-var precedence, the Vertex ADC
 //! existence check, the Bun `/proc/self/environ` fallback) is unchanged.
+//!
+//! One deliberate divergence: the `amazon-bedrock` `<authenticated>` marker is only returned for
+//! a credential source this port really implements. The TypeScript returns it for any source of
+//! the AWS SDK credential chain (`env-api-keys.ts:182-199`) because the SDK
+//! (`providers/amazon-bedrock.ts:193`) resolves those credentials itself; the port has no SDK and
+//! no IMDS/ECS/web-identity/SSO/`credential_process` support, so advertising them would claim a
+//! capability that does not exist. See `get_env_api_key` and `bedrock_static_credentials_are_available`.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -185,9 +192,26 @@ pub fn find_env_keys(provider: &str) -> Option<Vec<String>> {
     }
 }
 
+/// True when the port's own Bedrock credential resolution can produce credentials.
+///
+/// This asks the port's real chain (`resolve_aws_credentials`, `providers/amazon_bedrock.rs`
+/// `:656-730`) rather than "some `AWS_*` variable is set", so `get_env_api_key` can never
+/// advertise `<authenticated>` for a source the port cannot sign with. See the comment in
+/// `get_env_api_key` for the sources the AWS SDK `defaultProvider` covers and this port does not.
+fn bedrock_static_credentials_are_available() -> bool {
+    let options = crate::providers::amazon_bedrock::BedrockOptions::default();
+    crate::providers::amazon_bedrock::resolve_aws_credentials(&options).is_ok()
+}
+
 /// Get API key for provider from known environment variables, e.g. OPENAI_API_KEY.
 ///
 /// Will not return API keys for providers that require OAuth tokens.
+///
+/// For `amazon-bedrock` the `<authenticated>` marker is only returned when a credential source
+/// this port actually implements is present (env static keys, the Bedrock bearer token, or a
+/// profile file the port can read), never for the SDK-only sources (IMDS, ECS, web identity,
+/// SSO, `credential_process`). The TypeScript is less strict at
+/// `packages/ai/src/env-api-keys.ts:182-199` (the marker string is returned there at `:197`) because its marker implies the SDK chain.
 pub fn get_env_api_key(provider: &KnownProvider) -> Option<String> {
     if let Some(env_keys) = find_env_keys(provider) {
         if let Some(first) = env_keys.first() {
@@ -226,17 +250,35 @@ pub fn get_env_api_key(provider: &KnownProvider) -> Option<String> {
     }
 
     if provider == "amazon-bedrock" {
+        // TS: `packages/ai/src/env-api-keys.ts:182-199` returns the marker (at `:197`) when ANY
+        // source of the AWS SDK credential chain exists. The marker is consumed at
+        // `packages/coding-agent/src/core/auth-storage.ts:452` (`getEnvironmentAuthCandidate`),
+        // whose identity material is built from the same variables at `:467-493`.
+        //
+        // In the TypeScript that chain is the SDK's own `defaultProvider`: the
+        // `BedrockRuntimeClient` created at `packages/ai/src/providers/amazon-bedrock.ts:193`
+        // resolves credentials itself. The port has no SDK - it signs with
+        // `resolve_aws_credentials` (`providers/amazon_bedrock.rs:656-730`), which covers ONLY
+        // the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` environment
+        // triple, plus the static `aws_access_key_id` / `aws_secret_access_key` /
+        // `aws_session_token` keys of a profile in `$AWS_SHARED_CREDENTIALS_FILE`,
+        // `~/.aws/credentials`, `$AWS_CONFIG_FILE` or `~/.aws/config`.
+        //
+        // Missing owners, NOT implemented anywhere in this workspace and therefore never
+        // advertised here: EC2 IMDS, ECS/container credentials
+        // (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI`, `AWS_CONTAINER_CREDENTIALS_FULL_URI`),
+        // web identity (`AWS_WEB_IDENTITY_TOKEN_FILE` + STS `AssumeRoleWithWebIdentity`), SSO
+        // and `credential_process`. The same gap is stated for the responses path in
+        // `providers/bedrock_responses_client.rs:10-26`.
+        //
+        // A bare `AWS_PROFILE` is not advertised either: it only names a profile, and a profile
+        // whose static keys the port cannot read still fails with "Could not load credentials
+        // from any providers" (`providers/amazon_bedrock.rs:727-729`).
         let has_aws_env = |key: &str| {
             std::env::var(key).map(|value| !value.is_empty()).unwrap_or(false)
                 || get_proc_env(key).map(|value| !value.is_empty()).unwrap_or(false)
         };
-        if has_aws_env("AWS_PROFILE")
-            || (has_aws_env("AWS_ACCESS_KEY_ID") && has_aws_env("AWS_SECRET_ACCESS_KEY"))
-            || has_aws_env("AWS_BEARER_TOKEN_BEDROCK")
-            || has_aws_env("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI")
-            || has_aws_env("AWS_CONTAINER_CREDENTIALS_FULL_URI")
-            || has_aws_env("AWS_WEB_IDENTITY_TOKEN_FILE")
-        {
+        if has_aws_env("AWS_BEARER_TOKEN_BEDROCK") || bedrock_static_credentials_are_available() {
             return Some("<authenticated>".to_string());
         }
     }
@@ -314,19 +356,147 @@ mod tests {
         assert_eq!(get_env_api_key(&"nope".to_string()), None);
     }
 
+    /// Test-only serialization for `AWS_*` environment access, shared with the other modules
+    /// that read these process-global variables.
+    ///
+    /// `HOME` / `USERPROFILE` are pointed at an empty directory so the `~/.aws/credentials` and
+    /// `~/.aws/config` fallbacks inside `resolve_aws_credentials` cannot make the assertions depend
+    /// on the machine the test runs on.
+    struct BedrockEnv {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+        home: std::path::PathBuf,
+    }
+
+    const BEDROCK_ENV_NAMES: [&str; 12] = [
+        "AWS_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "AWS_SHARED_CREDENTIALS_FILE",
+        "AWS_CONFIG_FILE",
+        "HOME",
+        "USERPROFILE",
+    ];
+
+    impl BedrockEnv {
+        fn new() -> Self {
+            let guard = crate::providers::bedrock_responses_client::AWS_ENV_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let saved: Vec<(&'static str, Option<String>)> = BEDROCK_ENV_NAMES
+                .iter()
+                .map(|name| (*name, std::env::var(name).ok()))
+                .collect();
+            for name in BEDROCK_ENV_NAMES {
+                std::env::remove_var(name);
+            }
+            let home = std::env::temp_dir().join("pi-env-api-keys-bedrock-home");
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(&home).unwrap();
+            std::env::set_var("HOME", &home);
+            std::env::set_var("USERPROFILE", &home);
+            Self {
+                _guard: guard,
+                saved,
+                home,
+            }
+        }
+    }
+
+    impl Drop for BedrockEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.saved {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
     #[test]
     fn bedrock_credentials_report_authenticated() {
-        std::env::remove_var("AWS_PROFILE");
-        std::env::remove_var("AWS_ACCESS_KEY_ID");
-        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
-        std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK");
+        let _env = BedrockEnv::new();
+
         assert_eq!(get_env_api_key(&"amazon-bedrock".to_string()), None);
 
+        // A bare `AWS_PROFILE` is no longer enough: the marker must not claim a credential the
+        // port cannot resolve (`resolve_aws_credentials` fails with "Could not load credentials
+        // from any providers" when the profile has no readable static keys).
         std::env::set_var("AWS_PROFILE", "default");
+        assert_eq!(
+            get_env_api_key(&"amazon-bedrock".to_string()),
+            None,
+            "a profile name alone is not a usable credential"
+        );
+        std::env::remove_var("AWS_PROFILE");
+
+        // The sources the port really signs with are advertised.
+        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE");
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret");
         assert_eq!(
             get_env_api_key(&"amazon-bedrock".to_string()).as_deref(),
             Some("<authenticated>")
         );
-        std::env::remove_var("AWS_PROFILE");
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+
+        std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "bedrock-bearer");
+        assert_eq!(
+            get_env_api_key(&"amazon-bedrock".to_string()).as_deref(),
+            Some("<authenticated>")
+        );
+        std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK");
+
+        // A profile file the port can read counts.
+        let dir = std::env::temp_dir().join("pi-env-api-keys-bedrock-profile");
+        std::fs::create_dir_all(&dir).unwrap();
+        let credentials = dir.join("credentials");
+        std::fs::write(&credentials, "[default]\naws_access_key_id = AKIAFILE\naws_secret_access_key = filesecret\n").unwrap();
+        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &credentials);
+        assert_eq!(
+            get_env_api_key(&"amazon-bedrock".to_string()).as_deref(),
+            Some("<authenticated>"),
+            "a readable profile file is a source the port implements"
+        );
+        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bedrock_authenticated_marker_skips_the_unimplemented_aws_sdk_sources() {
+        let _env = BedrockEnv::new();
+
+        // The SDK default chain sources below need IMDS / ECS / STS / SSO / a child process.
+        // None of them exists in this port, so the marker must stay absent: the real failure would
+        // be `resolve_aws_credentials` -> "Could not load credentials from any providers"
+        // (`providers/amazon_bedrock.rs:727-729`), not an authenticated request.
+        for (name, value) in [
+            ("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/credentials/abc"),
+            ("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.2/v2/credentials"),
+            ("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/aws/token"),
+        ] {
+            std::env::set_var(name, value);
+            assert_eq!(
+                get_env_api_key(&"amazon-bedrock".to_string()),
+                None,
+                "{name} is an unimplemented SDK source and must not be advertised as authenticated"
+            );
+            assert_eq!(
+                crate::providers::amazon_bedrock::resolve_aws_credentials(
+                    &crate::providers::amazon_bedrock::BedrockOptions::default()
+                )
+                .is_err(),
+                true,
+                "{name} really cannot be resolved by the port"
+            );
+            std::env::remove_var(name);
+        }
     }
 }

@@ -513,7 +513,9 @@ pub struct BedrockClientConfig {
 	pub credentials: Option<AwsCredentials>,
 	/// `config.requestHandler` was installed because a proxy env var is set.
 	pub use_proxy_env: bool,
-	/// `config.requestHandler = new NodeHttpHandler()` under `AWS_BEDROCK_FORCE_HTTP1=1`.
+	/// `config.requestHandler = new NodeHttpHandler()` under `AWS_BEDROCK_FORCE_HTTP1=1`
+	/// (`amazon-bedrock.ts:176`). Consumed by `build_http_client`, which then builds the reqwest
+	/// client with `http1_only()`.
 	pub force_http1: bool,
 }
 
@@ -588,6 +590,8 @@ pub fn resolve_bedrock_client_config(model: &Model, options: &BedrockOptions) ->
 	if proxy_env {
 		config.use_proxy_env = true;
 	} else if std::env::var("AWS_BEDROCK_FORCE_HTTP1").ok().as_deref() == Some("1") {
+		// TS `amazon-bedrock.ts:176-178`: the HTTP/1.1 handler is only installed in the `else if`
+		// branch, i.e. only when no proxy env var selected the proxy handler first.
 		config.force_http1 = true;
 	}
 
@@ -2116,8 +2120,20 @@ pub fn handle_content_block_stop(
 // The request body (was the SDK's `client.send(command, { abortSignal })`)
 // ---------------------------------------------------------------------------
 
-fn build_http_client() -> Result<reqwest::Client, ProviderError> {
+/// The `config.requestHandler` half of the client config: proxy handling plus the optional
+/// HTTP/1.1 pinning. Split out so tests can observe the builder itself.
+///
+/// TS `packages/ai/src/providers/amazon-bedrock.ts:172-178` installs a `NodeHttpHandler`; when
+/// `AWS_BEDROCK_FORCE_HTTP1 === "1"` (`amazon-bedrock.ts:176`) that handler is what keeps the
+/// request on HTTP/1.1 instead of the SDK's default `NodeHttp2Handler`. reqwest has no handler
+/// object, so the same intent is expressed on the client with `http1_only()` (ALPN restricted to
+/// `http/1.1`; `reqwest-0.12.28/src/async_impl/client.rs`, `http1_only`, and the ALPN list at its
+/// line 825). Without the flag the client keeps reqwest's default negotiation, like the SDK.
+fn bedrock_http_client_builder(config: &BedrockClientConfig) -> reqwest::ClientBuilder {
 	let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+	if config.force_http1 {
+		builder = builder.http1_only();
+	}
 	let has_proxy_env = [
 		"HTTP_PROXY",
 		"HTTPS_PROXY",
@@ -2133,6 +2149,10 @@ fn build_http_client() -> Result<reqwest::Client, ProviderError> {
 		builder = builder.no_proxy();
 	}
 	builder
+}
+
+fn build_http_client(config: &BedrockClientConfig) -> Result<reqwest::Client, ProviderError> {
+	bedrock_http_client_builder(config)
 		.build()
 		.map_err(|error| ProviderError::message(error.to_string()))
 }
@@ -2237,7 +2257,8 @@ async fn run_bedrock_stream(
 		return Err(ProviderError::message("Request was aborted"));
 	}
 
-	let client = build_http_client()?;
+	// TS: the `config.requestHandler` installed by `resolve_bedrock_client_config`.
+	let client = build_http_client(&config)?;
 	let mut request = client
 		.post(format!("{}{}", endpoint.origin, path))
 		.body(body.clone());
@@ -3413,6 +3434,109 @@ mod tests {
 			host_header(&endpoint),
 			"bedrock-vpc.example.com:8443"
 		);
+	}
+
+	/// Test-only serialization for the process-global `AWS_*` / proxy variables, shared with the
+	/// other pi-ai modules that read them.
+	struct BedrockClientEnv {
+		_guard: std::sync::MutexGuard<'static, ()>,
+		saved: Vec<(&'static str, Option<String>)>,
+	}
+
+	const BEDROCK_CLIENT_ENV_NAMES: [&str; 11] = [
+		"AWS_REGION",
+		"AWS_DEFAULT_REGION",
+		"AWS_PROFILE",
+		"AWS_BEDROCK_SKIP_AUTH",
+		"AWS_BEDROCK_FORCE_HTTP1",
+		"HTTP_PROXY",
+		"HTTPS_PROXY",
+		"NO_PROXY",
+		"http_proxy",
+		"https_proxy",
+		"no_proxy",
+	];
+
+	impl BedrockClientEnv {
+		fn new() -> Self {
+			let guard = crate::providers::bedrock_responses_client::AWS_ENV_TEST_LOCK
+				.lock()
+				.unwrap_or_else(|poisoned| poisoned.into_inner());
+			let saved: Vec<(&'static str, Option<String>)> = BEDROCK_CLIENT_ENV_NAMES
+				.iter()
+				.map(|name| (*name, std::env::var(name).ok()))
+				.collect();
+			for name in BEDROCK_CLIENT_ENV_NAMES {
+				std::env::remove_var(name);
+			}
+			Self { _guard: guard, saved }
+		}
+	}
+
+	impl Drop for BedrockClientEnv {
+		fn drop(&mut self) {
+			for (name, value) in &self.saved {
+				match value {
+					Some(value) => std::env::set_var(name, value),
+					None => std::env::remove_var(name),
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn force_http1_pins_the_client_to_http1() {
+		// TS: `config.requestHandler = new NodeHttpHandler()` under `AWS_BEDROCK_FORCE_HTTP1=1`
+		// (amazon-bedrock.ts:176-178). reqwest exposes the same choice on the client, so the
+		// builder must carry it: `http1_only()` shows up as `http1_only: true` in the Debug form.
+		let default_builder = format!(
+			"{:?}",
+			bedrock_http_client_builder(&BedrockClientConfig::default())
+		);
+		assert!(
+			!default_builder.contains("http1_only"),
+			"without AWS_BEDROCK_FORCE_HTTP1 the client must keep the default protocol negotiation: {default_builder}"
+		);
+
+		let pinned = format!(
+			"{:?}",
+			bedrock_http_client_builder(&BedrockClientConfig {
+				force_http1: true,
+				..Default::default()
+			})
+		);
+		assert!(
+			pinned.contains("http1_only: true"),
+			"AWS_BEDROCK_FORCE_HTTP1 must pin the client to HTTP/1.1: {pinned}"
+		);
+	}
+
+	#[test]
+	fn aws_bedrock_force_http1_env_reaches_the_client_builder() {
+		let _env = BedrockClientEnv::new();
+		let model = model("global.anthropic.claude-opus-4-6-v1", "Claude Opus 4.6");
+
+		// No flag: the resolved config keeps HTTP/2 available.
+		let config = resolve_bedrock_client_config(&model, &BedrockOptions::default());
+		assert!(!config.force_http1);
+		assert!(!format!("{:?}", bedrock_http_client_builder(&config)).contains("http1_only"));
+
+		std::env::set_var("AWS_BEDROCK_FORCE_HTTP1", "1");
+		let config = resolve_bedrock_client_config(&model, &BedrockOptions::default());
+		assert!(
+			config.force_http1,
+			"AWS_BEDROCK_FORCE_HTTP1=1 must set config.force_http1 (amazon-bedrock.ts:176)"
+		);
+		assert!(
+			format!("{:?}", bedrock_http_client_builder(&config)).contains("http1_only: true"),
+			"the parsed flag must reach the client builder; otherwise the setting is parsed and dropped"
+		);
+
+		// `else if` in the TypeScript: a proxy handler wins, so the flag is not applied.
+		std::env::set_var("HTTPS_PROXY", "http://proxy.example.com:3128");
+		let config = resolve_bedrock_client_config(&model, &BedrockOptions::default());
+		assert!(config.use_proxy_env);
+		assert!(!config.force_http1);
 	}
 
 	#[test]

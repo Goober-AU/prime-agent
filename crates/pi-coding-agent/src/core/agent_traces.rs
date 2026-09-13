@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -12,6 +12,7 @@ use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 
 use crate::core::auth_storage::AuthStorage;
+use crate::core::session_manager::SessionManager;
 use crate::core::prime_inference_auth::{
     load_prime_cli_config, resolve_prime_agent_traces_base_url, FetchFn, HttpRequest, HttpResponse,
     PRIME_AGENT_TRACES_PROVIDER_ID, PRIME_INFERENCE_PROVIDER_ID,
@@ -1725,35 +1726,118 @@ fn is_rescheduled_upload_failure(status_code: Option<u16>) -> bool {
     }
 }
 
+/// `let catchUpTriggered = false;` (agent-traces.ts:1154) - module scope in the
+/// TypeScript, so the flag is process-wide here too.
+fn catch_up_triggered() -> &'static std::sync::atomic::AtomicBool {
+    static CATCH_UP_TRIGGERED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    &CATCH_UP_TRIGGERED
+}
+
+/// `if (!catchUpTriggered) { catchUpTriggered = true; void catchUpAgentTraceUploads(options).catch(...); }`
+/// (agent-traces.ts:1157-1160): startup catch-up runs once per process.
+fn trigger_catch_up_once(options: &AgentTraceUploadInstallOptions) {
+    if catch_up_triggered().swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let catch_up_options = AgentTraceUploadOptions {
+        session_file: None,
+        auth_storage: options.auth_storage.clone(),
+        require_enabled: true,
+        base_url: options.base_url.clone(),
+        config_path: options.config_path.clone(),
+        fetch_fn: options.fetch_fn.clone(),
+        reload_config: true,
+        request_timeout_ms: options.request_timeout_ms,
+        signal: None,
+        agent_traces_enabled: options.agent_traces_enabled.clone(),
+        reload_settings: options.reload_settings.clone(),
+    };
+    tokio::spawn(async move {
+        let _ = catch_up_agent_trace_uploads(catch_up_options).await;
+    });
+}
+
 /// `const traceUploadControllers = new WeakMap<SessionManager, AgentTraceUploadController>()`
-/// keyed by the session manager's persist-listener registry. The session slice
-/// owns `SessionManager`, so the port exposes the install function and lets the
-/// caller keep the returned controller per session manager.
+/// (agent-traces.ts:1153) - one controller per session manager, reused by later
+/// installs for the same manager.
+///
+/// TypeScript's map is weak-keyed by the manager object. Rust has no weak-keyed
+/// map, so the entry is keyed by the manager's address and holds a `Weak`
+/// controller: the registered persist listener owns the strong reference, so a
+/// dropped manager leaves a dead entry, and a later manager reusing that address
+/// upgrades to `None` and gets a fresh controller - the same "reuse while alive"
+/// behavior without leaking the controller.
+fn trace_upload_controllers() -> &'static Mutex<HashMap<usize, Weak<AgentTraceUploadController>>> {
+    static CONTROLLERS: OnceLock<Mutex<HashMap<usize, Weak<AgentTraceUploadController>>>> =
+        OnceLock::new();
+    CONTROLLERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// `installAgentTraceUpload(sessionManager, options)` (agent-traces.ts:1156-1170).
+///
+/// Registers `sessionManager.onPersist(controller.schedule)` (agent-traces.ts:1169)
+/// so every transcript persist schedules an automatic upload. Without this
+/// registration `schedule()` never runs, and only the explicit one-shot APIs and
+/// startup catch-up reach `uploadAgentTraceSession`.
+///
+/// UNRESOLVED (C3-05): the production call site
+/// `crates/pi-coding-agent/src/core/agent_session_services.rs:480`
+/// (`let _upload = install_agent_trace_upload(...)`) still calls the options-only
+/// install and never passes its `options.session_manager`, so no persist listener
+/// is registered in production yet. The TypeScript passes the manager as the
+/// first argument (`installAgentTraceUpload(options.sessionManager, {...})`,
+/// agent-session-services.ts:234). Wiring it needs that file to call
+/// `install_agent_trace_upload_for_session_manager(&manager, options)`; the file
+/// belongs to another slice, so this port exposes the registration here and
+/// records the exact missing call instead of editing that file.
+pub fn install_agent_trace_upload_for_session_manager(
+    session_manager: &SessionManager,
+    options: AgentTraceUploadInstallOptions,
+) -> Arc<AgentTraceUploadController> {
+    trigger_catch_up_once(&options);
+    // `sessionManager` as a key: `SessionManager` values live inside
+    // `Arc<Mutex<SessionManager>>`, so this address is stable for their lifetime.
+    let key = session_manager as *const SessionManager as usize;
+    {
+        let controllers = trace_upload_controllers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // `const controller = traceUploadControllers.get(sessionManager); if (controller) { controller.update(options); return; }`
+        if let Some(existing) = controllers.get(&key).and_then(Weak::upgrade) {
+            existing.update(options);
+            return existing;
+        }
+    }
+
+    let controller = AgentTraceUploadController::new(options);
+    {
+        let mut controllers = trace_upload_controllers()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Drop entries whose manager is gone so recycled addresses cannot grow the map.
+        controllers.retain(|_, entry| entry.strong_count() > 0);
+        controllers.insert(key, Arc::downgrade(&controller));
+    }
+
+    // `sessionManager.onPersist(controller.schedule);` - the TypeScript discards
+    // the returned unsubscribe, so the listener lives as long as the manager.
+    let scheduled = Arc::clone(&controller);
+    let _unsubscribe = session_manager.on_persist(Box::new(move |_session_file: &str| {
+        scheduled.schedule();
+    }));
+    controller
+}
+
+/// The options-only install: startup catch-up plus a fresh controller, with no
+/// session-manager registration. Kept for call sites that do not hold a
+/// `SessionManager`; [`install_agent_trace_upload_for_session_manager`] is the
+/// faithful `installAgentTraceUpload` and is what makes automatic upload work.
 pub fn install_agent_trace_upload(
     options: AgentTraceUploadInstallOptions,
 ) -> Arc<AgentTraceUploadController> {
-    let controller = AgentTraceUploadController::new(options.clone());
-    static CATCH_UP_TRIGGERED: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
-    if !CATCH_UP_TRIGGERED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        let catch_up_options = AgentTraceUploadOptions {
-            session_file: None,
-            auth_storage: options.auth_storage.clone(),
-            require_enabled: true,
-            base_url: options.base_url.clone(),
-            config_path: options.config_path.clone(),
-            fetch_fn: options.fetch_fn.clone(),
-            reload_config: true,
-            request_timeout_ms: options.request_timeout_ms,
-            signal: None,
-            agent_traces_enabled: options.agent_traces_enabled.clone(),
-            reload_settings: options.reload_settings.clone(),
-        };
-        tokio::spawn(async move {
-            let _ = catch_up_agent_trace_uploads(catch_up_options).await;
-        });
-    }
-    controller
+    trigger_catch_up_once(&options);
+    AgentTraceUploadController::new(options)
 }
 
 #[cfg(test)]
@@ -2174,6 +2258,131 @@ mod tests {
         assert_eq!(credential.label, "PRIME_API_KEY");
         assert_eq!(credential.source, "environment");
         std::env::remove_var("PRIME_API_KEY");
+    }
+
+    fn install_options(
+        session_file: &str,
+        fetch_fn: Option<FetchFn>,
+    ) -> AgentTraceUploadInstallOptions {
+        let session_file = session_file.to_string();
+        AgentTraceUploadInstallOptions {
+            auth_storage: Arc::new(tokio::sync::Mutex::new(AuthStorage::in_memory(
+                IndexMap::new(),
+                Some(crate::core::auth_storage::AuthStorageOptions {
+                    prime_cli_config_path: None,
+                    use_prime_cli_config: false,
+                }),
+            ))),
+            base_url: Some("https://traces.test".to_string()),
+            config_path: None,
+            fetch_fn,
+            request_timeout_ms: Some(1_000),
+            semantic_edges_ledger_path: None,
+            agent_traces_enabled: Arc::new(|| true),
+            reload_settings: Arc::new(|| Box::pin(async { Ok(()) })),
+            get_session_file: Arc::new(move || Some(session_file.clone())),
+        }
+    }
+
+    /// `installAgentTraceUpload` must register `sessionManager.onPersist(controller.schedule)`
+    /// (agent-traces.ts:1169), otherwise automatic trace upload is dead: nothing
+    /// calls `schedule()` and only the explicit one-shot APIs and startup
+    /// catch-up ever reach `uploadAgentTraceSession`.
+    ///
+    /// `schedule()` is observable without network access: it marks upload intent
+    /// in the outbox (`markAgentTraceOutboxPendingSync`, agent-traces.ts:1092)
+    /// and arms the debounce timer. The test drives a real persist through
+    /// `SessionManager` and checks both.
+    #[tokio::test]
+    async fn install_registers_on_persist_so_a_persist_schedules_an_upload() {
+        // Consume the one-shot startup catch-up so no background sweep of the
+        // shared outbox directory runs concurrently with this test.
+        catch_up_triggered().swap(true, std::sync::atomic::Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let session_dir = dir.path().join("sessions");
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let cwd = dir.path().join("cwd");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let mut manager =
+            SessionManager::create(&cwd.to_string_lossy(), Some(&session_dir.to_string_lossy()))
+                .unwrap();
+        let session_file = manager.new_session(None).unwrap().expect("session file");
+
+        // A fake transport: the controller's debounce may fire after this test
+        // returns, and it must never reach the real network.
+        let fetch_fn: FetchFn = Arc::new(move |request| {
+            Box::pin(async move {
+                let _ = request;
+                Ok(HttpResponse {
+                    status: 200,
+                    status_text: "OK".to_string(),
+                    headers: Vec::new(),
+                    text: json!({"bytes_stored": 1}).to_string(),
+                })
+            }) as BoxFuture<Result<HttpResponse, String>>
+        });
+
+        let controller = install_agent_trace_upload_for_session_manager(
+            &manager,
+            install_options(&session_file, Some(fetch_fn)),
+        );
+        let entry_path = agent_trace_outbox_entry_path(&session_file);
+        let _ = std::fs::remove_file(&entry_path);
+        assert!(
+            !Path::new(&entry_path).exists(),
+            "no upload intent before the first persist"
+        );
+        assert!(
+            !*controller.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            "the controller must not be scheduled before a persist"
+        );
+
+        // A real transcript persist: `flushNow()` -> `_rewriteFile()` ->
+        // `_notifyPersistListeners()` (session-manager.ts:2003-2008, 1912).
+        manager.flush_now();
+        assert!(Path::new(&session_file).exists(), "the persist must write the session file");
+
+        assert!(
+            *controller.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+            "a persist must schedule an upload through the registered listener"
+        );
+        let entry = std::fs::read_to_string(&entry_path).unwrap_or_default();
+        // The entry is JSON, so a Windows path appears with escaped separators;
+        // compare the parsed field instead of raw bytes.
+        let recorded = serde_json::from_str::<Value>(&entry)
+            .ok()
+            .and_then(|value| value.get("sessionFile").and_then(Value::as_str).map(str::to_string));
+        assert_eq!(
+            recorded.as_deref(),
+            Some(session_file.as_str()),
+            "the persist must record upload intent for {session_file}, got: {entry}"
+        );
+
+        // Negative control: without the install there is no listener, so a
+        // persist schedules nothing. This is the symptom the audit reported.
+        let other_dir = dir.path().join("sessions-unregistered");
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let mut unregistered =
+            SessionManager::create(&cwd.to_string_lossy(), Some(&other_dir.to_string_lossy()))
+                .unwrap();
+        let other_file = unregistered.new_session(None).unwrap().expect("session file");
+        let other_entry = agent_trace_outbox_entry_path(&other_file);
+        let _ = std::fs::remove_file(&other_entry);
+        unregistered.flush_now();
+        assert!(Path::new(&other_file).exists());
+        assert!(
+            !Path::new(&other_entry).exists(),
+            "an unregistered session manager must not record upload intent"
+        );
+
+        // Leave no outbox entries behind: the temp session files are removed with
+        // the tempdir, and catch-up would prune them, but the test cleans up now.
+        let _ = std::fs::remove_file(&entry_path);
+        locally_managed_session_files()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&session_file);
     }
 
     #[tokio::test]

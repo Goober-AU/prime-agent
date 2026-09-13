@@ -29,7 +29,7 @@ use crate::core::extensions::loader::{create_extension_runtime, load_extension_f
 use crate::core::extensions::types::{
     ExtensionFactory, ExtensionRuntime, LoadExtensionError, LoadExtensionsResult, SharedExtension,
 };
-use crate::core::package_manager::{DefaultPackageManager, PackageManagerOptions, PathMetadata, ResolvedPaths};
+use crate::core::package_manager::{DefaultPackageManager, PackageManagerOptions, PathMetadata};
 use crate::core::prompt_templates::{load_prompt_templates, LoadPromptTemplatesOptions, PromptTemplate};
 use crate::core::settings_manager::SettingsManager;
 use crate::core::skills::{load_skills, LoadSkillsOptions, Skill};
@@ -273,6 +273,14 @@ struct LoaderState {
     last_skill_paths: Vec<String>,
     last_prompt_paths: Vec<String>,
     last_theme_paths: Vec<String>,
+    /// Set when `reload()` aborts because `packageManager.resolve()` rejected.
+    ///
+    /// The TypeScript `reload()` awaits the resolve uncaught
+    /// (resource-loader.ts:338), so the rejection reaches its caller and no
+    /// resource state is touched. The Rust `reload()` has no error channel, so
+    /// the abort reason is retained here (and mirrored into
+    /// `skill_diagnostics`, which the UI already surfaces).
+    last_reload_error: Option<String>,
 }
 
 /// The mutable state behind [`DefaultResourceLoader`].
@@ -641,37 +649,30 @@ fn home_dir() -> String {
 impl LoaderInner {
     /// The body of `reload()`.
     async fn reload_inner(&self) {
+        // `const resolvedPaths = await this.packageManager.resolve();`
+        // (resource-loader.ts:338). The TypeScript awaits it uncaught, so a
+        // rejection aborts `reload()` BEFORE any of the state assignments below
+        // run: the previously loaded extensions/skills/prompts/themes stay in
+        // place and the error reaches the caller.
+        //
+        // Continuing with `ResolvedPaths::default()` instead would silently
+        // replace every loaded resource path with nothing (extensions, skills,
+        // prompts, and themes all come from `resolved_paths` below), and the
+        // diagnostic explaining it was itself erased by
+        // `update_skills_from_paths` (which assigns `skill_diagnostics`).
         let resolved_paths = match self.package_manager.resolve(None).await {
             Ok(paths) => paths,
-            Err(error) => {
-                self.state()
-                    .skill_diagnostics
-                    .push(ResourceDiagnostic {
-                        diagnostic_type: RESOURCE_DIAGNOSTIC_ERROR.to_string(),
-                        message: error,
-                        path: None,
-                        collision: None,
-                    });
-                ResolvedPaths::default()
-            }
+            Err(error) => return self.abort_reload(error),
         };
+        // `await this.packageManager.resolveExtensionSources(...)`
+        // (resource-loader.ts:339), also awaited uncaught.
         let cli_extension_paths = match self
             .package_manager
             .resolve_extension_sources(&self.additional_extension_paths, false, true)
             .await
         {
             Ok(paths) => paths,
-            Err(error) => {
-                self.state()
-                    .skill_diagnostics
-                    .push(ResourceDiagnostic {
-                        diagnostic_type: RESOURCE_DIAGNOSTIC_ERROR.to_string(),
-                        message: error,
-                        path: None,
-                        collision: None,
-                    });
-                ResolvedPaths::default()
-            }
+            Err(error) => return self.abort_reload(error),
         };
         let mut metadata_by_path: Vec<(String, PathMetadata)> = Vec::new();
 
@@ -947,6 +948,8 @@ impl LoaderInner {
         };
 
         let mut state = self.state();
+        // A fully applied reload clears the previous abort reason.
+        state.last_reload_error = None;
         state.extensions = extensions_result.extensions;
         state.extension_errors = extensions_result.errors;
         state.runtime = Some(extensions_result.runtime);
@@ -957,6 +960,29 @@ impl LoaderInner {
 }
 
 impl LoaderInner {
+    /// Aborts `reload()` with the rejection `packageManager.resolve()` produced.
+    ///
+    /// No resource state is mutated: the TypeScript lets the rejection escape
+    /// `reload()` (resource-loader.ts:338-341), so nothing after the awaits runs
+    /// and the previously loaded paths stay in place. The reason is retained
+    /// (and pushed as an error diagnostic, which the UI already surfaces through
+    /// `getSkills().diagnostics`) instead of being discarded.
+    fn abort_reload(&self, error: String) {
+        let mut state = self.state();
+        state.last_reload_error = Some(error.clone());
+        state.skill_diagnostics.push(ResourceDiagnostic {
+            diagnostic_type: RESOURCE_DIAGNOSTIC_ERROR.to_string(),
+            message: error,
+            path: None,
+            collision: None,
+        });
+    }
+
+    /// The reason the last `reload()` aborted, if it did.
+    pub fn last_reload_error(&self) -> Option<String> {
+        self.state().last_reload_error.clone()
+    }
+
     /// `updateSkillsFromPaths(skillPaths, metadataByPath?)`.
     fn update_skills_from_paths(&self, skill_paths: &[String], metadata_by_path: Option<&Vec<(String, PathMetadata)>>) {
         let skills_result = if self.no_skills && skill_paths.is_empty() {
@@ -1847,6 +1873,149 @@ mod tests {
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].path, "b");
         assert_eq!(conflicts[0].message, "Flag \"--shared\" conflicts with a");
+    }
+
+    /// `reload()` must not clear loaded resources when `packageManager.resolve()`
+    /// rejects.
+    ///
+    /// TypeScript awaits the resolve uncaught (`resource-loader.ts:338`), so the
+    /// rejection aborts `reload()` before any state assignment: the previously
+    /// loaded extensions/skills/prompts/themes stay in place and the error
+    /// reaches the caller. Continuing with empty defaults instead replaces every
+    /// loaded path with nothing, and the diagnostic explaining it was erased by
+    /// `update_skills_from_paths` (which assigns `skill_diagnostics`).
+    #[tokio::test]
+    async fn resolve_failure_aborts_reload_without_wiping_loaded_paths() {
+        let root = temp_dir("resolve-abort");
+        let agent_dir = root.join("agent");
+        let cwd = root.join("project");
+        write_file(
+            &agent_dir.join("skills").join("kept.md"),
+            "---\nname: kept-skill\ndescription: kept\n---\nbody",
+        );
+        write_file(&agent_dir.join("prompts").join("kept.md"), "Kept prompt");
+        write_file(
+            &agent_dir.join("themes").join("kept.json"),
+            "{\"name\":\"kept\",\"colors\":{\"primary\":\"#010203\"}}",
+        );
+
+        // `npmCommand` with an empty command makes `DefaultPackageManager::resolve`
+        // fail for any configured package ("Invalid npmCommand: first array entry
+        // must be a non-empty command", package_manager.rs:2220) without spawning a
+        // process, which is the same resolve rejection the TypeScript propagates.
+        let mut initial_settings: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        initial_settings.insert("npmCommand".to_string(), serde_json::json!([""]));
+        let settings_manager = Arc::new(Mutex::new(SettingsManager::in_memory(initial_settings)));
+
+        let loader = LoaderInner::new(DefaultResourceLoaderOptions {
+            settings_manager: Some(Arc::clone(&settings_manager)),
+            bundled_skills_dir: Some(None),
+            ..DefaultResourceLoaderOptions::new(&cwd.to_string_lossy(), &agent_dir.to_string_lossy())
+        });
+
+        loader.reload().await;
+        assert_eq!(loader.last_reload_error(), None);
+        // Snapshot the loaded sets. Auto-discovery also walks ancestor
+        // `.agents/skills` directories, so the counts are environment-dependent;
+        // the invariant under test is that a failed resolve does not REPLACE the
+        // loaded sets with the empty defaults.
+        let skills_before: Vec<String> = loader
+            .get_skills()
+            .skills
+            .iter()
+            .map(|skill| skill.name().to_string())
+            .collect();
+        let prompts_before: Vec<String> = loader
+            .get_prompts()
+            .prompts
+            .iter()
+            .map(|prompt| prompt.name.clone())
+            .collect();
+        let themes_before: Vec<String> = loader
+            .get_themes()
+            .themes
+            .iter()
+            .map(|theme| theme.name.clone().unwrap_or_default())
+            .collect();
+        assert!(
+            skills_before.contains(&"kept-skill".to_string()),
+            "the fixture skill must load before the failing resolve: {skills_before:?}"
+        );
+        assert!(prompts_before.contains(&"kept".to_string()), "{prompts_before:?}");
+        assert!(!themes_before.is_empty(), "the fixture theme must load: {themes_before:?}");
+
+        // The npm install path is gated by `PI_OFFLINE` (package_manager.rs:1666,
+        // `install_missing`: offline returns Ok(false) and resolve succeeds with
+        // nothing installed), so clear it to reach the failure. Other tests in
+        // this binary mutate the same variable, so the previous value is restored
+        // and the gate state is asserted here rather than assumed.
+        let previous_offline = std::env::var("PI_OFFLINE").ok();
+        std::env::remove_var("PI_OFFLINE");
+        assert!(
+            !crate::core::package_manager::is_offline_mode_enabled(),
+            "the resolve failure path below needs offline mode off (PI_OFFLINE unset)"
+        );
+
+        // A pinned project package forces an install, which fails on the invalid
+        // `npmCommand` above: `resolve()` now returns `Err`.
+        settings_manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_project_packages(vec![serde_json::json!("npm:some-package@1.0.0")]);
+        loader.reload().await;
+
+        match previous_offline {
+            Some(value) => std::env::set_var("PI_OFFLINE", value),
+            None => std::env::remove_var("PI_OFFLINE"),
+        }
+
+        // The resolved failure must not have replaced the loaded paths with the
+        // empty defaults.
+        let skills_after: Vec<String> = loader
+            .get_skills()
+            .skills
+            .iter()
+            .map(|skill| skill.name().to_string())
+            .collect();
+        let prompts_after: Vec<String> = loader
+            .get_prompts()
+            .prompts
+            .iter()
+            .map(|prompt| prompt.name.clone())
+            .collect();
+        let themes_after: Vec<String> = loader
+            .get_themes()
+            .themes
+            .iter()
+            .map(|theme| theme.name.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            skills_after, skills_before,
+            "a failed resolve must not wipe the previously loaded skills"
+        );
+        assert_eq!(
+            prompts_after, prompts_before,
+            "a failed resolve must not wipe the previously loaded prompts"
+        );
+        assert_eq!(
+            themes_after, themes_before,
+            "a failed resolve must not wipe the previously loaded themes"
+        );
+
+        // The failure must stay visible instead of being erased by the reload.
+        let error = loader
+            .last_reload_error()
+            .expect("the resolve rejection must surface from reload()");
+        assert!(error.contains("Invalid npmCommand"), "unexpected error: {error}");
+        assert!(
+            loader
+                .get_skills()
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.diagnostic_type == RESOURCE_DIAGNOSTIC_ERROR
+                    && diagnostic.message.contains("Invalid npmCommand")),
+            "the resolve rejection must remain visible as an error diagnostic"
+        );
     }
 }
 
