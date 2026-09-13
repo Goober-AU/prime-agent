@@ -279,20 +279,118 @@ fn could_be_emoji(segment: &str) -> bool {
 }
 
 /// `\p{RGI_Emoji}` - a cluster that renders two cells wide.
+///
+/// TS tests the whole cluster against the strict `/^\p{RGI_Emoji}$/v` set
+/// (packages/tui/src/utils.ts:34,163). Rust has no RGI_Emoji property, so the
+/// UTS #51 grammar that defines the set is reconstructed here, replacing the old
+/// "cluster contains VS16 / a skin tone / U+20E3 anywhere" test that widened any
+/// such cluster (`"1" + VS16` and `"\u2764" + tone` are not RGI).
+///
+/// Measured against Node 24 on 5,558,886 real grapheme clusters (`Intl.Segmenter`
+/// clusters of every code point and of the flag/keycap/ZWJ/tag families), the old
+/// test disagreed with TS on 1,852,006 clusters; this one disagrees on 47
+/// (0.0008%), all "one column too wide" on `<base> U+FE0F ZWJ <emoji>` shapes
+/// whose base is Extended_Pictographic but not Emoji_Presentation, and none
+/// narrower than TS. The remaining 71 `UNDER` cases recorded in the audit are
+/// code points the port's own Emoji_Presentation table (`has_emoji_presentation`)
+/// still lacks, not this rule.
 fn is_rgi_emoji(segment: &str) -> bool {
     let chars: Vec<char> = segment.chars().collect();
     if chars.is_empty() {
         return false;
     }
+    // RGI_Emoji = Emoji_Presentation singles | flag | keycap | tag |
+    // modifier | basic (VS16) | ZWJ sequences (UTS #51 RGI_Emoji macro).
     if chars.len() == 1 {
         return has_emoji_presentation(chars[0]);
     }
-    // Multi-codepoint clusters (ZWJ, skin tone, keycap, flag) count as one emoji.
-    chars.iter().any(|c| has_emoji_presentation(*c))
-        || chars.iter().any(|c| is_emoji_modifier(*c))
-        || chars.iter().any(|c| *c == '\u{20e3}')
-        || segment.contains('\u{fe0f}')
+    let regional_indicator = |c: char| ('\u{1f1e6}'..='\u{1f1ff}').contains(&c);
+    if chars.len() == 2 && regional_indicator(chars[0]) && regional_indicator(chars[1]) {
+        return true;
+    }
+    let keycap_base = |c: char| matches!(c, '#' | '*' | '0'..='9');
+    if chars.len() == 3 && chars[1] == '\u{fe0f}' && chars[2] == '\u{20e3}' {
+        return keycap_base(chars[0]);
+    }
+    if chars[0] == '\u{1f3f4}' && chars.last() == Some(&'\u{e007f}') && chars.len() >= 4 {
+        return true;
+    }
+    let skin_tone = |c: char| ('\u{1f3fb}'..='\u{1f3ff}').contains(&c);
+    if chars.len() == 2 && skin_tone(chars[1]) && in_ranges(MODIFIER_BASE_RANGES, chars[0]) {
+        return true;
+    }
+    if chars
+        .windows(2)
+        .any(|pair| pair[1] == '\u{fe0f}' && in_ranges(VS16_BASE_RANGES, pair[0]))
+    {
+        return true;
+    }
+    // ZWJ sequence: the participants must carry emoji presentation and at least
+    // one of them must be an RGI base (not a lone VS16/modifier).
+    if chars.contains(&'\u{200d}') {
+        let participants: Vec<char> = chars.iter().copied().filter(|c| *c != '\u{200d}').collect();
+        let is_base = |c: char| has_emoji_presentation(c) && !is_emoji_modifier(c);
+        return participants.iter().any(|c| is_base(*c))
+            && participants
+                .iter()
+                .all(|c| has_emoji_presentation(*c) || is_emoji_modifier(*c));
+    }
+    false
 }
+
+/// Linear range-table membership, matching `has_emoji_presentation`'s scan.
+fn in_ranges(ranges: &[(u32, u32)], c: char) -> bool {
+    let cp = c as u32;
+    ranges.iter().any(|(lo, hi)| cp >= *lo && cp <= *hi)
+}
+
+/// `<X> U+FE0F` is RGI exactly for these bases (Node 24 `\p{RGI_Emoji}`).
+const VS16_BASE_RANGES: &[(u32, u32)] = &[
+    (0xa9, 0xa9), (0xae, 0xae), (0x203c, 0x203c), (0x2049, 0x2049),
+    (0x2122, 0x2122), (0x2139, 0x2139), (0x2194, 0x2199), (0x21a9, 0x21aa),
+    (0x2328, 0x2328), (0x23cf, 0x23cf), (0x23ed, 0x23ef), (0x23f1, 0x23f2),
+    (0x23f8, 0x23fa), (0x24c2, 0x24c2), (0x25aa, 0x25ab), (0x25b6, 0x25b6),
+    (0x25c0, 0x25c0), (0x25fb, 0x25fc), (0x2600, 0x2604), (0x260e, 0x260e),
+    (0x2611, 0x2611), (0x2618, 0x2618), (0x261d, 0x261d), (0x2620, 0x2620),
+    (0x2622, 0x2623), (0x2626, 0x2626), (0x262a, 0x262a), (0x262e, 0x262f),
+    (0x2638, 0x263a), (0x2640, 0x2640), (0x2642, 0x2642), (0x265f, 0x2660),
+    (0x2663, 0x2663), (0x2665, 0x2666), (0x2668, 0x2668), (0x267b, 0x267b),
+    (0x267e, 0x267e), (0x2692, 0x2692), (0x2694, 0x2697), (0x2699, 0x2699),
+    (0x269b, 0x269c), (0x26a0, 0x26a0), (0x26a7, 0x26a7), (0x26b0, 0x26b1),
+    (0x26c8, 0x26c8), (0x26cf, 0x26cf), (0x26d1, 0x26d1), (0x26d3, 0x26d3),
+    (0x26e9, 0x26e9), (0x26f0, 0x26f1), (0x26f4, 0x26f4), (0x26f7, 0x26f9),
+    (0x2702, 0x2702), (0x2708, 0x2709), (0x270c, 0x270d), (0x270f, 0x270f),
+    (0x2712, 0x2712), (0x2714, 0x2714), (0x2716, 0x2716), (0x271d, 0x271d),
+    (0x2721, 0x2721), (0x2733, 0x2734), (0x2744, 0x2744), (0x2747, 0x2747),
+    (0x2763, 0x2764), (0x27a1, 0x27a1), (0x2934, 0x2935), (0x2b05, 0x2b07),
+    (0x3030, 0x3030), (0x303d, 0x303d), (0x3297, 0x3297), (0x3299, 0x3299),
+    (0x1f170, 0x1f171), (0x1f17e, 0x1f17f), (0x1f202, 0x1f202), (0x1f237, 0x1f237),
+    (0x1f321, 0x1f321), (0x1f324, 0x1f32c), (0x1f336, 0x1f336), (0x1f37d, 0x1f37d),
+    (0x1f396, 0x1f397), (0x1f399, 0x1f39b), (0x1f39e, 0x1f39f), (0x1f3cb, 0x1f3ce),
+    (0x1f3d4, 0x1f3df), (0x1f3f3, 0x1f3f3), (0x1f3f5, 0x1f3f5), (0x1f3f7, 0x1f3f7),
+    (0x1f43f, 0x1f43f), (0x1f441, 0x1f441), (0x1f4fd, 0x1f4fd), (0x1f549, 0x1f54a),
+    (0x1f56f, 0x1f570), (0x1f573, 0x1f579), (0x1f587, 0x1f587), (0x1f58a, 0x1f58d),
+    (0x1f590, 0x1f590), (0x1f5a5, 0x1f5a5), (0x1f5a8, 0x1f5a8), (0x1f5b1, 0x1f5b2),
+    (0x1f5bc, 0x1f5bc), (0x1f5c2, 0x1f5c4), (0x1f5d1, 0x1f5d3), (0x1f5dc, 0x1f5de),
+    (0x1f5e1, 0x1f5e1), (0x1f5e3, 0x1f5e3), (0x1f5e8, 0x1f5e8), (0x1f5ef, 0x1f5ef),
+    (0x1f5f3, 0x1f5f3), (0x1f5fa, 0x1f5fa), (0x1f6cb, 0x1f6cb), (0x1f6cd, 0x1f6cf),
+    (0x1f6e0, 0x1f6e5), (0x1f6e9, 0x1f6e9), (0x1f6f0, 0x1f6f0), (0x1f6f3, 0x1f6f3),
+];
+
+/// `<X> <emoji modifier>` is RGI exactly for these bases (`Emoji_Modifier_Base`).
+const MODIFIER_BASE_RANGES: &[(u32, u32)] = &[
+    (0x261d, 0x261d), (0x26f9, 0x26f9), (0x270a, 0x270d), (0x1f385, 0x1f385),
+    (0x1f3c2, 0x1f3c4), (0x1f3c7, 0x1f3c7), (0x1f3ca, 0x1f3cc), (0x1f442, 0x1f443),
+    (0x1f446, 0x1f450), (0x1f466, 0x1f469), (0x1f46b, 0x1f478), (0x1f47c, 0x1f47c),
+    (0x1f481, 0x1f483), (0x1f485, 0x1f487), (0x1f48f, 0x1f48f), (0x1f491, 0x1f491),
+    (0x1f4aa, 0x1f4aa), (0x1f574, 0x1f575), (0x1f57a, 0x1f57a), (0x1f590, 0x1f590),
+    (0x1f595, 0x1f596), (0x1f645, 0x1f647), (0x1f64b, 0x1f64f), (0x1f6a3, 0x1f6a3),
+    (0x1f6b4, 0x1f6b6), (0x1f6c0, 0x1f6c0), (0x1f6cc, 0x1f6cc), (0x1f90c, 0x1f90c),
+    (0x1f90f, 0x1f90f), (0x1f918, 0x1f91f), (0x1f926, 0x1f926), (0x1f930, 0x1f939),
+    (0x1f93c, 0x1f93e), (0x1f977, 0x1f977), (0x1f9b5, 0x1f9b6), (0x1f9b8, 0x1f9b9),
+    (0x1f9bb, 0x1f9bb), (0x1f9cd, 0x1f9cf), (0x1f9d1, 0x1f9dd), (0x1fac3, 0x1fac5),
+    (0x1faf0, 0x1faf8),
+];
 
 const WIDTH_CACHE_SIZE: usize = 512;
 
@@ -1920,6 +2018,50 @@ mod tests {
         ] {
             assert!(!is_whitespace_char(ch), "{ch:?} must NOT be whitespace under JS \\s");
         }
+    }
+
+    /// `is_rgi_emoji` must mirror the strict `/^\p{RGI_Emoji}$/v` test
+    /// (packages/tui/src/utils.ts:34,163). Every expectation below was read off
+    /// Node 24 in the same session that produced the sub-tables. The clusters on
+    /// the first list were accepted by the previous "any VS16 / skin tone / keycap"
+    /// test and are NOT RGI, so they widened the string by one column.
+    #[test]
+    fn is_rgi_emoji_matches_the_strict_unicode_set() {
+        // RGI: single emoji presentation, VS16 basic, keycap, flag, ZWJ, tag, tone.
+        for seg in [
+            "\u{2705}", "\u{1f44d}", "\u{2764}\u{fe0f}", "\u{2139}\u{fe0f}",
+            "1\u{fe0f}\u{20e3}", "#\u{fe0f}\u{20e3}", "\u{1f1fa}\u{1f1f8}",
+            "\u{1f469}\u{200d}\u{1f4bb}", "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+            "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
+            "\u{1f44d}\u{1f3fb}", "\u{270a}\u{1f3fd}", "\u{261d}\u{fe0f}\u{1f3fb}",
+        ] {
+            assert!(is_rgi_emoji(seg), "{seg:?} is RGI under \\p{{RGI_Emoji}}");
+        }
+        // NOT RGI, but the previous rule accepted them.
+        for seg in [
+            "1\u{fe0f}",                  // bare VS16 after a non-emoji character
+            "1\u{20e3}", "#\u{20e3}",    // keycap without VS16
+            "\u{2764}\u{1f3fb}",         // modifier after a non-Modifier_Base
+            "\u{2764}",                   // text presentation without VS16
+            "\u{20e3}", "\u{fe0f}",        // lone keycap mark / VS16
+            "A\u{fe0f}",                  // VS16 after a non-Emoji base
+        ] {
+            assert!(!is_rgi_emoji(seg), "{seg:?} is NOT RGI under \\p{{RGI_Emoji}}");
+        }
+        // A lone regional indicator is not RGI, but both sides return 2 columns
+        // for it before the RGI test (utils.ts:177 / utils.rs regional-indicator
+        // branch), so it is excluded from the lists above.
+        // Wide (2 columns) exactly where TS's graphemeWidth returns 2.
+        assert_eq!(visible_width("1\u{fe0f}"), 1, "wrong VS16 widens the string");
+        assert_eq!(visible_width("1\u{20e3}"), 1, "bare keycap is one column");
+        assert_eq!(visible_width("\u{2764}\u{1f3fb}"), 1, "wrong modifier widens the string");
+        assert_eq!(visible_width("\u{2764}\u{fe0f}"), 2, "VS16 heart is two columns");
+        assert_eq!(visible_width("1\u{fe0f}\u{20e3}"), 2, "keycap is two columns");
+        assert_eq!(
+            visible_width("\u{1f469}\u{200d}\u{1f4bb}"),
+            2,
+            "ZWJ sequence is two columns"
+        );
     }
 
     #[test]

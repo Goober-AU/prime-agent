@@ -455,7 +455,11 @@ pub struct TUI {
     fullscreen_pressed_hyperlink: Option<String>,
     overlay_selection_regions: Vec<FrameSelectionRegion>,
     fullscreen: Option<FullscreenState>,
-    selection_auto_scroll_timer_active: bool,
+    /// Port of `selectionAutoScrollTimer` (packages/tui/src/tui.ts:807): the
+    /// armed auto-scroll timeout. TS holds a timer handle; here the handle is
+    /// the deadline the owner tick waits for, paired with the scrolling
+    /// direction being pushed.
+    selection_auto_scroll_due_at: Option<std::time::Instant>,
     selection_auto_scroll_direction: Option<SelectionScrollDirection>,
     selection_auto_scroll_row: i64,
     selection_auto_scroll_column: i64,
@@ -508,7 +512,7 @@ impl TUI {
             fullscreen_pressed_hyperlink: None,
             overlay_selection_regions: Vec::new(),
             fullscreen: None,
-            selection_auto_scroll_timer_active: false,
+            selection_auto_scroll_due_at: None,
             selection_auto_scroll_direction: None,
             selection_auto_scroll_row: 0,
             selection_auto_scroll_column: 0,
@@ -988,7 +992,13 @@ impl TUI {
     }
 
     /// Port of the render timer body. Renders when work is queued.
+    ///
+    /// This is the owner loop's per-tick entry point (the interactive host calls
+    /// it every iteration), so it also services the selection auto-scroll
+    /// timeout armed by `updateSelectionAutoScroll` (tui.ts:814-833), whose
+    /// `setTimeout` chain the Rust port cannot own itself.
     pub fn run_pending_render(&mut self, now_ms: f64) {
+        self.poll_selection_auto_scroll();
         self.render_timer_active = false;
         if self.stopped || !self.render_requested {
             return;
@@ -1142,6 +1152,9 @@ impl TUI {
         self.terminal.write(&format!("\x1b]52;c;{base64}\x07"));
     }
 
+    /// Port of `updateSelectionAutoScroll` (packages/tui/src/tui.ts:803-812).
+    /// Arms the auto-scroll timeout through [`Self::schedule_selection_auto_scroll`]
+    /// exactly as TS does, with the 150ms initial delay.
     fn update_selection_auto_scroll(&mut self, screen_row: i64, screen_column: i64) {
         let direction = self
             .fullscreen
@@ -1149,7 +1162,8 @@ impl TUI {
             .and_then(|fullscreen| fullscreen.viewport.selection_auto_scroll_direction(screen_row));
         self.selection_auto_scroll_row = screen_row;
         self.selection_auto_scroll_column = screen_column;
-        if direction == self.selection_auto_scroll_direction && self.selection_auto_scroll_timer_active {
+        if direction == self.selection_auto_scroll_direction && self.selection_auto_scroll_due_at.is_some()
+        {
             return;
         }
         self.stop_selection_auto_scroll();
@@ -1158,13 +1172,45 @@ impl TUI {
             None => return,
         };
         self.selection_auto_scroll_direction = Some(direction);
-        self.selection_auto_scroll_timer_active = true;
+        self.schedule_selection_auto_scroll(Self::SELECTION_AUTO_SCROLL_DELAY_MS);
     }
 
-    /// Port of the selection auto-scroll timer body. Returns the next delay when
-    /// the timer reschedules itself, mirroring `setTimeout(..., INTERVAL)`.
+    /// Port of `scheduleSelectionAutoScroll` (packages/tui/src/tui.ts:814-833).
+    /// TS stores a `setTimeout` handle and clears it in
+    /// `stopSelectionAutoScroll`; the Rust port is owner-driven, so the armed
+    /// timeout is the deadline the owner tick waits for and
+    /// [`Self::run_selection_auto_scroll`] is called once it passes.
+    fn schedule_selection_auto_scroll(&mut self, delay_ms: u64) {
+        self.selection_auto_scroll_due_at =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(delay_ms));
+    }
+
+    /// Call the armed auto-scroll timeout when its deadline has passed.
+    /// Port of the `setTimeout` callback body (packages/tui/src/tui.ts:815-831):
+    /// scroll, request a render, then reschedule every
+    /// `SELECTION_AUTO_SCROLL_INTERVAL_MS` while the drag keeps pushing past the
+    /// viewport edge.
+    pub fn poll_selection_auto_scroll(&mut self) {
+        if self.stopped {
+            return;
+        }
+        let due = match self.selection_auto_scroll_due_at {
+            Some(due) => due,
+            None => return,
+        };
+        if std::time::Instant::now() < due {
+            return;
+        }
+        if let Some(interval_ms) = self.run_selection_auto_scroll() {
+            self.schedule_selection_auto_scroll(interval_ms);
+        }
+    }
+
+    /// Port of the selection auto-scroll timer body
+    /// (packages/tui/src/tui.ts:815-831). Returns the next delay when the timer
+    /// reschedules itself, mirroring `setTimeout(..., INTERVAL)`.
     pub fn run_selection_auto_scroll(&mut self) -> Option<u64> {
-        self.selection_auto_scroll_timer_active = false;
+        self.selection_auto_scroll_due_at = None;
         let direction = match self.selection_auto_scroll_direction {
             Some(direction) => direction,
             None => return None,
@@ -1183,12 +1229,13 @@ impl TUI {
             return None;
         }
         self.request_render();
-        self.selection_auto_scroll_timer_active = true;
         Some(Self::SELECTION_AUTO_SCROLL_INTERVAL_MS)
     }
 
+    /// Port of `stopSelectionAutoScroll` (packages/tui/src/tui.ts:835-841):
+    /// clear the pending timeout and the direction being pushed.
     fn stop_selection_auto_scroll(&mut self) {
-        self.selection_auto_scroll_timer_active = false;
+        self.selection_auto_scroll_due_at = None;
         self.selection_auto_scroll_direction = None;
     }
 }
@@ -3181,6 +3228,71 @@ mod tests {
         assert!(!tui.is_fullscreen());
         assert!(!terminal.borrow().alt_screen);
         assert!(!terminal.borrow().mouse_tracking);
+    }
+
+    /// TS arms a real timer in `updateSelectionAutoScroll` (tui.ts:811) and its
+    /// callback (tui.ts:815-831) scrolls one line, calls `requestRender()` and
+    /// reschedules every `SELECTION_AUTO_SCROLL_INTERVAL_MS`. The Rust port has
+    /// no timer of its own, so the armed timeout must be consumed by the owner
+    /// tick (`run_pending_render`) - otherwise dragging past the viewport edge
+    /// never scrolls and the content stays unreachable.
+    #[test]
+    fn dragging_past_the_viewport_edge_auto_scrolls_on_the_owner_tick() {
+        let terminal = Rc::new(RefCell::new(FakeTerminal::new(20, 5)));
+        let mut tui = TUI::new(Box::new(SharedTerminal(terminal.clone())), Some(false));
+        let scroll: Vec<Rc<RefCell<dyn Component>>> = (0..12)
+            .map(|_| Rc::new(RefCell::new(Line("line"))) as Rc<RefCell<dyn Component>>)
+            .collect();
+        let dock = Rc::new(RefCell::new(Line("dock"))) as Rc<RefCell<dyn Component>>;
+        tui.enter_fullscreen(FullscreenOptions {
+            scroll,
+            dock,
+            mouse: true,
+            viewport_controls: true,
+        });
+        tui.do_render();
+        let lines_above = tui.get_scroll_info().unwrap().lines_above;
+        assert!(lines_above > 0, "scrolled-back content is required");
+
+        // Press in the transcript window and drag upward past the top edge; the
+        // selection head rises above the anchor, the auto-scroll trigger.
+        assert!(tui.handle_fullscreen_input("\x1b[<0;3;4M"));
+        assert!(tui.handle_fullscreen_input("\x1b[<32;3;1M"));
+
+        // The 150ms timeout is armed but not yet due: nothing has scrolled.
+        assert_eq!(tui.get_scroll_info().unwrap().lines_above, lines_above);
+
+        // An owner tick before the deadline must not fire the timeout early.
+        tui.run_pending_render(0.0);
+        assert_eq!(tui.get_scroll_info().unwrap().lines_above, lines_above);
+
+        // An owner tick after the deadline fires it and scrolls one line.
+        std::thread::sleep(std::time::Duration::from_millis(
+            TUI::SELECTION_AUTO_SCROLL_DELAY_MS + 5,
+        ));
+        tui.run_pending_render(0.0);
+        assert_eq!(
+            tui.get_scroll_info().unwrap().lines_above,
+            lines_above - 1,
+            "the armed selection auto-scroll timeout must scroll on the owner tick"
+        );
+        // The timer reschedules itself instead of stopping after one step, and
+        // this tick's render request was already consumed, so the second fire
+        // proves the owner services the timeout with an empty render queue.
+        assert!(
+            tui.selection_auto_scroll_due_at.is_some(),
+            "setTimeout(..., SELECTION_AUTO_SCROLL_INTERVAL_MS) must reschedule"
+        );
+        assert!(!tui.render_requested(), "the scroll's render was consumed");
+        std::thread::sleep(std::time::Duration::from_millis(
+            TUI::SELECTION_AUTO_SCROLL_INTERVAL_MS + 5,
+        ));
+        tui.run_pending_render(0.0);
+        assert_eq!(
+            tui.get_scroll_info().unwrap().lines_above,
+            lines_above - 2,
+            "the 50ms reschedule chain must keep scrolling while the drag persists"
+        );
     }
 }
 // ---------------------------------------------------------------------------
