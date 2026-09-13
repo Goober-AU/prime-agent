@@ -90,11 +90,16 @@ impl<T, R> EventStream<T, R> {
     }
 
     /// `end(result?: R): void`
+    ///
+    /// The TypeScript resolves `finalResultPromise` (event-stream.ts:35-44), and a
+    /// promise resolves once: the first resolution wins, so a `push` of a
+    /// complete event (event-stream.ts:28-31) already fixes `result()` and a later
+    /// `end(result)` cannot replace it. Only set the result when it is still unset.
     pub fn end(&self, result: Option<R>) {
         {
             let mut state = self.lock();
             state.done = true;
-            if result.is_some() {
+            if state.result.is_none() {
                 state.result = result;
             }
         }
@@ -298,6 +303,26 @@ mod tests {
         assert_eq!(first.event_type(), "start");
         let second = stream.next().await.unwrap();
         assert_eq!(second.event_type(), "done");
+    }
+
+    #[tokio::test]
+    async fn end_does_not_replace_an_already_resolved_result() {
+        // event-stream.ts:35-44: `end(result?)` resolves the final-result promise, so a
+        // complete event pushed first (event-stream.ts:28-31) keeps its message.
+        let stream = AssistantMessageEventStream::new();
+        let resolved = message("first");
+        stream.push(AssistantMessageEvent::Done {
+            reason: STOP_REASON_STOP.to_string(),
+            message: resolved.clone(),
+        });
+        stream.end(Some(message("second")));
+        assert_eq!(stream.result().await, resolved);
+
+        // `end(Some(...))` still resolves the result when nothing resolved it first.
+        let late = AssistantMessageEventStream::new();
+        let fallback = message("fallback");
+        late.end(Some(fallback.clone()));
+        assert_eq!(late.result().await, fallback);
     }
 
     #[tokio::test]

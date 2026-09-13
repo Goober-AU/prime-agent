@@ -72,6 +72,15 @@ pub fn is_context_overflow(message: &AssistantMessage, context_window: Option<f6
         }
     }
 
+    // overflow.ts:129 and overflow.ts:139 gate the usage-based checks on
+    // `contextWindow` truthiness (`if (contextWindow && ...)`), so 0 is skipped like
+    // `undefined`. A `Some(0.0)` here comes from `unwrap_or(0.0)`
+    // (crates/pi-coding-agent/src/core/runtime_members.rs:2258-2259) and
+    // agent_session.rs:13172; without the gate case 2 degenerates to `input > 0` and case 3
+    // to `input >= 0`, which reports an overflow the TypeScript never reports.
+    // Non-finite values are treated the same way because `NaN > x` is false anyway and
+    // `>= NaN * 0.99` can never be a meaningful context window.
+    let context_window = context_window.filter(|window| window.is_finite() && *window != 0.0);
     if let Some(context_window) = context_window {
         if message.stop_reason == STOP_REASON_STOP {
             let input_tokens = message.usage.input + message.usage.cache_read;
@@ -208,6 +217,25 @@ mod tests {
         message.usage.cache_read = 1000.0;
         assert!(is_context_overflow(&message, Some(200000.0)));
         assert!(!is_context_overflow(&message, None));
+    }
+
+    #[test]
+    fn zero_or_non_finite_context_window_skips_the_usage_checks() {
+        // overflow.ts:129/139: `if (contextWindow && ...)` - a falsy context window (0) is
+        // skipped exactly like `undefined`, so a 0-context custom model is never reported as
+        // an overflow by the usage-based cases.
+        let mut stop_message = AssistantMessage::new("openai-completions", "custom", "local", 0);
+        stop_message.stop_reason = STOP_REASON_STOP.to_string();
+        stop_message.usage.input = 300000.0;
+        stop_message.usage.cache_read = 1000.0;
+        assert!(is_context_overflow(&stop_message, Some(200000.0)));
+        assert!(!is_context_overflow(&stop_message, None));
+        assert!(!is_context_overflow(&stop_message, Some(0.0)));
+        assert!(!is_context_overflow(&stop_message, Some(f64::NAN)));
+
+        let length_message = length_stop_message(58.0, 0.0, 0.0);
+        assert!(is_context_overflow(&length_message, Some(20.0)));
+        assert!(!is_context_overflow(&length_message, Some(0.0)));
     }
 
     #[test]

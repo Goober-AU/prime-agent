@@ -6788,7 +6788,20 @@ impl AgentSession {
         }
         self.disconnect_from_agent();
         self.event_listeners.lock().unwrap().clear();
-        let _ = pi_ai::session_resources::cleanup_session_resources(Some(&self.session_id()));
+        // `cleanupSessionResources(this.sessionId)` (agent-session.ts:4778) runs inside the
+        // `try/finally` of `dispose()` (agent-session.ts:4729) with no `catch`, so the
+        // `AggregateError("Failed to cleanup session resources")` from
+        // packages/ai/src/session-resources.ts:21-23 propagates to the dispose caller (e.g. the
+        // Codex websocket close failures registered at
+        // providers/openai_codex_responses.rs:1706). A synchronous `dispose` here has no caller
+        // error channel, so the failure is reported instead of being dropped by `let _ =`.
+        // Finally semantics are kept: the dispose callbacks below still start and the caller's
+        // original error is never replaced.
+        if let Err(cleanup_error) =
+            pi_ai::session_resources::cleanup_session_resources(Some(&self.session_id()))
+        {
+            eprintln!("Error: {cleanup_error}");
+        }
         let session = self.clone();
         tokio::spawn(async move {
             session.start_dispose_callbacks().await;

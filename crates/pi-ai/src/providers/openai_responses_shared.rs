@@ -245,7 +245,9 @@ pub fn convert_responses_messages(
                 if let Some(provider_context) = user.provider_context.as_ref() {
                     // The server owns this opaque window; SDK unions can lag new response item types.
                     messages.extend(provider_context.items.iter().cloned().map(Value::Object));
-                    msg_index += 1;
+                    // openai-responses-shared.ts:142 `continue` skips the only `msgIndex++`
+                    // (openai-responses-shared.ts:265), so this message does NOT advance the
+                    // index used by the generated `msg_N` ids at openai-responses-shared.ts:189.
                     continue;
                 }
                 match &user.content {
@@ -270,7 +272,8 @@ pub fn convert_responses_messages(
                             })
                             .collect();
                         if content.is_empty() {
-                            msg_index += 1;
+                            // openai-responses-shared.ts:163 `continue` skips `msgIndex++`
+                            // (openai-responses-shared.ts:265).
                             continue;
                         }
                         let mut item = Map::new();
@@ -363,7 +366,8 @@ pub fn convert_responses_messages(
                     }
                 }
                 if output.is_empty() {
-                    msg_index += 1;
+                    // openai-responses-shared.ts:222 `continue` skips `msgIndex++`
+                    // (openai-responses-shared.ts:265).
                     continue;
                 }
                 messages.extend(output);
@@ -414,6 +418,8 @@ pub fn convert_responses_messages(
                 messages.push(Value::Object(item));
             }
         }
+        // The only increment, mirroring openai-responses-shared.ts:265: every `continue`
+        // above skips it.
         msg_index += 1;
     }
 
@@ -1503,6 +1509,56 @@ mod tests {
         assert_eq!(
             messages[0]["content"],
             json!([{ "type": "output_text", "text": "hello", "annotations": [] }])
+        );
+    }
+
+    #[test]
+    fn generated_message_ids_skip_the_messages_the_typescript_skips() {
+        // openai-responses-shared.ts:189 uses `msgIndex`, and the ONLY increment is
+        // openai-responses-shared.ts:265 at the end of the loop body. Every `continue`
+        // earlier in the body (provider-context user at :142, empty user content at :163,
+        // empty assistant output at :222) therefore leaves the index untouched.
+        let model = text_model();
+
+        let checkpoint = crate::compaction::ProviderCompactionCheckpoint {
+            version: 1,
+            provider: "openai".to_string(),
+            api: "openai-responses".to_string(),
+            model: "gpt-4o-mini".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            endpoint: None,
+            items: vec![Map::new()],
+            estimated_tokens: 1.0,
+        };
+
+        let mut context_user = UserMessage::new(UserContent::Text("ignored".to_string()), 1);
+        context_user.provider_context = Some(checkpoint);
+        let mut empty_user = UserMessage::new(UserContent::Blocks(Vec::new()), 2);
+        empty_user.provider_context = None;
+        let mut empty_assistant = AssistantMessage::new("openai-responses", "openai", "gpt-4o-mini", 3);
+        empty_assistant.usage = Usage::zero();
+        let mut text_assistant = AssistantMessage::new("openai-responses", "openai", "gpt-4o-mini", 4);
+        text_assistant.content = vec![ContentBlock::Text(TextContent::new("hello"))];
+        text_assistant.usage = Usage::zero();
+
+        let context = Context::new(
+            None,
+            vec![
+                Message::user(context_user),
+                Message::user(empty_user),
+                Message::assistant(empty_assistant),
+                Message::assistant(text_assistant),
+            ],
+            None,
+        );
+        let messages = convert_responses_messages(&model, &context, &allowed(&["openai"]), None).unwrap();
+        let message_item = messages
+            .iter()
+            .find(|item| item["type"] == json!("message"))
+            .expect("assistant message item");
+        assert_eq!(
+            message_item["id"], json!("msg_0"),
+            "skipped messages must not advance msgIndex (openai-responses-shared.ts:265)"
         );
     }
 
