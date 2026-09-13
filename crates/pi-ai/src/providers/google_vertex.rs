@@ -1071,11 +1071,80 @@ fn blob_to_vertex(blob: &Value) -> Value {
 // SSE transport (`ApiClient.processStreamResponse`)
 // ---------------------------------------------------------------------------
 
+/// `@google/genai` dist index.mjs:13233 - the SDK throws this exact message when
+/// the response body ends with an unterminated event.
+const INCOMPLETE_JSON_SEGMENT_MESSAGE: &str = "Incomplete JSON segment at the end";
+
+/// TS: the SDK `processStreamResponse` inline error probe (dist index.mjs:13238-13260).
+///
+/// Vertex shares `ApiClient.processStreamResponse` with the Gemini path, so each raw
+/// (not yet split) *chunk* string is parsed as JSON; when the parsed object has an
+/// `error` member whose `code` is 4xx/5xx the SDK throws an `ApiError` with message
+/// ``got status: ${status}. ${JSON.stringify(chunkJson)}`` and `status = error.code`.
+/// google-vertex.ts:103 awaits `client.models.generateContentStream`, so the throw
+/// reaches the provider's catch instead of completing an empty/partial success.
+fn throw_if_inline_error_chunk(chunk_string: &str) -> Result<(), GoogleVertexStreamError> {
+	let Ok(chunk_json) = serde_json::from_str::<Value>(chunk_string) else {
+		// The SDK only rethrows `ApiError`; every other parse failure is ignored.
+		return Ok(());
+	};
+	let Some(error) = chunk_json.get("error") else {
+		return Ok(());
+	};
+	// `JSON.parse(JSON.stringify(chunkJson['error']))` - a non-object error member
+	// has no `code`/`status`, so the SDK's `if (code >= 400 && code < 600)` is false.
+	let Some(error_object) = error.as_object() else {
+		return Ok(());
+	};
+	let status = error_object.get("status");
+	let code_value = error_object.get("code");
+	if let Some(code) = javascript_number(code_value) {
+		if (400.0..600.0).contains(&code) {
+			let status_text = match status {
+				Some(Value::String(text)) => text.clone(),
+				Some(other) => other.to_string(),
+				None => "undefined".to_string(),
+			};
+			let message = format!("got status: {}. {}", status_text, chunk_json);
+			// `new ApiError({ message, status: code })` - `status` keeps the raw `error.code`
+			// value, like the SDK's `this.status = options.status`.
+			let mut value = Map::new();
+			value.insert("name".to_string(), Value::String("ApiError".to_string()));
+			value.insert("message".to_string(), Value::String(message.clone()));
+			value.insert(
+				"status".to_string(),
+				code_value.cloned().unwrap_or(Value::Number((code as i64).into())),
+			);
+			return Err(GoogleVertexStreamError::Api {
+				message,
+				status: code as i64,
+				value: Value::Object(value),
+			});
+		}
+	}
+	Ok(())
+}
+
+/// TS: `code >= 400 && code < 600` on the parsed `error.code`.
+///
+/// JavaScript coerces operands, so `"400"` triggers the same throw as `400` (the probed
+/// SDK keeps the raw value on the `ApiError` too: `status="400"`). `undefined`, `null`,
+/// an object or a non-numeric string compares false; only the number and numeric-string
+/// shapes the Google APIs emit are modelled here.
+fn javascript_number(value: Option<&Value>) -> Option<f64> {
+	match value {
+		Some(Value::Number(number)) => number.as_f64(),
+		Some(Value::String(text)) => text.trim().parse::<f64>().ok(),
+		_ => None,
+	}
+}
+
 /// Local SSE reader for `alt=sse` streaming.
 struct SseChunkStream {
 	chunks: std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
 	buffer: String,
 	pending: Vec<Value>,
+	byte_pending: Vec<u8>,
 	finished: bool,
 	signal: Option<tokio_util::sync::CancellationToken>,
 }
@@ -1086,6 +1155,7 @@ impl SseChunkStream {
 			chunks: Box::pin(response.bytes_stream()),
 			buffer: String::new(),
 			pending: Vec::new(),
+			byte_pending: Vec::new(),
 			finished: false,
 			signal,
 		}
@@ -1098,11 +1168,18 @@ impl SseChunkStream {
 				return Ok(Some(self.pending.remove(0)));
 			}
 			if self.finished {
+				// `@google/genai` dist index.mjs:13231-13235 - when the reader reports `done` a
+				// non-empty (trimmed) buffer is a truncated final event and the SDK throws
+				// "Incomplete JSON segment at the end"; the decoder is never flushed (there is no
+				// `decoder.decode()` call before `reader.releaseLock()`), so its pending partial
+				// bytes are dropped instead of being appended to the buffer.
+				self.byte_pending.clear();
 				if self.buffer.trim().is_empty() {
 					return Ok(None);
 				}
-				self.buffer.clear();
-				return Ok(None);
+				return Err(GoogleVertexStreamError::Message(
+					INCOMPLETE_JSON_SEGMENT_MESSAGE.to_string(),
+				));
 			}
 			if let Some(signal) = &self.signal {
 				if signal.is_cancelled() {
@@ -1115,8 +1192,47 @@ impl SseChunkStream {
 				}
 				Some(Err(error)) => return Err(GoogleVertexStreamError::Message(error.to_string())),
 				Some(Ok(bytes)) => {
-					self.buffer.push_str(&String::from_utf8_lossy(&bytes));
+					self.byte_pending.extend_from_slice(&bytes);
+					// TS: `const chunkString = decoder.decode(value, { stream: true })` - the
+					// decode is stateful, so a multi-byte character split across two network
+					// chunks survives instead of turning into U+FFFD.
+					let chunk_string = self.decode_pending_bytes();
+					throw_if_inline_error_chunk(&chunk_string)?;
+					self.buffer.push_str(&chunk_string);
 					self.drain_events()?;
+				}
+			}
+		}
+	}
+
+	/// TS: `decoder.decode(value, { stream: true })` - a stateful streaming UTF-8 decode.
+	///
+	/// Bytes that form an incomplete multi-byte sequence stay in `byte_pending` until
+	/// the next chunk arrives; a genuinely invalid sequence becomes U+FFFD like the
+	/// WHATWG decoder (`String::from_utf8_lossy` per chunk would instead corrupt every
+	/// character that straddles a chunk boundary). Same shape as
+	/// `anthropic.rs::decode_utf8_stream`.
+	fn decode_pending_bytes(&mut self) -> String {
+		let mut text = String::new();
+		loop {
+			match std::str::from_utf8(&self.byte_pending) {
+				Ok(valid) => {
+					text.push_str(valid);
+					self.byte_pending.clear();
+					return text;
+				}
+				Err(error) => {
+					let valid_up_to = error.valid_up_to();
+					text.push_str(&String::from_utf8_lossy(&self.byte_pending[..valid_up_to]));
+					self.byte_pending.drain(..valid_up_to);
+					match error.error_len() {
+						// Incomplete trailing sequence: wait for more bytes.
+						None => return text,
+						Some(error_length) => {
+							self.byte_pending.drain(..error_length);
+							text.push('\u{FFFD}');
+						}
+					}
 				}
 			}
 		}
@@ -1706,6 +1822,7 @@ mod tests {
 			chunks: Box::pin(futures::stream::empty()),
 			buffer: "data: {\"a\": 1}\n\ndata: {\"b\": 2}\r\r".to_string(),
 			pending: Vec::new(),
+			byte_pending: Vec::new(),
 			finished: true,
 			signal: None,
 		};
@@ -1716,10 +1833,125 @@ mod tests {
 			chunks: Box::pin(futures::stream::empty()),
 			buffer: "data: nope\n\n".to_string(),
 			pending: Vec::new(),
+			byte_pending: Vec::new(),
 			finished: true,
 			signal: None,
 		};
 		assert!(broken.drain_events().unwrap_err().message().starts_with("exception parsing stream chunk nope."));
+	}
+
+	fn byte_stream(chunks: Vec<&[u8]>) -> SseChunkStream {
+		let items: Vec<reqwest::Result<bytes::Bytes>> = chunks
+			.into_iter()
+			.map(|chunk| Ok(bytes::Bytes::copy_from_slice(chunk)))
+			.collect();
+		SseChunkStream {
+			chunks: Box::pin(futures::stream::iter(items)),
+			buffer: String::new(),
+			pending: Vec::new(),
+			byte_pending: Vec::new(),
+			finished: false,
+			signal: None,
+		}
+	}
+
+	/// GM-03: `@google/genai` dist index.mjs:13231-13235 throws
+	/// "Incomplete JSON segment at the end" for an unterminated trailing event.
+	#[tokio::test]
+	async fn sse_chunk_stream_reports_an_unterminated_trailing_event() {
+		let mut stream = byte_stream(vec![b"data: {\"candidates\":[]}"]);
+		let error = stream.next().await.unwrap_err();
+		assert_eq!(error.message(), "Incomplete JSON segment at the end");
+		assert_eq!(
+			format_stream_failure_message(&error.as_thrown()),
+			"Incomplete JSON segment at the end"
+		);
+
+		// A stream that ends exactly on a delimiter is still a clean end.
+		let mut clean = byte_stream(vec![b"data: {\"candidates\":[]}\n\n"]);
+		assert!(clean.next().await.unwrap().is_some());
+		assert!(clean.next().await.unwrap().is_none());
+	}
+
+	/// GM-02: the SDK's inline error probe (dist index.mjs:13238-13260) is shared with
+	/// the Gemini path; a raw JSON error chunk throws an `ApiError`.
+	#[tokio::test]
+	async fn sse_chunk_stream_surfaces_inline_json_error_chunks() {
+		let json = br#"{"error":{"code":403,"message":"denied","status":"PERMISSION_DENIED"}}"#;
+		let mut stream = byte_stream(vec![json]);
+		let error = stream.next().await.unwrap_err();
+		let GoogleVertexStreamError::Api { message, status, value } = &error else {
+			panic!("expected ApiError shape, got {error:?}")
+		};
+		assert_eq!(*status, 403);
+		assert_eq!(
+			*message,
+			"got status: PERMISSION_DENIED. {\"error\":{\"code\":403,\"message\":\"denied\",\"status\":\"PERMISSION_DENIED\"}}"
+		);
+		assert_eq!(value["name"], json!("ApiError"));
+		assert_eq!(value["status"], json!(403));
+
+		// An error member without a 4xx/5xx `code` is not thrown by the SDK probe: it stays
+		// in the buffer as an unterminated event (the probed SDK threw
+		// "Incomplete JSON segment at the end" for this exact body).
+		let no_code = br#"{"error":{"message":"no code"}}"#;
+		let mut stream = byte_stream(vec![no_code]);
+		assert_eq!(
+			stream.next().await.unwrap_err().message(),
+			"Incomplete JSON segment at the end"
+		);
+		assert!(throw_if_inline_error_chunk(r#"{"error":{"message":"no code"}}"#).is_ok());
+		assert!(throw_if_inline_error_chunk(r#"{"candidates":[]}"#).is_ok());
+		assert!(throw_if_inline_error_chunk("data: {").is_ok());
+	}
+
+	/// GM-05 (Vertex): the TS throws from `streamGoogleVertex` for missing credentials,
+	/// so the port must report through the stream. `stream_simple_google_vertex` has no
+	/// panic on this path; a panic here would hang this test until its timeout.
+	#[tokio::test]
+	async fn stream_simple_google_vertex_reports_missing_configuration_through_the_stream() {
+		if std::env::var("GOOGLE_CLOUD_API_KEY").is_ok() {
+			std::env::remove_var("GOOGLE_CLOUD_API_KEY");
+		}
+		std::env::remove_var("GOOGLE_CLOUD_PROJECT");
+		std::env::remove_var("GCLOUD_PROJECT");
+		std::env::remove_var("GOOGLE_CLOUD_LOCATION");
+		let model = model("gemini-3-pro");
+		let context = Context::new(None, vec![], None);
+		let stream = stream_simple_google_vertex(&model, &context, None);
+		let event = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+			.await
+			.unwrap()
+			.unwrap();
+		let AssistantMessageEvent::Error { reason, error } = event else {
+			panic!("expected provider error event")
+		};
+		assert_eq!(reason, "error");
+		assert_eq!(
+			error.error_message.as_deref(),
+			Some("Vertex AI requires a project ID. Set GOOGLE_CLOUD_PROJECT/GCLOUD_PROJECT or pass project in options.")
+		);
+		assert!(stream.is_done());
+		assert!(stream.next().await.is_none());
+	}
+
+	/// GM-04: `decoder.decode(value, { stream: true })` keeps a multi-byte character
+	/// that straddles a network chunk boundary intact.
+	#[tokio::test]
+	async fn sse_chunk_stream_keeps_multibyte_characters_split_across_chunks() {
+		// 'é' is C3 A9 and '🎈' is F0 9F 8E 88; one split lands inside each character.
+		let event = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"caf\u{e9} \u{1F388}\"}]}}]}\n\n";
+		let bytes = event.as_bytes();
+		let first_split = event.find('\u{e9}').unwrap() + 1;
+		let second_split = event.find('\u{1F388}').unwrap() + 2;
+		let mut stream = byte_stream(vec![
+			&bytes[..first_split],
+			&bytes[first_split..second_split],
+			&bytes[second_split..],
+		]);
+		let chunk = stream.next().await.unwrap().unwrap();
+		assert_eq!(chunk["candidates"][0]["content"]["parts"][0]["text"], json!("caf\u{e9} \u{1F388}"));
+		assert!(stream.next().await.unwrap().is_none());
 	}
 
 	#[test]
