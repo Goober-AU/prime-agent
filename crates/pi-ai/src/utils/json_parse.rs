@@ -336,16 +336,20 @@ mod partial_json_crate {
                 if self.index >= self.length() && OBJ & self.allow != 0 {
                     return Ok(Value::Object(obj));
                 }
+                // TS `parseObj` catches ANY throw from `parseStr()` and returns the partial
+                // container when `Allow.OBJ` is set (partialjson parseObj, the outer try/catch
+                // at the `const parseObj = () => { ... }` body); the Rust previously let
+                // `Malformed` escape, which made stage 2 of `parseStreamingJson` fail and let
+                // stage 3 recover MORE content than the TS does.
                 let key = match self.parse_str() {
                     Ok(Value::String(key)) => key,
                     Ok(other) => other.to_string(),
-                    Err(PartialJsonError::Partial(msg)) => {
+                    Err(e) => {
                         if OBJ & self.allow != 0 {
                             return Ok(Value::Object(obj));
                         }
-                        return Err(PartialJsonError::Partial(msg));
+                        return Err(e);
                     }
-                    Err(e) => return Err(e),
                 };
                 self.skip_blank();
                 self.index += 1; // skip colon
@@ -353,13 +357,14 @@ mod partial_json_crate {
                     Ok(value) => {
                         obj.insert(key, value);
                     }
-                    Err(PartialJsonError::Partial(msg)) => {
+                    // TS: the inner catch around `parseAny()` returns the partial object for ANY
+                    // error when `Allow.OBJ` is set (partialjson parseObj inner try/catch).
+                    Err(e) => {
                         if OBJ & self.allow != 0 {
                             return Ok(Value::Object(obj));
                         }
-                        return Err(PartialJsonError::Partial(msg));
+                        return Err(e);
                     }
-                    Err(e) => return Err(e),
                 }
                 self.skip_blank();
                 if self.char_at(self.index) == Some(',') {
@@ -388,13 +393,14 @@ mod partial_json_crate {
                 }
                 match self.parse_any() {
                     Ok(value) => arr.push(value),
-                    Err(PartialJsonError::Partial(msg)) => {
+                    // TS `parseArr` wraps the whole loop in one try/catch and returns the partial
+                    // array for ANY throw when `Allow.ARR` is set (partialjson parseArr).
+                    Err(e) => {
                         if ARR & self.allow != 0 {
                             return Ok(Value::Array(arr));
                         }
-                        return Err(PartialJsonError::Partial(msg));
+                        return Err(e);
                     }
-                    Err(e) => return Err(e),
                 }
                 self.skip_blank();
                 if self.char_at(self.index) == Some(',') {
@@ -525,6 +531,25 @@ mod tests {
         assert_eq!(parse_streaming_json(None), json!({}));
         assert_eq!(parse_streaming_json(Some("")), json!({}));
         assert_eq!(parse_streaming_json(Some("   ")), json!({}));
+    }
+
+    /// The audit drove the pinned TS dist in node and measured these exact deltas. TS
+    /// `parseObj`/`parseArr` recover the PARTIAL container for ANY throw (including
+    /// MalformedJSON), so stage 2 of `parseStreamingJson` already succeeds; the Rust used to
+    /// let Malformed escape, so stage 3 (`partialParse(repairJson(...))`) recovered MORE
+    /// content than the TS.
+    #[test]
+    fn malformed_json_recovers_the_partial_container_like_the_typescript() {
+        // TS: {"cmd":"ls"}  (the truncated string value is dropped, NOT repaired)
+        assert_eq!(
+            parse_streaming_json(Some("{\"cmd\":\"ls\",\"note\":\"a\nb")),
+            json!({"cmd": "ls"})
+        );
+        // TS: [1]          (the truncated string element is dropped)
+        assert_eq!(
+            parse_streaming_json(Some("[1,\"a\nb")),
+            json!([1])
+        );
     }
 
     #[test]
