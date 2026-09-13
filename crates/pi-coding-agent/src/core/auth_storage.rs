@@ -1190,18 +1190,10 @@ impl AuthStorage {
         let Some(content) = content else {
             return (IndexMap::new(), Vec::new());
         };
-        // TEETH PROOF ONLY: the original whole-file parse, which returned an empty
-        // map (and no error) as soon as any single entry failed.
-        let value: Value = {
-            let whole = serde_json::from_str::<AuthStorageData>(content).unwrap_or_default();
-            let mut entries = serde_json::Map::new();
-            for (key, credential) in whole {
-                entries.insert(
-                    key,
-                    serde_json::to_value(&credential).unwrap_or(Value::Null),
-                );
-            }
-            Value::Object(entries)
+        // A malformed *document* is the TS `JSON.parse` throw: nothing loads.
+        let value: Value = match serde_json::from_str(content) {
+            Ok(value) => value,
+            Err(error) => return (IndexMap::new(), vec![error.to_string()]),
         };
         let Some(entries) = value.as_object() else {
             return (
