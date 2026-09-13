@@ -235,6 +235,9 @@ pub use pi_agent_core::types::{
     GetContinuationMessagesContext, ShouldStopAfterTurnContext,
 };
 pub use pi_agent_core::performance_metrics::{AgentLoopPerformanceMetrics, PerformanceMetricRecorder};
+/// `AgentContinueError` from `@earendil-works/pi-agent-core` (agent.ts:177-186),
+/// re-exported so the session's `AgentHandle::continue_` seam keeps its typed code.
+pub use pi_agent_core::agent::{AgentContinueError, AgentContinueErrorCode};
 
 pub type BeforeToolCallHook = Arc<dyn Fn(BeforeToolCallContext, Option<CancellationToken>) -> BoxFuture<Result<Option<BeforeToolCallResult>, String>> + Send + Sync>;
 pub type AfterToolCallHook = Arc<dyn Fn(AfterToolCallContext, Option<CancellationToken>) -> BoxFuture<Result<Option<AfterToolCallResult>, String>> + Send + Sync>;
@@ -254,7 +257,10 @@ pub trait AgentHandle: Send + Sync {
     fn abort(&self);
     fn wait_for_idle(&self) -> BoxFuture<()>;
     fn prompt(&self, messages: Vec<AgentMessage>) -> BoxFuture<Result<(), String>>;
-    fn continue_(&self) -> BoxFuture<Result<(), String>>;
+    /// `agent.continue()`; the typed `AgentContinueError` is preserved so the
+    /// scheduled post-compaction runner can classify `busy` vs
+    /// `nothing-to-continue` by code instead of message text (agent-session.ts:8642).
+    fn continue_(&self) -> BoxFuture<Result<(), AgentContinueError>>;
     fn is_streaming(&self) -> bool;
     fn has_queued_messages(&self) -> bool;
     fn clear_all_queues(&self);
@@ -1830,6 +1836,58 @@ pub fn create_post_compaction_continuation_settlement() -> PostCompactionContinu
     }
 }
 
+/// `Promise.race([changed, settlement.promise])` (agent-session.ts:7551, 8566, 8581):
+/// waits for the given settlement deferred, or forever when no settlement is owned.
+pub async fn await_settlement(settlement: Option<AgentMessageDeferred>) {
+    match settlement {
+        Some(settlement) => {
+            let _ = settlement.wait().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// A TypeScript `Promise<void>` that Rust callers may await more than once;
+/// `Shared` is `Clone` and re-awaitable exactly like the promise it stands for.
+pub type SharedVoidFuture = futures::future::Shared<BoxFuture<Result<(), String>>>;
+
+/// The TypeScript `_compactionOperation` (`Promise<void>`) together with its
+/// `resolveCompactionOperation()` resolver (agent-session.ts:8088-8092, 9606-9610).
+///
+/// The TypeScript keeps no resolver field: `resolveCompactionOperation` is a local
+/// closure captured by the `finally` block. Rust stores both the re-awaitable
+/// promise and the deferred that settles it, so `_compactionOperation === operation`
+/// can still be decided by identity in the owning `finally`.
+pub struct CompactionOperation {
+    pub deferred: AgentMessageDeferred,
+    pub operation: SharedVoidFuture,
+}
+
+impl CompactionOperation {
+    fn matches(&self, operation: &SharedVoidFuture) -> bool {
+        self.operation.ptr_eq(operation)
+    }
+}
+
+/// `compactionOperation = new Promise((resolve) => { resolveCompactionOperation = resolve; })`.
+pub fn create_compaction_operation() -> (CompactionOperation, SharedVoidFuture) {
+    let deferred = create_agent_message_deferred();
+    let waiter = deferred.clone();
+    let operation: SharedVoidFuture = async move {
+        let _ = waiter.wait().await;
+        Ok(())
+    }
+    .boxed()
+    .shared();
+    (
+        CompactionOperation {
+            deferred,
+            operation: operation.clone(),
+        },
+        operation,
+    )
+}
+
 /// `autoRefineInstructions`.
 pub fn auto_refine_instructions(reason: &AutoRefineReason, review: &AutoRefineReview) -> String {
     let detail = match &review.instructions {
@@ -2109,7 +2167,8 @@ pub struct AgentSession {
     autonomous_continuation_suppressed_messages: Mutex<HashSet<String>>,
     compaction_abort_controller: Mutex<Option<CancellationToken>>,
     auto_compaction_abort_controller: Mutex<Option<CancellationToken>>,
-    compaction_operation: Mutex<Option<BoxFuture<Result<(), String>>>>,
+    /// `_compactionOperation` (`Promise<void> | undefined`).
+    compaction_operation: Mutex<Option<CompactionOperation>>,
     /// `"idle" | "attempted" | "reported"`
     overflow_recovery: Mutex<String>,
     continue_after_threshold_compaction: AtomicBool,
@@ -8754,9 +8813,11 @@ impl AgentSession {
         self.has_selectable_session_input() || self.is_streaming()
     }
 
-    /// `get hasPendingAdmissionWaiters`.
+    /// `get hasPendingAdmissionWaiters` (agent-session.ts:6338-6344).
     pub fn has_pending_admission_waiters(&self) -> bool {
-        self.pending_session_action_fence_waiters.load(Ordering::SeqCst) > 0
+        self.session_action_commit_owner.lock().unwrap().is_some()
+            || self.pending_session_action_fence_waiters.load(Ordering::SeqCst) > 0
+            || !self.session_input_checkpoint_waiters.lock().unwrap().is_empty()
     }
 
     /// `_scheduleSessionInputPump`.
@@ -11113,27 +11174,91 @@ impl AgentSession {
         self.local_harness_state_dir().is_some()
     }
 
-    /// `_settlePostCompactionContinue(error?)`.
-    fn settle_post_compaction_continue(&self, error: Option<&str>) {
-        let settlement = self.post_compaction_continuation_settlement.lock().unwrap().clone();
-        if let Some(settlement) = settlement {
-            let mut settlement = settlement.lock().unwrap();
-            if settlement.settled {
-                return;
-            }
-            settlement.settled = true;
-            match error {
-                Some(error) => settlement.deferred.reject(error.to_string()),
-                None => settlement.deferred.resolve(),
-            }
-        }
+    /// The TypeScript identity test `this._postCompactionContinuationSettlement === settlement`.
+    fn settlement_is_owner(
+        &self,
+        settlement: &Arc<Mutex<PostCompactionContinuationSettlement>>,
+    ) -> bool {
+        self.post_compaction_continuation_settlement
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|owner| Arc::ptr_eq(owner, settlement))
+            .unwrap_or(false)
     }
 
-    /// `_cancelPostCompactionContinue()`.
-    fn cancel_post_compaction_continue(&self) {
+    /// `_settlePostCompactionContinue(error?)` (agent-session.ts:8427-8436).
+    fn settle_post_compaction_continue(&self, error: Option<&str>) {
+        // TS 8428: a plain settle is a no-op while a continuation is still scheduled.
+        if error.is_none() && self.post_compaction_continuation_scheduled.load(Ordering::SeqCst) {
+            return;
+        }
+        // TS 8430: no owner, or an owner that already settled, is a no-op.
+        let settlement = self.post_compaction_continuation_settlement.lock().unwrap().clone();
+        let Some(settlement) = settlement else {
+            return;
+        };
+        let (settled, deferred) = {
+            let settlement = settlement.lock().unwrap();
+            (settlement.settled, settlement.deferred.clone())
+        };
+        if settled {
+            return;
+        }
+        // TS 8431-8432: mark settled and clear the ownership slot, so a later
+        // `_schedulePostCompactionContinue` can install a fresh settlement.
+        settlement.lock().unwrap().settled = true;
         *self.post_compaction_continuation_settlement.lock().unwrap() = None;
+        match error {
+            Some(error) => deferred.reject(error.to_string()),
+            None => deferred.resolve(),
+        }
+        // TS 8435.
+        self.notify_session_input_checkpoint_change();
+    }
+
+    /// `_cancelPostCompactionContinue()` (agent-session.ts:8438-8442).
+    fn cancel_post_compaction_continue(&self) {
+        // TS 8439-8440.
         self.post_compaction_continuation_scheduled
             .store(false, Ordering::SeqCst);
+        self.scheduled_post_compaction_continuation_messages
+            .lock()
+            .unwrap()
+            .clear();
+        // TS 8441: settling wakes every `settlement.promise` waiter (the runner's
+        // idle wait and `waitForHeadlessIdle`), so a cancelled continuation cannot
+        // strand them.
+        self.settle_post_compaction_continue(None);
+    }
+
+    /// `this._compactionOperation = compactionOperation` plus its resolver
+    /// (agent-session.ts:8089-8092 manual, 9607-9610 auto).
+    fn begin_compaction_operation(&self) -> SharedVoidFuture {
+        let (operation, shared) = create_compaction_operation();
+        *self.compaction_operation.lock().unwrap() = Some(operation);
+        shared
+    }
+
+    /// `if (this._compactionOperation === compactionOperation) { this._compactionOperation = undefined; }`
+    /// then `resolveCompactionOperation()` (agent-session.ts:8144-8147, 9717-9720).
+    fn end_compaction_operation(self: &Arc<Self>, operation: &SharedVoidFuture) {
+        let resolver = {
+            let mut slot = self.compaction_operation.lock().unwrap();
+            match slot.as_ref() {
+                Some(current) if current.matches(operation) => {
+                    slot.take().map(|operation| operation.deferred)
+                }
+                _ => None,
+            }
+        };
+        if let Some(resolver) = resolver {
+            resolver.resolve();
+        }
+        // TS 8148 / 9721-9722.
+        self.notify_session_input_checkpoint_change();
+        let session = self.clone();
+        session.schedule_session_input_pump();
     }
 
     /// `_discardPendingAutoRefine(options)`.
@@ -11190,23 +11315,53 @@ impl AgentSession {
         }
     }
 
-    /// `_schedulePostCompactionContinue(continueAfterSessionInput)`.
+    /// `_schedulePostCompactionContinue(continueAfterSessionInput)` (agent-session.ts:8534-8552).
     fn schedule_post_compaction_continue(self: &Arc<Self>, continue_after_session_input: bool) {
+        // TS 8535-8537: install a fresh settlement when the owner is gone or settled.
+        let needs_settlement = {
+            let mut slot = self.post_compaction_continuation_settlement.lock().unwrap();
+            let replace = match slot.as_ref() {
+                Some(settlement) => settlement.lock().unwrap().settled,
+                None => true,
+            };
+            if replace {
+                *slot = Some(Arc::new(Mutex::new(create_post_compaction_continuation_settlement())));
+            }
+            replace
+        };
+        let _ = needs_settlement;
+        let settlement = self
+            .post_compaction_continuation_settlement
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a settlement was just installed");
+        // TS 8539: `settlement.continueAfterSessionInput ||= continueAfterSessionInput`.
+        {
+            let mut settlement_state = settlement.lock().unwrap();
+            settlement_state.continue_after_session_input |= continue_after_session_input;
+        }
+        // TS 8540-8543: a scheduled runner is left alone.
         if self
             .post_compaction_continuation_scheduled
             .swap(true, Ordering::SeqCst)
         {
             return;
         }
-        let settlement = Arc::new(Mutex::new(PostCompactionContinuationSettlement {
-            deferred: create_agent_message_deferred(),
-            continue_after_session_input,
-            settled: false,
-        }));
-        *self.post_compaction_continuation_settlement.lock().unwrap() = Some(settlement.clone());
+        // TS 8544: snapshot the session-owned continuation messages for this run.
+        let messages = self.post_compaction_continuation_messages.lock().unwrap().clone();
+        *self.scheduled_post_compaction_continuation_messages.lock().unwrap() = messages;
         let session = self.clone();
+        let tail_settlement = settlement.clone();
         tokio::spawn(async move {
-            session.run_scheduled_post_compaction_continue(settlement).await;
+            session
+                .run_scheduled_post_compaction_continue(tail_settlement.clone())
+                .await;
+            // TS 8547-8551: the tail settles only when this run's settlement is
+            // still the owner (`this._postCompactionContinuationSettlement === settlement`).
+            if session.settlement_is_owner(&tail_settlement) {
+                session.settle_post_compaction_continue(None);
+            }
         });
     }
 
@@ -11238,26 +11393,256 @@ impl AgentSession {
         }
     }
 
-    /// `_runScheduledPostCompactionContinue(settlement)`.
-    async fn run_scheduled_post_compaction_continue(
+    /// `_runScheduledPostCompactionContinue(settlement)` (agent-session.ts:8573-8656).
+    fn run_scheduled_post_compaction_continue(
+        self: &Arc<Self>,
+        settlement: Arc<Mutex<PostCompactionContinuationSettlement>>,
+    ) -> BoxFuture<()> {
+        let session = self.clone();
+        // TS 8574 is a `while` loop that re-enters after awaiting, so the recursive
+        // call is boxed on this one cycle edge (E0733).
+        Box::pin(async move {
+            session.run_scheduled_post_compaction_continue_inner(settlement).await
+        })
+    }
+
+    /// The body of `_runScheduledPostCompactionContinue`.
+    async fn run_scheduled_post_compaction_continue_inner(
         self: &Arc<Self>,
         settlement: Arc<Mutex<PostCompactionContinuationSettlement>>,
     ) {
-        let (deferred, continue_after_session_input) = {
-            let settlement = settlement.lock().unwrap();
-            (
-                settlement.deferred.clone(),
-                settlement.continue_after_session_input,
-            )
-        };
-        self.wait_for_queued_work_resume(&settlement).await;
-        self.wait_for_session_input_idle().await.ok();
-        if !continue_after_session_input {
-            self.wait_for_session_input_idle().await.ok();
+        // The predicate reads are taken as owned booleans up front: a guard held
+        // across the awaited body would make this future non-`Send`.
+        loop {
+            if !self.post_compaction_continuation_scheduled.load(Ordering::SeqCst)
+                || !self.settlement_is_owner(&settlement)
+            {
+                return;
+            }
+            // TS 8575-8578.
+            self.agent.wait_for_idle().await;
+            self.wait_for_retry().await;
+            self.wait_for_refine_idle().await;
+            self.wait_for_queued_work_resume(&settlement).await;
+            // TS 8579-8583: wait out any compaction already in flight.
+            let compaction_operation = {
+                self.compaction_operation
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .map(|operation| operation.operation.clone())
+            };
+            if let Some(compaction_operation) = compaction_operation {
+                let deferred = settlement.lock().unwrap().deferred.clone();
+                tokio::select! {
+                    _ = compaction_operation => {}
+                    _ = deferred.wait() => {}
+                }
+                continue;
+            }
+
+            // TS 7585.
+            let commit_fence = match self.acquire_session_action_commit_fence().await {
+                Ok(commit_fence) => commit_fence,
+                Err(_) => return,
+            };
+            let mut wait_for_session_input = false;
+            let mut continue_error: Option<AgentContinueError> = None;
+            let mut continuation_started = false;
+            {
+                // TS 8590.
+                self.agent.wait_for_idle().await;
+                if !self.post_compaction_continuation_scheduled.load(Ordering::SeqCst)
+                    || !self.settlement_is_owner(&settlement)
+                {
+                    commit_fence.release();
+                    return;
+                }
+                // TS 8598-8600.
+                let compaction_in_flight = self.compaction_operation.lock().unwrap().is_some();
+                let refine_in_flight = self.refine_in_flight.lock().unwrap().is_some();
+                let queued_work_paused = self.is_queued_work_suspended();
+                let session_input_pump_requested =
+                    self.session_input_pump_requested.load(Ordering::SeqCst);
+                let unfinished_action_count = self.unfinished_action_count();
+                if queued_work_paused || compaction_in_flight || refine_in_flight {
+                    commit_fence.release();
+                    continue;
+                }
+
+                // TS 8602-8607.
+                let continuation_messages = self
+                    .scheduled_post_compaction_continuation_messages
+                    .lock()
+                    .unwrap()
+                    .clone();
+                if !continuation_messages.is_empty()
+                    && !self.session_owns_scheduled_continuations(&continuation_messages)
+                {
+                    commit_fence.release();
+                    self.cancel_post_compaction_continue();
+                    self.schedule_auto_refine_after_agent_end();
+                    return;
+                }
+                if unfinished_action_count > 0 || session_input_pump_requested {
+                    // TS 8609.
+                    self.schedule_session_input_pump();
+                    wait_for_session_input = true;
+                } else {
+                    // TS 8612-8613: the scheduled flag is cleared before `continue()`
+                    // so the loop cannot re-enter while that continuation runs.
+                    self.post_compaction_continuation_scheduled
+                        .store(false, Ordering::SeqCst);
+                    continuation_started = true;
+                }
+            }
+            commit_fence.release();
+
+            if continue_error.is_some() {
+                continue;
+            }
+            if !continuation_started {
+                // TS 8619-8633.
+                self.wait_for_idle_or_settlement(Some(&settlement)).await;
+                if !self.settlement_is_owner(&settlement) {
+                    return;
+                }
+                let continuation_messages = self
+                    .scheduled_post_compaction_continuation_messages
+                    .lock()
+                    .unwrap()
+                    .clone();
+                let continue_after_session_input = {
+                    settlement.lock().unwrap().continue_after_session_input
+                };
+                let should_continue = (continue_after_session_input && continuation_messages.is_empty())
+                    || self.session_owns_scheduled_continuations(&continuation_messages);
+                if should_continue {
+                    let messages = self.post_compaction_continuation_messages.lock().unwrap().clone();
+                    *self.scheduled_post_compaction_continuation_messages.lock().unwrap() = messages;
+                    continue;
+                }
+                // TS 8629-8632.
+                self.post_compaction_continuation_scheduled
+                    .store(false, Ordering::SeqCst);
+                self.scheduled_post_compaction_continuation_messages
+                    .lock()
+                    .unwrap()
+                    .clear();
+                self.schedule_auto_refine_after_agent_end();
+                return;
+            }
+
+            // TS 8613-8614: `continuation = this.agent.continue()`.
+            let outcome = self.agent.continue_().await;
+            match outcome {
+                Ok(()) => {
+                    // TS 8637-8640.
+                    if self.settlement_is_owner(&settlement) {
+                        let continuation_messages = self
+                            .scheduled_post_compaction_continuation_messages
+                            .lock()
+                            .unwrap()
+                            .clone();
+                        self.forget_consumed_post_compaction_continuations(&continuation_messages);
+                    }
+                    return;
+                }
+                Err(error) => {
+                    // TS 8641-8654 classifies on the typed code, never on text.
+                    match error.code {
+                        AgentContinueErrorCode::Busy => {
+                            // TS 8643-8648.
+                            if self.settlement_is_owner(&settlement) {
+                                self.post_compaction_continuation_scheduled
+                                    .store(true, Ordering::SeqCst);
+                                let messages =
+                                    self.post_compaction_continuation_messages.lock().unwrap().clone();
+                                *self.scheduled_post_compaction_continuation_messages.lock().unwrap() =
+                                    messages;
+                            }
+                            continue;
+                        }
+                        AgentContinueErrorCode::NothingToContinue => {
+                            // TS 8650: nothing to continue returns without settling.
+                            return;
+                        }
+                    }
+                    // TS 8650-8652: any other failure settles the continuation as an error.
+                    if self.settlement_is_owner(&settlement) {
+                        self.settle_post_compaction_continue(Some(&error.to_string()));
+                    }
+                    return;
+                }
+            }
         }
-        self.post_compaction_continuation_scheduled
-            .store(false, Ordering::SeqCst);
-        deferred.resolve();
+    }
+
+    /// `_waitForIdleOrSettlement(settlement?)` (agent-session.ts:7542-7574).
+    ///
+    /// The loop runs while no settlement is given, or while the given settlement is
+    /// still the owner: a superseded/cancelled settlement must release this waiter
+    /// instead of leaving it registered (the TS comment at 7535-7540, which explains
+    /// that a leaked waiter keeps `hasPendingAdmissionWaiters` true and blocks daemon
+    /// passivation).
+    async fn wait_for_idle_or_settlement(
+        self: &Arc<Self>,
+        settlement: Option<&Arc<Mutex<PostCompactionContinuationSettlement>>>,
+    ) {
+        loop {
+            if let Some(settlement) = settlement {
+                if !self.settlement_is_owner(settlement) {
+                    return;
+                }
+            }
+            if self.has_unfinished_actions() && self.is_queued_work_suspended() {
+                // TS 7543-7555: a suspended queue cannot drain, so park on a
+                // checkpoint waiter; racing the settlement releases a cancelled run.
+                let wake = Arc::new(tokio::sync::Notify::new());
+                let entry: Arc<dyn Fn() + Send + Sync> = {
+                    let wake = wake.clone();
+                    Arc::new(move || wake.notify_waiters())
+                };
+                self.session_input_checkpoint_waiters
+                    .lock()
+                    .unwrap()
+                    .push(entry.clone());
+                let settled = {
+                    settlement.map(|settlement| settlement.lock().unwrap().deferred.clone())
+                };
+                tokio::select! {
+                    _ = wake.notified() => {}
+                    _ = await_settlement(settled) => {}
+                }
+                // TS 7553 `finally`: unregister this waiter so it cannot leak.
+                self.session_input_checkpoint_waiters
+                    .lock()
+                    .unwrap()
+                    .retain(|existing| !Arc::ptr_eq(existing, &entry));
+                continue;
+            }
+            if self.has_unfinished_actions() {
+                // TS 7557.
+                let session = self.clone();
+                session.schedule_session_input_pump();
+            }
+            let pump = self.session_input_pump.lock().unwrap().clone();
+            let _ = pump.await;
+            self.agent.wait_for_idle().await;
+            let events = self.agent_event_queue.lock().unwrap().clone();
+            let _ = events.await;
+            // TS 7564-7572.
+            if self.has_unfinished_actions() || self.session_input_pump_requested.load(Ordering::SeqCst) {
+                continue;
+            }
+            return;
+        }
+    }
+
+    /// `_actionStore.queuedActions().length > 0` (agent-session.ts:7543) as the
+    /// unfinished-action test the session already exposes.
+    fn has_unfinished_actions(&self) -> bool {
+        self.unfinished_action_count() > 0
     }
 
     /// `_shouldSkipAutoRefineForActiveAgent()`.
@@ -12239,11 +12624,17 @@ impl AgentSession {
     /// `_runAutoCompaction(reason)`.
     async fn run_auto_compaction(self: &Arc<Self>, reason: &str) -> Option<String> {
         let controller = CancellationToken::new();
+        // agent-session.ts:9606-9610 publishes the in-flight auto compaction so the
+        // scheduled post-compaction runner can wait for it (8580-8582) and re-check
+        // it (8598) instead of racing a compaction that is still running.
+        let compaction_operation = self.begin_compaction_operation();
         *self.auto_compaction_abort_controller.lock().unwrap() = Some(controller.clone());
         let result = self
             .perform_compaction_unmeasured(None, controller.clone())
             .await;
         *self.auto_compaction_abort_controller.lock().unwrap() = None;
+        // TS 9715-9720 `finally`.
+        self.end_compaction_operation(&compaction_operation);
         self.schedule_auto_refine_after_compaction(false);
         match result {
             Ok(()) => Some(format!("Compaction completed ({reason}).")),
@@ -12767,6 +13158,9 @@ impl AgentSession {
         // and the failure arm separately, so no flag is needed.
         let compaction_abort = CancellationToken::new();
         *self.compaction_abort_controller.lock().unwrap() = Some(compaction_abort.clone());
+        // agent-session.ts:8088-8092 publishes the in-flight manual compaction before
+        // the work starts; the `finally` tail below clears it (TS 8141-8149).
+        let compaction_operation = self.begin_compaction_operation();
         self.emit(AgentSessionEvent::CompactionStart {
             reason: COMPACTION_REASON_MANUAL.to_string(),
             custom_instructions: custom_instructions.map(|value| value.to_string()),
@@ -12776,8 +13170,8 @@ impl AgentSession {
             .await;
         *self.compaction_abort_controller.lock().unwrap() = None;
         self.reconnect_to_agent();
-        self.notify_session_input_checkpoint_change();
-        self.schedule_session_input_pump();
+        // TS 8144-8147.
+        self.end_compaction_operation(&compaction_operation);
         match outcome {
             Ok(result) => {
                 self.emit(AgentSessionEvent::CompactionEnd {
@@ -13547,5 +13941,416 @@ impl AgentSession {
             return Some(estimate.tokens);
         }
         None
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Post-compaction continuation coverage
+//
+// The SDK faux fixture disables compaction (`"compaction":{"enabled":false}`), so
+// it never reaches the post-compaction continuation path. These tests drive that
+// path directly against `agent-session.ts:8427-8656` with a scripted `AgentHandle`
+// stub whose `continue_` returns a chosen typed `AgentContinueError`.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod post_compaction_continuation_tests {
+    use super::*;
+    use pi_agent_core::types::{
+        AgentEvent, AgentMessage, AgentState, ShouldStopAfterTurnContext, StreamFn,
+    };
+    use pi_ai::types::{Message, OnPayload, OnResponse};
+    use std::sync::atomic::AtomicUsize;
+
+    type Listener = Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>;
+
+    /// `agent.continue()` scripted per call: `busy` once, then success (or any
+    /// queued outcome), mirroring the TS tests at
+    /// `packages/coding-agent/test/suite/agent-session-compaction.test.ts:1198-1212`.
+    struct ScriptedAgent {
+        state: Mutex<AgentState>,
+        outcomes: Mutex<VecDeque<Result<(), AgentContinueError>>>,
+        continue_calls: AtomicUsize,
+        wait_for_idle_calls: AtomicUsize,
+        stream_fn: Mutex<StreamFn>,
+    }
+
+    impl ScriptedAgent {
+        fn new(outcomes: Vec<Result<(), AgentContinueError>>) -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(AgentState::default()),
+                outcomes: Mutex::new(outcomes.into_iter().collect()),
+                continue_calls: AtomicUsize::new(0),
+                wait_for_idle_calls: AtomicUsize::new(0),
+                stream_fn: Mutex::new(pi_agent_core::agent::default_stream_fn()),
+            })
+        }
+
+        fn continue_calls(&self) -> usize {
+            self.continue_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    fn busy() -> AgentContinueError {
+        AgentContinueError {
+            code: AgentContinueErrorCode::Busy,
+            message: "Agent is already processing. Wait for completion before continuing.".to_string(),
+        }
+    }
+
+    fn nothing_to_continue() -> AgentContinueError {
+        AgentContinueError {
+            code: AgentContinueErrorCode::NothingToContinue,
+            message: "No messages to continue from".to_string(),
+        }
+    }
+
+    impl AgentHandle for ScriptedAgent {
+        fn state(&self) -> AgentState {
+            self.state.lock().unwrap().clone()
+        }
+
+        fn set_state(&self, state: AgentState) {
+            *self.state.lock().unwrap() = state;
+        }
+
+        fn subscribe(&self, _listener: Listener) -> Box<dyn Fn() + Send + Sync> {
+            Box::new(|| {})
+        }
+
+        fn set_before_tool_call(&self, _hook: BeforeToolCallHook) {}
+        fn set_after_tool_call(&self, _hook: AfterToolCallHook) {}
+        fn set_get_continuation_messages(&self, _hook: GetContinuationMessagesHook) {}
+        fn set_should_stop_before_turn(&self, _hook: Arc<dyn Fn() -> bool + Send + Sync>) {}
+        fn set_should_stop_after_turn(
+            &self,
+            _hook: Arc<dyn Fn(ShouldStopAfterTurnContext) -> BoxFuture<bool> + Send + Sync>,
+        ) {
+        }
+
+        fn set_stream_fn(&self, stream_fn: StreamFn) {
+            *self.stream_fn.lock().unwrap() = stream_fn;
+        }
+
+        fn stream_fn(&self) -> StreamFn {
+            self.stream_fn.lock().unwrap().clone()
+        }
+
+        fn abort(&self) {}
+
+        fn wait_for_idle(&self) -> BoxFuture<()> {
+            self.wait_for_idle_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async {})
+        }
+
+        fn prompt(&self, _messages: Vec<AgentMessage>) -> BoxFuture<Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn continue_(&self) -> BoxFuture<Result<(), AgentContinueError>> {
+            let outcome = self.outcomes.lock().unwrap().pop_front().unwrap_or(Ok(()));
+            self.continue_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { outcome })
+        }
+
+        fn is_streaming(&self) -> bool {
+            false
+        }
+
+        fn has_queued_messages(&self) -> bool {
+            false
+        }
+
+        fn clear_all_queues(&self) {}
+
+        fn remove_queued_messages(
+            &self,
+            _predicate: Arc<dyn Fn(&AgentMessage) -> bool + Send + Sync>,
+        ) -> Vec<AgentMessage> {
+            Vec::new()
+        }
+
+        fn follow_up(&self, _message: AgentMessage) {}
+        fn set_follow_up_mode(&self, _mode: String) {}
+        fn set_steering_mode(&self, _mode: String) {}
+
+        fn set_convert_to_llm(
+            &self,
+            _convert: Arc<dyn Fn(Vec<AgentMessage>) -> BoxFuture<Vec<Message>> + Send + Sync>,
+        ) {
+        }
+
+        fn set_transform_context(
+            &self,
+            _transform: Arc<
+                dyn Fn(Vec<AgentMessage>, Option<CancellationToken>) -> BoxFuture<Vec<AgentMessage>>
+                    + Send
+                    + Sync,
+            >,
+        ) {
+        }
+
+        fn set_get_api_key(
+            &self,
+            _get_api_key: Arc<dyn Fn(String) -> BoxFuture<Option<String>> + Send + Sync>,
+        ) {
+        }
+
+        fn set_on_payload(&self, _hook: OnPayload) {}
+        fn set_on_response(&self, _hook: OnResponse) {}
+        fn set_tool_execution(&self, _mode: String) {}
+        fn performance_metrics(&self) -> Option<AgentLoopPerformanceMetrics> {
+            None
+        }
+        fn set_performance_metrics(&self, _metrics: Option<AgentLoopPerformanceMetrics>) {}
+        fn signal(&self) -> Option<CancellationToken> {
+            None
+        }
+    }
+
+    /// One in-memory session over the scripted agent.
+    fn test_session(agent: Arc<ScriptedAgent>) -> Arc<AgentSession> {
+        let cwd = std::env::temp_dir().to_string_lossy().to_string();
+        let settings = Arc::new(Mutex::new(
+            crate::core::settings_manager::SettingsManager::in_memory(
+                serde_json::json!({
+                    "autoRefine": {"enabled": false},
+                    "retry": {"enabled": false},
+                    "compaction": {"enabled": false},
+                    "telemetryEnabled": false,
+                    "agentTracesEnabled": false,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        ));
+        let manager = crate::core::session_manager::SessionManager::in_memory(Some(&cwd), Some(&cwd)).unwrap();
+        let loader = Arc::new(crate::core::resource_loader::DefaultResourceLoader::new(
+            crate::core::resource_loader::DefaultResourceLoaderOptions {
+                cwd: cwd.clone(),
+                agent_dir: cwd.clone(),
+                settings_manager: Some(settings.clone()),
+                no_extensions: true,
+                no_skills: true,
+                no_prompt_templates: true,
+                no_themes: true,
+                no_context_files: true,
+                bundled_skills_dir: Some(None),
+                ..Default::default()
+            },
+        ));
+        let session = AgentSession::new(AgentSessionConfig {
+            agent: agent as Arc<dyn AgentHandle>,
+            session_manager: Arc::new(Mutex::new(manager)),
+            settings_manager: settings,
+            service_tier_preference: None,
+            cwd: cwd.clone(),
+            agent_dir: Some(cwd.clone()),
+            scoped_models: None,
+            resource_loader: loader,
+            custom_tools: None,
+            model_registry: Arc::new(Mutex::new(
+                crate::core::model_registry::ModelRegistry::in_memory(
+                    crate::core::auth_storage::AuthStorage::in_memory(Default::default(), None),
+                ),
+            )),
+            initial_active_tool_names: None,
+            allowed_tool_names: None,
+            include_goals: Some(false),
+            agent_message_controller: None,
+            agent_observe_controller: None,
+            include_compact_skill: Some(false),
+            rlm_heartbeat_controller: None,
+            mcp_manager: None,
+            base_tools_override: None,
+            extension_runner_ref: None,
+            session_start_event: None,
+            rlm_depth: Some(0),
+            rlm_max_depth: Some(2),
+            rlm_session_dir: None,
+            rlm_parent_node_id: None,
+            rlm_parent_agent: None,
+            semantic_parent_session_id: None,
+            semantic_spawned_by_request_id: None,
+            subagent_runtime_host: None,
+            autonomous: None,
+            prewarm_ipython_kernel: Some(false),
+            auto_refine_reviewer: None,
+            serialized_refine: None,
+            initial_goal: None,
+        })
+        .unwrap();
+        session
+    }
+
+    fn user_message(text: &str) -> AgentMessage {
+        AgentMessage::Message(Message::User(pi_ai::types::UserMessage::new(
+            pi_ai::types::UserContent::Text(text.to_string()),
+            0,
+        )))
+    }
+
+    fn settlement_of(
+        session: &Arc<AgentSession>,
+    ) -> Option<Arc<Mutex<PostCompactionContinuationSettlement>>> {
+        session.post_compaction_continuation_settlement.lock().unwrap().clone()
+    }
+
+    /// D1: `_settlePostCompactionContinue` clears the ownership slot and notifies
+    /// (agent-session.ts:8427-8436).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settle_clears_the_ownership_slot_and_wakes_waiters() {
+        let agent = ScriptedAgent::new(vec![]);
+        let session = test_session(agent);
+        session.schedule_post_compaction_continue(false);
+        let settlement = settlement_of(&session).expect("a settlement is installed");
+        session.post_compaction_continuation_scheduled.store(false, Ordering::SeqCst);
+        session.settle_post_compaction_continue(None);
+        assert!(
+            settlement.lock().unwrap().settled,
+            "the settlement reports settled"
+        );
+        assert!(
+            settlement_of(&session).is_none(),
+            "the ownership slot is cleared (TS 8432)"
+        );
+        // A fresh schedule installs a NEW settlement rather than reusing the stale one.
+        session.schedule_post_compaction_continue(false);
+        let fresh = settlement_of(&session).expect("a fresh settlement is installed");
+        assert!(
+            !Arc::ptr_eq(&fresh, &settlement),
+            "a later schedule owns a new settlement"
+        );
+        session.dispose_async(Some(false)).await;
+    }
+
+    /// D2: `_cancelPostCompactionContinue` clears the scheduled snapshot and settles
+    /// the deferred, so no waiter is stranded (agent-session.ts:8438-8442).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancel_clears_scheduled_messages_and_releases_waiters() {
+        let agent = ScriptedAgent::new(vec![]);
+        let session = test_session(agent);
+        *session.post_compaction_continuation_messages.lock().unwrap() =
+            vec![user_message("session-owned continuation")];
+        session.schedule_post_compaction_continue(false);
+        let settlement = settlement_of(&session).expect("a settlement is installed");
+        let deferred = settlement.lock().unwrap().deferred.clone();
+
+        session.cancel_post_compaction_continue();
+
+        assert!(
+            !session.post_compaction_continuation_scheduled.load(Ordering::SeqCst),
+            "the scheduled flag is cleared (TS 8439)"
+        );
+        assert!(
+            session
+                .scheduled_post_compaction_continuation_messages
+                .lock()
+                .unwrap()
+                .is_empty(),
+            "the scheduled snapshot is cleared (TS 8440)"
+        );
+        // TS 8441 must wake every `settlement.promise` waiter. Without the settle this
+        // await never resolves.
+        tokio::time::timeout(std::time::Duration::from_secs(5), deferred.wait())
+            .await
+            .expect("cancellation must resolve the settlement (TS 8441)");
+        assert!(
+            settlement_of(&session).is_none(),
+            "cancellation clears the ownership slot"
+        );
+        session.dispose_async(Some(false)).await;
+    }
+
+    /// D3(a): the runner really calls `agent.continue_()` and forgets the consumed
+    /// continuation messages on success (agent-session.ts:8613, 8637-8640).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scheduled_runner_calls_continue_and_forgets_consumed_messages() {
+        let agent = ScriptedAgent::new(vec![Ok(())]);
+        let session = test_session(agent.clone());
+        *session.post_compaction_continuation_messages.lock().unwrap() =
+            vec![user_message("session-owned continuation")];
+        session.schedule_post_compaction_continue(false);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while agent.continue_calls() == 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            agent.continue_calls(),
+            1,
+            "the scheduled runner calls agent.continue_ (TS 8613)"
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !session.post_compaction_continuation_messages.lock().unwrap().is_empty()
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            session.post_compaction_continuation_messages.lock().unwrap().is_empty(),
+            "consumed continuations are forgotten (TS 8638)"
+        );
+        assert!(
+            settlement_of(&session).is_none(),
+            "the runner tail settles its own settlement"
+        );
+        session.dispose_async(Some(false)).await;
+    }
+
+    /// D3(b): a typed `busy` re-arms the schedule and the next pass continues again
+    /// (agent-session.ts:8643-8648), matching the TS test at
+    /// `agent-session-compaction.test.ts:1170-1212`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn busy_continue_rearms_the_schedule_and_retries() {
+        let agent = ScriptedAgent::new(vec![Err(busy()), Ok(())]);
+        let session = test_session(agent.clone());
+        session.schedule_post_compaction_continue(false);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while agent.continue_calls() < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            agent.continue_calls(),
+            2,
+            "a busy continue must be retried (TS 8645-8648)"
+        );
+        session.cancel_post_compaction_continue();
+        session.dispose_async(Some(false)).await;
+    }
+
+    /// D3(c): `nothing-to-continue` returns without settling as an error
+    /// (agent-session.ts:8650).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nothing_to_continue_returns_without_an_error_settlement() {
+        let agent = ScriptedAgent::new(vec![Err(nothing_to_continue())]);
+        let session = test_session(agent.clone());
+        session.schedule_post_compaction_continue(false);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        while agent.continue_calls() == 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(agent.continue_calls(), 1);
+        session.cancel_post_compaction_continue();
+        session.dispose_async(Some(false)).await;
+    }
+
+    /// P4: an in-flight compaction is published and cleared again, so the runner can
+    /// see it (agent-session.ts:8088-8092 / 8141-8147, 9606-9610 / 9715-9720).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compaction_operation_is_published_and_cleared() {
+        let agent = ScriptedAgent::new(vec![]);
+        let session = test_session(agent);
+        assert!(session.compaction_operation.lock().unwrap().is_none());
+        let operation = session.begin_compaction_operation();
+        assert!(
+            session.compaction_operation.lock().unwrap().is_some(),
+            "the in-flight compaction is visible to the runner (TS 8598)"
+        );
+        session.end_compaction_operation(&operation);
+        assert!(
+            session.compaction_operation.lock().unwrap().is_none(),
+            "the owning finally clears the operation (TS 9717-9720)"
+        );
+        session.dispose_async(Some(false)).await;
     }
 }

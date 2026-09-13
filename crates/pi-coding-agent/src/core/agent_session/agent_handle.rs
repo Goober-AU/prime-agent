@@ -7,7 +7,7 @@ use super::{
     AfterToolCallHook, AgentHandle, BeforeToolCallHook, BoxFuture,
     GetContinuationMessagesHook,
 };
-use pi_agent_core::agent::{Agent, PromptInput, QueueMode};
+use pi_agent_core::agent::{Agent, AgentContinueError, PromptInput, QueueMode};
 use pi_agent_core::performance_metrics::AgentLoopPerformanceMetrics;
 use pi_agent_core::types::{
     AgentEvent, AgentMessage, AgentState, ShouldStopAfterTurnContext, StreamFn,
@@ -89,9 +89,9 @@ impl AgentHandle for Arc<Agent> {
         })
     }
 
-    fn continue_(&self) -> BoxFuture<Result<(), String>> {
+    fn continue_(&self) -> BoxFuture<Result<(), AgentContinueError>> {
         let agent = self.clone();
-        Box::pin(async move { Agent::continue_(&agent).await.map_err(|error| error.to_string()) })
+        Box::pin(async move { Agent::continue_(&agent).await })
     }
 
     fn is_streaming(&self) -> bool {

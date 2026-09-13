@@ -524,6 +524,20 @@ impl AgentRoster {
     }
 }
 
+/// The roster wire value for one entry: `AgentRosterEntry` serialized as the
+/// TypeScript emits it, with `status` written through `as_str`.
+pub fn agent_roster_entry_to_value(entry: &AgentRosterEntry) -> Value {
+    let mut value = serde_json::to_value(entry).unwrap_or(Value::Null);
+    if let Some(object) = value.as_object_mut() {
+        object.insert("status".to_string(), Value::String(entry.status.as_str().to_string()));
+    }
+    value
+}
+
+pub fn agent_roster_entry_from_value(value: &Value) -> Option<AgentRosterEntry> {
+    serde_json::from_value(value.clone()).ok()
+}
+
 /// `amend` marks: `None` means "not provided", `Some(None)` clears the field.
 #[derive(Debug, Clone, Default)]
 pub struct RosterEntryMarks {

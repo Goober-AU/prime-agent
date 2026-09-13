@@ -2461,7 +2461,7 @@ impl AgentSession {
                     session.emit(AgentSessionEvent::AutoRetryEnd {
                         success: false,
                         attempt: attempt as i64,
-                        final_error: Some(error.clone()),
+                        final_error: Some(error.to_string()),
                     });
                     pi_agent_core::agent_loop::finalize_performance_metric_logical_request(
                         &message,
