@@ -393,6 +393,31 @@ pub trait KernelClient: Send + Sync {
         signal: Option<AbortSignal>,
         on_stream: Option<Arc<dyn Fn(&str, StreamName) + Send + Sync>>,
     ) -> BoxFuture<'static, Result<ExecuteResult, KernelError>>;
+    /// [`KernelClient::execute`] plus the late-sent-agent-message handler.
+    ///
+    /// TypeScript passes one options object to `KernelClient.execute`
+    /// (`packages/coding-agent/src/core/tools/ipython.ts:644-650`), which is how
+    /// `onLateSentAgentMessage` reaches the kernel session; the manager then
+    /// re-registers it under the request id once the execution settles
+    /// (`packages/coding-agent/src/core/kernel/repl-manager.ts:1153-1155`).
+    /// The Rust trait splits that object so callers that never pass a handler keep
+    /// the three argument form (`packages/coding-agent/src/core/tools/acp-mcp.ts:47`
+    /// passes only `signal`).
+    ///
+    /// The default drops the handler and defers to [`KernelClient::execute`]. An
+    /// implementation that owns a real manager must override this: the native
+    /// adapter does, so `ExecuteOptions.on_late_sent_agent_message` stays set and
+    /// the kernel session's late-message dispatch is genuinely reached.
+    fn execute_with_late_sent_agent_message(
+        &self,
+        code: &str,
+        signal: Option<AbortSignal>,
+        on_stream: Option<Arc<dyn Fn(&str, StreamName) + Send + Sync>>,
+        on_late_sent_agent_message: Option<Arc<dyn Fn(KernelSentAgentMessage) + Send + Sync>>,
+    ) -> BoxFuture<'static, Result<ExecuteResult, KernelError>> {
+        let _ = on_late_sent_agent_message;
+        self.execute(code, signal, on_stream)
+    }
     fn restore_state(&self) -> BoxFuture<'static, Result<Option<RestoreResult>, KernelError>>;
     fn shutdown(
         &self,
@@ -965,9 +990,27 @@ async fn execute_with_busy_kernel_choice(
         let manager = provisioner
             .ensure(Some(report_startup_progress.clone()), signal.clone())
             .await?;
-        let _late = on_late_sent_agent_message.as_ref().map(|_handler| tool_call_id);
+        // `onLateSentAgentMessage: onLateSentAgentMessage ? (message) =>
+        // onLateSentAgentMessage(toolCallId, message) : undefined`
+        // (packages/coding-agent/src/core/tools/ipython.ts:647-649). The tool-call id is
+        // bound here so the kernel callback only carries the message, and the bound
+        // handler is handed to the kernel session for every attempt of the loop -
+        // including a retry after a kill/restart, which builds a fresh session.
+        let late_handler: Option<Arc<dyn Fn(KernelSentAgentMessage) + Send + Sync>> =
+            on_late_sent_agent_message.as_ref().map(|handler| {
+                let handler = handler.clone();
+                let tool_call_id = tool_call_id.to_string();
+                Arc::new(move |message: KernelSentAgentMessage| {
+                    handler(tool_call_id.clone(), message)
+                }) as Arc<dyn Fn(KernelSentAgentMessage) + Send + Sync>
+            });
         let result = manager
-            .execute(code, signal.clone(), Some(on_stream.clone()))
+            .execute_with_late_sent_agent_message(
+                code,
+                signal.clone(),
+                Some(on_stream.clone()),
+                late_handler,
+            )
             .await;
         match result {
             Ok(result) => {
@@ -1026,6 +1069,9 @@ pub async fn execute_ipython(
     params: &IpythonToolInput,
     signal: Option<AbortSignal>,
     on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
+    // `options?.onLateSentAgentMessage` (packages/coding-agent/src/core/tools/ipython.ts:739),
+    // threaded into the kernel session by executeWithBusyKernelChoice.
+    on_late_sent_agent_message: Option<Arc<dyn Fn(String, KernelSentAgentMessage) + Send + Sync>>,
     ctx: Option<&ExtensionContext>,
 ) -> Result<(Vec<pi_agent_core::types::ContentBlock>, IpythonToolDetails, bool), KernelError> {
     if is_unsafe_windows_captured_launcher(&params.code) {
@@ -1090,7 +1136,7 @@ pub async fn execute_ipython(
         signal,
         stream_update,
         set_tool_working_message.clone(),
-        None,
+        on_late_sent_agent_message,
         ctx,
     )
     .await;
@@ -1214,6 +1260,10 @@ pub fn create_ipython_tool_definition(
     let provisioner = options.provisioner.clone().unwrap_or_else(|| {
         IpythonKernelProvisioner::new(cwd, Some(options.clone()), default_kernel_client_factory())
     });
+    // `options?.onLateSentAgentMessage` is read per tool call from the captured options
+    // (packages/coding-agent/src/core/tools/ipython.ts:739), so the handler the session
+    // registered in agent-session.ts:10099-10100 is not dropped at the tool boundary.
+    let on_late_sent_agent_message = options.on_late_sent_agent_message.clone();
 
     let execute: ToolExecuteFn<IpythonToolDetails> = Arc::new(
         move |tool_call_id: String,
@@ -1222,14 +1272,22 @@ pub fn create_ipython_tool_definition(
               on_update: Option<pi_agent_core::types::AgentToolUpdateCallback>,
               ctx: ExtensionContext| {
             let provisioner = provisioner.clone();
+            let on_late_sent_agent_message = on_late_sent_agent_message.clone();
             Box::pin(async move {
                 let input: IpythonToolInput = serde_json::from_value(params)
                     .map_err(|error| anyhow::anyhow!("ipython tool input is invalid. {error}"))?;
                 let abort_signal = signal.map(abort_signal_from_token);
-                let (content, details, _is_error) =
-                    execute_ipython(provisioner, &tool_call_id, &input, abort_signal, on_update, Some(&ctx))
-                        .await
-                        .map_err(|error| anyhow::Error::msg(error.to_string()))?;
+                let (content, details, _is_error) = execute_ipython(
+                    provisioner,
+                    &tool_call_id,
+                    &input,
+                    abort_signal,
+                    on_update,
+                    on_late_sent_agent_message,
+                    Some(&ctx),
+                )
+                .await
+                .map_err(|error| anyhow::Error::msg(error.to_string()))?;
                 Ok(pi_agent_core::types::AgentToolResult::new(
                     content,
                     serde_json::to_value(details).unwrap_or(Value::Null),
@@ -1282,9 +1340,39 @@ impl KernelClient for ReplKernelClient {
         Box::pin(async move { manager.start(options).await })
     }
     fn execute(&self, code: &str, signal: Option<AbortSignal>, on_stream: Option<Arc<dyn Fn(&str, StreamName) + Send + Sync>>) -> BoxFuture<'static, Result<ExecuteResult, KernelError>> {
+        self.execute_with_late_sent_agent_message(code, signal, on_stream, None)
+    }
+    fn execute_with_late_sent_agent_message(
+        &self,
+        code: &str,
+        signal: Option<AbortSignal>,
+        on_stream: Option<Arc<dyn Fn(&str, StreamName) + Send + Sync>>,
+        on_late_sent_agent_message: Option<Arc<dyn Fn(KernelSentAgentMessage) + Send + Sync>>,
+    ) -> BoxFuture<'static, Result<ExecuteResult, KernelError>> {
         let manager = self.manager.clone();
         let code = code.to_string();
-        Box::pin(async move { manager.execute(code, ExecuteOptions { signal, on_stream, ..Default::default() }).await })
+        // The TypeScript passes one options object to the kernel client
+        // (packages/coding-agent/src/core/tools/ipython.ts:644-650), so
+        // `onLateSentAgentMessage` lands on `ExecuteOptions` and the kernel session
+        // registers it once the cell settles
+        // (packages/coding-agent/src/core/kernel/repl-manager.ts:1153-1155, reached in
+        // Rust at core/kernel/repl_manager.rs:2222 through
+        // `register_late_sent_agent_message_handler`). `..Default::default()` here
+        // used to leave that field unset, so a kernel-sent agent message emitted after
+        // the tool result was silently dropped.
+        Box::pin(async move {
+            manager
+                .execute(
+                    code,
+                    ExecuteOptions {
+                        signal,
+                        on_stream,
+                        on_late_sent_agent_message,
+                        ..Default::default()
+                    },
+                )
+                .await
+        })
     }
     fn restore_state(&self) -> BoxFuture<'static, Result<Option<RestoreResult>, KernelError>> {
         let manager = self.manager.clone();
@@ -1563,6 +1651,164 @@ mod tests {
         }
     }
 
+    /// Records whether the busy-kernel path forwarded a late-message handler.
+    ///
+    /// Only an override of `execute_with_late_sent_agent_message` can set
+    /// `captured`, so the test proves the three-argument `execute` is no longer the
+    /// call the ipython tool makes when a handler exists.
+    struct LateHandlerCapturingKernelClient {
+        captured: Mutex<Vec<Arc<dyn Fn(KernelSentAgentMessage) + Send + Sync>>>,
+    }
+
+    impl KernelClient for LateHandlerCapturingKernelClient {
+        fn is_running(&self) -> bool {
+            true
+        }
+        fn is_defunct(&self) -> bool {
+            false
+        }
+        fn start(&self, _options: KernelStartOptions) -> BoxFuture<'static, Result<(), KernelError>> {
+            Box::pin(async { Ok(()) })
+        }
+        /// The provisioner's own bootstrap cell (and any other handler-free call)
+        /// still goes through the plain `execute`, so that path must stay usable.
+        fn execute(
+            &self,
+            code: &str,
+            _signal: Option<AbortSignal>,
+            _on_stream: Option<Arc<dyn Fn(&str, StreamName) + Send + Sync>>,
+        ) -> BoxFuture<'static, Result<ExecuteResult, KernelError>> {
+            if code == build_rlm_bootstrap_code(&[]) {
+                return StubKernelClient.execute(code, _signal, _on_stream);
+            }
+            Box::pin(async {
+                Err(KernelError::new(
+                    "a tool cell with a handler must not use plain execute",
+                ))
+            })
+        }
+        fn execute_with_late_sent_agent_message(
+            &self,
+            _code: &str,
+            _signal: Option<AbortSignal>,
+            _on_stream: Option<Arc<dyn Fn(&str, StreamName) + Send + Sync>>,
+            on_late_sent_agent_message: Option<Arc<dyn Fn(KernelSentAgentMessage) + Send + Sync>>,
+        ) -> BoxFuture<'static, Result<ExecuteResult, KernelError>> {
+            self.captured
+                .lock()
+                .unwrap()
+                .push(on_late_sent_agent_message.expect("handler forwarded to the kernel session"));
+            Box::pin(async {
+                Ok(ExecuteResult {
+                    stdout: "ok".to_string(),
+                    stderr: String::new(),
+                    result: None,
+                    diffs: None,
+                    attachments: None,
+                    sent_agent_messages: None,
+                    background_output: None,
+                    status: ExecuteStatus::Ok,
+                    error: None,
+                    duration_ms: 1.0,
+                })
+            })
+        }
+        fn restore_state(&self) -> BoxFuture<'static, Result<Option<RestoreResult>, KernelError>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn shutdown(&self, _snapshot: bool, _drain: bool) -> BoxFuture<'static, Result<(), KernelError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn kill(&self) -> BoxFuture<'static, Result<(), KernelError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn prune_oversized_variables(&self) -> BoxFuture<'static, Result<Option<PruneResult>, KernelError>> {
+            Box::pin(async { Ok(None) })
+        }
+        fn list_namespace_names(
+            &self,
+            _signal: Option<AbortSignal>,
+        ) -> BoxFuture<'static, Result<Option<Vec<String>>, KernelError>> {
+            Box::pin(async { Ok(None) })
+        }
+    }
+
+    fn sent_agent_message(id: &str, message: &str) -> KernelSentAgentMessage {
+        KernelSentAgentMessage {
+            id: id.to_string(),
+            message: message.to_string(),
+            delivery_status: crate::core::kernel::shared::KernelDeliveryStatus::Delivered,
+            receiver_role: Some(crate::core::kernel::shared::KernelReceiverRole::Parent),
+            target: crate::core::kernel::shared::KernelSentAgentMessageTarget {
+                active_session_id: "active".to_string(),
+                session_id: "session".to_string(),
+                session_name: None,
+            },
+        }
+    }
+
+    /// `onLateSentAgentMessage: (message) => onLateSentAgentMessage(toolCallId, message)`
+    /// (packages/coding-agent/src/core/tools/ipython.ts:647-649): the tool-call id is
+    /// bound at the call site and the bound handler reaches the kernel session.
+    #[tokio::test]
+    async fn busy_kernel_path_binds_the_tool_call_id_and_forwards_the_late_handler() {
+        let client = Arc::new(LateHandlerCapturingKernelClient {
+            captured: Mutex::new(Vec::new()),
+        });
+        let provisioner = provisioner_with(client.clone());
+        let seen: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_handler = seen.clone();
+        let handler: Arc<dyn Fn(String, KernelSentAgentMessage) + Send + Sync> = Arc::new(
+            move |tool_call_id: String, message: KernelSentAgentMessage| {
+                seen_for_handler.lock().unwrap().push((tool_call_id, message.id));
+            },
+        );
+
+        let execution = execute_with_busy_kernel_choice(
+            provisioner,
+            Arc::new(|_message: &str| {}),
+            "call-late",
+            "print(1)",
+            None,
+            Arc::new(|_chunk: &str, _name: StreamName| {}),
+            Arc::new(|_message: Option<&str>| {}),
+            Some(handler),
+            None,
+        )
+        .await
+        .expect("executed");
+        assert_eq!(execution.result.stdout, "ok");
+
+        let captured = client.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        captured[0](sent_agent_message("msg-1", "hello"));
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [("call-late".to_string(), "msg-1".to_string())]
+        );
+    }
+
+    /// A caller that passes no handler keeps the plain `execute` shape - the
+    /// default trait method must not invent one (ipython.ts:647-649).
+    #[tokio::test]
+    async fn busy_kernel_path_without_a_handler_uses_plain_execute() {
+        let provisioner = provisioner_with(Arc::new(StubKernelClient));
+        let execution = execute_with_busy_kernel_choice(
+            provisioner,
+            Arc::new(|_message: &str| {}),
+            "call-plain",
+            "print(1)",
+            None,
+            Arc::new(|_chunk: &str, _name: StreamName| {}),
+            Arc::new(|_message: Option<&str>| {}),
+            None,
+            None,
+        )
+        .await
+        .expect("executed");
+        assert_eq!(execution.result.stdout, "ok");
+    }
+
     fn provisioner_with(client: Arc<dyn KernelClient>) -> Arc<IpythonKernelProvisioner> {
         IpythonKernelProvisioner::new("/tmp", None, Arc::new(move |_options| client.clone()))
     }
@@ -1683,6 +1929,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("executed");
@@ -1703,6 +1950,7 @@ mod tests {
             &IpythonToolInput {
                 code: "raise ValueError".to_string(),
             },
+            None,
             None,
             None,
             None,
@@ -1728,6 +1976,7 @@ mod tests {
             &IpythonToolInput {
                 code: launcher_capture_code(),
             },
+            None,
             None,
             None,
             None,

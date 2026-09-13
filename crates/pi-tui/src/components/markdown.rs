@@ -366,6 +366,11 @@ enum FrameKind {
     TableCell,
     Strong,
     Em,
+    /// Port of marked's `del` token: the TS renderer wraps the content in
+    /// `this.theme.strikethrough(...)` (packages/tui/src/components/markdown.ts:645-648),
+    /// NOT `theme.italic`. `Token::Del` already renders that way; pulldown's
+    /// `Tag::Strikethrough` previously collapsed into `Em` and so rendered as italics.
+    Del,
     Link { href: String, text: String },
 }
 
@@ -462,7 +467,7 @@ impl TokenBuilder {
                 href: dest_url.to_string(),
                 text: String::new(),
             },
-            Tag::Strikethrough => FrameKind::Em,
+            Tag::Strikethrough => FrameKind::Del,
             Tag::HtmlBlock => FrameKind::Paragraph,
             Tag::FootnoteDefinition(_) => FrameKind::Paragraph,
             Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => FrameKind::Paragraph,
@@ -557,6 +562,7 @@ impl TokenBuilder {
             FrameKind::TableHead | FrameKind::TableRow | FrameKind::TableCell => return,
             FrameKind::Strong => Token::Strong { tokens: frame.tokens },
             FrameKind::Em => Token::Em { tokens: frame.tokens },
+            FrameKind::Del => Token::Del { tokens: frame.tokens },
             FrameKind::Link { href, .. } => {
                 let text = collect_text(&frame.tokens);
                 Token::Link {
@@ -1989,6 +1995,30 @@ mod tests {
         assert_eq!(strict_strikethrough("~~gone ~~"), None);
         assert_eq!(strict_strikethrough("~~gone~~~"), None);
         assert_eq!(strict_strikethrough("~gone~"), None);
+    }
+
+    /// `Tag::Strikethrough` must become a `del` token, which the TS renderer draws
+    /// with `this.theme.strikethrough(...)` (packages/tui/src/components/markdown.ts:645-648),
+    /// not with `theme.italic`. Mapping it to `FrameKind::Em` rendered `~~x~~` as italics.
+    #[test]
+    fn strikethrough_renders_as_strikethrough_not_italic() {
+        let mut component = markdown("~~gone~~ and *em*");
+        let lines = component.render(60.0);
+        let joined = lines.join("\n");
+
+        // The theme stub wraps strikethrough as `~~x~~` (theme() above) and italics as `_x_`.
+        assert!(
+            joined.contains("~~gone~~"),
+            "strikethrough text must use theme.strikethrough: {joined:?}"
+        );
+        assert!(
+            joined.contains("_em_"),
+            "emphasis must still use theme.italic: {joined:?}"
+        );
+        assert!(
+            !joined.contains("_gone_"),
+            "strikethrough must not fall through to theme.italic: {joined:?}"
+        );
     }
 
     #[test]

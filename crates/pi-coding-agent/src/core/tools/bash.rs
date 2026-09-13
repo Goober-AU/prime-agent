@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
 use pi_agent_core::types::ContentBlock as AgentContentBlock;
-use crate::utils::shell::kill_process_tree;
+// `core/tools/bash.ts:9-15` imports `getShellConfig`, `getShellEnv` and
+// `killProcessTree` from `utils/shell.js`; use the same owners here.
+use crate::utils::shell::{get_shell_config, get_shell_env, kill_process_tree};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -104,13 +106,21 @@ impl BashOperations for LocalBashOperations {
         let cwd = cwd.to_string();
         let shell_path = self.shell_path.clone();
         Box::pin(async move {
+            // TS order (`core/tools/bash.ts:69-73`): resolve the shell config
+            // first - `getShellConfig` throws `Custom shell path not found: ...`
+            // or the `No bash shell found. Options: ...` teaching error - and
+            // only then check the working directory. `?` rejects with the same
+            // string, mirroring the throw inside the Promise executor.
+            let config = get_shell_config(shell_path.as_deref())?;
+            let shell = config.shell;
+            let args = config.args;
+
             if !std::path::Path::new(&cwd).exists() {
                 return Err(format!(
                     "Working directory does not exist: {cwd}\nCannot execute bash commands."
                 ));
             }
 
-            let (shell, args) = get_shell_config(shell_path.as_deref());
             let mut command_builder = tokio::process::Command::new(&shell);
             for arg in &args {
                 command_builder.arg(arg);
@@ -237,23 +247,20 @@ where
     }
 }
 
-/// Port of `utils/shell.ts getShellConfig`.
-pub fn get_shell_config(shell_path: Option<&str>) -> (String, Vec<String>) {
-    if let Some(shell_path) = shell_path {
-        return (shell_path.to_string(), vec!["-c".to_string()]);
-    }
-    if cfg!(windows) {
-        let bash = std::env::var("PRIME_AGENT_BASH_SHELL").unwrap_or_else(|_| "bash".to_string());
-        return (bash, vec!["-c".to_string()]);
-    }
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    (shell, vec!["-c".to_string()])
-}
-
-/// Port of `utils/shell.ts getShellEnv`.
-pub fn get_shell_env() -> Vec<(String, String)> {
-    std::env::vars().collect()
-}
+// Shell resolution is NOT re-implemented here: `core/tools/bash.ts:9-15`
+// imports `getShellConfig`/`getShellEnv`/`killProcessTree` from `utils/shell.js`,
+// and this module does the same through `crate::utils::shell`. The previous
+// local copies diverged from `utils/shell.ts`:
+//   - unix preferred `$SHELL` (zsh/fish) where TS always uses `/bin/bash`
+//     (`utils/shell.ts:131-135`), then bash on PATH, then `sh`;
+//   - win32 used a bare `"bash"` from PATH, which CreateProcess can resolve to
+//     the `System32\bash.exe` WSL launcher that `orderWindowsBashCandidates`
+//     (`utils/shell.ts:14-19`) deliberately de-prioritizes;
+//   - neither the `Custom shell path not found: ...` nor the multi-line
+//     `No bash shell found. Options: ...` teaching error existed
+//     (`utils/shell.ts:66-69`, `utils/shell.ts:118-124`);
+//   - `get_shell_env` returned the ambient env without the `getBinDir()` PATH
+//     prepend (`utils/shell.ts:147-161`).
 
 
 /// TypeScript `interface BashSpawnContext`.
@@ -271,6 +278,8 @@ fn resolve_spawn_context(command: &str, cwd: &str, spawn_hook: Option<&BashSpawn
     let base_context = BashSpawnContext {
         command: command.to_string(),
         cwd: cwd.to_string(),
+        // `core/tools/bash.ts:135`: `env: { ...getShellEnv() }` - the bin-dir
+        // PATH prepend (`utils/shell.ts:147-161`) must reach tool commands.
         env: get_shell_env(),
     };
     match spawn_hook {
@@ -318,9 +327,12 @@ pub fn format_bash_call(args: Option<&BashToolInput>, theme: &dyn ToolTheme) -> 
     let command_value = args.map(|args| Value::String(args.command.clone()));
     let command = str_value(command_value.as_ref());
     let timeout = args.and_then(|args| args.timeout);
+    // `core/tools/bash.ts:180` gates on JS truthiness: `timeout ? ... : ""`, so
+    // `timeout: 0` renders just the command. `NaN` is falsy in JS too.
     let timeout_suffix = match timeout {
-        Some(timeout) if timeout != 0.0 => theme.fg("muted", &format!(" (timeout {timeout}s)")),
-        Some(timeout) if timeout == 0.0 => theme.fg("muted", &format!(" (timeout {timeout}s)")),
+        Some(timeout) if timeout != 0.0 && !timeout.is_nan() => {
+            theme.fg("muted", &format!(" (timeout {timeout}s)"))
+        }
         _ => String::new(),
     };
     let command_display = match command {
@@ -481,6 +493,123 @@ pub fn bash_tool_description() -> String {
         .replace("{kb}", &(DEFAULT_MAX_BYTES / 1024).to_string())
 }
 
+/// TS `lastUpdateAt` + `updateDirty` + `updateTimer` for `scheduleOutputUpdate`
+/// (`core/tools/bash.ts:295-333`).
+#[derive(Default)]
+struct BashUpdateThrottle {
+    /// TS `updateDirty`.
+    dirty: bool,
+    /// TS `lastUpdateAt`, in epoch milliseconds.
+    last_update_at: f64,
+    /// TS `updateTimer !== undefined`.
+    timer_pending: bool,
+    /// Stale-timer guard: a bumped id invalidates an armed trailing task, which
+    /// stands in for the `clearTimeout` call TS uses to cancel it.
+    timer_id: u64,
+}
+
+/// TS `emitOutputUpdate` (`core/tools/bash.ts:299-311`): dirty-gated, so a
+/// snapshot that has not changed since the last emission is not re-sent.
+fn emit_output_update(
+    throttle: &Arc<std::sync::Mutex<BashUpdateThrottle>>,
+    output: &Arc<std::sync::Mutex<OutputAccumulator>>,
+    on_update: &AgentToolUpdateCallback,
+) {
+    {
+        let mut state = throttle.lock().expect("update lock");
+        if !state.dirty {
+            return;
+        }
+        state.dirty = false;
+        state.last_update_at = now_ms();
+    }
+    let snapshot = output.lock().expect("output lock").snapshot();
+    on_update(update_result(&snapshot));
+}
+
+/// TS `clearUpdateTimer` (`core/tools/bash.ts:313-318`).
+fn clear_update_timer(throttle: &Arc<std::sync::Mutex<BashUpdateThrottle>>) {
+    let mut state = throttle.lock().expect("update lock");
+    if state.timer_pending {
+        state.timer_pending = false;
+        state.timer_id += 1;
+    }
+}
+
+/// TS `updateTimer` callback: emit only if this task is still the armed timer.
+fn fire_update_timer(
+    throttle: &Arc<std::sync::Mutex<BashUpdateThrottle>>,
+    output: &Arc<std::sync::Mutex<OutputAccumulator>>,
+    on_update: &AgentToolUpdateCallback,
+    timer_id: u64,
+) {
+    let still_armed = {
+        let mut state = throttle.lock().expect("update lock");
+        if !state.timer_pending || state.timer_id != timer_id {
+            false
+        } else {
+            state.timer_pending = false;
+            true
+        }
+    };
+    if still_armed {
+        emit_output_update(throttle, output, on_update);
+    }
+}
+
+/// TS `scheduleOutputUpdate` (`core/tools/bash.ts:320-333`).
+///
+/// A throttled chunk is no longer dropped: the pending trailing task emits it
+/// when the window elapses (`setTimeout`), so the last chunk of a burst always
+/// reaches the update stream.
+fn schedule_output_update(
+    throttle: &Arc<std::sync::Mutex<BashUpdateThrottle>>,
+    output: &Arc<std::sync::Mutex<OutputAccumulator>>,
+    on_update: &AgentToolUpdateCallback,
+) {
+    let delay = {
+        let mut state = throttle.lock().expect("update lock");
+        state.dirty = true;
+        BASH_UPDATE_THROTTLE_MS as f64 - (now_ms() - state.last_update_at)
+    };
+    if delay <= 0.0 {
+        clear_update_timer(throttle);
+        emit_output_update(throttle, output, on_update);
+        return;
+    }
+    let timer_id = {
+        let mut state = throttle.lock().expect("update lock");
+        if state.timer_pending {
+            // `updateTimer ??= setTimeout(...)` - one armed timer at a time.
+            return;
+        }
+        state.timer_pending = true;
+        state.timer_id += 1;
+        state.timer_id
+    };
+    let delay = std::time::Duration::from_millis(delay.ceil() as u64);
+    let (state_for_task, output_for_task, update_for_task) =
+        (throttle.clone(), output.clone(), on_update.clone());
+    let (state_for_thread, output_for_thread, update_for_thread) =
+        (throttle.clone(), output.clone(), on_update.clone());
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(async move {
+                tokio::time::sleep(delay).await;
+                fire_update_timer(&state_for_task, &output_for_task, &update_for_task, timer_id);
+            });
+        }
+        // No reactor available (a foreign-thread `onData`): sleep on a helper
+        // thread so the trailing emission still happens.
+        Err(_) => {
+            std::thread::spawn(move || {
+                std::thread::sleep(delay);
+                fire_update_timer(&state_for_thread, &output_for_thread, &update_for_thread, timer_id);
+            });
+        }
+    }
+}
+
 /// Port of `createBashToolDefinition`'s execute body.
 ///
 /// The TypeScript closure mutates one `OutputAccumulator` from the data handler
@@ -504,32 +633,26 @@ pub async fn execute_bash(
         OutputAccumulatorOptions::default(),
         "pi-bash",
     )));
-    let last_update_at = Arc::new(std::sync::Mutex::new(0.0f64));
+    let update_throttle = Arc::new(std::sync::Mutex::new(BashUpdateThrottle::default()));
 
     if let Some(on_update) = on_update.as_ref() {
+        // `core/tools/bash.ts:335-337`: `onUpdate({ content: [], details: undefined })`.
         on_update(AgentToolResult::new(Vec::new(), Value::Null));
     }
 
+    // TS `handleData` (`core/tools/bash.ts:339-342`): append, then schedule.
     let on_data: Arc<dyn Fn(&[u8]) + Send + Sync> = {
         let output = output.clone();
         let on_update = on_update.clone();
-        let last_update_at = last_update_at.clone();
+        let update_throttle = update_throttle.clone();
         Arc::new(move |data: &[u8]| {
-            let mut accumulator = output.lock().expect("output lock");
-            if accumulator.append(data).is_err() {
+            if output.lock().expect("output lock").append(data).is_err() {
                 return;
             }
             let Some(on_update) = on_update.as_ref() else {
                 return;
             };
-            let now = now_ms();
-            let mut last_update = last_update_at.lock().expect("update lock");
-            if now - *last_update < BASH_UPDATE_THROTTLE_MS as f64 {
-                return;
-            }
-            *last_update = now;
-            let snapshot = accumulator.snapshot();
-            on_update(update_result(&snapshot));
+            schedule_output_update(&update_throttle, &output, on_update);
         })
     };
 
@@ -544,7 +667,10 @@ pub async fn execute_bash(
         .exec(&spawn_context.command, &spawn_context.cwd, exec_options)
         .await;
 
-    let snapshot = finish_output(&output, on_update.as_ref());
+    let snapshot = finish_output(&output, on_update.as_ref(), &update_throttle);
+    // `finally { clearUpdateTimer(); }` (`core/tools/bash.ts:408-410`) runs after
+    // the final snapshot, cancelling any trailing timer a late chunk armed.
+    clear_update_timer(&update_throttle);
     let (text, details) = format_output(&snapshot, &output, if result.is_err() { "" } else { "(no output)" });
 
     match result {
@@ -585,16 +711,23 @@ fn update_result(snapshot: &OutputSnapshot) -> AgentToolResult {
     )
 }
 
+/// TS `finishOutput` (`core/tools/bash.ts:344-351`): finish, cancel the pending
+/// trailing timer, emit the dirty-gated update, then snapshot only after the
+/// spill settled.
 fn finish_output(
     output: &Arc<std::sync::Mutex<OutputAccumulator>>,
     on_update: Option<&AgentToolUpdateCallback>,
+    update_throttle: &Arc<std::sync::Mutex<BashUpdateThrottle>>,
 ) -> OutputSnapshot {
-    let mut accumulator = output.lock().expect("output lock");
-    accumulator.finish();
+    output.lock().expect("output lock").finish();
+    clear_update_timer(update_throttle);
     if let Some(on_update) = on_update {
-        on_update(update_result(&accumulator.snapshot()));
+        // `std::sync::Mutex` is not reentrant: the accumulator lock is released
+        // before `emit_output_update` takes it to read the snapshot.
+        emit_output_update(update_throttle, output, on_update);
     }
     // Snapshot only after the spill settled: the advertised path is terminal.
+    let mut accumulator = output.lock().expect("output lock");
     accumulator.close_temp_file();
     accumulator.snapshot()
 }
@@ -787,9 +920,93 @@ mod tests {
         assert!(text.contains("$ ..."));
     }
 
+    // `core/tools/bash.ts:180`: `timeout ? theme.fg(...) : ""` - `timeout: 0`
+    // is falsy, so no suffix is rendered.
+    #[test]
+    fn format_bash_call_omits_the_suffix_for_a_zero_timeout() {
+        let zero = BashToolInput {
+            command: "echo hi".to_string(),
+            timeout: Some(0.0),
+        };
+        let text = format_bash_call(Some(&zero), &PlainTheme);
+        assert!(!text.contains("timeout"), "rendered: {text}");
+
+        let absent = BashToolInput {
+            command: "echo hi".to_string(),
+            timeout: None,
+        };
+        assert!(!format_bash_call(Some(&absent), &PlainTheme).contains("timeout"));
+    }
+
     #[test]
     fn format_duration_uses_one_decimal() {
         assert_eq!(format_duration(1500.0), "1.5s");
+    }
+
+    // `core/tools/bash.ts:320-333` `scheduleOutputUpdate`: a chunk inside the
+    // throttle window is queued, not dropped, and is emitted when the window
+    // elapses.
+    #[tokio::test]
+    async fn schedule_output_update_emits_the_trailing_chunk() {
+        let output = Arc::new(std::sync::Mutex::new(OutputAccumulator::with_temp_file_prefix(
+            OutputAccumulatorOptions::default(),
+            "pi-bash-test-trailing",
+        )));
+        let throttle = Arc::new(std::sync::Mutex::new(BashUpdateThrottle::default()));
+        let updates: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = updates.clone();
+        let on_update: AgentToolUpdateCallback = Arc::new(move |result: AgentToolResult| {
+            let text = result
+                .content
+                .iter()
+                .filter_map(|block| block.as_text())
+                .collect::<Vec<&str>>()
+                .join("");
+            collected.lock().expect("updates lock").push(text);
+        });
+
+        schedule_output_update(&throttle, &output, &on_update);
+        let first = updates.lock().expect("updates lock").len();
+        // `updateTimer ??= setTimeout(...)`: a second chunk inside the window
+        // must not arm a second timer.
+        schedule_output_update(&throttle, &output, &on_update);
+        assert_eq!(updates.lock().expect("updates lock").len(), first);
+
+        tokio::time::sleep(std::time::Duration::from_millis(BASH_UPDATE_THROTTLE_MS + 300)).await;
+        assert_eq!(
+            updates.lock().expect("updates lock").len(),
+            first + 1,
+            "the trailing chunk must be emitted at throttle resolution"
+        );
+        // Trailing emission is dirty-gated: nothing changed since, so no more.
+        assert!(
+            !throttle.lock().expect("update lock").timer_pending,
+            "the trailing timer must disarm itself"
+        );
+    }
+
+    // `core/tools/bash.ts:299-311` `emitOutputUpdate` gate: a clean throttle
+    // emits nothing.
+    #[tokio::test]
+    async fn emit_output_update_is_dirty_gated() {
+        let output = Arc::new(std::sync::Mutex::new(OutputAccumulator::with_temp_file_prefix(
+            OutputAccumulatorOptions::default(),
+            "pi-bash-test-dirty",
+        )));
+        let throttle = Arc::new(std::sync::Mutex::new(BashUpdateThrottle::default()));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counter = calls.clone();
+        let on_update: AgentToolUpdateCallback = Arc::new(move |_result: AgentToolResult| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+
+        emit_output_update(&throttle, &output, &on_update);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "clean throttle must not emit");
+
+        throttle.lock().expect("update lock").dirty = true;
+        emit_output_update(&throttle, &output, &on_update);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!throttle.lock().expect("update lock").dirty);
     }
 
     #[tokio::test]
@@ -879,11 +1096,97 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
+    // `test/tools.test.ts:322-343` "should pass shellPath through to shell
+    // resolution" plus `utils/shell.ts:66-69`: the tool must go through the real
+    // owner, so a bad shellPath surfaces the teaching error (not a spawn error).
+    #[tokio::test]
+    async fn local_operations_reject_a_missing_custom_shell_path() {
+        let operations = create_local_bash_operations(Some(LocalBashOperationsOptions {
+            shell_path: Some("/custom/bash".to_string()),
+        }));
+        let error = operations
+            .exec(
+                "echo test",
+                ".",
+                BashExecOptions {
+                    on_data: Arc::new(|_| {}),
+                    signal: None,
+                    timeout: None,
+                    env: None,
+                },
+            )
+            .await
+            .expect_err("must reject");
+        assert_eq!(error, "Custom shell path not found: /custom/bash");
+    }
+
+    // `utils/shell.ts:64-130` never consults `$SHELL`: unix always uses
+    // `/bin/bash` first. Regression guard for the removed `$SHELL` shadow.
     #[test]
-    fn get_shell_config_uses_explicit_shell_path() {
-        let (shell, args) = get_shell_config(Some("/bin/zsh"));
-        assert_eq!(shell, "/bin/zsh");
-        assert_eq!(args, vec!["-c".to_string()]);
+    fn shell_resolution_ignores_the_shell_env_var_on_unix() {
+        if cfg!(windows) {
+            return;
+        }
+        let config = get_shell_config(None).expect("resolved shell");
+        assert_eq!(config.shell, "/bin/bash");
+        assert_eq!(config.args, vec!["-c".to_string()]);
+    }
+
+    // End-to-end guard for THIS host: the shell the tool now resolves through
+    // the `utils/shell.ts` owner must exist and must actually run a command.
+    // On win32 the old shadow used a bare `"bash"` from PATH and no Git Bash
+    // candidate was consulted (`utils/shell.ts:100-116`).
+    #[tokio::test]
+    async fn local_operations_run_the_resolved_shell() {
+        // Honest skip: a host with no bash at all gets TS's teaching error from
+        // `getLocalShellConfig`, which the test above already covers.
+        let Ok(config) = get_shell_config(None) else {
+            return;
+        };
+        assert!(
+            std::path::Path::new(&config.shell).exists(),
+            "resolved shell must exist: {}",
+            config.shell
+        );
+        assert_eq!(config.args, vec!["-c".to_string()]);
+
+        let operations = create_local_bash_operations(None);
+        let received: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = received.clone();
+        let result = operations
+            .exec(
+                "echo pi-bash-shell-ok",
+                ".",
+                BashExecOptions {
+                    on_data: Arc::new(move |data: &[u8]| {
+                        sink.lock().expect("sink lock").extend_from_slice(data);
+                    }),
+                    signal: None,
+                    timeout: Some(30.0),
+                    env: None,
+                },
+            )
+            .await
+            .expect("executed");
+        assert_eq!(result.exit_code, Some(0));
+        let stdout = String::from_utf8_lossy(&received.lock().expect("sink lock")).to_string();
+        assert!(stdout.contains("pi-bash-shell-ok"), "stdout: {stdout}");
+    }
+
+    // `core/tools/bash.ts:135` (`resolveSpawnContext`) and
+    // `utils/shell.ts:147-161`: the spawn env carries the `getBinDir()` prepend.
+    #[test]
+    fn spawn_context_env_uses_the_shell_env_owner() {
+        let context = resolve_spawn_context("echo hi", ".", None);
+        let bin_dir = crate::utils::tools_manager::get_bin_dir().to_string_lossy().to_string();
+        let path_entry = context
+            .env
+            .iter()
+            .find(|(key, _)| key.to_lowercase() == "path")
+            .map(|(_, value)| value.clone())
+            .expect("PATH entry");
+        assert!(path_entry.starts_with(&bin_dir));
+        assert_eq!(context.command, "echo hi");
     }
 
     #[test]
