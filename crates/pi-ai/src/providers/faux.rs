@@ -816,7 +816,7 @@ pub fn register_faux_provider(options: Option<RegisterFauxProviderOptions>) -> F
 			if let Err(panic) = std::panic::AssertUnwindSafe(body).catch_unwind().await {
 				// faux.ts:457-460: the catch-all builds `createErrorMessage(error, api, provider, modelId)`,
 				// pushes `{ type: "error", reason: "error", error: message }` and calls `outer.end(message)`.
-				// faux.ts:275 maps the unknown error with `error instanceof Error ? error.message : String(error)`;
+				// faux.ts:274 maps the unknown error with `error instanceof Error ? error.message : String(error)`;
 				// the panic payload carries that same message text.
 				let panic_text = panic
 					.downcast_ref::<&str>()
@@ -1299,7 +1299,7 @@ mod tests {
 			Some(AssistantMessageEvent::Error { reason, error }) => {
 				assert_eq!(reason, "error");
 				assert_eq!(error.stop_reason, "error");
-				// faux.ts:275: `error instanceof Error ? error.message : String(error)`.
+				// faux.ts:274: `error instanceof Error ? error.message : String(error)`.
 				assert_eq!(error.error_message.as_deref(), Some("faux factory exploded"));
 			}
 			other => panic!("expected the stream to end with an error event, got {other:?}"),
