@@ -7033,9 +7033,22 @@ impl AgentDaemon {
         let begin_daemon = Arc::clone(self);
         let error_daemon = Arc::clone(self);
         let hooks = Arc::new(crate::core::cron_jobs::AgentCronSchedulerHooks {
+            // `runJob: (job) => this.runCronJob(job)` (daemon-mode.ts:659). This field's
+            // type cannot reject (`AgentCronSchedulerHooks` is another slice's struct), so it
+            // can only report a failure; the true throwing form of the same call is installed
+            // through `enable_run_job_errors` below and is what the scheduler prefers
+            // (core/cron_jobs.rs:1972-1976).
             run_job: Arc::new(move |job: AgentCronJob| {
                 let daemon = Arc::clone(&daemon);
-                Box::pin(async move { daemon.run_cron_job(job).await })
+                Box::pin(async move {
+                    match daemon.run_cron_job(job.clone()).await {
+                        Ok(result) => result,
+                        Err(error) => {
+                            daemon.log(&format!("Cron job {} failed: {error}", job.id));
+                            None
+                        }
+                    }
+                })
             }),
             begin_dispatch: Some(Arc::new(move |_dispatch| {
                 begin_daemon.mutation_drain.begin();
@@ -7048,6 +7061,11 @@ impl AgentDaemon {
             })),
         });
         let scheduler = Arc::new(AgentCronScheduler::new(Arc::clone(&self.cron_store), hooks));
+        let run_job_daemon = Arc::clone(self);
+        scheduler.enable_run_job_errors(Arc::new(move |job: AgentCronJob| {
+            let daemon = Arc::clone(&run_job_daemon);
+            Box::pin(async move { daemon.run_cron_job(job).await })
+        }));
         *self.cron_scheduler.lock().expect("cron scheduler poisoned") =
             Some(Arc::clone(&scheduler));
         scheduler.start();
@@ -10438,7 +10456,14 @@ const CRON_JOB_UNRUNNABLE_AT_ADMISSION: &str = "Cron job became unrunnable befor
 
 impl AgentDaemon {
     /// `runCronJob(job)`.
-    async fn run_cron_job(self: &Arc<Self>, job: AgentCronJob) -> Option<String> {
+    ///
+    /// The TS rejects with the run error instead of swallowing it: the queued-prompt
+    /// `await session.followUp(...)` sits inside the same try/catch as the prompt calls
+    /// (daemon-mode.ts:2064 then 2085-2105), and that catch rethrows everything that is
+    /// not the `unrunnableAtAdmission` sentinel (daemon-mode.ts:2100-2105). The
+    /// scheduler turns that rejection into `onError` + `lastError`
+    /// (cron-jobs.ts:1010-1020), so the port returns the same rejection as `Err`.
+    async fn run_cron_job(self: &Arc<Self>, job: AgentCronJob) -> Result<Option<String>, String> {
         let require_persisted_job = self
             .cron_store
             .list()
@@ -10450,7 +10475,7 @@ impl AgentDaemon {
             Some(job.clone())
         };
         let Some(due_job) = due_job else {
-            return Some(RUN_RESULT_SKIPPED.to_string());
+            return Ok(Some(RUN_RESULT_SKIPPED.to_string()));
         };
         let state = self
             .get_or_create_cron_job_session(&due_job, require_persisted_job)
@@ -10461,14 +10486,14 @@ impl AgentDaemon {
             Some(due_job)
         };
         let (Some(state), Some(runnable_job)) = (state, runnable_job) else {
-            return Some(RUN_RESULT_SKIPPED.to_string());
+            return Ok(Some(RUN_RESULT_SKIPPED.to_string()));
         };
         if !self.is_cron_job_runnable_for_state(&runnable_job, &state, require_persisted_job) {
-            return Some(RUN_RESULT_SKIPPED.to_string());
+            return Ok(Some(RUN_RESULT_SKIPPED.to_string()));
         }
         let session = self.session_of(&state);
         if should_defer_heartbeat_cron_job(&runnable_job, &self.heartbeat_activity(&state)) {
-            return Some(RUN_RESULT_SKIPPED.to_string());
+            return Ok(Some(RUN_RESULT_SKIPPED.to_string()));
         }
         let should_queue_cron_prompt = session.is_streaming()
             || session.is_compacting()
@@ -10477,9 +10502,15 @@ impl AgentDaemon {
             || session.unfinished_action_count() > 0.0;
         if !is_heartbeat_cron_job(&runnable_job) && should_queue_cron_prompt {
             if !self.is_cron_job_runnable_for_state(&runnable_job, &state, require_persisted_job) {
-                return Some(RUN_RESULT_SKIPPED.to_string());
+                return Ok(Some(RUN_RESULT_SKIPPED.to_string()));
             }
-            let _ = session
+            // `await session.followUp(runnableJob.prompt, undefined, { resumeIfIdle: true })`
+            // (daemon-mode.ts:2064-2066) has no catch of its own, and `runCronJob` is
+            // `async`, so a rejection here leaves the method as a rejected promise. The
+            // scheduler catches that as `runError`, calls `onError`, and stores it as
+            // `lastError` (cron-jobs.ts:1010-1020). Dropping the error would make the
+            // daemon's queued-prompt failures invisible, so it is returned here.
+            session
                 .follow_up(
                     &runnable_job.prompt,
                     None,
@@ -10488,8 +10519,8 @@ impl AgentDaemon {
                         ..PromptInvocation::default()
                     },
                 )
-                .await;
-            return None;
+                .await?;
+            return Ok(None);
         }
         let daemon = Arc::clone(self);
         let job_id = job.id.clone();
@@ -10510,7 +10541,7 @@ impl AgentDaemon {
             }
         };
         let Some(current) = get_runnable_job() else {
-            return Some(RUN_RESULT_SKIPPED.to_string());
+            return Ok(Some(RUN_RESULT_SKIPPED.to_string()));
         };
         // Re-check after the session admission fence wait: the job may have been
         // cancelled, completed, or updated meanwhile.
@@ -10519,24 +10550,38 @@ impl AgentDaemon {
         let admission_state = Arc::clone(&state);
         let expected_prompt = current.prompt.clone();
         let expected_delivery_mode = current.delivery_mode.clone();
-        let admission_committed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
-            let refreshed = if require_persisted_job {
-                admission_daemon.get_runnable_cron_job(&admission_job_id)
-            } else {
-                Some((*runnable_job).clone())
-            }
-            .filter(|current| {
-                admission_daemon.is_cron_job_runnable_for_state(
-                    current,
-                    &admission_state,
-                    require_persisted_job,
-                )
-            });
-            match refreshed {
-                Some(refreshed)
-                    if refreshed.prompt == expected_prompt
-                        && refreshed.delivery_mode == expected_delivery_mode => {}
-                _ => admission_daemon.log(CRON_JOB_UNRUNNABLE_AT_ADMISSION),
+        // The TS `admissionCommitted` THROWS `unrunnableAtAdmission` (daemon-mode.ts:2079-2084)
+        // so the prompt aborts and the outer catch returns "skipped" (daemon-mode.ts:2101-2103).
+        // The ported seam cannot throw: `PromptInvocation::admission_committed` is
+        // `Option<Arc<dyn Fn() + Send + Sync>>` and the session owner calls it as `committed()`
+        // (core/agent_session.rs:7613, 7944) — changing that type means editing the session
+        // slice, which this slice does not own. So the sentinel is recorded here and read back
+        // after the prompt, which reproduces the same outcome ("skipped", not an error).
+        let admission_rejected = Arc::new(AtomicBool::new(false));
+        let admission_committed: Arc<dyn Fn() + Send + Sync> = Arc::new({
+            let admission_rejected = Arc::clone(&admission_rejected);
+            move || {
+                let refreshed = if require_persisted_job {
+                    admission_daemon.get_runnable_cron_job(&admission_job_id)
+                } else {
+                    Some((*runnable_job).clone())
+                }
+                .filter(|current| {
+                    admission_daemon.is_cron_job_runnable_for_state(
+                        current,
+                        &admission_state,
+                        require_persisted_job,
+                    )
+                });
+                match refreshed {
+                    Some(refreshed)
+                        if refreshed.prompt == expected_prompt
+                            && refreshed.delivery_mode == expected_delivery_mode => {}
+                    _ => {
+                        admission_rejected.store(true, Ordering::SeqCst);
+                        admission_daemon.log(CRON_JOB_UNRUNNABLE_AT_ADMISSION);
+                    }
+                }
             }
         });
         let invocation = PromptInvocation {
@@ -10570,14 +10615,17 @@ impl AgentDaemon {
                 )
                 .await
         };
+        if admission_rejected.load(Ordering::SeqCst) {
+            // `if (error === unrunnableAtAdmission) { return "skipped"; }`
+            // (daemon-mode.ts:2101-2103).
+            return Ok(Some(RUN_RESULT_SKIPPED.to_string()));
+        }
         match result {
-            Ok(()) => None,
-            Err(_) => {
-                // `unrunnableAtAdmission` is a control-flow sentinel in the TS
-                // original; the ported session reports it as an ordinary
-                // rejection, so the job counts as skipped.
-                Some(RUN_RESULT_SKIPPED.to_string())
-            }
+            Ok(()) => Ok(None),
+            // `throw error;` (daemon-mode.ts:2104): every other rejection leaves
+            // `runCronJob`, the scheduler catches it as `runError`, calls `onError`, and
+            // stores it as `lastError` (cron-jobs.ts:1010-1020).
+            Err(error) => Err(error),
         }
     }
 
@@ -16013,5 +16061,534 @@ impl crate::core::cron_jobs::AgentRlmHeartbeatController for DaemonAgentRlmHeart
     fn delete_rlm_heartbeat(&self, id: &str) -> Option<AgentCronJob> {
         let state = self.require_current_state();
         self.daemon.delete_rlm_heartbeat_for_state(&state, id)
+    }
+}
+
+#[cfg(test)]
+mod cron_error_propagation_tests {
+    use super::*;
+
+    /// The cron store coordinates every write through one process-wide lock with a 1s
+    /// budget (cron-jobs.rs:297-343), so these tests must not drive the store from two
+    /// threads at once; otherwise one fails on lock contention instead of on its assertion.
+    fn cron_store_lock() -> &'static StdMutex<()> {
+        static LOCK: std::sync::OnceLock<StdMutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    /// A daemon session whose queued prompt fails on demand. Everything else delegates to
+    /// `MissingSession` (the daemon's own not-resident double), so this only changes the
+    /// behaviour under test.
+    struct FailingQueuedPromptSession {
+        inner: MissingSession,
+        active_session_id: String,
+        session_file: String,
+        fail_follow_up: bool,
+        follow_up_calls: Arc<AtomicU64>,
+    }
+
+    impl DaemonSession for FailingQueuedPromptSession {
+        fn session_id(&self) -> String {
+            self.active_session_id.clone()
+        }
+        fn session_name(&self) -> Option<String> {
+            Some("cron-error-test".to_string())
+        }
+        fn session_file(&self) -> Option<String> {
+            Some(self.session_file.clone())
+        }
+        fn is_session_active(&self) -> bool {
+            true
+        }
+        /// `shouldQueueCronPrompt` reads `session.isStreaming` (daemon-mode.ts:2054-2059), so
+        /// the job must take the queued-prompt path the bug drops.
+        fn is_streaming(&self) -> bool {
+            true
+        }
+        fn unfinished_action_count(&self) -> f64 {
+            0.0
+        }
+        /// `session.followUp(prompt, undefined, { resumeIfIdle: true })` (daemon-mode.ts:2064).
+        fn follow_up(
+            &self,
+            _message: &str,
+            _images: Option<Value>,
+            _options: PromptInvocation,
+        ) -> BoxFuture<'static, Result<bool, String>> {
+            self.follow_up_calls.fetch_add(1, Ordering::SeqCst);
+            let fail = self.fail_follow_up;
+            Box::pin(async move {
+                if fail {
+                    Err("cron queued prompt exploded".to_string())
+                } else {
+                    Ok(true)
+                }
+            })
+        }
+
+    fn session_manager(&self) -> Arc<StdMutex<SessionManager>> {
+        self.inner.session_manager()
+    }
+    fn runtime(&self) -> Arc<dyn DaemonRuntimeApi> {
+        self.inner.runtime()
+    }
+    fn settings_manager(&self) -> Option<Arc<StdMutex<SettingsManager>>> {
+        self.inner.settings_manager()
+    }
+    fn session_dir(&self) -> Option<String> {
+        self.inner.session_dir()
+    }
+    fn set_exec_env_provider(&self, client_env: Option<HashMap<String, String>>) {
+        self.inner.set_exec_env_provider(client_env)
+    }
+    fn set_runtime_env_scope(&self, client_env: Option<HashMap<String, String>>) {
+        self.inner.set_runtime_env_scope(client_env)
+    }
+    fn set_subagent_runtime_host(&self, host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>) {
+        self.inner.set_subagent_runtime_host(host)
+    }
+    fn set_rebind_session(&self, rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>) {
+        self.inner.set_rebind_session(rebind)
+    }
+    fn bind_extensions( &self, binding: crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.bind_extensions(binding)
+    }
+    fn abort_for_update_restart(&self) {
+        self.inner.abort_for_update_restart()
+    }
+    fn is_compacting(&self) -> bool {
+        self.inner.is_compacting()
+    }
+    fn is_bash_running(&self) -> bool {
+        self.inner.is_bash_running()
+    }
+    fn is_retrying(&self) -> bool {
+        self.inner.is_retrying()
+    }
+    fn has_running_rlm_children(&self) -> bool {
+        self.inner.has_running_rlm_children()
+    }
+    fn messages(&self) -> Vec<AgentMessage> {
+        self.inner.messages()
+    }
+    fn model_identity(&self) -> Option<pi_ai::types::Model> {
+        self.inner.model_identity()
+    }
+    fn rlm_depth(&self) -> Option<i64> {
+        self.inner.rlm_depth()
+    }
+    fn thinking_level(&self) -> Option<String> {
+        self.inner.thinking_level()
+    }
+    fn service_tier(&self) -> Option<String> {
+        self.inner.service_tier()
+    }
+    fn system_prompt(&self) -> Option<String> {
+        self.inner.system_prompt()
+    }
+    fn connection_view(&self) -> DaemonConnectionView {
+        self.inner.connection_view()
+    }
+    fn connection_state(&self, active_session_id: Option<String>) -> Value {
+        self.inner.connection_state(active_session_id)
+    }
+    fn set_current_recap(&self, recap: Option<&str>) {
+        self.inner.set_current_recap(recap)
+    }
+    fn set_session_name(&self, name: &str) {
+        self.inner.set_session_name(name)
+    }
+    fn get_rlm_child_run_status(&self, child_id: &str) -> Option<String> {
+        self.inner.get_rlm_child_run_status(child_id)
+    }
+    fn register_rlm_child_session(&self, child_id: &str, session: Arc<dyn DaemonSession>) -> bool {
+        self.inner.register_rlm_child_session(child_id, session)
+    }
+    fn remove_queued_follow_up(&self, key: &str) {
+        self.inner.remove_queued_follow_up(key)
+    }
+    fn subscribe(&self, listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {
+        self.inner.subscribe(listener)
+    }
+    fn prompt_until_accepted( &self, message: &str, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.prompt_until_accepted(message, options)
+    }
+    fn prompt_and_wait( &self, message: &str, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.prompt_and_wait(message, options)
+    }
+    fn prompt_heartbeat( &self, job: &AgentCronJob, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.prompt_heartbeat(job, options)
+    }
+    fn accept_agent_message_prompt( &self, message: &str, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.accept_agent_message_prompt(message, options)
+    }
+    fn steer( &self, message: &str, images: Option<Value>, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.steer(message, images, options)
+    }
+    fn restore_steering_message( &self, message: &str, images: Option<Value>, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.restore_steering_message(message, images, options)
+    }
+    fn restore_follow_up_message( &self, message: &str, images: Option<Value>, options: PromptInvocation, ) -> BoxFuture<'static, Result<bool, String>> {
+        self.inner.restore_follow_up_message(message, images, options)
+    }
+    fn restore_pending_next_turn_messages(&self, messages: &Value) {
+        self.inner.restore_pending_next_turn_messages(messages)
+    }
+    fn restore_session_actions(&self, snapshot: &Value) -> BoxFuture<'static, Result<f64, String>> {
+        self.inner.restore_session_actions(snapshot)
+    }
+    fn send_custom_message(&self, message: &Value) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.send_custom_message(message)
+    }
+    fn resume_queued_work(&self) -> bool {
+        self.inner.resume_queued_work()
+    }
+    fn clear_queued_agent_messages(&self) -> Value {
+        self.inner.clear_queued_agent_messages()
+    }
+    fn clear_queue(&self) -> Value {
+        self.inner.clear_queue()
+    }
+    fn mutate_queued_message( &self, lane: &str, index: f64, expected_text: &str, mutation: &Value, ) -> Value {
+        self.inner.mutate_queued_message(lane, index, expected_text, mutation)
+    }
+    fn get_steering_message_previews(&self) -> Vec<Value> {
+        self.inner.get_steering_message_previews()
+    }
+    fn get_follow_up_message_previews(&self) -> Vec<Value> {
+        self.inner.get_follow_up_message_previews()
+    }
+    fn request_abort(&self) {
+        self.inner.request_abort()
+    }
+    fn cancel_rlm_child_run(&self, child_id: &str) -> bool {
+        self.inner.cancel_rlm_child_run(child_id)
+    }
+    fn delete_inactive_rlm_subagent( &self, child_id: &str, is_resident_child_running: Arc<dyn Fn() -> bool + Send + Sync>, ) -> BoxFuture<'static, Result<String, String>> {
+        self.inner.delete_inactive_rlm_subagent(child_id, is_resident_child_running)
+    }
+    fn run_user_bash( &self, command: &str, options: RunUserBashOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.run_user_bash(command, options)
+    }
+    fn execute_bash(&self, command: &str) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.execute_bash(command)
+    }
+    fn abort_bash(&self) {
+        self.inner.abort_bash()
+    }
+    fn acquire_session_input_pause(&self) -> SessionInputPause {
+        self.inner.acquire_session_input_pause()
+    }
+    fn wait_for_idle(&self) -> BoxFuture<'static, ()> {
+        self.inner.wait_for_idle()
+    }
+    fn wait_for_headless_completion( &self, options: HeadlessCompletionOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.wait_for_headless_completion(options)
+    }
+    fn refresh_available_models(&self) -> BoxFuture<'static, Result<Vec<pi_ai::types::Model>, String>> {
+        self.inner.refresh_available_models()
+    }
+    fn refresh_model_catalog(&self) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.refresh_model_catalog()
+    }
+    fn get_provider_auth_status_source(&self, provider: &str) -> Option<String> {
+        self.inner.get_provider_auth_status_source(provider)
+    }
+    fn find_model(&self, provider: &str, model_id: &str) -> Option<pi_ai::types::Model> {
+        self.inner.find_model(provider, model_id)
+    }
+    fn set_model( &self, model: &pi_ai::types::Model, wait_for_extensions: bool, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.set_model(model, wait_for_extensions)
+    }
+    fn cycle_model( &self, direction: &str, wait_for_extensions: bool, ) -> BoxFuture<'static, Result<Option<pi_ai::types::Model>, String>> {
+        self.inner.cycle_model(direction, wait_for_extensions)
+    }
+    fn set_scoped_models(&self, scoped_models: &Value) {
+        self.inner.set_scoped_models(scoped_models)
+    }
+    fn set_thinking_level(&self, level: &str) {
+        self.inner.set_thinking_level(level)
+    }
+    fn set_service_tier(&self, service_tier: &str) {
+        self.inner.set_service_tier(service_tier)
+    }
+    fn cycle_thinking_level(&self) -> Option<String> {
+        self.inner.cycle_thinking_level()
+    }
+    fn set_transport(&self, transport: &str) {
+        self.inner.set_transport(transport)
+    }
+    fn set_steering_mode(&self, mode: &str) {
+        self.inner.set_steering_mode(mode)
+    }
+    fn set_follow_up_mode(&self, mode: &str) {
+        self.inner.set_follow_up_mode(mode)
+    }
+    fn set_auto_compaction_enabled(&self, enabled: bool) {
+        self.inner.set_auto_compaction_enabled(enabled)
+    }
+    fn set_auto_retry_enabled(&self, enabled: bool) {
+        self.inner.set_auto_retry_enabled(enabled)
+    }
+    fn compact( &self, custom_instructions: Option<&str>, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.compact(custom_instructions)
+    }
+    fn refine(&self, options: RefineOptions) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.refine(options)
+    }
+    fn abort_compaction(&self) {
+        self.inner.abort_compaction()
+    }
+    fn abort_branch_summary(&self) {
+        self.inner.abort_branch_summary()
+    }
+    fn abort_retry(&self) {
+        self.inner.abort_retry()
+    }
+    fn reload(&self) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.reload()
+    }
+    fn get_rlm_max_depth_status(&self) -> Value {
+        self.inner.get_rlm_max_depth_status()
+    }
+    fn set_rlm_max_depth( &self, max_depth: Value, global: bool, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.set_rlm_max_depth(max_depth, global)
+    }
+    fn build_session_context(&self) -> Value {
+        self.inner.build_session_context()
+    }
+    fn get_session_stats(&self) -> Value {
+        self.inner.get_session_stats()
+    }
+    fn get_context_tree(&self) -> Value {
+        self.inner.get_context_tree()
+    }
+    fn get_rlm_child_snapshots(&self) -> Vec<Value> {
+        self.inner.get_rlm_child_snapshots()
+    }
+    fn export_to_html( &self, output_path: Option<&str>, ) -> BoxFuture<'static, Result<String, String>> {
+        self.inner.export_to_html(output_path)
+    }
+    fn export_to_jsonl(&self, output_path: Option<&str>) -> Result<String, String> {
+        self.inner.export_to_jsonl(output_path)
+    }
+    fn get_user_messages_for_forking(&self) -> Vec<Value> {
+        self.inner.get_user_messages_for_forking()
+    }
+    fn get_last_assistant_text(&self) -> String {
+        self.inner.get_last_assistant_text()
+    }
+    fn get_tool_definition(&self, name: &str) -> Option<Value> {
+        self.inner.get_tool_definition(name)
+    }
+    fn navigate_tree( &self, target_id: &str, options: NavigateTreeOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.navigate_tree(target_id, options)
+    }
+    fn start_side_question( &self, question: &str, options: SideQuestionOptions, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.start_side_question(question, options)
+    }
+    fn abort_side_question(&self, side_question_id: &str) {
+        self.inner.abort_side_question(side_question_id)
+    }
+    fn release_acp_mcp_servers( &self, owner_id: &str, server_names: &[String], ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.release_acp_mcp_servers(owner_id, server_names)
+    }
+    fn replace_acp_mcp_servers( &self, servers: &[Value], owner_id: &str, ) -> BoxFuture<'static, Result<(), String>> {
+        self.inner.replace_acp_mcp_servers(servers, owner_id)
+    }
+    fn new_session( &self, options: Option<NewSessionRuntimeOptions>, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.new_session(options)
+    }
+    fn release_rlm_child_session( &self, child_id: &str, session: Arc<dyn DaemonSession>, ) -> Option<Box<dyn FnOnce() + Send>> {
+        self.inner.release_rlm_child_session(child_id, session)
+    }
+    fn replied_to_parent_since_task(&self) -> Option<bool> {
+        self.inner.replied_to_parent_since_task()
+    }
+    fn switch_session( &self, session_path: &str, options: SessionPathOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.switch_session(session_path, options)
+    }
+    fn fork( &self, entry_id: &str, options: ForkOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.fork(entry_id, options)
+    }
+    fn import_from_jsonl( &self, input_path: &str, cwd_override: Option<&str>, ) -> BoxFuture<'static, Result<Value, String>> {
+        self.inner.import_from_jsonl(input_path, cwd_override)
+    }
+    fn dispose(&self) -> BoxFuture<'static, ()> {
+        self.inner.dispose()
+    }
+    }
+
+    /// A daemon with one resident session and one due cron job, driven only through
+    /// `AgentDaemon::run_cron_job` (the `runJob` the scheduler calls).
+    struct CronErrorFixture {
+        _directory: tempfile::TempDir,
+        daemon: Arc<AgentDaemon>,
+        job: AgentCronJob,
+        on_error: Arc<StdMutex<Vec<String>>>,
+        follow_up_calls: Arc<AtomicU64>,
+    }
+
+    fn cron_error_fixture(fail_follow_up: bool) -> CronErrorFixture {
+        let directory = tempfile::tempdir().expect("temp dir");
+        let agent_dir = directory.path().join("agent");
+        std::fs::create_dir_all(&agent_dir).expect("agent dir");
+        let session_file = directory.path().join("session.jsonl");
+        std::fs::write(&session_file, "{}\n").expect("session file");
+        let socket_path = directory.path().join("daemon.sock").to_string_lossy().into_owned();
+        let daemon = AgentDaemon::new(
+            socket_path.clone(),
+            DaemonModeOptions {
+                socket_path: Some(socket_path),
+                default_session_config: AgentSessionRuntimeConfig {
+                    cwd: Some(directory.path().to_string_lossy().into_owned()),
+                    agent_dir: Some(agent_dir.to_string_lossy().into_owned()),
+                    ..Default::default()
+                },
+                create_runtime: Arc::new(|_| {
+                    Box::pin(async { panic!("the cron error test must not create a runtime") })
+                }),
+                worker: None,
+            },
+        );
+        let active_session_id = "cron-error-session".to_string();
+        let session_file_string = session_file.to_string_lossy().into_owned();
+        let follow_up_calls = Arc::new(AtomicU64::new(0));
+        let session: Arc<dyn DaemonSession> = Arc::new(FailingQueuedPromptSession {
+            inner: MissingSession::new(&active_session_id),
+            active_session_id: active_session_id.clone(),
+            session_file: session_file_string.clone(),
+            fail_follow_up,
+            follow_up_calls: Arc::clone(&follow_up_calls),
+        });
+        let state = Arc::new(StdMutex::new(ActiveSessionState::new(
+            active_session_id.clone(),
+            AgentSessionRuntime {
+                session: ActiveSessionRuntimeSession {
+                    session_id: active_session_id.clone(),
+                    session_file: Some(session_file_string.clone()),
+                    ..ActiveSessionRuntimeSession::default()
+                },
+                metadata: Some(AgentSessionRuntimeMetadata::default()),
+                model_fallback_message: None,
+            },
+        )));
+        daemon.sessions.lock().expect("sessions poisoned").insert(
+            active_session_id.clone(),
+            Arc::new(DaemonSessionState {
+                state: Arc::clone(&state),
+                session: Arc::clone(&session),
+                runtime_metadata: AgentSessionRuntimeMetadata::default(),
+            }),
+        );
+        let job = daemon
+            .cron_store
+            .create(&CreateAgentCronJobInput {
+                active_session_id: active_session_id.clone(),
+                session_id: active_session_id,
+                session_file: session_file_string,
+                // `DaemonSessionState::cwd()` for this double is `MissingSession`'s
+                // in-memory manager cwd ("."), so matching it keeps `rebindSessionJobs`
+                // (daemon-mode.ts:2045) from rewriting the job during the run.
+                cwd: ".".to_string(),
+                prompt: "check the build".to_string(),
+                schedule_text: "every 10m".to_string(),
+                now: Some(0.0),
+                ..CreateAgentCronJobInput::default()
+            })
+            .expect("cron job");
+        CronErrorFixture {
+            _directory: directory,
+            daemon,
+            job,
+            on_error: Arc::new(StdMutex::new(Vec::new())),
+            follow_up_calls,
+        }
+    }
+
+    impl CronErrorFixture {
+        /// Install the scheduler the daemon builds in `start_cron_scheduler`, with an
+        /// `on_error` sink in place of the daemon log file.
+        fn scheduler(&self) -> Arc<AgentCronScheduler> {
+            let daemon = Arc::clone(&self.daemon);
+            let sink = Arc::clone(&self.on_error);
+            let hooks = Arc::new(crate::core::cron_jobs::AgentCronSchedulerHooks {
+                run_job: Arc::new(move |job: AgentCronJob| {
+                    let daemon = Arc::clone(&daemon);
+                    Box::pin(async move { daemon.run_cron_job(job).await.ok().flatten() })
+                }),
+                begin_dispatch: None,
+                now: None,
+                on_error: Some(Arc::new(move |_job: &AgentCronJob, error: String| {
+                    sink.lock().expect("on_error sink").push(error);
+                })),
+            });
+            let scheduler = Arc::new(AgentCronScheduler::new(
+                Arc::clone(&self.daemon.cron_store),
+                hooks,
+            ));
+            let daemon = Arc::clone(&self.daemon);
+            scheduler.enable_run_job_errors(Arc::new(move |job: AgentCronJob| {
+                let daemon = Arc::clone(&daemon);
+                Box::pin(async move { daemon.run_cron_job(job).await })
+            }));
+            scheduler
+        }
+
+        async fn run_due(&self) -> Result<usize, String> {
+            self.scheduler().run_due(Some(600_000.0)).await
+        }
+
+        fn recorded_job(&self) -> AgentCronJob {
+            self.daemon
+                .cron_store
+                .list()
+                .into_iter()
+                .find(|candidate| candidate.id == self.job.id)
+                .expect("job still listed")
+        }
+    }
+
+    /// The half-landed fix: a daemon queued-prompt failure must reach `onError`/`lastError`
+    /// instead of being dropped. `await session.followUp(...)` (daemon-mode.ts:2064-2066)
+    /// runs inside `runCronJob`'s try (2085-2105), and its catch rethrows everything that is
+    /// not the `unrunnableAtAdmission` sentinel (2100-2105); the scheduler records that
+    /// rejection (cron-jobs.ts:1010-1020, 739).
+    #[tokio::test]
+    async fn cron_queued_prompt_failure_reaches_on_error_and_last_error() {
+        let _serialize = cron_store_lock().lock().expect("cron store lock");
+        let fixture = cron_error_fixture(true);
+        fixture.run_due().await.expect("run due");
+        assert_eq!(
+            fixture.follow_up_calls.load(Ordering::SeqCst),
+            1,
+            "the failing queued prompt was never attempted, so this test is not on the bug path"
+        );
+        assert_eq!(
+            fixture.on_error.lock().expect("on_error sink").as_slice(),
+            ["cron queued prompt exploded"],
+            "the daemon dropped the queued-prompt error instead of reporting it"
+        );
+        assert_eq!(
+            fixture.recorded_job().last_error.as_deref(),
+            Some("cron queued prompt exploded"),
+            "lastError was not persisted for the failed daemon cron run"
+        );
+    }
+
+    /// The same path with a healthy queued prompt must stay silent and count the run.
+    #[tokio::test]
+    async fn cron_queued_prompt_success_reports_no_error() {
+        let _serialize = cron_store_lock().lock().expect("cron store lock");
+        let fixture = cron_error_fixture(false);
+        fixture.run_due().await.expect("run due");
+        assert_eq!(fixture.follow_up_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            fixture.on_error.lock().expect("on_error sink").is_empty(),
+            "a successful queued prompt must not report an error"
+        );
+        let recorded = fixture.recorded_job();
+        assert_eq!(recorded.last_error, None);
+        assert_eq!(recorded.run_count, 1.0);
     }
 }
