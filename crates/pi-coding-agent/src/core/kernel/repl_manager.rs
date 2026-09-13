@@ -3862,7 +3862,12 @@ mod tests {
             )
             .await
             .expect("execution must not remain parked on the queue");
-            assert_eq!(result.unwrap_err().message, "Kernel stdin is not connected");
+            // `KernelError` is an enum, not a struct: read it through the canonical
+            // `error_message` helper (shared.rs:60) exactly as the production paths do.
+            assert_eq!(
+                error_message(&result.unwrap_err()),
+                "Kernel stdin is not connected"
+            );
         }
     }
 
