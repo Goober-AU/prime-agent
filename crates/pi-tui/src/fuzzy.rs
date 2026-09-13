@@ -1,5 +1,7 @@
 //! Port of packages/tui/src/fuzzy.ts.
 
+use crate::utils::is_whitespace_char;
+
 /// Result of matching one query token against one text.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FuzzyMatch {
@@ -37,11 +39,13 @@ pub fn fuzzy_match(query: &str, text: &str) -> FuzzyMatch {
         let mut i = 0usize;
         while i < text_chars.len() && query_index < query_chars.len() {
             if text_chars[i] == query_chars[query_index] {
+                // TS is `/[-_./:]/.test(textLower[i - 1])` (packages/tui/src/fuzzy.ts:32),
+                // i.e. those four punctuation chars OR JS `\s`. Rust's `char::is_whitespace`
+                // is NOT the same set (it includes U+0085 and excludes U+FEFF), so reuse the
+                // faithful `is_whitespace_char` owner, which matches `\s` exactly.
                 let is_word_boundary = i == 0
-                    || matches!(
-                        text_chars[i - 1],
-                        ' ' | '\t' | '\n' | '\r' | '-' | '_' | '.' | '/' | ':'
-                    );
+                    || is_whitespace_char(&text_chars[i - 1].to_string())
+                    || matches!(text_chars[i - 1], '-' | '_' | '.' | '/' | ':');
 
                 if last_match_index == i as i64 - 1 {
                     consecutive_matches += 1;
@@ -195,6 +199,34 @@ pub fn fuzzy_filter<T: Clone>(items: &[T], query: &str, get_text: &dyn Fn(&T) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn word_boundary_uses_js_whitespace() {
+        // TS `/[-_./:]/.test(textLower[i - 1])` also matches every JS `\\s` char
+        // (packages/tui/src/fuzzy.ts:32), so NBSP and vertical tab count as word
+        // boundaries. `char::is_whitespace` would miss NBSP... but DOES include U+0085,
+        // so assert both directions.
+        // A word boundary is a PREFERENCE, so it makes the score LOWER (`score -= 10`
+        // in the loop above), matching the TS `score -= 10` at fuzzy.ts:36-37.
+        let nbsp = fuzzy_match("a", "\u{00a0}a");
+        let plain = fuzzy_match("a", "xa");
+        assert!(
+            nbsp.score < plain.score,
+            "NBSP must be a word boundary (lower score is better): nbsp={} plain={}",
+            nbsp.score,
+            plain.score
+        );
+        // U+0085 (NEL) is excluded from JS `\s`, so it must NOT be treated as a boundary
+        // and must score exactly like a non-boundary neighbour ("xa" == 0.1).
+        let nel = fuzzy_match("a", "\u{0085}a");
+        assert_eq!(nel.score, plain.score, "U+0085 is NOT a JS \\s boundary");
+        // Every member of JS `\s` IS a boundary: space, vertical tab, NBSP.
+        let space = fuzzy_match("a", " a");
+        let vtab = fuzzy_match("a", "\u{000b}a");
+        assert_eq!(space.score, nbsp.score, "space and NBSP are both boundaries");
+        assert_eq!(vtab.score, nbsp.score, "vertical tab is a boundary");
+    }
 
     #[test]
     fn empty_query_matches_everything() {
