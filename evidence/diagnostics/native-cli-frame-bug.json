@@ -1,0 +1,16 @@
+{
+ "symptom": "crates/pi-coding-agent/tests/native_cli.rs:374 --print fails: 'Error: Invalid private frame header length: 2065855609'",
+ "value": "2065855609 = 0x7B227479 = the ASCII bytes '{\"ty' read as a big-endian u32",
+ "meaning": "a reader expecting a private frame (8-byte length prefix) consumed plain JSON text",
+ "reproduced": "manual3.ps1: supervisor daemon + optimus-rust --print against a private named pipe",
+ "supervisor_hello": "plain jsonl, advertises client_owned_sessions (correct once the worker role env is cleared)",
+ "worker": "the supervisor spawns a session worker on \\\\.\\pipe\\prime-agent-worker-<key>-<id>; the worker is private-framed",
+ "isolated_decision_point": "DaemonSocketClient.transport == 'private-framed' chooses encode_private_frame (daemon_mode.rs:7737 write_serialized_encoded) and the frame decoder (daemon_worker_client.rs:72 push)",
+ "suspects": [
+  "native_supervisor.rs:335 -- DaemonWorkerClient::new(&socket) must decode frames from the worker it spawned; if the worker emits plain jsonl the supervisor's decoder breaks first",
+  "daemon_server.rs:72 -- transport = is_worker() ? private-framed : jsonl. A spawned worker only frames if is_daemon_worker_process_from_env() is true (DAEMON_WORKER_ROLE_ENV == '1')",
+  "native_supervisor.rs:313-318 does set DAEMON_WORKER_ROLE_ENV=1 (matches daemon-supervisor.ts:3320)"
+ ],
+ "next_check": "log the worker's own transport decision and whether its daemon_hello arrives framed",
+ "note_worker_env": "the shell that runs the harness is itself a daemon worker; the native_cli fixture uses env_clear() so it is NOT the cause of this failure, but it does change my ad-hoc probes"
+}

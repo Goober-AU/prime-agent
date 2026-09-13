@@ -621,9 +621,40 @@ fn recovery_command(descriptor: &DaemonWorkerDescriptor) -> Result<Map<String, V
     command.insert("config".into(), json!({"sessionDir":descriptor.session_dir, "telemetryDisabled":descriptor.telemetry_disabled}));
     Ok(command)
 }
+/// `SUPERVISOR_SERVER_CAPABILITIES` (daemon-supervisor.ts:196-200):
+/// `[...DAEMON_DEFAULT_SERVER_CAPABILITIES, "agent_roster", "direct_peer_transport"]`.
+///
+/// The TypeScript ADDS to the default list. The port must not subtract from it: every
+/// capability is a promise the supervisor keeps, and the client gates real commands on it.
+/// Dropping `client_owned_sessions` in particular made every `--print` run fail with
+/// "The running Prime Agent daemon does not support client_owned_sessions" (main.ts:1095-1098),
+/// even though the supervisor implements the whole owned-session lifecycle
+/// (`create` with `lifecycle: "client_owned"`, `promote_owned_session`, `complete_owned_session`).
+///
+/// Capabilities this supervisor genuinely does not serve yet are deliberately NOT advertised,
+/// so callers fall back instead of hanging. Each one is a known gap:
+///   - `agent_roster`         - roster_subscribe is still rejected (see the command dispatch).
+///   - `direct_peer_transport` - `get_direct_worker_transport` is still rejected; clients then
+///                              keep the supervisor link and use plain jsonl.
+///   - `slim_attach`, `chunked_snapshot`, `history_ranges` - snapshot transfer modes the
+///     supervisor still serves as full snapshots.
+///   - `heartbeat_catalog`, `authoritative_child_roster`, `owned_session_recovery_context` -
+///     roster/heartbeat and recovery-context paths that are not wired to workers yet.
 fn server_capabilities() -> Vec<String> {
-    daemon_protocol::DAEMON_DEFAULT_SERVER_CAPABILITIES.iter().map(super::super::daemon_client::capability_name)
-        .filter(|capability| !matches!(capability.as_str(), "slim_attach" | "chunked_snapshot" | "history_ranges" | "heartbeat_catalog" | "authoritative_child_roster" | "owned_session_recovery_context"))
+    daemon_protocol::DAEMON_DEFAULT_SERVER_CAPABILITIES
+        .iter()
+        .map(super::super::daemon_client::capability_name)
+        .filter(|capability| {
+            !matches!(
+                capability.as_str(),
+                "slim_attach"
+                    | "chunked_snapshot"
+                    | "history_ranges"
+                    | "heartbeat_catalog"
+                    | "authoritative_child_roster"
+                    | "owned_session_recovery_context"
+            )
+        })
         .collect()
 }
 fn descriptor_key(socket: &str) -> String { format!("{:x}", Sha256::digest(socket.as_bytes()))[..12].to_string() }
