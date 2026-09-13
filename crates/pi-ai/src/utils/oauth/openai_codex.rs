@@ -312,11 +312,67 @@ pub struct OAuthServerInfo {
     handle: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// Settles the callback slot with `None` when the callback-server task stops
+/// without delivering a code, so `waitForCode()` can never be left pending.
+///
+/// TypeScript reference: a Node server that fails emits `error`, and that
+/// handler calls `settleWait?.(null)` (packages/ai/src/utils/oauth/openai-codex.ts:274);
+/// the fallback server it resolves exposes `waitForCode: async () => null`
+/// (openai-codex.ts:284). So in the TypeScript a server that stops resolves the
+/// wait with `null` instead of hanging it. This guard gives the Rust port the
+/// same guarantee for every exit path of the spawned server task: a normal
+/// return (`listener.accept()` failed), a panic, or `OAuthServerInfo::close()`.
+///
+/// `cancel()` never loses a delivered code: `CallbackSlot::settle` keeps the
+/// first value, so this only converts a would-be hang into a resolution.
+struct SettleSlotOnDrop(CallbackSlot<String>);
+
+impl Drop for SettleSlotOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// Aborts the wrapped task when dropped, so aborting the guard task
+/// (`OAuthServerInfo::close()`) still stops the server task.
+struct AbortOnDrop(tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Wrap the spawned callback-server task in a guard that settles `slot` when the
+/// server stops, and that stops the server when the guard is aborted or dropped.
+///
+/// Both guards are built before the task is spawned, so they are dropped even
+/// when the task is aborted before its first poll.
+fn guard_callback_server(
+    slot: CallbackSlot<String>,
+    server: tokio::task::JoinHandle<()>,
+) -> tokio::task::JoinHandle<()> {
+    let settle = SettleSlotOnDrop(slot);
+    let cascade = AbortOnDrop(server.abort_handle());
+    tokio::spawn(async move {
+        let _settle = settle;
+        let _cascade = cascade;
+        let _ = server.await;
+    })
+}
+
 impl OAuthServerInfo {
     pub fn close(&mut self) {
         if let Some(handle) = self.handle.take() {
             handle.abort();
         }
+        // `server.close()` (openai-codex.ts:266) stops the server, and the
+        // `error` path of the TypeScript resolves the wait with `null`
+        // (openai-codex.ts:274, :284). The Rust port settles the slot here as
+        // well, so no exit path can leave a waiter pending forever. A code that
+        // was already delivered is kept, because `CallbackSlot::settle` keeps
+        // the first value.
+        self.slot.cancel();
     }
 
     pub fn cancel_wait(&self) {
@@ -339,12 +395,15 @@ async fn start_local_oauth_server(state: &str) -> Result<OAuthServerInfo, String
     let listener = match bind_callback_listener(&host, CALLBACK_PORT).await {
         Ok(listener) => listener,
         Err(_) => {
-            // The TypeScript resolves a server whose `waitForCode` is always null
-            // when the bind fails.
-            return Ok(OAuthServerInfo {
-                slot: CallbackSlot::default(),
-                handle: None,
-            });
+            // packages/ai/src/utils/oauth/openai-codex.ts:273-285: the Node server
+            // emits "error" when the listen on port 1455 fails, that handler calls
+            // `settleWait?.(null)` (openai-codex.ts:274) and then resolves a server
+            // whose `waitForCode: async () => null` (openai-codex.ts:284). The wait
+            // therefore resolves with null immediately, and `loginOpenAICodex`
+            // falls through to the paste prompt at openai-codex.ts:378-388.
+            let slot: CallbackSlot<String> = CallbackSlot::default();
+            slot.cancel();
+            return Ok(OAuthServerInfo { slot, handle: None });
         }
     };
 
@@ -367,6 +426,7 @@ async fn start_local_oauth_server(state: &str) -> Result<OAuthServerInfo, String
             oauth_success_html("OpenAI authentication completed. You can close this window."),
         )
     });
+    let handle = guard_callback_server(slot.clone(), handle);
 
     Ok(OAuthServerInfo {
         slot,
@@ -570,7 +630,18 @@ fn _assert_unused(_: HashMap<String, String>, _: Option<Model>) {}
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
     use super::*;
+
+    /// The OAuth callback tests all bind the real `CALLBACK_PORT`, so they must
+    /// not run at the same time.
+    static CALLBACK_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Bound for the interactive assertions: the flows must resolve quickly, and
+    /// a hang must fail the test instead of blocking it.
+    const FLOW_BOUND: Duration = Duration::from_secs(5);
 
     #[test]
     fn state_is_32_hex_chars() {
@@ -644,6 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn local_server_validates_state_and_returns_code() {
+        let _guard = CALLBACK_PORT_LOCK.lock().await;
         let state = create_state();
         let mut server = start_local_oauth_server(&state).await.unwrap();
 
@@ -666,6 +738,184 @@ mod tests {
         assert_eq!(server.wait_for_code().await.as_deref(), Some("abc"));
         server.close();
     }
+
+    /// Occupies `CALLBACK_PORT` so the OAuth callback server cannot bind it,
+    /// which is the state the TypeScript `server.on("error", ...)` handler
+    /// (packages/ai/src/utils/oauth/openai-codex.ts:273-285) covers.
+    struct CallbackPortLock {
+        listener: Option<tokio::net::TcpListener>,
+    }
+
+    impl CallbackPortLock {
+        async fn take() -> Self {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", CALLBACK_PORT))
+                .await
+                .expect("bind the callback port for the bind-failure test");
+            Self {
+                listener: Some(listener),
+            }
+        }
+    }
+
+    impl Drop for CallbackPortLock {
+        fn drop(&mut self) {
+            drop(self.listener.take());
+        }
+    }
+
+    /// Reads the `state` query parameter of the authorization URL that
+    /// `loginOpenAICodex` reports through `onAuth` (the URL is the only way the
+    /// test can learn the state the flow generated).
+    fn state_from_auth_info(info: &OAuthAuthInfo) -> String {
+        let url = url::Url::parse(&info.url).expect("authorization url");
+        url.query_pairs()
+            .find(|(key, _)| key == "state")
+            .map(|(_, value)| value.to_string())
+            .expect("authorization url carries a state")
+    }
+
+    #[tokio::test]
+    async fn bind_failure_settles_the_slot_so_the_wait_resolves() {
+        let _guard = CALLBACK_PORT_LOCK.lock().await;
+        let port_lock = CallbackPortLock::take().await;
+
+        let server = start_local_oauth_server(&create_state()).await.unwrap();
+        // openai-codex.ts:274 `settleWait?.(null)` + :284 `waitForCode: async () => null`.
+        let waited = tokio::time::timeout(FLOW_BOUND, server.wait_for_code())
+            .await
+            .expect("bind failure must settle the callback slot; the wait hung");
+        assert_eq!(waited, None);
+        drop(port_lock);
+    }
+
+    #[tokio::test]
+    async fn bind_failure_falls_through_to_the_paste_prompt() {
+        let _guard = CALLBACK_PORT_LOCK.lock().await;
+        let port_lock = CallbackPortLock::take().await;
+
+        // Mirrors `if (!code) { const input = await options.onPrompt(...) }`
+        // (packages/ai/src/utils/oauth/openai-codex.ts:378-388). A hang here means
+        // the flow never reached the prompt.
+        let auth_state: Arc<std::sync::Mutex<Option<String>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let prompt_state_reply = auth_state.clone();
+        let auth_state_clone = auth_state.clone();
+        let options = OpenAICodexLoginOptions {
+            on_auth: Some(Arc::new(move |info: OAuthAuthInfo| {
+                *auth_state_clone.lock().unwrap() = Some(state_from_auth_info(&info));
+            })),
+            on_prompt: Some(Arc::new(move |prompt: OAuthPrompt| {
+                let reply = prompt_state_reply.clone();
+                Box::pin(async move {
+                    assert_eq!(
+                        prompt.message,
+                        "Paste the authorization code (or full redirect URL):"
+                    );
+                    let state = reply
+                        .lock()
+                        .unwrap()
+                        .clone()
+                        .expect("onAuth ran before the paste prompt");
+                    format!("pasted-code#{}", state)
+                }) as crate::types::BoxFuture<String>
+            })),
+            on_progress: None,
+            on_manual_code_input: None,
+            originator: None,
+        };
+
+        let login = tokio::time::timeout(FLOW_BOUND, login_openai_codex(options))
+            .await
+            .expect("bind failure must reach the paste prompt instead of hanging");
+        // The paste prompt returned a code, so the flow continues to the token
+        // exchange, which needs the network. Reaching that exchange proves the
+        // callback wait resolved and the prompt was used.
+        let error = login.expect_err("no live token endpoint in this test");
+        assert!(
+            error.starts_with("OpenAI Codex token exchange"),
+            "flow did not consume the pasted code: {}",
+            error
+        );
+        drop(port_lock);
+    }
+
+    #[tokio::test]
+    async fn bind_failure_does_not_skip_the_manual_code_input() {
+        let _guard = CALLBACK_PORT_LOCK.lock().await;
+        let port_lock = CallbackPortLock::take().await;
+
+        let manual_seen = Arc::new(AtomicBool::new(false));
+        let manual_seen_clone = manual_seen.clone();
+        let auth_state: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let auth_state_clone = auth_state.clone();
+        let options = OpenAICodexLoginOptions {
+            on_auth: Some(Arc::new(move |info: OAuthAuthInfo| {
+                *auth_state_clone.lock().unwrap() = Some(state_from_auth_info(&info));
+            })),
+            on_prompt: Some(Arc::new(|_prompt: OAuthPrompt| {
+                Box::pin(async move { "should-not-be-prompted".to_string() })
+                    as crate::types::BoxFuture<String>
+            })),
+            on_progress: None,
+            on_manual_code_input: Some(Arc::new(move || {
+                let seen = manual_seen_clone.clone();
+                Box::pin(async move {
+                    seen.store(true, Ordering::SeqCst);
+                    Ok("manual-code".to_string())
+                }) as crate::types::BoxFuture<Result<String, String>>
+            })),
+            originator: None,
+        };
+
+        let login = tokio::time::timeout(FLOW_BOUND, login_openai_codex(options))
+            .await
+            .expect("bind failure must not hang the manual-input race");
+        assert!(manual_seen.load(Ordering::SeqCst));
+        let error = login.expect_err("no live token endpoint in this test");
+        assert!(
+            error.starts_with("OpenAI Codex token exchange"),
+            "flow did not consume the manual code: {}",
+            error
+        );
+        drop(port_lock);
+    }
+
+    #[tokio::test]
+    async fn stopped_callback_server_settles_the_wait() {
+        let _guard = CALLBACK_PORT_LOCK.lock().await;
+        let state = create_state();
+        let mut server = start_local_oauth_server(&state).await.unwrap();
+
+        // The server task can no longer serve the callback, so the wait must
+        // resolve with `null` (openai-codex.ts:274/:284) instead of hanging.
+        server.close();
+        let waited = tokio::time::timeout(FLOW_BOUND, server.wait_for_code())
+            .await
+            .expect("a stopped callback server must settle the wait");
+        assert_eq!(waited, None);
+    }
+
+    #[tokio::test]
+    async fn close_keeps_a_code_that_was_already_delivered() {
+        let _guard = CALLBACK_PORT_LOCK.lock().await;
+        let state = create_state();
+        let mut server = start_local_oauth_server(&state).await.unwrap();
+
+        let response = reqwest::get(format!(
+            "http://localhost:{}{}?code=kept&state={}",
+            CALLBACK_PORT, CALLBACK_PATH, state
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status().as_u16(), 200);
+
+        server.close();
+        let waited = tokio::time::timeout(FLOW_BOUND, server.wait_for_code())
+            .await
+            .expect("the wait must resolve");
+        assert_eq!(waited.as_deref(), Some("kept"));
+    }
+
 
     #[test]
     fn provider_identity() {
