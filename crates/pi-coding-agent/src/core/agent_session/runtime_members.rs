@@ -488,6 +488,63 @@ fn build_provider_actions(weak: Weak<AgentSession>) -> ProviderActions {
     }
 }
 
+/// Bridges an extension-supplied `user_bash` `operations` value (the extension-facing
+/// `extensions::types::BashOperations`, `UserBashEventResult.operations` at
+/// `core/extensions/types.ts`) onto the executor's `core::tools::bash::BashOperations`.
+///
+/// In the TypeScript both are the *same* interface, imported from `../tools/bash.js`
+/// (`import type { BashOperations } from "../tools/bash.js";` in
+/// `core/extensions/types.ts`), so `executeBash(..., { operations: eventResult?.operations })`
+/// (agent-session.ts:12462-12466) passes one object straight through. The Rust port declares
+/// two structurally identical traits in two slices; this adapter is the pass-through at the
+/// single call site that TypeScript resolves for free. It drops nothing: every argument is
+/// forwarded and the exit code is converted exactly once.
+struct ExtensionBashOperations {
+    operations: Arc<dyn crate::core::extensions::types::BashOperations>,
+}
+
+impl crate::core::tools::BashOperations for ExtensionBashOperations {
+    fn exec(
+        &self,
+        command: &str,
+        cwd: &str,
+        options: crate::core::tools::bash::BashExecOptions,
+    ) -> futures::future::BoxFuture<'static, Result<crate::core::tools::bash::BashExecResult, String>>
+    {
+        let operations = self.operations.clone();
+        let command = command.to_string();
+        let cwd = cwd.to_string();
+        let on_data = options.on_data.clone();
+        let signal = options.signal.clone();
+        let timeout = options.timeout;
+        let env = options.env.map(|env| {
+            env.into_iter()
+                .map(|(key, value)| (key, Value::String(value)))
+                .collect::<Map<String, Value>>()
+        });
+        Box::pin(async move {
+            // The extension trait streams `Vec<u8>` chunks; the executor hands out borrowed
+            // slices, so each chunk is copied once before forwarding.
+            let forward: Arc<dyn Fn(Vec<u8>) + Send + Sync> = Arc::new(move |data: Vec<u8>| {
+                on_data(&data);
+            });
+            let exit_code = operations
+                .exec(command, cwd, forward, signal, timeout, env)
+                .await?;
+            // The extension trait reports the exit code as a JS number; the executor's
+            // `BashExecResult` is `Option<i32>`. An out-of-range code is reported instead of
+            // silently truncated, so a bad extension value cannot look like a clean exit.
+            let exit_code = match exit_code {
+                Some(code) => Some(i32::try_from(code).map_err(|_| {
+                    format!("user_bash operations returned an out-of-range exit code: {code}")
+                })?),
+                None => None,
+            };
+            Ok(crate::core::tools::bash::BashExecResult { exit_code })
+        })
+    }
+}
+
 impl AgentSession {
     pub async fn bind_extensions(self: &Arc<Self>, bindings: &ExtensionBindings) -> Result<(), String> {
         let Some(runner) = self.extension_runner() else { return Ok(()); };
@@ -599,12 +656,33 @@ impl AgentSession {
                     let settings = self.settings_manager.lock().unwrap();
                     (settings.get_shell_command_prefix(), settings.get_shell_path())
                 };
+                // `onLateSentAgentMessage: (toolCallId, message) => this._recordLateIpythonSentAgentMessage(toolCallId, message)`
+                // (agent-session.ts:10099-10100; handler at agent-session.ts:1747): an agent message the
+                // kernel emits *after* the ipython call already returned must still reach the session so
+                // `_rememberLateIpythonSentAgentMessage` can attach it to the tool result and persist it.
+                let late_session = Arc::downgrade(self);
+                let on_late_sent_agent_message:
+                    Option<Arc<dyn Fn(String, crate::core::kernel::shared::KernelSentAgentMessage) + Send + Sync>> =
+                    Some(Arc::new(
+                        move |tool_call_id: String,
+                              message: crate::core::kernel::shared::KernelSentAgentMessage| {
+                            let Some(session) = late_session.upgrade() else {
+                                return;
+                            };
+                            // The kernel hands the callback the parsed message; the session records
+                            // the `{ toolCallId, message }` entry the TypeScript persists verbatim.
+                            if let Ok(message) = serde_json::to_value(message) {
+                                session.record_late_ipython_sent_agent_message(&tool_call_id, message);
+                            }
+                        },
+                    ));
                 let options = crate::core::tools::ToolsOptions { ipython: Some(crate::core::tools::IpythonToolOptions {
                     env: Some(self.rlm_kernel_env().into_iter().collect()),
                     host_handlers: Some(self.create_kernel_host_handlers()), session_id: Some(self.session_id()),
                     command_prefix,
                     shell_path,
                     snapshot_dir: self.session_manager.lock().unwrap().get_session_artifact_dir(),
+                    on_late_sent_agent_message,
                     ..Default::default()
                 }) };
                 crate::core::tools::create_all_tool_definitions(&self.cwd, Some(&options))
@@ -2566,15 +2644,36 @@ impl AgentSession {
         on_chunk: Option<Arc<dyn Fn(&str) + Send + Sync>>,
         exclude_from_context: Option<bool>,
     ) -> Result<BashResult, String> {
+        self.execute_bash_with_operations(command, on_chunk, exclude_from_context, None).await
+    }
+
+    /// `executeBash(command, onChunk, { excludeFromContext, operations, transient })`
+    /// (agent-session.ts:12318-12344).
+    ///
+    /// `operations` is the extension-supplied `user_bash` override; when absent the
+    /// built-in local shell runs, exactly like
+    /// `options?.operations ?? createLocalBashOperations({ shellPath })` at
+    /// agent-session.ts:12339.
+    async fn execute_bash_with_operations(
+        self: &Arc<Self>,
+        command: &str,
+        on_chunk: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+        exclude_from_context: Option<bool>,
+        operations: Option<Arc<dyn crate::core::tools::BashOperations>>,
+    ) -> Result<BashResult, String> {
         let controller = CancellationToken::new();
         self.bash_abort_controllers.lock().unwrap().push(controller.clone());
         let (prefix, shell_path) = { let settings = self.settings_manager.lock().unwrap();
             (settings.get_shell_command_prefix(), settings.get_shell_path()) };
         let resolved = prefix.filter(|prefix| !prefix.is_empty())
             .map(|prefix| format!("{prefix}\n{command}")).unwrap_or_else(|| command.to_string());
+        // `options?.operations ?? createLocalBashOperations({ shellPath })` (agent-session.ts:12339).
+        let operations = operations.unwrap_or_else(|| {
+            crate::core::tools::create_local_bash_operations(Some(crate::core::tools::LocalBashOperationsOptions { shell_path }))
+        });
         let result = crate::core::bash_executor::execute_bash_with_operations(
             &resolved, &self.cwd,
-            crate::core::tools::create_local_bash_operations(Some(crate::core::tools::LocalBashOperationsOptions { shell_path })),
+            operations,
             Some(crate::core::bash_executor::BashExecutorOptions { on_chunk, signal: Some(controller.clone()) }),
         ).await;
         controller.cancel();
@@ -2614,22 +2713,68 @@ impl AgentSession {
     pub(super) async fn run_user_bash_locked(
         self: &Arc<Self>, command: &str, exclude_from_context: Option<bool>, _controller: CancellationToken,
     ) -> Result<BashResult, String> {
+        // `const eventResult = await this._extensionRunner.emitUserBash({...})` (agent-session.ts:12415-12420).
+        // Extensions may replace the result outright (`result`) or supply the operations
+        // `executeBash` should run instead of the built-in local shell (`operations`, types.ts
+        // `UserBashEventResult`). Without this dispatch both are unreachable.
+        let event_result = match self.extension_runner() {
+            Some(runner) => runner
+                .emit_user_bash(serde_json::json!({
+                    "type": "user_bash",
+                    "command": command,
+                    "excludeFromContext": exclude_from_context.unwrap_or(false),
+                    "cwd": self.session_manager.lock().unwrap().get_cwd(),
+                }))
+                .await,
+            None => None,
+        };
+        // NOTE: `this._extensionRunner.emitUserBash(...)` is unguarded in the TypeScript;
+        // this port reaches the runner through the optional `extensionRunnerRef`, so a
+        // session without a runner behaves like a session whose extensions all returned void.
+
+        // `this._emit({ type: "bash_start", ... })` happens AFTER the extension dispatch
+        // (agent-session.ts:12428-12433), so a handler that runs for the whole dispatch window
+        // is not reported as an already-started bash.
         self.emit(AgentSessionEvent::BashStart {
             command: command.to_string(), exclude_from_context: exclude_from_context.unwrap_or(false),
             transient: None, run_id: None,
         });
+        // `if (eventResult?.result) { ... }` (agent-session.ts:12436-12448).
+        if let Some(result) = event_result.as_ref().and_then(|result| result.result.as_ref()) {
+            let result = BashResult {
+                output: result.output.clone(),
+                exit_code: result.exit_code,
+                cancelled: result.cancelled,
+                truncated: result.truncated,
+                full_output_path: result.full_output_path.clone(),
+            };
+            if !result.output.is_empty() {
+                self.emit(AgentSessionEvent::BashOutput { chunk: result.output.clone() });
+            }
+            self.record_bash_result(command, &result, exclude_from_context);
+            return Ok(result);
+        }
+        // `if (this._userBashAbortRequested)` (agent-session.ts:12452-12460): an abort that
+        // arrived during the extension dispatch has no abort controller to act on yet.
         if self.user_bash_abort_requested.load(Ordering::SeqCst) {
             let result = BashResult { output: String::new(), exit_code: None, cancelled: true,
                 truncated: false, full_output_path: None };
             self.record_bash_result(command, &result, exclude_from_context);
             return Ok(result);
         }
+        // `operations: eventResult?.operations` (agent-session.ts:12464).
+        let operations = event_result
+            .and_then(|result| result.operations)
+            .map(|operations| {
+                Arc::new(ExtensionBashOperations { operations })
+                    as Arc<dyn crate::core::tools::BashOperations>
+            });
         let weak = Arc::downgrade(self);
-        match self.execute_bash(command, Some(Arc::new(move |chunk| {
+        match self.execute_bash_with_operations(command, Some(Arc::new(move |chunk| {
             if let Some(session) = weak.upgrade() {
                 session.emit(AgentSessionEvent::BashOutput { chunk: chunk.to_string() });
             }
-        })), exclude_from_context).await {
+        })), exclude_from_context, operations).await {
             Ok(result) => Ok(result),
             Err(error) => {
                 let result = BashResult { output: format!("bash failed: {error}"), exit_code: None,
@@ -3179,5 +3324,125 @@ impl AgentSession {
     /// `get extensionRunner()`.
     pub fn extension_runner(&self) -> Option<ExtensionRunner> {
         self.extension_runner_ref.current()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::extensions::types::BashOperations as ExtensionBashOperationsTrait;
+    use std::sync::atomic::{AtomicI64, AtomicUsize};
+
+    /// Records what the session forwarded to an extension-supplied `user_bash`
+    /// `operations` value and streams one chunk back.
+    struct RecordingExtensionOperations {
+        command: Mutex<String>,
+        cwd: Mutex<String>,
+        exit_code: AtomicI64,
+        exec_calls: Arc<AtomicUsize>,
+    }
+
+    impl ExtensionBashOperationsTrait for RecordingExtensionOperations {
+        fn exec(
+            &self,
+            command: String,
+            cwd: String,
+            on_data: Arc<dyn Fn(Vec<u8>) + Send + Sync>,
+            signal: Option<CancellationToken>,
+            timeout: Option<f64>,
+            env: Option<Map<String, Value>>,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Option<i64>, String>> + Send>>
+        {
+            self.exec_calls.fetch_add(1, Ordering::SeqCst);
+            *self.command.lock().unwrap() = command;
+            *self.cwd.lock().unwrap() = cwd;
+            assert!(signal.is_none());
+            assert!(timeout.is_none());
+            assert!(env.is_none());
+            let exit_code = self.exit_code.load(Ordering::SeqCst);
+            Box::pin(async move {
+                on_data(b"streamed".to_vec());
+                Ok(if exit_code < 0 { None } else { Some(exit_code) })
+            })
+        }
+    }
+
+    fn recording_operations(exit_code: i64) -> (Arc<RecordingExtensionOperations>, Arc<AtomicUsize>) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let operations = Arc::new(RecordingExtensionOperations {
+            command: Mutex::new(String::new()),
+            cwd: Mutex::new(String::new()),
+            exit_code: AtomicI64::new(exit_code),
+            exec_calls: calls.clone(),
+        });
+        (operations, calls)
+    }
+
+    /// `operations: eventResult?.operations` (agent-session.ts:12464) must reach the
+    /// executor unchanged: command, cwd, streamed output, and exit code.
+    #[tokio::test]
+    async fn extension_bash_operations_forward_command_cwd_and_exit_code() {
+        let (recording, calls) = recording_operations(3);
+        let adapter = ExtensionBashOperations {
+            operations: recording.clone(),
+        };
+        let streamed: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let sink = streamed.clone();
+        let result = crate::core::bash_executor::execute_bash_with_operations(
+            "echo hi",
+            "/tmp",
+            Arc::new(adapter),
+            Some(crate::core::bash_executor::BashExecutorOptions {
+                on_chunk: Some(Arc::new(move |chunk| sink.lock().unwrap().push_str(chunk))),
+                signal: None,
+            }),
+        )
+        .await
+        .expect("operations-backed bash succeeds");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(*recording.command.lock().unwrap(), "echo hi");
+        assert_eq!(*recording.cwd.lock().unwrap(), "/tmp");
+        assert_eq!(result.exit_code, Some(3));
+        assert_eq!(result.output, "streamed");
+        // The extension's stream is forwarded to the caller's chunk sink, not just returned.
+        assert_eq!(*streamed.lock().unwrap(), "streamed");
+    }
+
+    /// A killed (`undefined`) exit code stays `None` instead of becoming `0`.
+    #[tokio::test]
+    async fn extension_bash_operations_preserve_absent_exit_code() {
+        let (recording, _calls) = recording_operations(-1);
+        let adapter = ExtensionBashOperations {
+            operations: recording,
+        };
+        let result = crate::core::bash_executor::execute_bash_with_operations(
+            "kill me",
+            "/tmp",
+            Arc::new(adapter),
+            None,
+        )
+        .await
+        .expect("operations-backed bash succeeds");
+        assert_eq!(result.exit_code, None);
+    }
+
+    /// JS exit codes are numbers, not `i32`; an out-of-range value fails loudly rather
+    /// than wrapping into a plausible-looking exit status.
+    #[tokio::test]
+    async fn extension_bash_operations_reject_out_of_range_exit_code() {
+        let (recording, _calls) = recording_operations(i64::from(i32::MAX) + 1);
+        let adapter = ExtensionBashOperations {
+            operations: recording,
+        };
+        let error = crate::core::bash_executor::execute_bash_with_operations(
+            "huge",
+            "/tmp",
+            Arc::new(adapter),
+            None,
+        )
+        .await
+        .expect_err("out-of-range exit code must be reported");
+        assert!(error.contains("out-of-range exit code"), "{error}");
     }
 }
