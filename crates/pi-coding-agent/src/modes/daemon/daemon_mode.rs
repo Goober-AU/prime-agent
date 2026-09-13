@@ -7745,7 +7745,34 @@ impl AgentDaemon {
             .as_deref()
             == Some("private-framed");
         if private_framed {
-            let header = serde_json::json!({ "kind": "outbound", "outboundType": outbound_type });
+            // `writeSerialized` derives the routing header from the message itself
+            // (`daemon-mode.ts:7639-7646`), so the payload's session id reaches the peer.
+            let mut header = serde_json::Map::from_iter([
+                ("kind".to_string(), Value::String("outbound".to_string())),
+                (
+                    "outboundType".to_string(),
+                    Value::String(outbound_type.to_string()),
+                ),
+            ]);
+            if let Some(active_session_id) = value.get("activeSessionId").and_then(Value::as_str) {
+                header.insert(
+                    "activeSessionId".to_string(),
+                    Value::String(active_session_id.to_string()),
+                );
+            }
+            if let Some(snapshot_id) = value.get("snapshotId").and_then(Value::as_str) {
+                header.insert(
+                    "snapshotId".to_string(),
+                    Value::String(snapshot_id.to_string()),
+                );
+            }
+            if let Some(request_id) = value.get("id").and_then(Value::as_str) {
+                header.insert(
+                    "requestId".to_string(),
+                    Value::String(request_id.to_string()),
+                );
+            }
+            let header = Value::Object(header);
             match encode_private_frame(&header, line.as_bytes()) {
                 Ok(frame) => return client.writer.write_bytes(frame),
                 Err(error) => {

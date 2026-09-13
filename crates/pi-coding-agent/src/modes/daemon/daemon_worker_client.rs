@@ -278,7 +278,19 @@ impl DaemonWorkerClient {
             let mut buffer = vec![0u8; 64 * 1024];
             loop {
                 match read_half.read(&mut buffer).await {
-                    Ok(0) => break,
+                    Ok(0) => {
+                        // Mirror `daemon_server.rs` and `private-framing.ts`: a half-written
+                        // trailing frame is an error, not a silent EOF.
+                        if let Err(error) = decoder.finish() {
+                            if let Some(client) = weak.upgrade() {
+                                client
+                                    .log(&format!(
+                                        "Daemon worker private frame stream ended mid-frame: {error}"
+                                    ));
+                            }
+                        }
+                        break;
+                    }
                     Ok(read) => {
                         let frames = match decoder.push(&buffer[..read]) {
                             Ok(frames) => frames,

@@ -2058,7 +2058,10 @@ pub async fn create_daemon_client_connection(
             }
         }
         if options.client_owned.unwrap_or(false) {
-            let _ = client.wait_for_hello(DEFAULT_DAEMON_HELLO_TIMEOUT_MS).await;
+            client
+                .wait_for_hello(DEFAULT_DAEMON_HELLO_TIMEOUT_MS)
+                .await
+                .map_err(|error| error.message())?;
             if !client.supports_server_capability("client_owned_sessions") {
                 return Err(DaemonCapabilityUnavailableError::new("create", Some("client_owned_sessions"), false)
                     .message());
@@ -2198,7 +2201,9 @@ pub const DEFAULT_DAEMON_CONNECT_TIMEOUT_MS: u64 = 3000;
 /// `ensureInteractiveDaemonRunning`'s short probe (`main.ts:1000`).
 pub const DAEMON_PROBE_CONNECT_TIMEOUT_MS: u64 = 250;
 /// `await client.waitForHello()`.
-pub const DEFAULT_DAEMON_HELLO_TIMEOUT_MS: u64 = 10_000;
+/// `waitForHello(timeoutMs = 3000)` - the `DaemonClient.waitForHello` default
+/// (`daemon-client.ts:189`).
+pub const DEFAULT_DAEMON_HELLO_TIMEOUT_MS: u64 = 3000;
 
 /// `promptForMissingSessionCwd(issue, settingsManager)`.
 ///
