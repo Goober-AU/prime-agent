@@ -5,7 +5,25 @@
 //! credentials. The Rust port builds the same request itself with `reqwest`, signs it with the
 //! SigV4 implementation in `amazon_bedrock.rs` (HMAC-SHA256 over `sha2`, because the `hmac`
 //! crate is not in the workspace dependency list) and reads credentials from the same
-//! environment variables with the same precedence. No STS/IMDS network calls are made.
+//! environment variables with the same precedence.
+//!
+//! CREDENTIAL-CHAIN GAP (F6, unresolved by design - do not fake it): the TypeScript passes
+//! `defaultProvider` / `options.credentialProvider` to `SignatureV4`
+//! (`bedrock-responses-client.ts:48-54`), which is the full AWS default chain. The sources the
+//! port actually implements are exactly the ones `resolve_aws_credentials` covers
+//! (`amazon_bedrock.rs:656-730`): the `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` /
+//! `AWS_SESSION_TOKEN` environment triple, and the static `aws_access_key_id` /
+//! `aws_secret_access_key` / `aws_session_token` keys of a named profile in
+//! `$AWS_SHARED_CREDENTIALS_FILE` / `~/.aws/credentials` / `$AWS_CONFIG_FILE` / `~/.aws/config`.
+//!
+//! NOT implemented, and they cannot be, by the owner module alone: EC2 IMDS, ECS/container
+//! credentials (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` / `..._FULL_URI`), web identity
+//! (`AWS_WEB_IDENTITY_TOKEN_FILE` + STS `AssumeRoleWithWebIdentity`), SSO, and
+//! `credential_process`. Each needs a network round trip or a child process plus a clock-driven
+//! cache, none of which exists in this crate; a request would fail with
+//! "Could not load credentials from any providers" (`amazon_bedrock.rs:727-729`) instead of
+//! signing. The exact missing owner symbol is the AWS SDK default provider chain behind
+//! `defaultProvider` - it has no Rust counterpart in this workspace.
 
 use std::time::Duration;
 
@@ -15,8 +33,68 @@ use serde_json::Value;
 
 use crate::types::{Model, StreamOptions};
 use crate::utils::now_ms;
+use crate::utils::stream_failure::ThrownStreamError;
 
 use super::amazon_bedrock::{resolve_aws_credentials, sign_request_for_service, AwsCredentials};
+
+/// The Rust counterpart of a value thrown out of the TypeScript `try` block of
+/// `streamBedrockResponses` (`amazon-bedrock-responses.ts:48-90`).
+///
+/// It lives here because this module owns the transport that can raise each variant: the SSE
+/// reader detects the mid-stream `throw`s and this module holds the response object for the
+/// `responses.create(...)` reject.
+#[derive(Debug, Clone)]
+pub enum ResponsesRunError {
+	/// `throw streamFailureFromStopReason(...)` / a `StreamFailureError` from the shared stream loop.
+	Failure(Box<crate::utils::stream_failure::StreamFailureError>),
+	/// `throw new Error(...)`.
+	Message(String),
+	/// A thrown SDK `APIError`, whose `status` / `headers` / `error` fields
+	/// `extractStreamFailureParts` reads (`utils/stream-failure.ts:142-167`). It covers the two
+	/// `APIError` throws the OpenAI SDK raises for this provider:
+	///
+	/// * `APIError.generate(status, body, ...)` when `responses.create(...)`
+	///   (`amazon-bedrock-responses.ts:59`) rejects for a non-2xx HTTP status, and
+	/// * `new APIError(undefined, data.error, undefined, response.headers)` when a streamed
+	///   frame carries a truthy `error` (`Stream.fromSSEResponse`).
+	///
+	/// Same shape as `RunError::Value` in `openai_responses.rs:87-103`.
+	ApiError(Value),
+}
+
+impl ResponsesRunError {
+	pub fn message(message: impl Into<String>) -> Self {
+		ResponsesRunError::Message(message.into())
+	}
+
+	/// The thrown value as the shared `stream-failure` helpers expect it.
+	pub fn as_thrown(&self) -> ThrownStreamError<'_> {
+		match self {
+			ResponsesRunError::Failure(failure) => ThrownStreamError::Failure(failure),
+			ResponsesRunError::Message(message) => ThrownStreamError::Message(message),
+			ResponsesRunError::ApiError(value) => ThrownStreamError::Value(value),
+		}
+	}
+}
+
+impl std::fmt::Display for ResponsesRunError {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			ResponsesRunError::Failure(failure) => write!(formatter, "{}", failure.message),
+			ResponsesRunError::Message(message) => write!(formatter, "{}", message),
+			// `APIError extends Error`, and `APIError.makeMessage` is the `message`.
+			ResponsesRunError::ApiError(value) => {
+				let message = value
+					.get("message")
+					.and_then(Value::as_str)
+					.filter(|message| !message.is_empty());
+				write!(formatter, "{}", message.unwrap_or("Provider stream failed"))
+			}
+		}
+	}
+}
+
+impl std::error::Error for ResponsesRunError {}
 
 /// TS: `interface BedrockResponsesAuthOptions extends StreamOptions`.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -367,21 +445,58 @@ pub async fn send_signed_responses_request(
 	response.map_err(|error| error.to_string())
 }
 
+/// Test-only serialization for `AWS_*` environment access.
+///
+/// The transport tests in this module and the run-body tests in `amazon_bedrock_responses.rs`
+/// both observe the process-global `AWS_*` variables, so they must share one lock. Tests only:
+/// no production code touches this.
+#[cfg(test)]
+pub(crate) static AWS_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// The boxed response byte stream used by `responses_event_stream`.
 pub type BedrockByteStream =
 	std::pin::Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>;
 
+/// One decoded SSE frame, or the failure that ends the body read.
+///
+/// The TypeScript reads the body through the OpenAI SDK's `Stream.fromSSEResponse`
+/// (`amazon-bedrock-responses.ts:59` -> `openai/resources/responses/responses.ts`
+/// `this._client.responses.create(...)`), which:
+///
+/// * `throw`s `new Error(\`Could not parse message into JSON: ...\`)` for a frame whose
+///   `data:` payload is not JSON, and
+/// * `throw`s `new APIError(undefined, data.error, undefined, response.headers)` for a frame
+///   whose parsed payload carries a truthy `error`.
+///
+/// A Rust stream cannot `throw`, so the failure travels as the `Err` item of the stream and
+/// the owner (`amazon_bedrock_responses.rs` run body) re-raises it after the shared loop ends -
+/// the same catch boundary and the same message. This mirrors `parse_sse_response`
+/// (`openai_codex_responses.rs:1200-1265`, `Ok`/`Err` items re-raised by `map_codex_events`).
+pub enum BedrockSseFrame {
+	/// A parsed `data:` JSON payload.
+	Event(Value),
+	/// `throw new Error(...)` - the payload was not JSON.
+	Message(String),
+	/// `throw new APIError(undefined, data.error, undefined, response.headers)` - the payload
+	/// nested a truthy `error` object (`data.error`), the in-stream API-error shape.
+	ApiError(Value),
+}
+
 /// The local SSE reader for the Responses transport (`data: ...` frames).
+///
+/// Frames are read the way the SDK's `SSEDecoder` does: `\n\n` delimits a chunk, `data:`
+/// lines are joined with `\n`, `[DONE]` ends the stream, and anything that is not JSON or that
+/// carries a truthy `error` is an error rather than a silently dropped frame.
 #[derive(Default)]
 pub struct BedrockResponsesSseBuffer {
 	buffer: String,
 }
 
 impl BedrockResponsesSseBuffer {
-	/// Appends a chunk and returns the complete `data:` payloads it completed.
-	pub fn push(&mut self, bytes: &[u8]) -> Vec<Value> {
+	/// Appends a chunk and returns the frames it completed, in order.
+	pub fn push(&mut self, bytes: &[u8]) -> Vec<BedrockSseFrame> {
 		self.buffer.push_str(&String::from_utf8_lossy(bytes));
-		let mut events: Vec<Value> = Vec::new();
+		let mut frames: Vec<BedrockSseFrame> = Vec::new();
 		while let Some(index) = self.buffer.find("\n\n") {
 			let chunk = self.buffer[..index].to_string();
 			self.buffer = self.buffer[index + 2..].to_string();
@@ -393,38 +508,143 @@ impl BedrockResponsesSseBuffer {
 				.join("\n");
 			let data = data.trim().to_string();
 			if !data.is_empty() && data != "[DONE]" {
-				if let Ok(parsed) = serde_json::from_str::<Value>(&data) {
-					events.push(parsed);
-				}
+				frames.push(decode_bedrock_sse_frame(&data));
 			}
 		}
-		events
+		frames
+	}
+
+	/// The frames still inside an incomplete trailing chunk.
+	///
+	/// The SDK's decoder is fed by the whole body and has no "unfinished frame" case, but a
+	/// Rust body ends on the last byte, so `push` must have the same behaviour for the tail
+	/// it never got a delimiter for. Without this, a truncated or un-delimited final frame
+	/// would be kept in `buffer` forever and silently reported as a complete response.
+	pub fn finish(&mut self) -> Vec<BedrockSseFrame> {
+		let text = std::mem::take(&mut self.buffer);
+		let data = text
+			.split('\n')
+			.filter(|line| line.starts_with("data:"))
+			.map(|line| line[5..].trim().to_string())
+			.collect::<Vec<_>>()
+			.join("\n");
+		let data = data.trim().to_string();
+		if data.is_empty() || data == "[DONE]" {
+			return Vec::new();
+		}
+		vec![decode_bedrock_sse_frame(&data)]
 	}
 }
 
-/// Drain a `reqwest` response body into a `processResponsesStream` input stream.
+/// Decode one complete `data:` payload, keeping the SDK's two failure modes.
+fn decode_bedrock_sse_frame(data: &str) -> BedrockSseFrame {
+	let parsed = match serde_json::from_str::<Value>(data) {
+		Ok(parsed) => parsed,
+		Err(cause) => {
+			// SDK `Stream.fromSSEResponse`: `throw new Error(\`Could not parse message into
+			// JSON: ...\`)`. This tree does not vendor `openai`'s `streaming.ts`, so the exact
+			// template cannot be quoted from source; the port keeps the same throw and names
+			// the real symptom - the payload that failed - plus the JSON parse error.
+			return BedrockSseFrame::Message(format!(
+				"Could not parse message into JSON: {} (JSON parse error: {})",
+				data, cause
+			));
+		}
+	};
+	// SDK: `if (data && data.error) throw new APIError(undefined, data.error, undefined,
+	// response.headers)`. `js_truthy` is the Rust port of the JavaScript truthiness test the
+	// SDK uses, so an explicit JSON `null`/`false`/`0`/`""` must NOT throw.
+	if let Some(error) = parsed.get("error").filter(|error| js_truthy(error)) {
+		return BedrockSseFrame::ApiError(error.clone());
+	}
+	BedrockSseFrame::Event(parsed)
+}
+
+/// The JavaScript truthiness test (`Boolean(value)`) for a parsed JSON value.
+///
+/// Same semantics as `openai_completions.rs:32-45`: only `false`, `0`, `""`, `null` and
+/// `undefined` are falsy; every object and array is truthy.
+fn js_truthy(value: &Value) -> bool {
+	match value {
+		Value::Null => false,
+		Value::Bool(value) => *value,
+		Value::Number(number) => number.as_f64().map(|number| number != 0.0).unwrap_or(true),
+		Value::String(text) => !text.is_empty(),
+		Value::Array(_) | Value::Object(_) => true,
+	}
+}
+
+/// Drain a `reqwest` response body into a `processResponsesStream` input stream, storing the
+/// first body failure in `error_slot` for the run body to re-raise.
+///
+/// Unlike `unfold` returning `None` for `Some(Err(_))` - which silently truncated the
+/// response and let it be reported as a complete answer - a body read error, an unparseable
+/// frame and a `data.error` frame all END the stream with the failure preserved.
 pub fn responses_event_stream(
 	response: reqwest::Response,
+	error_slot: std::sync::Arc<std::sync::Mutex<Option<ResponsesRunError>>>,
 ) -> crate::providers::openai_responses_shared::ResponsesEventStream {
 	let byte_stream: BedrockByteStream = Box::pin(response.bytes_stream());
 	Box::pin(futures::stream::unfold(
 		(
 			byte_stream,
 			BedrockResponsesSseBuffer::default(),
-			std::collections::VecDeque::<Value>::new(),
+			std::collections::VecDeque::<BedrockSseFrame>::new(),
+			false,
+			error_slot,
 		),
-		|(mut byte_stream, mut buffer, mut pending)| async move {
+		|(mut byte_stream, mut buffer, mut pending, mut finished, error_slot)| async move {
 			loop {
-				if let Some(event) = pending.pop_front() {
-					return Some((event, (byte_stream, buffer, pending)));
+				match pending.pop_front() {
+					Some(BedrockSseFrame::Event(event)) => {
+						return Some((event, (byte_stream, buffer, pending, finished, error_slot)));
+					}
+					Some(failure) => {
+						// `throw` out of the `for await` loop: record the thrown value and end
+						// the stream; the run body re-raises it after `processResponsesStream`
+						// returns (the provider `catch`, `amazon-bedrock-responses.ts:79-90`).
+						record_bedrock_sse_failure(&error_slot, failure);
+						finished = true;
+						continue;
+					}
+					None if finished => return None,
+					None => {}
 				}
 				match byte_stream.next().await {
 					Some(Ok(bytes)) => pending.extend(buffer.push(&bytes)),
-					_ => return None,
+					Some(Err(error)) => {
+						// The TypeScript body read rejects (`body` stream error) and the SDK
+						// surfaces it; it must not masquerade as a completed stream.
+						pending.push_back(BedrockSseFrame::Message(error.to_string()));
+					}
+					None => {
+						// End of body: decode whatever the last chunk left behind.
+						pending.extend(buffer.finish());
+						finished = true;
+					}
 				}
 			}
 		},
 	))
+}
+
+/// Store a stream failure once, keeping the FIRST one (the thrown value the TypeScript `catch`
+/// would have seen). Only the first failure reached the `throw`, so later frames cannot
+/// replace it.
+fn record_bedrock_sse_failure(
+	slot: &std::sync::Arc<std::sync::Mutex<Option<ResponsesRunError>>>,
+	failure: BedrockSseFrame,
+) {
+	let value = match failure {
+		BedrockSseFrame::Message(message) => ResponsesRunError::Message(message),
+		BedrockSseFrame::ApiError(error) => ResponsesRunError::ApiError(error),
+		// `record_bedrock_sse_failure` is only called for the non-event variants.
+		BedrockSseFrame::Event(_) => return,
+	};
+	let mut slot = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+	if slot.is_none() {
+		*slot = Some(value);
+	}
 }
 
 #[cfg(test)]
@@ -450,8 +670,7 @@ mod tests {
 	];
 
 	fn env_lock() -> &'static std::sync::Mutex<()> {
-		static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-		&LOCK
+		&AWS_ENV_TEST_LOCK
 	}
 
 	impl CleanAwsEnv {
@@ -776,12 +995,216 @@ mod tests {
 		assert!(signed.get("x-amz-date").is_none());
 	}
 
+	/// Serves one raw HTTP response, then closes the connection after `body` bytes.
+	async fn serve_raw_response(
+		head: String,
+		body: Vec<u8>,
+	) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut buffer = [0u8; 4096];
+			// Drain the request head (and body, if the client sent one) before answering.
+			let mut seen = Vec::new();
+			loop {
+				let count = socket.read(&mut buffer).await.unwrap();
+				if count == 0 {
+					return;
+				}
+				seen.extend_from_slice(&buffer[..count]);
+				if seen.windows(4).any(|window| window == b"\r\n\r\n") {
+					break;
+				}
+			}
+			socket.write_all(head.as_bytes()).await.unwrap();
+			socket.write_all(&body).await.unwrap();
+			socket.flush().await.unwrap();
+			// Drop closes the connection: a body shorter than `Content-Length` is a read error.
+		});
+		(address, server)
+	}
+
+	#[tokio::test]
+	async fn body_read_error_is_surfaced_instead_of_ending_the_stream() {
+		// F3/F7: the previous `unfold` mapped `Some(Err(_))` and the tail of the body to
+		// `None` (end of stream), so a truncated response was reported to the caller as a
+		// completed answer. The TypeScript body read rejects and the SDK surfaces it, so the
+		// failure must end the stream WITH the thrown value preserved.
+		let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 400\r\nConnection: close\r\n\r\n".to_string();
+		// One complete frame, then a partial one; the body ends 360 bytes short of what the
+		// headers promised, which is exactly the dropped-connection case.
+		let body = b"data: {\"type\":\"response.created\",\"response\":{\"id\":\"r1\"}}\n\ndata: {\"type\":\"response.comp".to_vec();
+		let (address, server) = serve_raw_response(head, body).await;
+		let response = reqwest::Client::new()
+			.get(format!("http://{address}/probe"))
+			.send()
+			.await
+			.unwrap();
+		let error_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+		let mut events = responses_event_stream(response, error_slot.clone());
+
+		let mut delivered = Vec::new();
+		while let Some(event) = events.next().await {
+			delivered.push(event);
+		}
+		assert_eq!(delivered.len(), 1, "the complete frame is still delivered");
+		assert_eq!(delivered[0]["response"]["id"], "r1");
+
+		let recorded = error_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+		match recorded {
+			Some(ResponsesRunError::Message(message)) => {
+				assert!(
+					!message.is_empty(),
+					"the body read failure must carry the transport error text"
+				);
+			}
+			Some(ResponsesRunError::ApiError(value)) => {
+				panic!("a body read failure is not an SDK APIError: {value}");
+			}
+			Some(ResponsesRunError::Failure(failure)) => {
+				panic!("a body read failure is not a stream failure: {}", failure.message);
+			}
+			None => panic!(
+				"a truncated body must surface an error, not be reported as a completed stream"
+			),
+		}
+		tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+	}
+
+	#[tokio::test]
+	async fn unparseable_and_error_frames_reach_the_error_slot() {
+		// F7: the SDK `throw`s for an unparseable `data:` payload and for a truthy `data.error`,
+		// so the run body must see a thrown value and fail the request instead of silently
+		// dropping the frames and reporting a completed (empty) answer.
+		for (payload, expected) in [
+			(
+				"data: {\"type\":\"response.created\"}\n\ndata: {not json}\n\n",
+				"Could not parse message into JSON",
+			),
+			(
+				"data: {\"type\":\"response.created\"}\n\ndata: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+				"overloaded_error",
+			),
+		] {
+			let head = format!(
+				"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+				payload.len()
+			);
+			let (address, server) = serve_raw_response(head, payload.as_bytes().to_vec()).await;
+			let response = reqwest::Client::new()
+				.get(format!("http://{address}/probe"))
+				.send()
+				.await
+				.unwrap();
+			let error_slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+			let mut events = responses_event_stream(response, error_slot.clone());
+			let mut delivered = 0;
+			while events.next().await.is_some() {
+				delivered += 1;
+			}
+			assert_eq!(delivered, 1, "the leading valid frame is still delivered: {payload}");
+
+			let recorded = error_slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+			let rendered = match recorded {
+				Some(ResponsesRunError::Message(message)) => message,
+				Some(ResponsesRunError::ApiError(value)) => value.to_string(),
+				Some(ResponsesRunError::Failure(failure)) => failure.message,
+				None => panic!("no error recorded for payload: {payload}"),
+			};
+			assert!(
+				rendered.contains(expected),
+				"error must name the real symptom ({expected}): {rendered}"
+			);
+			tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+		}
+	}
+
 	#[test]
 	fn sse_buffer_decodes_data_frames() {
 		let mut buffer = BedrockResponsesSseBuffer::default();
 		assert!(buffer.push(b"data: {\"type\":\"response.crea").is_empty());
 		let events = buffer.push(b"ted\",\"response\":{\"id\":\"r1\"}}\n\ndata: [DONE]\n\n");
 		assert_eq!(events.len(), 1);
-		assert_eq!(events[0]["response"]["id"], "r1");
+		match &events[0] {
+			BedrockSseFrame::Event(event) => assert_eq!(event["response"]["id"], "r1"),
+			BedrockSseFrame::Message(message) => panic!("unexpected decode failure: {message}"),
+			BedrockSseFrame::ApiError(error) => panic!("unexpected api error: {error}"),
+		}
+	}
+
+	#[test]
+	fn sse_buffer_surfaces_unparseable_frames_instead_of_dropping_them() {
+		// SDK `Stream.fromSSEResponse`: `throw new Error(\`Could not parse message into JSON: ...\`)`.
+		// The old port dropped the frame (so the response looked complete and empty).
+		let mut buffer = BedrockResponsesSseBuffer::default();
+		let frames = buffer.push(b"data: {not json\n\n");
+		assert_eq!(frames.len(), 1);
+		match &frames[0] {
+			BedrockSseFrame::Message(message) => {
+				assert!(
+					message.starts_with("Could not parse message into JSON: {not json"),
+					"{message}"
+				);
+				assert!(message.contains("JSON parse error"), "{message}");
+			}
+			BedrockSseFrame::Event(event) => panic!("unparseable frame became an event: {event}"),
+			BedrockSseFrame::ApiError(error) => panic!("unparseable frame became an api error: {error}"),
+		}
+	}
+
+	#[test]
+	fn sse_buffer_surfaces_nested_error_payloads_as_api_errors() {
+		// SDK: `if (data && data.error) throw new APIError(undefined, data.error, undefined,
+		// response.headers);`. The old port dropped it and reported a completed stream.
+		let mut buffer = BedrockResponsesSseBuffer::default();
+		let frames = buffer.push(
+			b"data: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+		);
+		assert_eq!(frames.len(), 1);
+		match &frames[0] {
+			BedrockSseFrame::ApiError(error) => assert_eq!(error["type"], "overloaded_error"),
+			BedrockSseFrame::Event(event) => panic!("data.error frame became an event: {event}"),
+			BedrockSseFrame::Message(message) => panic!("data.error frame became a parse error: {message}"),
+		}
+
+		// Falsy `error` values do NOT throw (`if (data && data.error)`), so `null`, `false`,
+		// `0` and `""` stay ordinary events.
+		for falsy in [b"null".as_slice(), b"false", b"0", b"\"\""] {
+			let payload = format!("data: {{\"type\":\"response.created\",\"error\":{}}}\n\n", String::from_utf8_lossy(falsy));
+			let mut buffer = BedrockResponsesSseBuffer::default();
+			let frames = buffer.push(payload.as_bytes());
+			assert_eq!(frames.len(), 1);
+			assert!(matches!(frames[0], BedrockSseFrame::Event(_)), "falsy error must not throw");
+		}
+	}
+
+	#[test]
+	fn sse_buffer_finishes_the_trailing_frame_at_end_of_body() {
+		// A body that ends without the `\n\n` delimiter must still be decoded, otherwise the
+		// frame stays buffered forever and the truncation is reported as success.
+		let mut buffer = BedrockResponsesSseBuffer::default();
+		assert!(buffer.push(b"data: {\"type\":\"response.comp").is_empty());
+		let frames = buffer.finish();
+		assert_eq!(frames.len(), 1);
+		assert!(matches!(frames[0], BedrockSseFrame::Message(_)), "a partial frame is not valid JSON");
+
+		let mut buffer = BedrockResponsesSseBuffer::default();
+		buffer.push(b"data: {\"type\":\"response.completed\"}");
+		let frames = buffer.finish();
+		assert_eq!(frames.len(), 1);
+		match &frames[0] {
+			BedrockSseFrame::Event(event) => assert_eq!(event["type"], "response.completed"),
+			_ => panic!("a complete trailing frame must decode"),
+		}
+
+		// `[DONE]` and an empty tail produce nothing.
+		let mut buffer = BedrockResponsesSseBuffer::default();
+		buffer.push(b"data: [DONE]");
+		assert!(buffer.finish().is_empty());
+		#[allow(unused_mut)]
+		let mut buffer = BedrockResponsesSseBuffer::default();
+		assert!(buffer.finish().is_empty());
 	}
 }

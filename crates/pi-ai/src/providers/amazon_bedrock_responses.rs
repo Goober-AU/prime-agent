@@ -15,12 +15,15 @@ use crate::utils::event_stream::{create_assistant_message_event_stream, Assistan
 use crate::utils::headers::header_map_to_record;
 use crate::utils::now_ms;
 use crate::utils::stream_failure::{
-	format_stream_failure_message, record_stream_failure, stream_failure_from_stop_reason, ThrownStreamError,
+	format_stream_failure_message, record_stream_failure, stream_failure_from_stop_reason,
 };
 
 use super::bedrock_responses_client::{
 	create_bedrock_responses_client, responses_event_stream, BedrockResponsesAuthOptions,
 };
+/// The thrown-value type is owned by the transport module that can raise every variant; it is
+/// re-exported here so this module's call sites keep their name.
+pub use super::bedrock_responses_client::ResponsesRunError;
 use super::openai_responses_shared::{
 	convert_responses_messages, convert_responses_tools, process_responses_stream, OpenAIResponsesStreamOptions,
 };
@@ -167,70 +170,114 @@ pub fn stream_simple_bedrock_responses(
 	}))
 }
 
-/// The typed entry point, mirroring the TypeScript `SimpleStreamOptions` signature.
-pub fn stream_simple_bedrock_responses_with_options(
+/// The options object `streamSimpleBedrockResponses` hands to `streamBedrockResponses`.
+///
+/// TS (`amazon-bedrock-responses.ts:101-110`):
+/// ```text
+/// const base = buildBaseOptions(model, options);
+/// const reasoningEffort = clampThinkingLevel(model, options?.reasoning ?? "medium");
+/// return streamBedrockResponses(model, context, {
+///     ...base,
+///     onUsageObservation: options?.onUsageObservation,
+///     reasoningEffort,
+/// });
+/// ```
+///
+/// `buildBaseOptions` never copies `onUsageObservation` (`simple-options.ts:3-19`), so the
+/// re-add at `amazon-bedrock-responses.ts:108` is this provider's own responsibility.
+pub fn build_simple_stream_options(
 	model: &Model,
-	context: &Context,
-	options: Option<SimpleStreamOptions>,
-) -> AssistantMessageEventStream {
+	options: Option<&SimpleStreamOptions>,
+) -> BedrockResponsesOptions {
 	// TS: `const base = buildBaseOptions(model, options);`
-	let base = build_base_options(model, options.as_ref(), None);
+	let base = build_base_options(model, options, None);
 	// TS: `clampThinkingLevel(model, options?.reasoning ?? "medium")`
 	let reasoning_effort = clamp_thinking_level(
 		model,
 		options
-			.as_ref()
 			.and_then(|options| options.reasoning.as_deref())
 			.unwrap_or("medium"),
 	);
 	// TS: `{ ...base, onUsageObservation: options?.onUsageObservation, reasoningEffort }`
 	let mut stream_options = base;
 	stream_options.on_usage_observation =
-		options.as_ref().and_then(|options| options.stream.on_usage_observation.clone());
+		options.and_then(|options| options.stream.on_usage_observation.clone());
+	BedrockResponsesOptions {
+		stream: stream_options,
+		reasoning_effort: Some(reasoning_effort),
+		..Default::default()
+	}
+}
+
+/// The typed entry point, mirroring the TypeScript `SimpleStreamOptions` signature.
+pub fn stream_simple_bedrock_responses_with_options(
+	model: &Model,
+	context: &Context,
+	options: Option<SimpleStreamOptions>,
+) -> AssistantMessageEventStream {
 	stream_bedrock_responses_with_options(
 		model,
 		context,
-		Some(BedrockResponsesOptions {
-			stream: stream_options,
-			reasoning_effort: Some(reasoning_effort),
-			..Default::default()
-		}),
+		Some(build_simple_stream_options(model, options.as_ref())),
 	)
 }
 
-/// The Rust counterpart of a value thrown out of the TypeScript `try` block.
-#[derive(Debug, Clone)]
-pub enum ResponsesRunError {
-	/// `throw streamFailureFromStopReason(...)` / a `StreamFailureError` from the shared stream loop.
-	Failure(Box<crate::utils::stream_failure::StreamFailureError>),
-	/// `throw new Error(...)`.
-	Message(String),
-}
-
-impl ResponsesRunError {
-	pub fn message(message: impl Into<String>) -> Self {
-		ResponsesRunError::Message(message.into())
+/// The OpenAI SDK `APIError.generate(status, error, message, headers)` failure value for a
+/// non-2xx Bedrock proxy response.
+///
+/// TS: `client.responses.create(params, requestOptions).withResponse()`
+/// (`amazon-bedrock-responses.ts:59`) rejects with the SDK `APIError` when the response status
+/// is not ok (`openai@6.x` `makeStatusError`), and the `catch` at
+/// `amazon-bedrock-responses.ts:79-90` passes it to `formatStreamFailureMessage` /
+/// `recordStreamFailure`, which read `error.status`, `error.headers`, `error.error` and
+/// `error.message` (`utils/stream-failure.ts:142-167`).
+///
+/// The OpenAI and Azure Responses ports share that one SDK error class, so this is the same
+/// shape as `api_error_from_response` (`openai_responses.rs:737-779`) and `azure_api_error`
+/// (`azure_openai_responses.rs:642-667`). The shape must not be re-invented.
+async fn bedrock_api_error(response: reqwest::Response) -> Value {
+	let status = response.status().as_u16() as i64;
+	let headers = header_map_to_record(response.headers());
+	let text = response.text().await.unwrap_or_default();
+	let body: Option<Value> = serde_json::from_str(&text).ok();
+	// `APIError.makeMessage(status, error, message)`: the parsed body's `error.message`
+	// when present, otherwise the raw text, otherwise "<status> status code (no body)".
+	let error_message = body
+		.as_ref()
+		.and_then(|body| body.get("error"))
+		.and_then(|error| error.get("message"))
+		.and_then(Value::as_str)
+		.map(str::to_string);
+	let message = match error_message {
+		Some(message) if !message.is_empty() => format!("{status} {message}"),
+		_ if !text.is_empty() => format!("{status} {text}"),
+		_ => format!("{status} status code (no body)"),
+	};
+	let mut object = Map::new();
+	object.insert("name".to_string(), Value::String("APIError".to_string()));
+	object.insert("message".to_string(), Value::String(message));
+	object.insert("status".to_string(), Value::Number(status.into()));
+	object.insert(
+		"headers".to_string(),
+		Value::Object(
+			headers
+				.iter()
+				.map(|(key, value)| (key.clone(), Value::String(value.clone())))
+				.collect(),
+		),
+	);
+	// The SDK sets `error` to the body's `error` object when it is one, and otherwise to the
+	// whole response body (`errorFromResponse(errorResponse) ?? errorResponse`), which is what
+	// `extractStreamFailureParts` then reads for the provider type and message.
+	let body_error = body.and_then(|body| match body.get("error") {
+		Some(Value::Object(_)) => body.get("error").cloned(),
+		_ => Some(body.clone()),
+	});
+	if let Some(error) = body_error {
+		object.insert("error".to_string(), error);
 	}
-
-	/// The thrown value as the shared `stream-failure` helpers expect it.
-	pub fn as_thrown(&self) -> ThrownStreamError<'_> {
-		match self {
-			ResponsesRunError::Failure(failure) => ThrownStreamError::Failure(failure),
-			ResponsesRunError::Message(message) => ThrownStreamError::Message(message),
-		}
-	}
+	Value::Object(object)
 }
-
-impl std::fmt::Display for ResponsesRunError {
-	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		match self {
-			ResponsesRunError::Failure(failure) => write!(formatter, "{}", failure.message),
-			ResponsesRunError::Message(message) => write!(formatter, "{}", message),
-		}
-	}
-}
-
-impl std::error::Error for ResponsesRunError {}
 
 /// TS: `buildParams(model, context, options?)`.
 pub fn build_params(
@@ -324,6 +371,17 @@ async fn run_bedrock_responses_stream(
 		.await
 		.map_err(ResponsesRunError::message)?;
 
+	// TS: `client.responses.create(...).withResponse()` (amazon-bedrock-responses.ts:59) - the
+	// OpenAI SDK rejects the promise with an SDK `APIError` for a non-2xx status, so the
+	// `catch` at amazon-bedrock-responses.ts:79-90 runs `formatStreamFailureMessage` +
+	// `recordStreamFailure`. Without this check the HTTP error body (JSON, no SSE frames)
+	// would decode to zero events and be reported as a completed empty answer.
+	// Same check as the Azure adapter, which shares the SDK error class
+	// (`azure_openai_responses.rs:611-613`).
+	if !response.status().is_success() {
+		return Err(ResponsesRunError::ApiError(bedrock_api_error(response).await));
+	}
+
 	let status = response.status().as_u16();
 	let response_headers = response.headers().clone();
 	// TS: `await options?.onResponse?.({ status, headers: headersToRecord(response.headers) }, model);`
@@ -362,7 +420,14 @@ async fn run_bedrock_responses_stream(
 		on_usage_observation: options.stream.on_usage_observation.clone(),
 	};
 
-	let events = responses_event_stream(response);
+	// The SSE reader `throw`s out of the `for await` loop for a body read error, an
+	// unparseable frame or a `data.error` frame; a Rust stream cannot, so the thrown value is
+	// parked in this slot and re-raised below - the same `catch` boundary and the same message
+	// (`amazon-bedrock-responses.ts:79-90`). Same pattern as `map_codex_events`
+	// (`openai_codex_responses.rs:1058-1084`).
+	let sse_error: Arc<std::sync::Mutex<Option<ResponsesRunError>>> =
+		Arc::new(std::sync::Mutex::new(None));
+	let events = responses_event_stream(response, sse_error.clone());
 	process_responses_stream(events, output, stream, model, Some(&stream_options))
 		.await
 		.map_err(|error| match error {
@@ -373,6 +438,12 @@ async fn run_bedrock_responses_stream(
 				ResponsesRunError::Message(message)
 			}
 		})?;
+
+	// `throw` from inside the `for await (const event of openaiStream)` loop wins over the
+	// loop's normal completion, exactly like a JavaScript `throw` inside the loop body.
+	if let Some(error) = sse_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+		return Err(error);
+	}
 
 	if options
 		.stream
@@ -408,6 +479,7 @@ pub fn apply_bedrock_astra_context_pricing(usage: &mut Usage) {
 mod tests {
 	use super::*;
 	use crate::types::{Message, ModelCost, Tool, UserContent, UserMessage};
+	use crate::utils::stream_failure::ThrownStreamError;
 
 	fn model(id: &str) -> Model {
 		let mut built = Model::new(
@@ -605,6 +677,171 @@ mod tests {
 		assert!(auth.region.is_none());
 	}
 
+	/// A throwaway HTTP/1.1 server that answers one request with a fixed status/body and reads
+	/// the request to completion, so a body read cannot race the response write.
+	async fn serve_http(
+		status: &str,
+		extra_headers: &str,
+		body: &'static str,
+	) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let response = format!(
+			"HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+			body.len()
+		);
+		let server = tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			loop {
+				let mut buffer = [0u8; 4096];
+				let count = socket.read(&mut buffer).await.unwrap();
+				if count == 0 {
+					return;
+				}
+				request.extend_from_slice(&buffer[..count]);
+				if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+					let headers = std::str::from_utf8(&request[..end]).unwrap();
+					let length = headers
+						.lines()
+						.filter_map(|line| line.split_once(':'))
+						.find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+						.map(|(_, value)| value.trim().parse::<usize>().unwrap_or(0))
+						.unwrap_or(0);
+					if request.len() >= end + 4 + length {
+						break;
+					}
+				}
+			}
+			socket.write_all(response.as_bytes()).await.unwrap();
+			socket.flush().await.unwrap();
+		});
+		(address, server)
+	}
+
+	#[tokio::test]
+	async fn http_error_status_throws_the_sdk_api_error_shape() {
+		// `amazon-bedrock-responses.ts:59` (`client.responses.create(...).withResponse()`)
+		// rejects with the SDK `APIError` for a non-2xx status (the OpenAI SDK calls
+		// `makeStatusError`), and the `catch` at `amazon-bedrock-responses.ts:79-90`
+		// classifies it through `utils/stream-failure.ts:142-167`, which reads
+		// `error.status`, `error.headers`, `error.error` and `error.message`.
+		//
+		// Before the status check this body decoded to zero SSE events, so the failure was
+		// reported to the user as a SUCCESSFUL EMPTY ANSWER (`stopReason: "stop"`).
+		let body = "{\"error\":{\"message\":\"The security token included in the request is invalid\",\"type\":\"invalid_request_error\"}}";
+		let (address, server) =
+			serve_http("401 Unauthorized", "x-request-id: req_bedrock\r\nRetry-After: 2\r\n", body).await;
+		let response = reqwest::Client::new()
+			.get(format!("http://{address}/probe"))
+			.send()
+			.await
+			.unwrap();
+		let value = bedrock_api_error(response).await;
+		assert_eq!(value["name"], json!("APIError"));
+		assert_eq!(value["status"], json!(401));
+		assert_eq!(
+			value["message"],
+			json!("401 The security token included in the request is invalid")
+		);
+		assert_eq!(value["error"]["type"], json!("invalid_request_error"));
+
+		// Downstream classification: the whole point of the shape.
+		let thrown = ThrownStreamError::Value(&value);
+		let parts = crate::utils::stream_failure::extract_stream_failure_parts(&thrown);
+		// `classifyStreamFailure` (`utils/stream-failure.ts:70-97`): `status === 401` wins over
+		// the body type, so the verdict is "auth" - not "invalid_request".
+		assert_eq!(parts.info.kind, "auth");
+		assert_eq!(parts.info.status, Some(401));
+		assert_eq!(parts.info.provider_error_type.as_deref(), Some("invalid_request_error"));
+		assert_eq!(parts.info.request_id.as_deref(), Some("req_bedrock"));
+		assert_eq!(
+			format_stream_failure_message(&thrown),
+			"Provider authentication failed (invalid_request_error, 401): The security token included in the request is invalid [request_id: req_bedrock]"
+		);
+		tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+	}
+
+	#[test]
+	fn http_error_status_ends_the_run_as_an_error_not_an_empty_answer() {
+		// Held for the whole test, so it must not be an async test: a std lock guard live
+		// across an `.await` is exactly what the client module's env guards avoid too.
+		let _env = crate::providers::bedrock_responses_client::AWS_ENV_TEST_LOCK
+			.lock()
+			.unwrap_or_else(|poisoned| poisoned.into_inner());
+		let runtime = tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("current-thread runtime");
+		runtime.block_on(http_error_status_ends_the_run_as_an_error_not_an_empty_answer_body());
+	}
+
+	async fn http_error_status_ends_the_run_as_an_error_not_an_empty_answer_body() {
+		// End-to-end through the real entry point: a 500 with a JSON error body must produce an
+		// `error` event carrying the thrown message - never `done` with `stopReason: "stop"`,
+		// zero usage and no `errorMessage`.
+		//
+		// Hermetic: the model base URL points at the throwaway server, so no `AWS_*` process
+		// variable is written. The caller holds the shared lock because a concurrent client
+		// test sets `AWS_BEDROCK_BASE_URL`, which would otherwise outrank this base URL
+		// (`bedrock-responses-client.ts:20`).
+		let body = "{\"error\":{\"message\":\"Bedrock is having a bad day\",\"type\":\"server_error\"}}";
+		let (address, server) = serve_http("500 Internal Server Error", "", body).await;
+		let mut streaming_model = Model::new(
+			"openai.gpt-6-astra",
+			"Astra",
+			"bedrock-responses",
+			"amazon-bedrock",
+			&format!("http://{address}/openai/v1"),
+		);
+		streaming_model.reasoning = false;
+		streaming_model.cost = ModelCost::default();
+
+		// No `.into_stream()`: `AssistantMessageEventStream::next()` is the port's own
+		// async-iterator (`event_stream.rs:225`), and its `into_stream()` wrapper is `!Unpin`.
+		let stream = stream_bedrock_responses_with_options(
+			&streaming_model,
+			&context("hello"),
+			Some(BedrockResponsesOptions {
+				stream: StreamOptions {
+					api_key: Some("token".to_string()),
+					..Default::default()
+				},
+				region: Some("us-west-2".to_string()),
+				..Default::default()
+			}),
+		);
+
+		let mut saw_error = false;
+		while let Some(event) = stream.next().await {
+			match event {
+				AssistantMessageEvent::Error { reason, error } => {
+					assert_eq!(reason, "error");
+					assert_eq!(error.stop_reason, "error");
+					assert!(
+						error
+							.error_message
+							.as_deref()
+							.unwrap_or_default()
+							.contains("Bedrock is having a bad day"),
+						"errorMessage must carry the provider error: {:?}",
+						error.error_message
+					);
+					saw_error = true;
+				}
+				AssistantMessageEvent::Done { message, .. } => panic!(
+					"an HTTP error must not be reported as a completed answer: stopReason={} errorMessage={:?}",
+					message.stop_reason, message.error_message
+				),
+				_ => {}
+			}
+		}
+		assert!(saw_error, "the failed request must surface an error event");
+		tokio::time::timeout(std::time::Duration::from_secs(5), server).await.unwrap().unwrap();
+	}
+
+
 	#[test]
 	fn responses_run_error_preserves_the_thrown_shape() {
 		let error = ResponsesRunError::message("Request was aborted");
@@ -631,7 +868,9 @@ mod tests {
 
 	#[test]
 	fn usage_observation_is_forwarded_from_simple_options() {
-		// The simple entry point copies `onUsageObservation` onto the base options.
+		// TS `amazon-bedrock-responses.ts:108` (`onUsageObservation: options?.onUsageObservation`)
+		// re-adds the observer that `buildBaseOptions` (`simple-options.ts:3-19`) does not copy,
+		// so the forwarding owner is this provider's own simple-options builder - not the base.
 		let simple = SimpleStreamOptions {
 			stream: StreamOptions {
 				on_usage_observation: Some(Arc::new(
@@ -646,8 +885,16 @@ mod tests {
 		};
 		let mut reasoning_model = model("openai.gpt-6-astra");
 		reasoning_model.max_tokens = 1000.0;
+		// `buildBaseOptions` itself drops the observer (simple-options.ts:3-19)...
 		let base = build_base_options(&reasoning_model, Some(&simple), None);
-		assert!(base.on_usage_observation.is_some());
+		assert!(base.on_usage_observation.is_none());
+		// ...and `amazon-bedrock-responses.ts:108` puts it back on the provider options.
+		let provider_options = build_simple_stream_options(&reasoning_model, Some(&simple));
+		assert!(provider_options.stream.on_usage_observation.is_some());
+		assert_eq!(provider_options.reasoning_effort.as_deref(), Some("high"));
+		// No observer requested: nothing to forward, and the field stays unset.
+		let provider_options = build_simple_stream_options(&reasoning_model, None);
+		assert!(provider_options.stream.on_usage_observation.is_none());
 
 		// `clampThinkingLevel(model, options?.reasoning ?? "medium")` on a model without a
 		// thinking-level map keeps the requested level.
