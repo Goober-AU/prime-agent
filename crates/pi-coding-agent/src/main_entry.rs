@@ -28,7 +28,7 @@ use serde_json::Value;
 use crate::cli::args::{parse_args, Args, ListModelsValue, ResumeValue};
 use crate::cli::command_registry::format_top_level_help;
 use crate::cli::daemon_launch::{
-    ensure_interactive_daemon_running, list_active_daemon_session_summaries, probe_running_daemon_sessions,
+    ensure_interactive_daemon_running, is_daemon_session_summary, probe_running_daemon_sessions,
     shutdown_daemon_and_wait,
 };
 use crate::cli::daemon_stop_confirm::{
@@ -100,7 +100,9 @@ use crate::modes::daemon::daemon_protocol::{
 use crate::modes::daemon::daemon_errors::{
     deserialize_daemon_create_error, deserialize_daemon_error, DaemonError,
 };
-use crate::modes::daemon::daemon_session_list::SessionSummary;
+use crate::modes::daemon::daemon_session_list::{
+    resolve_attach_model_fallback_message, SessionSummary,
+};
 use crate::modes::daemon::daemon_socket::default_daemon_socket_path;
 use crate::modes::agents_view::agents_view_state::AgentsViewScopeKey;
 use crate::modes::interactive::interactive_mode::{InteractiveModeRunResult, InteractiveModeRunResultType};
@@ -1983,13 +1985,110 @@ pub async fn find_attached_daemon_session_summary(
         .map_err(|_| "Daemon returned an invalid active session summary".to_string())
 }
 
+/// `error instanceof SessionAlreadyActiveError || error instanceof DaemonSessionCreateError`
+/// (`main.ts:1616`) / `error instanceof DaemonSessionCreateError` (`main.ts:1529`).
+///
+/// The TypeScript tells the printed kinds from the rethrown ones by `instanceof`,
+/// so the port keeps that discrimination on the returned error instead of
+/// collapsing every failure into one `String`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonClientConnectionErrorKind {
+    /// `SessionAlreadyActiveError` (core/session-lease.ts:20).
+    SessionAlreadyActive,
+    /// `DaemonSessionCreateError` (modes/daemon/daemon-errors.ts:36-41).
+    DaemonSessionCreate,
+    /// Every other error, which `main.ts:1533` / `main.ts:1620` rethrow.
+    Rethrown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonClientConnectionError {
+    pub kind: DaemonClientConnectionErrorKind,
+    pub message: String,
+}
+
+impl DaemonClientConnectionError {
+    /// An error the TypeScript does not handle at the connection site.
+    pub fn rethrown(message: impl Into<String>) -> Self {
+        Self {
+            kind: DaemonClientConnectionErrorKind::Rethrown,
+            message: message.into(),
+        }
+    }
+
+    /// `deserializeDaemonCreateError(response)` (`daemon-errors.ts:44-48`): an untyped
+    /// failure keeps its `DaemonSessionCreateError` class; a typed `errorInfo` keeps its
+    /// own class and is rethrown unless it is `session_already_active`.
+    pub fn from_create_failure(response: &DaemonResponse) -> Self {
+        let error = deserialize_daemon_create_error(response);
+        let kind = match &error {
+            DaemonError::SessionAlreadyActive(_) => DaemonClientConnectionErrorKind::SessionAlreadyActive,
+            DaemonError::Message(_) if response.error_info.is_none() => {
+                DaemonClientConnectionErrorKind::DaemonSessionCreate
+            }
+            _ => DaemonClientConnectionErrorKind::Rethrown,
+        };
+        Self {
+            kind,
+            message: daemon_error_message(&error),
+        }
+    }
+
+    /// `main.ts:1529`: the interactive attach prints only `DaemonSessionCreateError`.
+    pub fn is_reported_at_interactive_attach(&self) -> bool {
+        matches!(self.kind, DaemonClientConnectionErrorKind::DaemonSessionCreate)
+    }
+
+    /// `main.ts:1616`: the daemon-client path prints both named kinds.
+    pub fn is_reported_at_daemon_client(&self) -> bool {
+        !matches!(self.kind, DaemonClientConnectionErrorKind::Rethrown)
+    }
+}
+
+impl std::fmt::Display for DaemonClientConnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for DaemonClientConnectionError {}
+
+impl From<String> for DaemonClientConnectionError {
+    fn from(message: String) -> Self {
+        Self::rethrown(message)
+    }
+}
+
+/// The `String` boundary the other call site keeps (`modes/agents_view/native_host.rs:481`).
+impl From<DaemonClientConnectionError> for String {
+    fn from(error: DaemonClientConnectionError) -> Self {
+        error.message
+    }
+}
+
+/// `throw error` (`main.ts:1533`, `main.ts:1620`).
+///
+/// `cli-main.ts:41` awaits `main` without a catch, so that rejection leaves `runCli()`
+/// and Node reports it as an uncaught failure with a non-zero exit. This port's `main`
+/// returns `()` and `native_main_host.rs:108` discards the value, so the error cannot be
+/// handed to the caller from this file. Until that seam propagates a `Result`, the
+/// rethrow is reported WITHOUT the handled `Error: {message}` line that only the named
+/// kinds print, and it keeps the non-zero exit.
+fn rethrow_daemon_connection_error(error: &DaemonClientConnectionError, host: &dyn MainHost) {
+    eprintln!("{error}");
+    host.exit(1);
+}
+
 /// `createDaemonClientConnection(options)`.
 pub async fn create_daemon_client_connection(
     options: CreateDaemonClientConnectionOptions,
-) -> Result<(Arc<DaemonAgentConnection>, SessionSummary), String> {
+) -> Result<(Arc<DaemonAgentConnection>, SessionSummary), DaemonClientConnectionError> {
     // Caller must have awaited ensureInteractiveDaemonRunning for this socket.
     let client = DaemonClient::create(&options.socket_path);
-    client.connect(DEFAULT_DAEMON_CONNECT_TIMEOUT_MS).await.map_err(|error| error.message())?;
+    client
+        .connect(DEFAULT_DAEMON_CONNECT_TIMEOUT_MS)
+        .await
+        .map_err(|error| DaemonClientConnectionError::rethrown(error.message()))?;
 
     let socket_path_for_recover = options.socket_path.clone();
     // `DaemonAgentConnection.attach(client, ...)` in the TypeScript; the port's
@@ -2029,7 +2128,7 @@ pub async fn create_daemon_client_connection(
                 },
             )
             .await?;
-            Ok::<_, String>((connection, summary))
+            Ok::<_, DaemonClientConnectionError>((connection, summary))
         }
     };
 
@@ -2041,13 +2140,62 @@ pub async fn create_daemon_client_connection(
 
         if let Some(session_path) = &options.session_path {
             if !options.client_owned.unwrap_or(false) {
-                let summaries = list_active_daemon_session_summaries(&options.socket_path, true)
+                // `listActiveDaemonSessionSummaries(client)` (`main.ts:1087`): the
+                // TypeScript reuses the already-connected client and passes no
+                // options, so `includeClientOwned` stays undefined and the error
+                // propagates. `list_active_daemon_session_summaries` opens its own
+                // socket through `daemon_request` (cli/daemon_launch.rs:221-230), so
+                // the port issues the same `list` command on this client instead.
+                let response = client
+                    .request(
+                        DaemonCommandBody::from_iter([(
+                            "type".to_string(),
+                            Value::String("list".to_string()),
+                        )]),
+                        None,
+                        Default::default(),
+                    )
                     .await
-                    .unwrap_or_default();
-                let typed: Vec<SessionSummary> = summaries
-                    .iter()
-                    .filter_map(|value| serde_json::from_value(value.clone()).ok())
-                    .collect();
+                    .map_err(|error| DaemonClientConnectionError::rethrown(error.message()))?;
+                let mut typed: Vec<SessionSummary> = Vec::new();
+                let mut request_failure: Option<DaemonClientConnectionError> = None;
+                if !response.success {
+                    // `throw new Error(response.error)` (cli/daemon-launch.ts:130).
+                    request_failure = Some(DaemonClientConnectionError::rethrown(
+                        response.error.unwrap_or_else(|| "Daemon request failed".to_string()),
+                    ));
+                } else {
+                    let sessions = response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("sessions"))
+                        .and_then(Value::as_array);
+                    match sessions {
+                        None => {
+                            request_failure = Some(DaemonClientConnectionError::rethrown(
+                                "Daemon returned an invalid session list response",
+                            ));
+                        }
+                        Some(sessions) => {
+                            for session in sessions {
+                                if !is_daemon_session_summary(session) {
+                                    request_failure = Some(DaemonClientConnectionError::rethrown(
+                                        "Daemon returned an invalid session list response",
+                                    ));
+                                    break;
+                                }
+                                typed.push(serde_json::from_value(session.clone()).map_err(|_| {
+                                    DaemonClientConnectionError::rethrown(
+                                        "Daemon returned an invalid session list response",
+                                    )
+                                })?);
+                            }
+                        }
+                    }
+                }
+                if let Some(failure) = request_failure {
+                    return Err(failure);
+                }
                 if let Some(active_summary) =
                     find_active_daemon_session_summary_for_session_file(&typed, session_path)
                 {
@@ -2066,8 +2214,9 @@ pub async fn create_daemon_client_connection(
                 .await
                 .map_err(|error| error.message())?;
             if !client.supports_server_capability("client_owned_sessions") {
-                return Err(DaemonCapabilityUnavailableError::new("create", Some("client_owned_sessions"), false)
-                    .message());
+                return Err(DaemonClientConnectionError::rethrown(
+                    DaemonCapabilityUnavailableError::new("create", Some("client_owned_sessions"), false).message(),
+                ));
             }
         }
 
@@ -2107,12 +2256,12 @@ pub async fn create_daemon_client_connection(
         let response = client
             .request(command, None, Default::default())
             .await
-            .map_err(|error| error.message())?;
+            .map_err(|error| DaemonClientConnectionError::rethrown(error.message()))?;
         if !response.success {
-            return Err(daemon_error_message(&deserialize_daemon_create_error(&response)));
+            return Err(DaemonClientConnectionError::from_create_failure(&response));
         }
         let summary = serde_json::from_value::<SessionSummary>(response.data.unwrap_or(Value::Null))
-            .map_err(|_| "Daemon returned an invalid create response".to_string())?;
+            .map_err(|_| DaemonClientConnectionError::rethrown("Daemon returned an invalid create response"))?;
         attach(summary).await
     }
     .await;
@@ -2910,7 +3059,7 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
         // A fresh default chat opens a real but message-less session; the lifecycle
         // axis treats it as a draft (hidden, discarded on detach if never used), so
         // no DeferredAgentConnection is needed to avoid creating it up front.
-        let _is_fresh_default_session =
+        let is_fresh_default_session =
             active_daemon_session_summary.is_none()
                 && get_interactive_daemon_session_path(
                     &parsed,
@@ -2935,17 +3084,29 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
         .await
         {
             Ok(connection) => connection,
-            Err(message) => {
-                eprintln!("{}", red(&format!("Error: {message}")));
+            Err(error) => {
+                // `if (error instanceof DaemonSessionCreateError) { print; exit(1) }
+                //  throw error;` (`main.ts:1528-1534`).
+                if !error.is_reported_at_interactive_attach() {
+                    rethrow_daemon_connection_error(&error, host);
+                    return;
+                }
+                eprintln!("{}", red(&format!("Error: {}", error.message)));
                 host.exit(1);
                 return;
             }
         };
         let (connection, summary) = connection;
-        // `resolveAttachModelFallbackMessage(summary, startupModel.modelFallbackMessage)`:
-        // the helpers live in the agents-view slice, which exports the same
-        // summary/firstMessage rules the interactive launch reads.
-        let attach_model_fallback_message = startup_model.model_fallback_message.clone();
+        // `const attachModelFallbackMessage = isFreshDefaultSession
+        //   ? startupModel.modelFallbackMessage
+        //   : resolveAttachModelFallbackMessage(summary, startupModel.modelFallbackMessage);`
+        // (`main.ts:1536-1538`). The helper is the real one
+        // (`daemon_session_list.rs:227-238` -> `daemon-session-list.ts:104-109`).
+        let attach_model_fallback_message = if is_fresh_default_session {
+            startup_model.model_fallback_message.clone()
+        } else {
+            resolve_attach_model_fallback_message(&summary, startup_model.model_fallback_message.as_deref())
+        };
 
         host.preload_code_highlighter();
         print_timings();
@@ -3052,8 +3213,15 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
         .await
         {
             Ok(connection) => connection,
-            Err(message) => {
-                eprintln!("{}", red(&format!("Error: {message}")));
+            Err(error) => {
+                // `if (error instanceof SessionAlreadyActiveError || error instanceof
+                //  DaemonSessionCreateError) { print; exit(1) } throw error;`
+                // (`main.ts:1615-1621`).
+                if !error.is_reported_at_daemon_client() {
+                    rethrow_daemon_connection_error(&error, host);
+                    return;
+                }
+                eprintln!("{}", red(&format!("Error: {}", error.message)));
                 host.exit(1);
                 return;
             }

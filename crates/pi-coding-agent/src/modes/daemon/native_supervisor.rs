@@ -303,6 +303,15 @@ impl Supervisor {
         match frame.header.get("outboundType").and_then(Value::as_str).unwrap_or("") {
             "roster_delta" => { self.consume_worker_roster_delta(worker, &frame.payload); return; }
             "roster_heartbeat" => return,
+            // daemon-supervisor.ts:5897-5901. TS also records `worker.heartbeatSnapshotStale`
+            // and calls `broadcastHeartbeatsChanged()` (7109-7114), which fans out to every
+            // client. Both are withheld here on purpose: this supervisor never advertises
+            // `heartbeat_catalog` (see `server_capabilities`), and
+            // `DAEMON_OUTBOUND_COMPATIBILITY` gates `heartbeats_changed` on exactly that
+            // capability (daemon-protocol.ts:1258), so a client must not act on the frame. The
+            // frame is consumed rather than forwarded: letting it fall through `forward_frame`
+            // would feed a non-event payload into the assistant-stream reconstructor.
+            "heartbeats_changed" => return,
             _ => {}
         }
         self.forward_frame(worker, frame);
@@ -1118,6 +1127,17 @@ impl Supervisor {
                 if response.success { self.pauses.lock().unwrap().remove(&pause_id); }
                 response.id = id; return Ok(Some(response));
             }
+            // `get_direct_worker_transport` (daemon-supervisor.ts:2159-2165) is refused because
+            // `issuePeerTransport` (5082-5146) is not ported: it needs the worker's
+            // `worker_register_peer_transport` grant (5120) answered by the worker side
+            // (daemon_mode.rs:9201-9231), `worker.peerTransportCapable` from the
+            // `peer_transport` capability in the worker_auth response (3629,
+            // worker_auth_advertises_roster's sibling `workerAuthAdvertisesPeerTransport` at
+            // 612-616), and a `get_daemon_socket_identity` read of the live worker socket
+            // (5105-5113). Advertising `direct_peer_transport` without them would hand clients
+            // a ticket this supervisor cannot mint, so the capability stays unadvertised and
+            // the rejection stays explicit. `prepare_update_restart` / `restart` need the
+            // update-restart transaction (2421-2423, 2415-2417).
             "get_direct_worker_transport" | "prepare_update_restart" | "restart" => return Err(format!("Daemon supervisor command is not implemented: {kind}")),
             _ => {}
         }
@@ -1154,6 +1174,17 @@ impl Supervisor {
             let supports_ui = body.get("supportsExtensionUi").and_then(Value::as_bool) == Some(true) || body.get("capabilities").and_then(Value::as_array).is_some_and(|capabilities| capabilities.iter().any(|value| value.as_str() == Some("extension_ui")));
             public.supports_extension_ui.store(supports_ui, std::sync::atomic::Ordering::SeqCst);
             body.insert("type".into(), json!("attach"));
+            // daemon-supervisor.ts:5451-5458 derives the forwarded list from the attaching
+            // client's own capabilities (`normalizeCapabilities`, 704-713) and ALWAYS sends
+            // `supportsExtensionUi: false`; the worker-side UI decision is made by the
+            // supervisor, not by the worker: TS re-asks the worker through `subscribeWorker`
+            // with the real flag (3660-3669).
+            body.insert("supportsExtensionUi".into(), json!(false));
+            // `slim_attach` / `chunked_snapshot` / `history_ranges` stay out of the list
+            // although TS:5451-5457 can add them: this port pins full snapshots (see
+            // `subscribe`, "Full snapshots avoid a private chunk cache at the public
+            // boundary") and reads `response.data.snapshot` directly, so a slim or chunked
+            // reply would be a snapshot the supervisor cannot consume.
             body.insert("capabilities".into(), json!(["attach_snapshot", "event_sequence"]));
             if let Some(client_id) = body.get("clientId").and_then(Value::as_str) { *public.id.lock().unwrap() = client_id.to_string(); }
             body.remove("clientId");
@@ -1303,23 +1334,42 @@ fn recovery_command(descriptor: &DaemonWorkerDescriptor) -> Result<Map<String, V
 /// `SUPERVISOR_SERVER_CAPABILITIES` (daemon-supervisor.ts:196-200):
 /// `[...DAEMON_DEFAULT_SERVER_CAPABILITIES, "agent_roster", "direct_peer_transport"]`.
 ///
-/// The TypeScript ADDS to the default list. The port must not subtract from it: every
-/// capability is a promise the supervisor keeps, and the client gates real commands on it.
-/// Dropping `client_owned_sessions` in particular made every `--print` run fail with
-/// "The running Prime Agent daemon does not support client_owned_sessions" (main.ts:1095-1098),
-/// even though the supervisor implements the whole owned-session lifecycle
-/// (`create` with `lifecycle: "client_owned"`, `promote_owned_session`, `complete_owned_session`).
-///
-/// Capabilities this supervisor genuinely does not serve yet are deliberately NOT advertised,
-/// so callers fall back instead of hanging. Each one is a known gap:
+/// The TypeScript ADDS to the default list. Two additions are served here, the third is not:
 ///   - `agent_roster`         - served (advertised below); roster rows, subscriptions and
 ///                              public `roster_update` pushes are implemented.
-///   - `direct_peer_transport` - `get_direct_worker_transport` is still rejected; clients then
-///                              keep the supervisor link and use plain jsonl.
-///   - `slim_attach`, `chunked_snapshot`, `history_ranges` - snapshot transfer modes the
-///     supervisor still serves as full snapshots.
-///   - `heartbeat_catalog`, `authoritative_child_roster`, `owned_session_recovery_context` -
-///     roster/heartbeat and recovery-context paths that are not wired to workers yet.
+///   - `client_owned_sessions`- served via `DAEMON_DEFAULT_SERVER_CAPABILITIES` itself; the
+///                              owned-session lifecycle (`create` with `lifecycle:
+///                              "client_owned"`, `promote_owned_session`,
+///                              `complete_owned_session`) is implemented. Dropping it made every
+///                              `--print` run fail with "The running Prime Agent daemon does not
+///                              support client_owned_sessions" (main.ts:1095-1098).
+///   - `direct_peer_transport`- NOT served. `dispatch` rejects
+///                              `get_direct_worker_transport`, and TS pairs that command with
+///                              `issuePeerTransport` (daemon-supervisor.ts:2159-2165, 5082-5146).
+///                              Advertising it would promise a ticket this port never issues, so
+///                              callers keep the supervisor link and plain jsonl instead.
+///
+/// Withheld capabilities. Each one is a promise the supervisor would have to keep, so it is
+/// deliberately NOT advertised and callers fall back instead of hanging. This filter is the
+/// honest divergence from TS 196-200; the functions that would have to be implemented here are:
+///   - `slim_attach`, `chunked_snapshot` - `subscribe` pins full snapshots
+///     ("Full snapshots avoid a private chunk cache at the public boundary"), and the
+///     attach path reads `response.data.snapshot` directly. TS instead streams through
+///     `SnapshotTranscriptCache` (`streamSnapshot`, daemon-supervisor.ts:5697-5776) and replies
+///     from `createStreamedAttachResult` (5681-5695). Required: that cache plus the
+///     `session_snapshot_begin/chunk/end/failed` writers.
+///   - `history_ranges` - needs the supervisor-side `get_history_range` routing and the
+///     `history` field on the cached snapshot (TS gates the snapshot on
+///     `wantsHistoryRanges`, daemon-supervisor.ts:5424-5436); the worker already serves the
+///     command (daemon_mode.rs `get_history_range`), the supervisor does not route it.
+///   - `heartbeat_catalog` - needs the worker-wide `heartbeats_list` fan-out with
+///     `worker.heartbeatSnapshot` / `heartbeatSnapshotStale` caching
+///     (daemon-supervisor.ts:2481-2535) and `broadcastHeartbeatsChanged` (7109-7114).
+///   - `authoritative_child_roster` - needs supervisor routing for `get_rlm_children`
+///     (`daemon_command_compatibility` gates it at revision 17); the port only forwards
+///     commands that carry `activeSessionId`.
+///   - `owned_session_recovery_context` - needs `command.recoveryConfig` handling in the
+///     owned-worker attach branch (daemon-supervisor.ts:5385-5396).
 fn server_capabilities() -> Vec<String> {
     let mut capabilities: Vec<String> = daemon_protocol::DAEMON_DEFAULT_SERVER_CAPABILITIES
         .iter()

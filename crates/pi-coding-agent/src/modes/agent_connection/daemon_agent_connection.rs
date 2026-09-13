@@ -288,6 +288,33 @@ impl DaemonResponse {
 /// `DaemonTransportClient` seam consumed by this adapter.
 pub trait DaemonTransportClient: Send + Sync {
     fn request(&self, command: Value, timeout_ms: Option<u64>) -> BoxFuture<Result<DaemonResponse, String>>;
+    /// `client.request(command, timeoutMs, { recoverable })` - daemon-client.ts:130-134
+    /// with the third argument this slice supplies.
+    ///
+    /// `recoverable: false` opts out of reconnect parking (daemon-client.ts:39-45):
+    /// a socket close must reject the request so the caller's own bounded retry
+    /// loop stays live, and the request must never be parked and replayed behind a
+    /// hello. The connection slice's `requestData` passes that third argument
+    /// (daemon-agent-connection.ts:1735-1740), so this seam has to carry it.
+    ///
+    /// GAP, owed by the two bridge impls outside this file
+    /// (`main_entry.rs:1803` `MainEntryDaemonTransport`,
+    /// `modes/telegram/worker.rs:438` `TelegramDaemonTransport`): their `request`
+    /// forwards only `command`/`timeout_ms` and hardcodes
+    /// `DaemonClientRequestOptions::default()`, whose `recoverable: None` resolves
+    /// to `true` in `daemon_client.rs:1037` (park). Those impls therefore do not
+    /// override this method yet, and the default below keeps their existing parked
+    /// behaviour instead of inventing a new one. The override they owe is
+    /// `DaemonClientRequestOptions { recoverable: Some(recoverable), .. }` handed to
+    /// `DaemonClient::request` (`daemon_client.rs:903-908`).
+    fn request_with_recoverable(
+        &self,
+        command: Value,
+        timeout_ms: Option<u64>,
+        _recoverable: bool,
+    ) -> BoxFuture<Result<DaemonResponse, String>> {
+        self.request(command, timeout_ms)
+    }
     fn on_message(&self, listener: Arc<dyn Fn(DaemonOutbound) + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
     fn on_close(&self, listener: Arc<dyn Fn(String) + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
     fn supports_server_capability(&self, capability: &str) -> bool;
@@ -388,6 +415,17 @@ fn format_error_sentence(error: &str) -> String {
 }
 
 /// `updateTransportReconnects` weak map, kept as a per-client single-flight slot.
+/// Clears `reconnect_in_flight` and wakes `dispose` when the recovery attempt ends,
+/// mirroring the TypeScript promise settling (`daemon-agent-connection.ts:1643-1646`).
+struct ReconnectScope(Arc<Mutex<Option<tokio::sync::broadcast::Sender<()>>>>);
+impl Drop for ReconnectScope {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.lock().unwrap().take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
 fn reconnect_daemon_transport_after_update(client: Arc<dyn DaemonTransportClient>) -> BoxFuture<Result<(), String>> {
     Box::pin(async move {
         client.disconnect_for_reconnect("update");
@@ -739,6 +777,10 @@ pub struct DaemonAgentConnection {
     session_input_pauses: Arc<Mutex<HashMap<String, AgentConnectionSessionInputPause>>>,
     session_input_pause_generation: Arc<Mutex<u64>>,
     owned_session_promotion_tail: Arc<tokio::sync::Mutex<()>>,
+    /// `this.reconnectPromise` (`daemon-agent-connection.ts:255`): the in-flight recovery
+    /// attempt that `dispose()` races against `OWNED_SESSION_DISPOSE_RECONNECT_WAIT_MS`
+    /// (`daemon-agent-connection.ts:1594-1598`).
+    reconnect_in_flight: Arc<Mutex<Option<tokio::sync::broadcast::Sender<()>>>>,
     last_event_cursor: Arc<Mutex<Option<DaemonEventCursor>>>,
     retired_event_generations: Arc<Mutex<HashSet<String>>>,
     last_event_sequence: Arc<Mutex<Option<i64>>>,
@@ -796,6 +838,7 @@ impl DaemonAgentConnection {
             session_input_pauses: Arc::new(Mutex::new(HashMap::new())),
             session_input_pause_generation: Arc::new(Mutex::new(0)),
             owned_session_promotion_tail: Arc::new(tokio::sync::Mutex::new(())),
+            reconnect_in_flight: Arc::new(Mutex::new(None)),
             last_event_cursor: Arc::new(Mutex::new(None)),
             retired_event_generations: Arc::new(Mutex::new(HashSet::new())),
             last_event_sequence: Arc::new(Mutex::new(None)),
@@ -1095,8 +1138,10 @@ impl DaemonAgentConnection {
         timeout_ms: Option<u64>,
         recoverable: bool,
     ) -> Result<Value, String> {
-        let _ = recoverable;
-        let response = self.client.request(command.clone(), timeout_ms).await?;
+        let response = self
+            .client
+            .request_with_recoverable(command.clone(), timeout_ms, recoverable)
+            .await?;
         if !response.success {
             return Err(response
                 .error
@@ -1508,7 +1553,7 @@ impl DaemonAgentConnection {
                 // parking them behind a hello it can never produce.
                 let response = self
                     .client
-                    .request(command_body("list", vec![]), Some(30000))
+                    .request_with_recoverable(command_body("list", vec![]), Some(30000), false)
                     .await?;
                 if *self.disposed.lock().unwrap() {
                     return Ok(true);
@@ -1565,6 +1610,11 @@ impl DaemonAgentConnection {
 
     /// `reconnect(cause)`: single-flight through `reconnectPromise`.
     async fn reconnect(&self, cause: String) -> Result<(), String> {
+        // Publish `this.reconnectPromise`'s completion signal so `dispose` can await it
+        // (`daemon-agent-connection.ts:1643-1646` stores the promise; `:1594` races it).
+        let (reconnect_done, _) = tokio::sync::broadcast::channel::<()>(1);
+        *self.reconnect_in_flight.lock().unwrap() = Some(reconnect_done.clone());
+        let _reconnect_scope = ReconnectScope(self.reconnect_in_flight.clone());
         self.emit(AgentConnectionEvent::ConnectionStatus {
             status: "reconnecting".to_string(),
             error: Some(cause.clone()),
@@ -2215,6 +2265,27 @@ impl DaemonAgentConnection {
             return;
         }
         *self.disposing.lock().unwrap() = true;
+        // `if (this.options.ownedSession && !this.client.isConnected && this.reconnectPromise)
+        //      await Promise.race([this.reconnectPromise, delay(...)])`
+        // (`daemon-agent-connection.ts:1594-1598`). Dispose must not tear the connection
+        // down while a recovery attempt is still running.
+        if self.options.lock().unwrap().owned_session && !self.client.is_connected() {
+            let in_flight = self
+                .reconnect_in_flight
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|sender| sender.subscribe());
+            if let Some(mut receiver) = in_flight {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(OWNED_SESSION_DISPOSE_RECONNECT_WAIT_MS),
+                    async {
+                        while receiver.recv().await.is_ok() {}
+                    },
+                )
+                .await;
+            }
+        }
         *self.disposed.lock().unwrap() = true;
         *self.update_restart_pending.lock().unwrap() = false;
         let side_questions: Vec<String> = self.active_side_question_ids.lock().unwrap().iter().cloned().collect();

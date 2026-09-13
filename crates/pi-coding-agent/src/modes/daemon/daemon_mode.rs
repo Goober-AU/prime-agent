@@ -2594,6 +2594,80 @@ impl AgentDaemon {
         self.schedule_supervisor_fence_check();
     }
 
+    /// `waitForPromptAdmission(claimCheck, parsedAdmission?.controller?.signal)`
+    /// (`daemon-mode.ts:3850`).
+    ///
+    /// TS observes the already-running fence check even if admission cancellation wins
+    /// (`daemon-mode.ts:3846-3848`), and on cancellation `void claimCheck.catch(...)`
+    /// revokes only the exact binding that initiated it (`:3859-3863`).
+    ///
+    /// Divergence: the shared Rust `waitForPromptAdmission` port
+    /// (`core/prompt_admission.rs:61`) requires a `'static` future, so it cannot observe
+    /// the in-flight `assert_supervisor_claim_current` borrow. The cancellation branch
+    /// re-drives the same check against the same bound claim instead of observing the
+    /// first one; the observable effect (revoke on stale, survive on replacement) is the
+    /// same because both calls read the same owner record.
+    ///
+    /// Returns `(claim_check, admission_cancelled)`. `claim_check` keeps the
+    /// `assert_supervisor_claim_current` error string shape the caller maps to the
+    /// `supervisor_generation_stale` failure (`:3856-3882`).
+    async fn await_supervisor_claim_admission(
+        self: &Arc<Self>,
+        client_key: usize,
+        bound_claim: &BoundSupervisorGenerationClaim,
+        admission_signal: Option<tokio_util::sync::CancellationToken>,
+    ) -> (Result<String, String>, bool) {
+        let Some(signal) = admission_signal else {
+            return (
+                self.assert_supervisor_claim_current(
+                    &bound_claim.claim,
+                    Some(&bound_claim.owner_fingerprint),
+                )
+                .await,
+                false,
+            );
+        };
+        let check = self.assert_supervisor_claim_current(
+            &bound_claim.claim,
+            Some(&bound_claim.owner_fingerprint),
+        );
+        // `wait_for_prompt_admission` (core/prompt_admission.rs) requires a `'static`
+        // future, so the same "await unless the signal aborts first" race is run here
+        // with `tokio::select!` over the borrowed check.
+        let claim_check = tokio::select! {
+            result = check => Some(result),
+            _ = signal.cancelled() => None,
+        };
+        match claim_check {
+            Some(claim_check) => (claim_check, false),
+            None => {
+                // The fence check remains authoritative after cancellation: it revokes
+                // only the binding that it checked (`daemon-mode.ts:3859-3863`).
+                let daemon = Arc::clone(self);
+                let bound_claim = bound_claim.clone();
+                tokio::spawn(async move {
+                    let result = daemon
+                        .assert_supervisor_claim_current(
+                            &bound_claim.claim,
+                            Some(&bound_claim.owner_fingerprint),
+                        )
+                        .await;
+                    if result.is_err()
+                        && daemon.revoke_supervisor_claim(client_key, Some(&bound_claim))
+                    {
+                        if let Some(client) = daemon.client_by_key(client_key) {
+                            client.writer.end();
+                        }
+                    }
+                });
+                (
+                    Err(PromptAdmissionCancelledError::default().to_string()),
+                    true,
+                )
+            }
+        }
+    }
+
     /// `assertSupervisorClaimCurrent(claim, validatedFingerprint?)`.
     async fn assert_supervisor_claim_current(
         &self,
@@ -3809,12 +3883,13 @@ impl AgentDaemon {
                         .get(key)
                         .and_then(|admission| admission.controller.clone())
                 });
-                let check = self.assert_supervisor_claim_current(
-                    &bound_claim.claim,
-                    Some(&bound_claim.owner_fingerprint),
-                );
-                let claim_check = check.await;
-                let admission_cancelled = false;
+                let (claim_check, admission_cancelled) = self
+                    .await_supervisor_claim_admission(
+                        client_key,
+                        &bound_claim,
+                        admission_signal,
+                    )
+                    .await;
                 match claim_check {
                     Ok(owner_fingerprint) => {
                         let current = self
@@ -3837,7 +3912,6 @@ impl AgentDaemon {
                         }
                     }
                     Err(error) => {
-                        let _ = admission_signal;
                         clear_parsed_admission();
                         let current = self
                             .supervisor_claims
@@ -8845,6 +8919,9 @@ impl AgentDaemon {
                     snapshot,
                     message_count,
                     transcript,
+                    // `streamWorkerSnapshot(client, streamedResult, transcript, "attach", ...)`
+                    // (`daemon-mode.ts:4296-4302`).
+                    "attach",
                     signal,
                     true,
                 )
@@ -8884,6 +8961,10 @@ impl AgentDaemon {
     }
 
     /// `streamWorkerSnapshot(client, result, transcript, purpose, signal, snapshotAlreadyMarked)`.
+    ///
+    /// `purpose` is `"attach" | "replacement" | "catchup"` (`daemon-mode.ts:5554`), the
+    /// same three values the private-frame header validator accepts
+    /// (`daemon_worker_protocol.rs:97-99` -> `daemon-worker-protocol.ts:257-280`).
     #[allow(clippy::too_many_arguments)]
     async fn stream_worker_snapshot(
         self: &Arc<Self>,
@@ -8893,6 +8974,7 @@ impl AgentDaemon {
         snapshot: Value,
         message_count: usize,
         transcript: crate::modes::daemon::snapshot_transcript_cache::SnapshotTranscriptChunks,
+        purpose: &str,
         transfer_signal: tokio_util::sync::CancellationToken,
         snapshot_already_marked: bool,
     ) -> Result<(), String> {
@@ -8924,31 +9006,47 @@ impl AgentDaemon {
             "snapshot": snapshot_without_messages,
             "messageCount": message_count as f64,
             "targetChunkBytes": SNAPSHOT_TARGET_CHUNK_BYTES as f64,
-            "purpose": "attach",
+            // `purpose === "catchup" ? "resync" : purpose` (`daemon-mode.ts:5593`).
+            "purpose": if purpose == "catchup" { "resync" } else { purpose },
         });
+        // `deliverSnapshotFailure` awaits the record write (`daemon-mode.ts:5616-5630`),
+        // so the closure yields a future here too. The future owns its captures because
+        // the record write is awaited by callers that keep borrowing `client`.
         let deliver_failure = |error: &str| {
-            self.write_worker_snapshot_record(
-                client,
-                &serde_json::json!({
-                    "type": "session_snapshot_failed",
-                    "activeSessionId": active_session_id,
-                    "snapshotId": stream_id,
-                    "error": error,
-                }),
-                Some(WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS),
-            )
+            let daemon = Arc::clone(self);
+            let client = Arc::clone(client);
+            let purpose = purpose.to_string();
+            let payload = serde_json::json!({
+                "type": "session_snapshot_failed",
+                "activeSessionId": active_session_id.clone(),
+                "snapshotId": stream_id,
+                "error": error,
+            });
+            async move {
+                daemon
+                    .write_worker_snapshot_record(
+                        &client,
+                        &payload,
+                        &purpose,
+                        Some(WORKER_SNAPSHOT_TERMINAL_DRAIN_TIMEOUT_MS),
+                    )
+                    .await
+            }
         };
         if transfer_signal.is_cancelled() {
             let message = format!("Snapshot {stream_id} was aborted");
-            deliver_failure(&message);
+            deliver_failure(&message).await;
             let mut client_mut = Arc::clone(client);
             finish_client_snapshot_streaming(&mut client_mut, &active_session_id);
             return Ok(());
         }
-        if !self.write_worker_snapshot_record(client, &snapshot_begin, Some(0)) {
+        if !self
+            .write_worker_snapshot_record(client, &snapshot_begin, purpose, Some(0))
+            .await
+        {
             if transfer_signal.is_cancelled() {
                 let message = format!("Snapshot {stream_id} was aborted");
-                deliver_failure(&message);
+                deliver_failure(&message).await;
             }
             let mut client_mut = Arc::clone(client);
             finish_client_snapshot_streaming(&mut client_mut, &active_session_id);
@@ -8959,7 +9057,7 @@ impl AgentDaemon {
         loop {
             if transfer_signal.is_cancelled() {
                 let message = format!("Snapshot {stream_id} was aborted");
-                deliver_failure(&message);
+                deliver_failure(&message).await;
                 break;
             }
             let Some(chunk) = chunks.next() else {
@@ -8972,14 +9070,15 @@ impl AgentDaemon {
                     "lastEventSequence": last_event_sequence as f64,
                     "lastEventCursor": { "generation": event_generation, "sequence": last_event_sequence },
                 });
-                self.write_worker_snapshot_record(client, &end, Some(0));
+                self.write_worker_snapshot_record(client, &end, purpose, Some(0))
+                    .await;
                 break;
             };
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(error) => {
                     let message = format!("Snapshot {stream_id} was aborted: {error}");
-                    deliver_failure(&message);
+                    deliver_failure(&message).await;
                     break;
                 }
             };
@@ -9000,11 +9099,14 @@ impl AgentDaemon {
             // `writeWorkerSnapshotBuffer`, which frames for a private-framed client).
             let chunk_value: Value = serde_json::from_str(line.trim())
                 .unwrap_or_else(|_| Value::Null);
-            if !self.write_worker_snapshot_record(client, &chunk_value, None) {
+            if !self
+                .write_worker_snapshot_record(client, &chunk_value, purpose, None)
+                .await
+            {
                 client.set_backpressured(true);
                 if transfer_signal.is_cancelled() {
                     let message = format!("Snapshot {stream_id} was aborted");
-                    deliver_failure(&message);
+                    deliver_failure(&message).await;
                 }
                 break;
             }
@@ -9024,17 +9126,36 @@ impl AgentDaemon {
         Ok(())
     }
 
-    /// `writeWorkerSnapshotRecord(...)`.
-    fn write_worker_snapshot_record(
+    /// `writeWorkerSnapshotRecord(client, message, purpose, signal?, drainTimeoutMs?)`.
+    ///
+    /// `purpose` is the private-frame header field `snapshotPurpose`. Valid values are
+    /// exactly `attach | replacement | catchup` (`daemon_worker_protocol.rs:97-99`
+    /// validates that set against `daemon-worker-protocol.ts:257-280`), matching the
+    /// TypeScript parameter type `daemon-mode.ts:5710`.
+    async fn write_worker_snapshot_record(
         self: &Arc<Self>,
         client: &Arc<DaemonClientHandle>,
         message: &Value,
-        _drain_timeout_ms: Option<u64>,
+        purpose: &str,
+        drain_timeout_ms: Option<u64>,
     ) -> bool {
         if client.writer.destroyed() {
             return false;
         }
-        self.write(client, &DaemonOutbound::Raw(message.clone()))
+        // `daemon-mode.ts:5714-5721` forwards `purpose` into `writeWorkerSnapshotBuffer`,
+        // which passes it to `writeSerialized(..., "jsonl", purpose)` (`:5735`) - the only
+        // place the header field is written (`daemon-mode.ts:7647`), so the raw `write`
+        // path cannot carry it.
+        //
+        // Gap: `writeWorkerSnapshotBuffer`'s drain branch
+        // (`daemon-mode.ts:5738-5768`) is still unported inside
+        // `write_worker_snapshot_buffer` below, so a rejected `socket.write` never waits
+        // for `drain`; that helper returns `false` in that case, exactly as here.
+        let raw = DaemonOutbound::Raw(message.clone());
+        let line = serialize_json_line(message);
+        let aborted = false;
+        self.write_worker_snapshot_buffer(client, line.into_bytes(), &raw, purpose, aborted, drain_timeout_ms)
+            .await
     }
 
     /// `createConnectionState(state)`.
@@ -13371,6 +13492,9 @@ impl AgentDaemon {
                         snapshot,
                         message_count,
                         transcript,
+                        // `purpose === "replacement" ? "replacement" : "catchup"`
+                        // (`daemon-mode.ts:7523`).
+                        if purpose == "replacement" { "replacement" } else { "catchup" },
                         signal,
                         true,
                     )
@@ -13583,6 +13707,8 @@ impl AgentDaemon {
                     snapshot,
                     message_count,
                     transcript,
+                    // `daemon-mode.ts:7124` passes the literal `"replacement"`.
+                    "replacement",
                     snapshot_signal,
                     true,
                 )
