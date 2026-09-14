@@ -1872,6 +1872,78 @@ mod tests {
     use crate::core::prime_inference_auth::HttpResponse;
     use serde_json::json;
 
+    /// Serializes env-mutating tests and restores the process environment when
+    /// dropped, including on panic.
+    ///
+    /// `cargo test` runs test functions on parallel threads inside ONE process,
+    /// and `std::env` is process-global. Two failure modes follow, and a
+    /// restore-on-drop journal alone only fixes the second:
+    ///
+    /// 1. Interleaving. Test A sets `PRIME_AGENT_TRACES_API_KEY` and then awaits;
+    ///    test B removes the same variable mid-await, so A's credential lookup
+    ///    sees no key. Restoring on drop cannot help, because B's remove is
+    ///    immediate. `ScopedEnv` therefore also holds `env_lock()` for its whole
+    ///    lifetime, so only one such test can be inside its body at a time.
+    /// 2. Leakage. A test leaves its value (or its temp `ENV_AGENT_DIR`) behind
+    ///    for whatever runs next. `Drop` restores the previous value, including
+    ///    the previous *absence* (`None`).
+    ///
+    /// Same journal shape as `auth_storage.rs`'s `EnvRestore`, plus the lock.
+    struct ScopedEnv {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Vec<(String, Option<String>)>,
+    }
+
+    /// One lock per process for every test that depends on the trace environment.
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    impl ScopedEnv {
+        fn new() -> Self {
+            // A panicking test poisons the lock; the next test must still run,
+            // so recover the guard instead of failing the whole binary.
+            let lock = env_lock()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            ScopedEnv {
+                _lock: lock,
+                previous: Vec::new(),
+            }
+        }
+
+        /// Set `name`, remembering the value it had before this call.
+        fn set(&mut self, name: &str, value: &str) {
+            self.remember(name);
+            std::env::set_var(name, value);
+        }
+
+        /// Remove `name`, remembering the value it had before this call.
+        fn remove(&mut self, name: &str) {
+            self.remember(name);
+            std::env::remove_var(name);
+        }
+
+        fn remember(&mut self, name: &str) {
+            if self.previous.iter().any(|(saved, _)| saved == name) {
+                return;
+            }
+            self.previous.push((name.to_string(), std::env::var(name).ok()));
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            for (name, value) in self.previous.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(&name, value),
+                    None => std::env::remove_var(&name),
+                }
+            }
+        }
+    }
+
     fn write_session(dir: &Path, name: &str, lines: &[Value]) -> String {
         let path = dir.join(name);
         let body: String = lines
@@ -2073,6 +2145,9 @@ mod tests {
 
     #[test]
     fn outbox_entries_are_per_session_and_round_trip() {
+        // The outbox path resolves through `ENV_AGENT_DIR` (`get_agent_dir`), so a
+        // test that re-points that variable must not run while this one does.
+        let _env = ScopedEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let session = dir.path().join("s.jsonl");
         std::fs::write(&session, "{}\n").unwrap();
@@ -2126,6 +2201,9 @@ mod tests {
 
     #[tokio::test]
     async fn upload_skips_when_disabled_or_missing_credentials() {
+        // This test asserts `MissingCredentials`, which is only true while no other
+        // test has `PRIME_AGENT_TRACES_API_KEY` set. Hold the lock so it can be.
+        let _env = ScopedEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let session = write_session(dir.path(), "s.jsonl", &[session_header("s1", "cwd")]);
 
@@ -2175,11 +2253,12 @@ mod tests {
                 })
             }) as BoxFuture<Result<HttpResponse, String>>
         });
-        std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
+        let mut env = ScopedEnv::new();
+        env.set("PRIME_AGENT_TRACES_API_KEY", "trace-key");
         let mut options = test_options(Some(session.clone()), Some(fetch_fn));
         options.require_enabled = true;
         let result = upload_agent_trace_file(options).await;
-        std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
+        env.remove("PRIME_AGENT_TRACES_API_KEY");
         match result {
             AgentTraceUploadResult::Uploaded {
                 session_id,
@@ -2227,10 +2306,11 @@ mod tests {
                 })
             }) as BoxFuture<Result<HttpResponse, String>>
         });
-        std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
+        let mut env = ScopedEnv::new();
+        env.set("PRIME_AGENT_TRACES_API_KEY", "trace-key");
         let options = test_options(Some(session), Some(fetch_fn));
         let result = upload_agent_trace_file(options).await;
-        std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
+        env.remove("PRIME_AGENT_TRACES_API_KEY");
         assert_eq!(
             result,
             AgentTraceUploadResult::Failed {
@@ -2246,7 +2326,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let session = write_session(dir.path(), "s.jsonl", &[session_header("s1", "cwd")]);
         std::fs::write(&session, vec![b'x'; (MAX_TRACE_BYTES + 1) as usize]).unwrap();
-        std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
+        let mut env = ScopedEnv::new();
+        env.set("PRIME_AGENT_TRACES_API_KEY", "trace-key");
         let result = upload_agent_trace_file(test_options(Some(session.clone()), None)).await;
         assert_eq!(
             result,
@@ -2257,13 +2338,14 @@ mod tests {
         );
         std::fs::write(&session, "").unwrap();
         let result = upload_agent_trace_file(test_options(Some(session), None)).await;
-        std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
+        env.remove("PRIME_AGENT_TRACES_API_KEY");
         assert_eq!(result, AgentTraceUploadResult::EmptySession);
     }
 
     #[tokio::test]
     async fn credential_precedence_matches_typescript() {
-        std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
+        let mut env = ScopedEnv::new();
+        env.set("PRIME_AGENT_TRACES_API_KEY", "trace-key");
         let mut storage = AuthStorage::in_memory(
             IndexMap::new(),
             Some(crate::core::auth_storage::AuthStorageOptions {
@@ -2275,15 +2357,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(credential.label, "PRIME_AGENT_TRACES_API_KEY");
-        std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
+        env.remove("PRIME_AGENT_TRACES_API_KEY");
 
-        std::env::set_var("PRIME_API_KEY", "prime-key");
+        env.set("PRIME_API_KEY", "prime-key");
         let credential = get_prime_agent_trace_credential(&mut storage, false, None)
             .await
             .unwrap();
         assert_eq!(credential.label, "PRIME_API_KEY");
         assert_eq!(credential.source, "environment");
-        std::env::remove_var("PRIME_API_KEY");
+        env.remove("PRIME_API_KEY");
     }
 
     fn install_options(
@@ -2321,6 +2403,9 @@ mod tests {
     /// `SessionManager` and checks both.
     #[tokio::test]
     async fn install_registers_on_persist_so_a_persist_schedules_an_upload() {
+        // The controller this test installs writes outbox entries, whose directory
+        // resolves through `ENV_AGENT_DIR`. Serialize with the tests that re-point it.
+        let _env = ScopedEnv::new();
         // Consume the one-shot startup catch-up so no background sweep of the
         // shared outbox directory runs concurrently with this test.
         catch_up_triggered().swap(true, std::sync::atomic::Ordering::SeqCst);
@@ -2420,8 +2505,14 @@ mod tests {
         // directory, so without the same isolation this test also scans whatever
         // entries an earlier test in this binary left behind and counts their
         // missing session files as prunes.
-        let previous_agent_dir = std::env::var(crate::config::env_agent_dir()).ok();
-        std::env::set_var(crate::config::env_agent_dir(), dir.path().to_string_lossy().to_string());
+        // The guard restores the previous `ENV_AGENT_DIR` (or its absence) when
+        // this test ends, on the panic path too, so a parallel test never
+        // inherits this temp directory.
+        let mut env = ScopedEnv::new();
+        env.set(
+            crate::config::env_agent_dir(),
+            &dir.path().to_string_lossy().to_string(),
+        );
         let missing = dir.path().join("gone.jsonl").to_string_lossy().to_string();
         assert!(mark_agent_trace_outbox_pending_sync(&missing, None));
         let ledger = dir.path().join("edges.jsonl");
@@ -2437,10 +2528,6 @@ mod tests {
         assert_eq!(catch_up.pruned, 1);
         assert_eq!(catch_up.semantic_edge_ledgers_pending, 1);
         assert!(catch_up.results.is_empty());
-        match previous_agent_dir {
-            Some(value) => std::env::set_var(crate::config::env_agent_dir(), value),
-            None => std::env::remove_var(crate::config::env_agent_dir()),
-        }
     }
 
     #[tokio::test]
@@ -2460,7 +2547,8 @@ mod tests {
                 })
             }) as BoxFuture<Result<HttpResponse, String>>
         });
-        std::env::set_var("PRIME_AGENT_TRACES_API_KEY", "trace-key");
+        let mut env = ScopedEnv::new();
+        env.set("PRIME_AGENT_TRACES_API_KEY", "trace-key");
         let progress: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(Vec::new()));
         let progress_sink = progress.clone();
         let result = upload_all_agent_traces(&AgentTraceUploadAllOptions {
@@ -2472,7 +2560,6 @@ mod tests {
             })),
         })
         .await;
-        std::env::remove_var("PRIME_AGENT_TRACES_API_KEY");
         assert_eq!(result.total, 2);
         assert_eq!(result.uploaded, 2);
         assert_eq!(result.failed, 0);
