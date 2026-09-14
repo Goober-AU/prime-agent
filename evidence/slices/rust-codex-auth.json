@@ -1,0 +1,13 @@
+{
+  "slice": "rust-codex-auth",
+  "files": [
+    "crates/pi-coding-agent/src/core/auth_storage.rs",
+    "crates/pi-coding-agent/src/core/model_registry.rs",
+    "crates/pi-coding-agent/src/modes/interactive/auth_flows.rs",
+    "crates/pi-coding-agent/tests/oauth_auth_storage.rs",
+    "docs/RUST_LAUNCHER.md",
+    "packages/coding-agent/.changes/rust-codex-auth.md",
+    "evidence/status/rust-codex-auth.json"
+  ],
+  "purpose": "Connect credential resolution to the real shared OAuth registry and validate Codex credential refresh and shared-file locking"
+}

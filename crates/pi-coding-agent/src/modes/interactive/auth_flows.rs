@@ -1046,11 +1046,11 @@ mod tests {
     async fn unknown_mcp_integration_reports_failure() {
         let host = host();
         let flows = ProviderAuthFlows::new(&host);
-        let result = flows.run_mcp_login("linear", None).await;
+        let result = flows.run_mcp_login("not-a-real-integration", None).await;
         assert_eq!(result, AuthenticationResult::Failed);
         assert_eq!(
             host.errors.lock().expect("errors").first().map(|value| value.as_str()),
-            Some("Unknown MCP integration: linear")
+            Some("Unknown MCP integration: not-a-real-integration")
         );
     }
 
@@ -1058,13 +1058,21 @@ mod tests {
     async fn empty_login_options_report_the_exact_status() {
         let host = host();
         let flows = ProviderAuthFlows::new(&host);
-        // Only Serper is offered, so an oauth-only filter is empty.
-        let result = flows.run_login(ProviderLoginOptions { auth_type: Some("oauth".into()), initial_category: None }).await;
+        let result = flows.run_login(ProviderLoginOptions { auth_type: Some("unknown-auth-type".into()), initial_category: None }).await;
         assert_eq!(result, AuthenticationResult::Failed);
         assert_eq!(
             host.statuses.lock().expect("statuses").first().map(|value| value.as_str()),
-            Some("No subscription providers available.")
+            Some("No providers available.")
         );
+    }
+
+    #[test]
+    fn subscription_login_options_include_builtin_codex() {
+        let host = host();
+        let flows = ProviderAuthFlows::new(&host);
+        let options = flows.get_login_provider_options(Some("oauth"));
+        assert!(options.iter().any(|option| option.id == "openai-codex"));
+        assert!(options.iter().all(|option| option.auth_type == "oauth"));
     }
 
     #[test]
