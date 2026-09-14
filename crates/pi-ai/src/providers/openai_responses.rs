@@ -942,7 +942,11 @@ mod tests {
         assert_eq!(params["model"], json!("gpt-5.4"));
         assert_eq!(params["stream"], json!(true));
         assert_eq!(params["store"], json!(false));
-        assert_eq!(params["prompt_cache_retention"], json!(null));
+        // openai-responses.ts:87-92 `getPromptCacheRetention` returns `"24h" | undefined`, and
+        // JSON.stringify (openai-responses.ts:265) drops an undefined value, so a non-long-lived
+        // retention OMITS the key entirely - TS never sends an explicit null (measured under Node
+        // on this host: JSON.stringify({prompt_cache_retention: undefined}) === {"model":"m","store":false}).
+        assert!(!params.contains_key("prompt_cache_retention"));
         assert!(!params.contains_key("prompt_cache_key"));
         assert!(!params.contains_key("max_output_tokens"));
         assert!(!params.contains_key("temperature"));
