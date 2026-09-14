@@ -37,13 +37,24 @@ impl HistoryRuntime {
         }
     }
 
+    /// Replaces the transcript with the attached session's messages.
+    ///
+    /// The recent-first window is optional metadata. TypeScript renders the plain
+    /// transcript when `snapshot.history` is absent (interactive-mode.ts:6759-6767)
+    /// and reports an unusable window through `showError` without failing the
+    /// attachment (:5302-5304); the daemon likewise degrades to the full legacy
+    /// snapshot instead of dropping or misidentifying it
+    /// (modes/daemon/daemon-mode.ts:5507-5509). The unusable window therefore
+    /// degrades to the same full-transcript render here and its message is returned
+    /// for the caller to report, instead of propagating out of the host and killing
+    /// startup/resync (handoff defect 5).
     pub(super) fn reset(
         &mut self,
         history: Option<wire::AgentConnectionHistoryWindow>,
         messages: Vec<AgentMessage>,
         transcript: &Rc<RefCell<Transcript>>,
         editor: &Rc<RefCell<CustomEditor>>,
-    ) -> Result<(), String> {
+    ) -> Option<String> {
         self.generation = self.generation.wrapping_add(1);
         if let Some(task) = self.task.take() {
             task.abort();
@@ -61,8 +72,18 @@ impl HistoryRuntime {
                 }
             }
         }
+        let mut warning = None;
+        let history = match history {
+            Some(history) => match validate(&history, messages.len()) {
+                Ok(()) => Some(history),
+                Err(error) => {
+                    warning = Some(error);
+                    None
+                }
+            },
+            None => None,
+        };
         if let Some(history) = history {
-            validate(&history, messages.len())?;
             self.loaded = Some(LoadedAgentConnectionHistory {
                 window: window(history),
                 messages: messages.clone(),
@@ -75,7 +96,7 @@ impl HistoryRuntime {
         } else {
             transcript.borrow_mut().replace(messages);
         }
-        Ok(())
+        warning
     }
 
     pub(super) fn request(&mut self, mode: &InteractiveMode) {
@@ -176,6 +197,168 @@ fn validate(history: &wire::AgentConnectionHistoryWindow, messages: usize) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pi_ai::types::{
+        AssistantMessage, ContentBlock, Message as AiMessage, TextContent, UserContent, UserMessage,
+    };
+
+    /// A connection that a test never calls: `reset` is pure transcript work.
+    fn unused_connection() -> Arc<dyn wire::AgentConnection> {
+        let client =
+            crate::modes::daemon::daemon_client::DaemonClient::create("unused-test-socket");
+        Arc::new(
+            crate::modes::agent_connection::daemon_agent_connection::DaemonAgentConnection::new(
+                Arc::new(crate::main_entry::MainEntryDaemonTransport::new(client)),
+                "active".to_string(),
+                Default::default(),
+            ),
+        )
+    }
+
+    fn user_message(text: &str) -> AgentMessage {
+        AgentMessage::Message(AiMessage::User(UserMessage::new(
+            UserContent::Text(text.to_string()),
+            0,
+        )))
+    }
+
+    fn streaming_assistant_message(text: &str) -> AgentMessage {
+        AgentMessage::Message(AiMessage::Assistant(AssistantMessage {
+            content: vec![ContentBlock::Text(TextContent::new(text))],
+            ..Default::default()
+        }))
+    }
+
+    fn transcript_text(transcript: &Rc<RefCell<Transcript>>) -> String {
+        transcript
+            .borrow_mut()
+            .render(80.0)
+            .iter()
+            .map(|line| pi_tui::utils::strip_ansi(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn fixture(
+        session_id: &str,
+    ) -> (
+        Rc<RefCell<Transcript>>,
+        Rc<RefCell<CustomEditor>>,
+        HistoryRuntime,
+    ) {
+        let mode = Rc::new(RefCell::new(super::super::tests::stash_mode(session_id)));
+        let transcript = Rc::new(RefCell::new(Transcript::new(mode)));
+        let tui = Rc::new(RefCell::new(TUI::new(
+            Box::new(pi_tui::terminal::ProcessTerminal::new()),
+            None,
+        )));
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            tui,
+            editor_theme(),
+            CustomEditorOptions::default(),
+        )));
+        (transcript, editor, HistoryRuntime::new(unused_connection()))
+    }
+
+    fn valid_window(entry_ids: &[&str]) -> wire::AgentConnectionHistoryWindow {
+        wire::AgentConnectionHistoryWindow {
+            version: 1.0,
+            generation: "generation-1".into(),
+            representation: "model".into(),
+            tip_entry_id: Some("tip".into()),
+            total_message_count: entry_ids.len() as f64,
+            start_index: 0.0,
+            entry_ids: entry_ids.iter().map(|id| (*id).to_string()).collect(),
+            has_older: false,
+            order: "chronological".into(),
+        }
+    }
+
+    /// DEFECT 5: an unusable optional history window degrades to the full-transcript
+    /// render instead of aborting the attachment (interactive-mode.ts:6759-6767
+    /// renders the plain transcript when `snapshot.history` is unusable).
+    #[test]
+    fn malformed_optional_history_keeps_a_usable_transcript() {
+        let (transcript, editor, mut runtime) = fixture("history-malformed");
+        let messages = vec![user_message("KEEP_ME_VISIBLE")];
+        // Entry ids disagree with the messages, which is exactly what
+        // `validate` rejects.
+        let mut history = valid_window(&["entry-1"]);
+        history.entry_ids = vec!["entry-1".into(), "entry-2".into()];
+
+        let error = apply_history_snapshot(
+            Some(history),
+            messages,
+            None,
+            &transcript,
+            &editor,
+            &mut runtime,
+        );
+
+        assert_eq!(
+            error.as_deref(),
+            Some("Received an invalid recent-first session history window"),
+            "the unusable window must be reported, not propagated as a fatal error"
+        );
+        let rendered = transcript_text(&transcript);
+        assert!(
+            rendered.contains("KEEP_ME_VISIBLE"),
+            "the transcript must stay usable after malformed optional history: {rendered:?}"
+        );
+        assert!(
+            runtime.loaded.is_none(),
+            "an unusable window must not become the pinned paging state"
+        );
+    }
+
+    /// DEFECT 1: the in-flight response survives the initial attach, with
+    /// recent-first metadata (interactive-mode.ts:6865-6871 renders the transcript
+    /// first and restores the streaming message afterwards).
+    #[test]
+    fn streaming_response_survives_the_initial_attach_with_history_metadata() {
+        let (transcript, editor, mut runtime) = fixture("history-streaming-window");
+        let messages = vec![user_message("EARLIER_TURN")];
+        let error = apply_history_snapshot(
+            Some(valid_window(&["entry-1"])),
+            messages,
+            Some(streaming_assistant_message("IN_FLIGHT_REPLY")),
+            &transcript,
+            &editor,
+            &mut runtime,
+        );
+        assert_eq!(error, None, "the window is valid");
+        let rendered = transcript_text(&transcript);
+        assert!(
+            rendered.contains("IN_FLIGHT_REPLY"),
+            "the paged history reset must not discard the streaming row: {rendered:?}"
+        );
+    }
+
+    /// DEFECT 1 without recent-first metadata: the same ordering holds on the
+    /// legacy full-snapshot attach path (interactive-mode.ts:6759-6766).
+    #[test]
+    fn streaming_response_survives_the_initial_attach_without_history_metadata() {
+        let (transcript, editor, mut runtime) = fixture("history-streaming-plain");
+        let messages = vec![user_message("EARLIER_TURN")];
+        let error = apply_history_snapshot(
+            None,
+            messages,
+            Some(streaming_assistant_message("IN_FLIGHT_REPLY")),
+            &transcript,
+            &editor,
+            &mut runtime,
+        );
+        assert_eq!(error, None, "no window means nothing to validate");
+        let rendered = transcript_text(&transcript);
+        assert!(
+            rendered.contains("IN_FLIGHT_REPLY"),
+            "the full-transcript reset must not discard the streaming row: {rendered:?}"
+        );
+        assert!(
+            rendered.contains("EARLIER_TURN"),
+            "the reset must still render the snapshot messages: {rendered:?}"
+        );
+    }
+
     #[test]
     fn snapshot_validation_rejects_unknown_order_and_misaligned_ids() {
         let mut history = wire::AgentConnectionHistoryWindow {
