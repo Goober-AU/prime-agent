@@ -505,6 +505,23 @@ impl Default for ProcessTerminal {
     }
 }
 
+/// `process.stdout.columns || Number(process.env.COLUMNS) || 80`
+/// (terminal.ts:502-508). JavaScript `||` treats `0`, `NaN` and `""` as absent,
+/// so a reported size of 0 is unknown and falls through to the environment
+/// variable and finally to the 80x24 default.
+fn resolve_dimension(reported: Option<usize>, env_value: Option<&str>, default: usize) -> usize {
+    if let Some(value) = reported {
+        if value > 0 {
+            return value;
+        }
+    }
+    env_value
+        .map(str::trim)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+}
+
 fn is_kitty_protocol_response(sequence: &str) -> bool {
     // Kitty protocol response pattern: \x1b[?<flags>u
     let bytes = sequence.as_bytes();
@@ -728,25 +745,17 @@ impl Terminal for ProcessTerminal {
     }
 
     fn columns(&self) -> usize {
-        crossterm::terminal::size()
-            .map(|(cols, _)| cols as usize)
-            .unwrap_or_else(|_| {
-                std::env::var("COLUMNS")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(80)
-            })
+        let reported = crossterm::terminal::size()
+            .ok()
+            .map(|(cols, _)| cols as usize);
+        resolve_dimension(reported, std::env::var("COLUMNS").ok().as_deref(), 80)
     }
 
     fn rows(&self) -> usize {
-        crossterm::terminal::size()
-            .map(|(_, rows)| rows as usize)
-            .unwrap_or_else(|_| {
-                std::env::var("LINES")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(24)
-            })
+        let reported = crossterm::terminal::size()
+            .ok()
+            .map(|(_, rows)| rows as usize);
+        resolve_dimension(reported, std::env::var("LINES").ok().as_deref(), 24)
     }
 
     fn kitty_protocol_active(&self) -> bool {
@@ -887,6 +896,38 @@ mod tests {
         terminal.set_progress(false);
         assert_eq!(terminal.progress_interval, None);
         assert_eq!(terminal.progress_keepalive_at, None);
+    }
+
+    /// `process.stdout.columns || Number(process.env.COLUMNS) || 80`
+    /// (terminal.ts:502-508) and the `rows` twin (terminal.ts:506-508). Teeth:
+    /// restoring the old `crossterm::terminal::size().map(..).unwrap_or_else(..)`
+    /// shape makes the 0-valued cases return 0 instead of the env/default value.
+    #[test]
+    fn dimension_falls_back_like_a_javascript_truthiness_chain() {
+        assert_eq!(resolve_dimension(Some(120), Some("40"), 80), 120);
+        assert_eq!(
+            resolve_dimension(Some(0), Some("40"), 80),
+            40,
+            "0 columns is unknown"
+        );
+        assert_eq!(
+            resolve_dimension(Some(0), Some("0"), 80),
+            80,
+            "0 env is unknown too"
+        );
+        assert_eq!(resolve_dimension(None, Some("40"), 80), 40);
+        assert_eq!(
+            resolve_dimension(None, Some("nonsense"), 80),
+            80,
+            "NaN -> default"
+        );
+        assert_eq!(resolve_dimension(None, Some(""), 80), 80, "'' -> default");
+        assert_eq!(resolve_dimension(None, None, 80), 80);
+        assert_eq!(
+            resolve_dimension(Some(0), None, 24),
+            24,
+            "the rows default is 24"
+        );
     }
 
     #[test]
