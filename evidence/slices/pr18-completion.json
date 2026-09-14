@@ -32,7 +32,9 @@
   "crates/pi-tui/tests/pr18_rendering.rs",
   "docs/PR18-HANDOFF.md",
   "evidence/slices/pr18-completion.json",
-  "evidence/status/pr18-completion.json"
+  "evidence/status/pr18-completion.json",
+  "scripts/port-isolation.ps1",
+  "scripts/test-port-registry-isolation.ps1"
  ],
  "purpose": "Owned-file manifest for the PR #19 completion round. Every file listed here was touched by this slice; the round's new files are tests/slash_command_matrix.rs, tests/slash_command_matrix.json and tests/long_session_soak.rs.",
  "head_branch": "fix/pr19-completion",

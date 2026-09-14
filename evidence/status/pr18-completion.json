@@ -310,5 +310,42 @@
   "56ff61268",
   "e666afe9a",
   "8955f1d0f"
+ ],
+ "test_harness_incident": {
+  "what_happened": "At 14:34 UTC the PRODUCTION daemon supervisor ownership registry (C:/Users/openclawuser/.prime/supervisor-owners) was replaced by a FILE containing PID 23044, which matches a Rust test process. The daemon then failed with 'Daemon supervisor generation ... no longer owns its registry entry (record on disk is missing or was replaced)'. Hish restored it; this repository did NOT touch it again.",
+  "root_cause": "The test harness was not isolating the supervisor registry. Windows is the key detail: the Rust default resolves the registry through dirs::home_dir(), which uses the known-folder lookup rather than HOME/USERPROFILE, so redirecting the agent, session, temp and home paths was NOT enough. A test process with an inherited production home therefore targeted the real registry directory.",
+  "aggravating_factor": "Recovery code treated the whole registry DIRECTORY as a disposable lock when it found unexpected contents, instead of failing closed. Replacing a directory with a lock FILE is not a recoverable action for a shared, live registry. This is a genuine port defect and it is REPORTED, not fixed here, because Hish explicitly instructed that the registry work is already handled and must not be re-touched.",
+  "mitigation_landed": "scripts/port-isolation.ps1 now sets PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR to a directory under the isolated root, creates it with the rest of the isolated tree, and fails fast if any redirected path still resolves under .prime. scripts/test-port-registry-isolation.ps1 verifies the contract in a child process, including that an INHERITED production value is overridden in the child only. Both checks pass.",
+  "residual_risk": "The mitigation protects this repository's test runs only. Any other consumer that starts a daemon with a production home and unexpected registry contents can repeat the damage until the recovery path fails closed instead of reclaiming the directory.",
+  "status": "reported, not fixed (owner decision)"
+ },
+ "not_completed": [
+  "Nine slash commands have no handler: btw, fork, logout, scoped-models, share, side, traces, tree, update. Each carries a verified TypeScript citation in crates/pi-coding-agent/tests/slash_command_matrix.json (32 OK / 1 DIVERGES / 9 UNHANDLED of 42 rows). They report 'recognised but the native host has no handler for it yet'.",
+  "/mcp needs its subcommands (interactive-mode.ts:8906-8950) and is the only remaining DIVERGES row.",
+  "/logout CANNOT be wired correctly as written: crates/pi-coding-agent/src/modes/interactive/auth_flows.rs:412 run_logout opens an overlay with a default handle and returns None without removing any credential, so wiring it would fake success. It was left reporting 'no handler' on purpose.",
+  "Idle eviction has no sweep: crates/pi-coding-agent/src/modes/daemon/daemon_supervisor.rs:25-28 imports can_evict_worker, IdleEvictionMinutes, SessionEvictionSnapshot and WorkerEvictionSnapshot and never uses them (daemon-supervisor.ts:1088-1101, :1140-1145). worker_passivate_idle_children (daemon_mode.rs:9425) has no sender.",
+  "TUI::hide_overlay (crates/pi-tui/src/tui.rs:742) has no production caller because the host uses OverlayHandle::hide(); reset_extension_ui, clear_extension_widgets and set_extension_footer have zero callers anywhere.",
+  "The extension UI 'custom' overlay factory returns None on all three bindings, and setStatus/setWidget/setWorkingIndicator fall into the catch-all arm (native_host.rs:1558) versus interactive-mode.ts:5422-5446.",
+  "The CLI config selector now mounts the real component, but the remaining selector/menu surfaces are unaudited.",
+  "Mermaid rendering has no production wiring: create_mermaid_markdown_transform (mermaid.rs:164) is unused and the option stays at its Default (native_host.rs:196) versus interactive-mode.ts:1113-1116, :5920, :6573.",
+  "Onboarding never runs: mark_onboarding_shown has no caller and PrimeOnboardingSplashComponent has zero call sites.",
+  "The shortcut and hotkeys guides (getShortcutGuide, getHotkeysGuide) do not exist in Rust (TypeScript interactive-mode.ts:10045, :10075).",
+  "Only 5 keybindings are registered (native_host.rs:589-603) and the prompt stash is still None at native_host.rs:551, so Ctrl+S does nothing."
+ ],
+ "failed_or_unsound": [
+  "The daemon supervisor ownership REGISTRY recovery path is unsound and was NOT fixed: it treats the shared, live registry DIRECTORY as a disposable lock and can replace it with a lock file when it finds unexpected contents. That is what broke the production daemon at 14:34 UTC. This is the single most important failure in this PR and it is deliberately left alone because Hish stated the registry work is already handled and must not be re-touched.",
+  "Daemon paths have NO in-process coverage: daemon_drivable_in_process=false is asserted as fact in the soak suite, which names tests/native_cli.rs as the owner of that path.",
+  "Style-leak and 29 tui-render cases are graded by CODE-PATH EQUIVALENCE ONLY. The TypeScript checks read @xterm/headless and the port has no VT emulator, so those rows are unverified in the strict sense.",
+  "pr18_rendering.json covers utils/markdown/latex only. Overlay compositing, terminal handoff, stdin_buffer, mouse, terminal_image, selection metadata and render_cache have NO fixture coverage at all.",
+  "The slash-command matrix proves classification, handler presence and recorded behaviour. It does NOT capture live rendered terminal output (native_host is pub(crate) and the TUI daemon is unusable in this environment).",
+  "One test run hung and had to be killed, and one full-suite run timed out at 900s under shared-build contention. Both were infrastructure symptoms, not product behaviour, but they are recorded as failures of those runs.",
+  "Pre-existing formatting debt remains in theme.rs (~663 rustfmt-unclean lines), terminal.rs (145), terminal_colors.rs (30) and agent_session.rs (360 blocks). It was NOT reformatted, deliberately, so the fixes stay reviewable; no line added by this round is unclean.",
+  "A worker exited mid-refactor and left native_host.rs uncompilable with four errors (orphaned login_dialog/login_cancel slots and two stale signatures). The lead repaired it; the underlying cause was an agent ending its turn between edits.",
+  "An earlier commit in the series (65eb9e194) did NOT compile standalone because it referenced symbols that lived only in later uncommitted files. The dependent work was committed as 56ff61268 and HEAD was then verified to build in a detached worktree.",
+  "A relative CARGO_TARGET_DIR in the worker brief caused a 4.8 GB nested target tree at crates/pi-coding-agent/.port-env. It was removed and the brief now mandates an absolute path."
+ ],
+ "known_accepted_gaps": [
+  "PR #18 remains OPEN and must be reconciled rather than merged blindly.",
+  "The two .teethbak scratch files and all worker scratch directories were removed; no mutation residue remains."
  ]
 }
