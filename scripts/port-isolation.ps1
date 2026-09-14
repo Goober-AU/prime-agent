@@ -7,7 +7,7 @@ param(
   [string]$PythonPath = "C:\Users\openclawuser\optimus-rust-port\prime-agent-runtime\src"
 )
 $ErrorActionPreference = "Stop"
-foreach ($d in @("agent","sessions","artifacts","memory","harness","cache","tmp","pipes","logs","kernel","home")) {
+foreach ($d in @("agent","sessions","artifacts","memory","harness","cache","tmp","pipes","logs","kernel","home","supervisor-owners")) {
   New-Item -ItemType Directory -Force -Path (Join-Path $Root $d) | Out-Null
 }
 # Refuse to run if the root resolves outside the project (junction/symlink escape check).
@@ -20,6 +20,8 @@ $env:PRIME_AGENT_CODING_AGENT_DIR   = Join-Path $Root "agent"
 $env:PI_CODING_AGENT_DIR            = Join-Path $Root "agent"
 $env:PRIME_AGENT_SESSION_DIR        = Join-Path $Root "sessions"
 $env:PRIME_AGENT_CODING_AGENT_SESSION_DIR = Join-Path $Root "sessions"
+# Windows known-folder lookup is not reliably redirected by HOME/USERPROFILE.
+$env:PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR = Join-Path $Root "supervisor-owners"
 $env:PRIME_AGENT_KERNEL_PYTHON      = $KernelPython
 $env:PRIME_AGENT_KERNEL_VENV        = Join-Path $Root "kernel"
 $env:PYTHONPATH                     = $PythonPath
@@ -34,7 +36,7 @@ $env:PRIME_AGENT_INTERNAL_SESSION_LEASE_OWNER_ID = "rust-port-test"
 Remove-Item Env:NODE_OPTIONS -ErrorAction SilentlyContinue
 
 # Hard stop if anything still points at production state.
-foreach ($v in @("PRIME_AGENT_CODING_AGENT_DIR","PI_CODING_AGENT_DIR","PRIME_AGENT_SESSION_DIR","TEMP","TMP","HOME","USERPROFILE")) {
+foreach ($v in @("PRIME_AGENT_CODING_AGENT_DIR","PI_CODING_AGENT_DIR","PRIME_AGENT_SESSION_DIR","PRIME_AGENT_INTERNAL_DAEMON_SUPERVISOR_REGISTRY_DIR","TEMP","TMP","HOME","USERPROFILE")) {
   $val = [Environment]::GetEnvironmentVariable($v)
   if ($val -and $val -like "*\.prime\*") { throw "$v still points at production state: $val" }
 }

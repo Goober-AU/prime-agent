@@ -34,6 +34,7 @@ use super::super::daemon_protocol::{self, DaemonResponse};
 use super::super::daemon_session_id::matches_session_id_suffix;
 use super::super::daemon_session_list::{summary_for_inactive_session, SessionSummary};
 use crate::core::session_manager::SessionInfo;
+use crate::core::session_action_store::{can_evict_worker, IdleEvictionMinutes, SessionEvictionSnapshot, WorkerEvictionSnapshot, WorkerLifecycle};
 use crate::core::agent_messages::{
     assert_agent_session_name_available, format_agent_session_name_unavailable,
     session_name_reservation_key, AgentFamilyCatalogEntry, AgentSessionNameAvailabilityInput,
@@ -162,6 +163,10 @@ impl Drop for PromptAdmissionGuard {
     fn drop(&mut self) { self.supervisor.delete_prompt_admission(&self.admission); }
 }
 struct Supervisor {
+    // Lock order: admission read/write fence, then `opening`. A sweep drains
+    // public commands and excludes recovery/opening before its final decision.
+    eviction_fence: tokio::sync::RwLock<()>,
+    idle_eviction_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     socket_path: String,
     descriptor_dir: PathBuf,
     config: AgentSessionRuntimeConfig,
@@ -235,6 +240,7 @@ pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut 
         Err(error) => { let _ = ownership.release().await; if let Some(lease) = lease { lease.release().await; } return Err(error); }
     };
     let supervisor = Arc::new(Supervisor {
+        eviction_fence: tokio::sync::RwLock::new(()), idle_eviction_task: Mutex::new(None),
         socket_path: socket_path.clone(), journal: Mutex::new(journal),
         descriptor_dir, config, ownership, workers: Mutex::new(HashMap::new()), clients: Mutex::new(HashMap::new()), opening: AsyncMutex::new(()), pauses: Mutex::new(HashMap::new()),
         catalog: Arc::new(DaemonCatalogClient::new(Arc::new(|message| eprintln!("Daemon catalog: {message}")))), stopped: CancellationToken::new(),
@@ -268,6 +274,7 @@ pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut 
         supervisor.adopt_workers().await?;
         supervisor.seed_roster_ledger().await;
         supervisor.start_roster_watchdog();
+        supervisor.start_idle_eviction();
         // `this.scheduleScheduledSessionWakeRecompute()` on startup (daemon-supervisor.ts:883).
         supervisor.schedule_scheduled_session_wake_recompute();
         #[cfg(unix)]
@@ -295,6 +302,8 @@ pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut 
         Ok(())
     }.await;
     supervisor.stopped.cancel();
+    let idle_task = supervisor.idle_eviction_task.lock().unwrap().take();
+    if let Some(task) = idle_task { let _ = task.await; }
     for client in supervisor.clients.lock().unwrap().values() { client.stopped.cancel(); }
     let workers: Vec<_> = supervisor.workers.lock().unwrap().values().cloned().collect();
     for worker in workers {
@@ -664,6 +673,121 @@ impl Supervisor {
             if active.is_some_and(|id| client.subscriptions.lock().unwrap().contains(id)) { client.write(&value); }
         }
     }
+    fn idle_eviction_minutes(&self) -> IdleEvictionMinutes {
+        let value = crate::core::settings_manager::SettingsManager::create(
+            self.config.cwd.as_deref().unwrap_or("."), self.config.agent_dir.as_deref(),
+        ).get_idle_eviction_minutes();
+        match value {
+            crate::core::settings_manager::IdleEvictionMinutes::Off => IdleEvictionMinutes::Off,
+            crate::core::settings_manager::IdleEvictionMinutes::Minutes(value) => IdleEvictionMinutes::Minutes(value),
+        }
+    }
+
+    fn start_idle_eviction(self: &Arc<Self>) {
+        let supervisor = Arc::clone(self);
+        let task = tokio::spawn(async move {
+            loop {
+                let minutes = supervisor.idle_eviction_minutes();
+                let delay = match minutes {
+                    IdleEvictionMinutes::Minutes(minutes) => (minutes * 60_000.0 / 3.0).clamp(60_000.0, 300_000.0) as u64,
+                    IdleEvictionMinutes::Off => 300_000,
+                };
+                tokio::select! {
+                    _ = supervisor.stopped.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(delay)) => {},
+                }
+                if let Err(error) = supervisor.sweep_idle_workers().await {
+                    eprintln!("Daemon idle eviction: {error}");
+                }
+            }
+        });
+        *self.idle_eviction_task.lock().unwrap() = Some(task);
+    }
+
+    fn worker_eviction_snapshot(&self, worker: &Worker) -> WorkerEvictionSnapshot {
+        let descriptor = worker.descriptor.lock().unwrap().clone();
+        let rows = self.worker_roster_entries(worker);
+        let root = PathBuf::from(canonical_session_path(&Path::new(self.config.agent_dir.as_deref().unwrap_or("."))
+            .join("sessions").to_string_lossy()));
+        let has_wake_blind_schedule = rows.iter().any(|entry| {
+            let row = &entry.summary;
+            if row.has_registered_heartbeat != Some(true) && row.has_registered_cron_job != Some(true) { return false; }
+            row.session_file.as_ref().is_none_or(|file| {
+                let file = PathBuf::from(canonical_session_path(file));
+                !file.starts_with(&root)
+            })
+        });
+        WorkerEvictionSnapshot {
+            lifecycle: match descriptor.lifecycle.as_str() {
+                "ready" => WorkerLifecycle::Ready, "starting" => WorkerLifecycle::Starting,
+                "recovering" => WorkerLifecycle::Recovering, "stopping" => WorkerLifecycle::Stopping,
+                _ => WorkerLifecycle::Failed,
+            },
+            is_connected: worker.client.lock().unwrap().as_ref().is_some_and(|c| c.is_connected()),
+            is_stopping: self.stopped.is_cancelled() || descriptor.stop_requested_at.is_some(),
+            has_owner_client: descriptor.owner_client_id.is_some(),
+            is_preparing_update_restart: self.ownership.snapshot().phase != "owner",
+            has_wake_blind_schedule,
+            sessions: rows.into_iter().filter(|entry| entry.queued_child != Some(true)).map(|entry| {
+                let summary = summary_from_entry(&entry);
+                let active = summary.active_session_id.as_deref().unwrap_or(&summary.id);
+                SessionEvictionSnapshot {
+                    is_session_active: is_session_summary_busy(summary.is_session_active, summary.has_running_rlm_children),
+                    attached_clients: self.attached_client_count(&summary, active),
+                    has_registered_cron_job: summary.has_registered_cron_job == Some(true),
+                    last_activity_at: summary.last_activity_at.as_deref().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                        .map(|d| d.timestamp_millis() as f64).unwrap_or(f64::NAN),
+                }
+            }).collect(),
+        }
+    }
+
+    async fn sweep_idle_workers(self: &Arc<Self>) -> Result<(), String> {
+        let minutes = self.idle_eviction_minutes();
+        if minutes == IdleEvictionMinutes::Off || self.stopped.is_cancelled() { return Ok(()); }
+        let workers: Vec<_> = self.workers.lock().unwrap().values().cloned().collect();
+        let mut candidates = Vec::new();
+        let now = chrono::Utc::now().timestamp_millis() as f64;
+        for worker in workers {
+            if self.stopped.is_cancelled() { return Ok(()); }
+            // A failed or hung refresh must never turn stale roster data into a
+            // destructive eviction decision.
+            if !matches!(tokio::time::timeout(Duration::from_secs(30), self.refresh(&worker)).await, Ok(Ok(_))) { continue; }
+            if can_evict_worker(&self.worker_eviction_snapshot(&worker), minutes, now) {
+                candidates.push(worker);
+            } else {
+                let client = worker.client.lock().unwrap().clone();
+                if let Some(client) = client {
+                    let mut request = command("worker_passivate_idle_children");
+                    if let IdleEvictionMinutes::Minutes(value) = minutes { request.insert("idleEvictionMinutes".into(), json!(value)); }
+                    request.insert("now".into(), json!(now)); request.insert("limit".into(), json!(2));
+                    match client.request_worker(request, 30_000).await.map_err(|e| e.to_string()).and_then(response_data) {
+                        Ok(_) => {}, Err(error) => eprintln!("Child passivation sweep failed: {error}"),
+                    }
+                }
+            }
+        }
+        if candidates.is_empty() { return Ok(()); }
+        let _fence = tokio::time::timeout(Duration::from_secs(5), self.eviction_fence.write()).await
+            .map_err(|_| "Timed out draining daemon commands for idle eviction".to_string())?;
+        let _opening = tokio::time::timeout(Duration::from_secs(5), self.opening.lock()).await
+            .map_err(|_| "Timed out draining worker opens for idle eviction".to_string())?;
+        for worker in candidates {
+            if self.stopped.is_cancelled() { break; }
+            let id = worker.descriptor.lock().unwrap().worker_id.clone();
+            if !self.workers.lock().unwrap().get(&id).is_some_and(|w| Arc::ptr_eq(w, &worker)) { continue; }
+            if !matches!(tokio::time::timeout(Duration::from_secs(30), self.refresh(&worker)).await, Ok(Ok(_))) { continue; }
+            if can_evict_worker(&self.worker_eviction_snapshot(&worker), minutes, now) {
+                // Archive the durable resident tree before graceful shutdown,
+                // matching stopWorker(worker, true). Never force-kill a sweep.
+                self.stop_worker(&worker, true, false).await?;
+                eprintln!("Evicted idle worker {id}");
+            }
+        }
+        self.schedule_scheduled_session_wake_recompute();
+        Ok(())
+    }
+
     /// `refreshWorkerSummaries(worker, recovery, fillGaps)`.
     async fn refresh(self: &Arc<Self>, worker: &Arc<Worker>) -> Result<Vec<Value>, String> {
         let client = self.connected_client(worker).await?;
@@ -2436,6 +2560,10 @@ impl Supervisor {
         }
         if let Some(identity) = envelope_client.as_ref().filter(|identity| !identity.is_empty()) { *public.protocol_id.lock().unwrap() = Some(identity.clone()); }
         let journal_identity = envelope_client.map(|identity| if identity.is_empty() { public.identity() } else { identity }).filter(|_| daemon_protocol::is_daemon_mutating_command(&kind) && kind != "ack_result").zip(id.clone());
+        // Prompt admissions above must be registered before the first await.
+        // Keep this guard through dispatch so a fresh attachment or mutation
+        // cannot race the eviction snapshot and graceful worker shutdown.
+        let _admission = self.eviction_fence.read().await;
         if let Err(error) = self.ownership.assert_current().await {
             public.write(&json!(DaemonResponse::failure(id.as_deref(), &kind, &error.to_string(), None))); return;
         }

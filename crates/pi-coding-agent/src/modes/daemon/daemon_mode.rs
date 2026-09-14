@@ -2733,7 +2733,10 @@ impl AgentDaemon {
         supervisor_socket_path: &str,
     ) -> Result<(), String> {
         let agent_dir = self.options.default_session_config.agent_dir.clone();
-        let lock_directory = Path::new(&self.default_supervisor_lock_directory()).to_path_buf();
+        let lock_directory = Path::new(&self.default_supervisor_lock_directory(supervisor_socket_path)).to_path_buf();
+        if let Some(parent) = lock_directory.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
         let mut owns_lock = false;
         for _ in 0..3 {
             if owns_lock {
@@ -2837,14 +2840,24 @@ impl AgentDaemon {
         }
         .await;
         if owns_lock {
-            let _ = std::fs::remove_dir_all(&lock_directory);
+            if std::fs::read_to_string(&lock_directory).ok().as_deref() == Some(&format!("{}\n", std::process::id())) {
+                let _ = std::fs::remove_file(&lock_directory);
+            }
         }
         result
     }
 
-    /// The supervisor ownership lock directory this daemon's agent dir uses.
-    fn default_supervisor_lock_directory(&self) -> String {
-        crate::modes::daemon::daemon_supervisor_ownership::default_daemon_supervisor_registry_dir()
+    /// A socket-specific launch lock, separate from the durable ownership registry.
+    fn default_supervisor_lock_directory(&self, supervisor_socket_path: &str) -> String {
+        let key = format!("{:x}", Sha256::digest(supervisor_socket_path.as_bytes()));
+        // Named pipes are not filesystem directories. Keep their launch lock in
+        // the daemon's private filesystem socket directory on Windows.
+        let directory = if supervisor_socket_path.starts_with(r"\\.\pipe\") {
+            super::daemon_socket::default_daemon_socket_dir()
+        } else {
+            dirname(supervisor_socket_path)
+        };
+        join_path(&directory, &format!(".supervisor-launch-{}.lock", &key[..12]))
     }
 
     /// `cleanupSocketPath()`.
@@ -3343,6 +3356,7 @@ pub struct NavigateTreeOptions {
 /// `startSideQuestion(...)`.
 #[derive(Clone, Default)]
 pub struct SideQuestionOptions {
+    pub id: String,
     pub previous_turns: Option<Value>,
     pub retry_policy: Option<Value>,
     pub on_event: Option<Arc<dyn Fn(&Value) + Send + Sync>>,
@@ -5143,31 +5157,27 @@ impl AgentDaemon {
                         }
                     }
                 });
-                session
-                    .start_side_question(
-                        body.get("question").and_then(Value::as_str).unwrap_or(""),
-                        SideQuestionOptions {
-                            previous_turns: body.get("previousTurns").cloned(),
-                            retry_policy: session.settings_manager().map(|_| Value::Null),
-                            on_event: Some(on_event),
-                        },
-                    )
-                    .await?;
-                self.side_question_runs
-                    .lock()
-                    .expect("side question runs poisoned")
-                    .insert(
-                        side_question_id,
-                        SideQuestionRunEntry {
-                            run: Arc::new(|| {}),
-                            client: Arc::clone(client),
-                            active_session_id: state
-                                .lock()
-                                .expect("active session poisoned")
-                                .active_session_id
-                                .clone(),
-                        },
-                    );
+                // Register ownership before the task can emit a terminal event.
+                // The callback removes this exact id on completion; disconnect
+                // and explicit abort call the live session's cancellation hook.
+                let abort_session = session.clone();
+                let abort_id = side_question_id.clone();
+                self.side_question_runs.lock().expect("side question runs poisoned").insert(
+                    side_question_id.clone(), SideQuestionRunEntry {
+                        run: Arc::new(move || abort_session.abort_side_question(&abort_id)),
+                        client: Arc::clone(client), active_session_id: state_active_session_id,
+                    },
+                );
+                if let Err(error) = session.start_side_question(
+                    body.get("question").and_then(Value::as_str).unwrap_or(""),
+                    SideQuestionOptions {
+                        id: side_question_id.clone(), previous_turns: body.get("previousTurns").cloned(),
+                        retry_policy: session.settings_manager().map(|_| Value::Null), on_event: Some(on_event),
+                    },
+                ).await {
+                    self.side_question_runs.lock().expect("side question runs poisoned").remove(&side_question_id);
+                    return Err(error);
+                }
                 Ok(Some(DaemonResponse::success(
                     id,
                     "start_side_question",

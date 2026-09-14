@@ -1,0 +1,31 @@
+{
+  "slice": "pr20-implementation",
+  "files": [
+    "crates/pi-coding-agent/src/utils/dir_lock.rs",
+    "crates/pi-coding-agent/src/modes/daemon/native_supervisor.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_commands.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_extensions.rs",
+    "crates/pi-coding-agent/src/modes/interactive/auth_flows.rs",
+    "evidence/slices/pr20-implementation.json",
+    "evidence/status/pr20-implementation.json",
+    "docs/PR20-IMPLEMENTATION.md",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs",
+    "crates/pi-coding-agent/src/modes/interactive/components/mermaid.rs",
+    "crates/pi-coding-agent/Cargo.toml",
+    "Cargo.lock",
+    "crates/pi-tui/src/tui.rs",
+    "crates/pi-coding-agent/src/core/extensions/types.rs",
+    "crates/pi-coding-agent/src/core/extensions/runner.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_extension_binding.rs",
+    "crates/pi-coding-agent/src/modes/rpc/rpc_extension_ui_context.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_extension_bridge.rs",
+    "crates/pi-coding-agent/src/core/agent_session.rs",
+    "crates/pi-coding-agent/src/core/agent_session/agent_handle.rs",
+    "crates/pi-coding-agent/src/core/side_question.rs",
+    "crates/pi-coding-agent/src/core/side_question/native.rs",
+    "crates/pi-coding-agent/src/core/agent_session_runtime/daemon_adapter.rs",
+    "crates/pi-coding-agent/src/core/agent_session_runtime/in_process_adapter.rs",
+    "crates/pi-coding-agent/src/modes/agent_connection/in_process_agent_connection.rs"
+  ]
+}

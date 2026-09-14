@@ -1,5 +1,7 @@
 //! Port of packages/tui/src/latex.ts.
 
+use unicode_general_category::{get_general_category, GeneralCategory};
+
 const SYMBOLS: &[(&str, &str)] = &[
     ("alpha", "α"),
     ("beta", "β"),
@@ -209,48 +211,10 @@ const SYMBOLS: &[(&str, &str)] = &[
 ];
 
 const OPERATOR_NAMES: &[&str] = &[
-    "log",
-    "ln",
-    "lg",
-    "exp",
-    "sin",
-    "cos",
-    "tan",
-    "cot",
-    "sec",
-    "csc",
-    "arcsin",
-    "arccos",
-    "arctan",
-    "sinh",
-    "cosh",
-    "tanh",
-    "coth",
-    "min",
-    "max",
-    "argmin",
-    "argmax",
-    "arg",
-    "sup",
-    "inf",
-    "lim",
-    "limsup",
-    "liminf",
-    "det",
-    "dim",
-    "ker",
-    "deg",
-    "gcd",
-    "hom",
-    "Pr",
-    "tr",
-    "Tr",
-    "rank",
-    "diag",
-    "sgn",
-    "softmax",
-    "mod",
-    "bmod",
+    "log", "ln", "lg", "exp", "sin", "cos", "tan", "cot", "sec", "csc", "arcsin", "arccos",
+    "arctan", "sinh", "cosh", "tanh", "coth", "min", "max", "argmin", "argmax", "arg", "sup",
+    "inf", "lim", "limsup", "liminf", "det", "dim", "ker", "deg", "gcd", "hom", "Pr", "tr", "Tr",
+    "rank", "diag", "sgn", "softmax", "mod", "bmod",
 ];
 
 /// Single-character escapes (`\{` -> `{`) and spacing commands.
@@ -361,6 +325,13 @@ const SUPERSCRIPTS: &[(&str, &str)] = &[
     ("U", "ᵁ"),
     ("V", "ⱽ"),
     ("W", "ᵂ"),
+    ("β", "ᵝ"),
+    ("γ", "ᵞ"),
+    ("δ", "ᵟ"),
+    ("θ", "ᶿ"),
+    ("ϕ", "ᵠ"),
+    ("φ", "ᵠ"),
+    ("χ", "ᵡ"),
 ];
 
 const SUBSCRIPTS: &[(&str, &str)] = &[
@@ -397,6 +368,12 @@ const SUBSCRIPTS: &[(&str, &str)] = &[
     ("u", "ᵤ"),
     ("v", "ᵥ"),
     ("x", "ₓ"),
+    ("β", "ᵦ"),
+    ("γ", "ᵧ"),
+    ("ρ", "ᵨ"),
+    ("ϕ", "ᵩ"),
+    ("φ", "ᵩ"),
+    ("χ", "ᵪ"),
 ];
 
 const COMMON_FRACTIONS: &[(&str, &str)] = &[
@@ -427,7 +404,6 @@ fn in_set(table: &[&str], key: &str) -> bool {
     table.contains(&key)
 }
 
-
 /// Code point of the styled "A" in the Mathematical Alphanumeric block.
 #[derive(Debug, Clone)]
 struct AlphabetStyle {
@@ -442,7 +418,15 @@ const ALPHABET_MATHBB: AlphabetStyle = AlphabetStyle {
     upper: Some(0x1d538),
     lower: Some(0x1d552),
     digit: Some(0x1d7d8),
-    exceptions: &[("C", "\u{2102}"), ("H", "\u{210d}"), ("N", "\u{2115}"), ("P", "\u{2119}"), ("Q", "\u{211a}"), ("R", "\u{211d}"), ("Z", "\u{2124}")],
+    exceptions: &[
+        ("C", "\u{2102}"),
+        ("H", "\u{210d}"),
+        ("N", "\u{2115}"),
+        ("P", "\u{2119}"),
+        ("Q", "\u{211a}"),
+        ("R", "\u{211d}"),
+        ("Z", "\u{2124}"),
+    ],
 };
 const ALPHABET_MATHBF: AlphabetStyle = AlphabetStyle {
     upper: Some(0x1d400),
@@ -472,7 +456,13 @@ const ALPHABET_MATHFRAK: AlphabetStyle = AlphabetStyle {
     upper: Some(0x1d504),
     lower: Some(0x1d51e),
     digit: None,
-    exceptions: &[("C", "\u{212d}"), ("H", "\u{210c}"), ("I", "\u{2111}"), ("R", "\u{211c}"), ("Z", "\u{2128}")],
+    exceptions: &[
+        ("C", "\u{212d}"),
+        ("H", "\u{210c}"),
+        ("I", "\u{2111}"),
+        ("R", "\u{211c}"),
+        ("Z", "\u{2128}"),
+    ],
 };
 
 fn alphabet(name: &str) -> Option<&'static AlphabetStyle> {
@@ -491,13 +481,7 @@ fn alphabet(name: &str) -> Option<&'static AlphabetStyle> {
 
 /// Text-mode commands: their argument is literal text, so ^ and _ stay as-is.
 const TEXT_COMMANDS: &[&str] = &[
-    "text",
-    "textrm",
-    "textit",
-    "textsf",
-    "texttt",
-    "mbox",
-    "hbox",
+    "text", "textrm", "textit", "textsf", "texttt", "mbox", "hbox",
 ];
 
 /// Math-mode font commands rendered unstyled; scripts inside still apply.
@@ -572,17 +556,33 @@ fn map_script(text: &str, table: &[(&str, &str)]) -> Option<String> {
 }
 
 /// True when a fraction/sqrt operand reads unambiguously without parentheses.
+///
+/// Port of `isSimpleOperand` (packages/tui/src/latex.ts:572-574):
+/// `[...text].length === 1 || /^[\p{L}\p{N}\p{M}]+$/u.test(text)`. The general
+/// categories - not `char::is_alphanumeric`, which is `L*`/`N*` only - are what make
+/// a combining mark a simple operand, so `\frac{\vec{v}}{2}` renders `v⃗/2` and not
+/// `(v⃗)/2` (markdown-latex.test.ts:86-88).
 fn is_simple_operand(text: &str) -> bool {
-    let count = text.chars().count();
-    if count == 1 {
+    if text.chars().count() == 1 {
         return true;
     }
-    !text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || is_combining(c))
-}
-
-fn is_combining(c: char) -> bool {
-    let cp = c as u32;
-    (0x0300..=0x036f).contains(&cp)
+    !text.is_empty()
+        && text.chars().all(|c| {
+            matches!(
+                get_general_category(c),
+                GeneralCategory::UppercaseLetter
+                    | GeneralCategory::LowercaseLetter
+                    | GeneralCategory::TitlecaseLetter
+                    | GeneralCategory::ModifierLetter
+                    | GeneralCategory::OtherLetter
+                    | GeneralCategory::DecimalNumber
+                    | GeneralCategory::LetterNumber
+                    | GeneralCategory::OtherNumber
+                    | GeneralCategory::NonspacingMark
+                    | GeneralCategory::SpacingMark
+                    | GeneralCategory::EnclosingMark
+            )
+        })
 }
 
 fn parenthesize(text: &str) -> String {
@@ -633,7 +633,7 @@ impl LatexParser {
             if ch == '&' {
                 // Alignment marker: becomes a separating space unless one is there.
                 self.pos += 1;
-                if !result.ends_with(char::is_whitespace) {
+                if !result.ends_with(is_math_whitespace) {
                     result.push(' ');
                 }
                 continue;
@@ -687,7 +687,7 @@ impl LatexParser {
 
     /// Render the next required argument: a braced group, or a single atom (TeX allows \frac12).
     fn parse_argument(&mut self) -> String {
-        while self.pos < self.src.len() && self.src[self.pos].is_whitespace() {
+        while self.pos < self.src.len() && is_math_whitespace(self.src[self.pos]) {
             self.pos += 1;
         }
         if self.peek() == Some('{') {
@@ -766,7 +766,7 @@ impl LatexParser {
             let content = self.parse_argument();
             let mut out = String::new();
             for c in content.chars() {
-                if c.is_whitespace() {
+                if is_math_whitespace(c) {
                     out.push(c);
                 } else {
                     out.push(c);
@@ -779,10 +779,16 @@ impl LatexParser {
             "frac" | "dfrac" | "tfrac" | "cfrac" => {
                 let numerator = self.parse_argument();
                 let denominator = self.parse_argument();
-                if let Some(common) = lookup(COMMON_FRACTIONS, &format!("{numerator}/{denominator}")) {
+                if let Some(common) =
+                    lookup(COMMON_FRACTIONS, &format!("{numerator}/{denominator}"))
+                {
                     return common.to_string();
                 }
-                format!("{}/{}", parenthesize(&numerator), parenthesize(&denominator))
+                format!(
+                    "{}/{}",
+                    parenthesize(&numerator),
+                    parenthesize(&denominator)
+                )
             }
             "binom" => {
                 let top = self.parse_argument();
@@ -802,7 +808,8 @@ impl LatexParser {
                     Some(index) if index == "3" => format!("\u{221b}{operand}"),
                     Some(index) if index == "4" => format!("\u{221c}{operand}"),
                     Some(index) => {
-                        let mapped = map_script(&index, SUPERSCRIPTS).unwrap_or_else(|| format!("^{index}"));
+                        let mapped =
+                            map_script(&index, SUPERSCRIPTS).unwrap_or_else(|| format!("^{index}"));
                         format!("{mapped}\u{221a}{operand}")
                     }
                 }
@@ -837,7 +844,7 @@ impl LatexParser {
 
     /// Render the delimiter following \left or \right ("." means invisible).
     fn parse_delimiter(&mut self) -> String {
-        while self.pos < self.src.len() && self.src[self.pos].is_whitespace() {
+        while self.pos < self.src.len() && is_math_whitespace(self.src[self.pos]) {
             self.pos += 1;
         }
         let ch = match self.peek() {
@@ -856,6 +863,11 @@ impl LatexParser {
     }
 }
 
+// ECMAScript \s includes BOM and excludes NEL.
+fn is_math_whitespace(c: char) -> bool {
+    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
+}
+
 /// Convert LaTeX math source to Unicode plain text.
 pub fn latex_to_unicode(tex: &str) -> String {
     let parsed = LatexParser::new(tex).parse();
@@ -870,9 +882,9 @@ fn collapse_spaces(text: &str) -> String {
     let mut i = 0usize;
     while i < chars.len() {
         let c = chars[i];
-        if c != '\n' && c.is_whitespace() {
+        if c != '\n' && is_math_whitespace(c) {
             let mut j = i;
-            while j < chars.len() && chars[j] != '\n' && chars[j].is_whitespace() {
+            while j < chars.len() && chars[j] != '\n' && is_math_whitespace(chars[j]) {
                 j += 1;
             }
             if j - i >= 2 {
@@ -890,19 +902,24 @@ fn collapse_spaces(text: &str) -> String {
 }
 
 /// Port of `.replace(/\n\s*\n/g, "\n")`.
+///
+/// `\s` includes `\n`, so the middle run is greedy and then backtracks to its last
+/// newline: three consecutive newlines are a single match, and `a\n\n b` matches with
+/// an empty middle run (`\s*` gives up the space) so the space survives the collapse.
 fn collapse_blank_lines(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut i = 0usize;
     while i < chars.len() {
         if chars[i] == '\n' {
-            let mut j = i + 1;
-            while j < chars.len() && chars[j].is_whitespace() && chars[j] != '\n' {
-                j += 1;
+            let mut end = i + 1;
+            while end < chars.len() && is_math_whitespace(chars[end]) {
+                end += 1;
             }
-            if j < chars.len() && chars[j] == '\n' {
+            // Backtrack to the last newline the greedy `\s*` swallowed.
+            if let Some(close) = chars[i + 1..end].iter().rposition(|c| *c == '\n') {
                 out.push('\n');
-                i = j + 1;
+                i = i + 1 + close + 1;
                 continue;
             }
         }
@@ -929,6 +946,42 @@ mod tests {
         assert_eq!(latex_to_unicode(r"x_\theta"), "x_\u{3b8}");
     }
 
+    /// `SUPERSCRIPTS` / `SUBSCRIPTS` carry 7 Greek forms each in the TS
+    /// (packages/tui/src/latex.ts:375-381, 418-423).
+    #[test]
+    fn greek_letters_use_super_and_subscript_forms() {
+        assert_eq!(latex_to_unicode(r"x^\beta"), "x\u{1d5d}");
+        assert_eq!(latex_to_unicode(r"x^\gamma"), "x\u{1d5e}");
+        assert_eq!(latex_to_unicode(r"x^\delta"), "x\u{1d5f}");
+        assert_eq!(latex_to_unicode(r"x^\theta"), "x\u{1dbf}");
+        assert_eq!(latex_to_unicode(r"x_\beta"), "x\u{1d66}");
+        assert_eq!(latex_to_unicode(r"x_\gamma"), "x\u{1d67}");
+        assert_eq!(latex_to_unicode(r"x_\rho"), "x\u{1d68}");
+        assert_eq!(latex_to_unicode(r"x_\chi"), "x\u{1d6a}");
+    }
+
+    /// `isSimpleOperand` is `/^[\p{L}\p{N}\p{M}]+$/u` (latex.ts:572-574), so a
+    /// combining mark counts as a simple operand and the parentheses are dropped
+    /// (markdown-latex.test.ts:86-88).
+    #[test]
+    fn accented_operand_skips_parentheses() {
+        assert_eq!(latex_to_unicode(r"\frac{\vec{v}}{2}"), "v\u{20d7}/2");
+        assert_eq!(latex_to_unicode(r"\frac{\hat{x}}{2}"), "x\u{302}/2");
+        // A non-mark, non-letter still needs parentheses.
+        assert_eq!(latex_to_unicode(r"\frac{-1}{2}"), "(-1)/2");
+    }
+
+    /// `latexToUnicode` ends with `.replace(/\n\s*\n/g, "\n")` (latex.ts:833), and
+    /// `\s` includes `\n`, so three newlines collapse to one.
+    #[test]
+    fn three_newlines_collapse_to_one() {
+        assert_eq!(latex_to_unicode("a\n\n\nb"), "a\nb");
+        // `\s*` is greedy then backtracks, so the space survives in `a\n\n b`.
+        assert_eq!(latex_to_unicode("a\n\n b"), "a\n b");
+        assert_eq!(latex_to_unicode("a\n \n\n b"), "a\n b");
+        assert_eq!(latex_to_unicode("a\nb"), "a\nb");
+    }
+
     #[test]
     fn fractions_and_sqrt_degrade_to_linear() {
         assert_eq!(latex_to_unicode(r"\frac{a}{b}"), "a/b");
@@ -946,6 +999,5 @@ mod tests {
     #[test]
     fn double_backslash_becomes_newline_and_collapses_blanks() {
         assert_eq!(latex_to_unicode(r"a \\ b"), "a \n b");
-        assert_eq!(latex_to_unicode("a\n\n\nb"), "a\n\nb");
     }
 }

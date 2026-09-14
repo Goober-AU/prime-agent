@@ -245,6 +245,8 @@ pub type AfterToolCallHook = Arc<dyn Fn(AfterToolCallContext, Option<Cancellatio
 pub type GetContinuationMessagesHook = Arc<dyn Fn(GetContinuationMessagesContext, Option<CancellationToken>) -> BoxFuture<Vec<AgentMessage>> + Send + Sync>;
 
 pub trait AgentHandle: Send + Sync {
+    /// Snapshot the live callbacks copied by TypeScript's standalone side agent.
+    fn side_question_options(&self) -> Option<pi_agent_core::agent::AgentOptions> { None }
     fn state(&self) -> AgentState;
     fn set_state(&self, state: AgentState);
     fn subscribe(&self, listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
@@ -9285,7 +9287,15 @@ impl AgentSession {
             if epoch != self.session_input_pump_epoch.load(Ordering::SeqCst) {
                 let mut store = self.action_store.lock().unwrap();
                 for action in actions.iter() {
-                    let mut candidate = action.clone();
+                    // TS 6414 `this._actionStore.rollback(preselected)` operates on the
+                    // stored object; re-read it so the rollback starts from `selected`.
+                    let Some(mut candidate) = store
+                        .owned_actions()
+                        .into_iter()
+                        .find(|candidate| candidate.id == action.id)
+                    else {
+                        continue;
+                    };
                     let _ = store.rollback(&mut candidate, None);
                 }
                 drop(store);
@@ -9294,7 +9304,16 @@ impl AgentSession {
             {
                 let mut store = self.action_store.lock().unwrap();
                 for action in actions.iter() {
-                    let mut next = action.clone();
+                    // TS 6419 mutates the store's own action objects; `actions` holds
+                    // clones taken before `selectFirst()`, so re-read the live entry
+                    // (`selected`) before the `preparing` transition.
+                    let Some(mut next) = store
+                        .owned_actions()
+                        .into_iter()
+                        .find(|candidate| candidate.id == action.id)
+                    else {
+                        continue;
+                    };
                     let _ = transition_session_action(
                         &mut next,
                         ActionLifecycle::Preparing { preparation: None },
@@ -9509,7 +9528,14 @@ impl AgentSession {
                     return;
                 }
                 {
-                    let mut next = action.clone();
+                    // TS 6537-6540 mutates the STORE's own action object
+                    // (`ActionStore.selectFirst()` returns the element, not a copy),
+                    // so every transition here must start from the live stored
+                    // action. Transitioning this pump-local snapshot would write a
+                    // stale lifecycle back over the store entry.
+                    let mut next = session
+                        .action_by_id(&action.id)
+                        .unwrap_or_else(|| action.clone());
                     let _ = transition_session_action(
                         &mut next,
                         ActionLifecycle::Running {
@@ -9525,7 +9551,11 @@ impl AgentSession {
                 match outcome {
                     Ok(()) => {
                         {
-                            let mut next = action.clone();
+                            // TS 6543 `transitionSessionAction(action, { state:
+                            // "completed" })` mutates the live stored action.
+                            let mut next = session
+                                .action_by_id(&action.id)
+                                .unwrap_or_else(|| action.clone());
                             let _ = transition_session_action(
                                 &mut next,
                                 ActionLifecycle::Completed,
@@ -9541,7 +9571,10 @@ impl AgentSession {
                     Err(error) => {
                         let command_error = session.as_error(&error);
                         {
-                            let mut next = action.clone();
+                            // TS 6547-6550, the `failed` transition of the live action.
+                            let mut next = session
+                                .action_by_id(&action.id)
+                                .unwrap_or_else(|| action.clone());
                             let _ = transition_session_action(
                                 &mut next,
                                 ActionLifecycle::Failed {
@@ -9558,7 +9591,17 @@ impl AgentSession {
                         session.reject_agent_message(action.agent_message_id.as_deref(), &command_error);
                     }
                 }
-                session.action_store.lock().unwrap().release_terminal(action);
+                // TS 6555 `releaseTerminal(action)` runs on the same object the
+                // transitions above moved to a terminal state; a stale pump-local
+                // snapshot is still nonterminal here and would leave the action in
+                // the store forever.
+                if let Some(current) = session.action_by_id(&action.id) {
+                    let _ = session
+                        .action_store
+                        .lock()
+                        .unwrap()
+                        .release_terminal(&current);
+                }
                 session.notify_session_input_checkpoint_change();
                 session.emit_queue_update();
             };
@@ -15261,6 +15304,118 @@ mod post_compaction_continuation_tests {
         }
     }
 
+    /// One in-memory session over a REAL agent plus a faux provider and a runtime
+    /// API key, so a PLAIN turn can actually run. The scripted `test_session` has no
+    /// credentials and no real agent loop, so a normal prompt there rejects with
+    /// "No API key found for the selected model".
+    ///
+    /// Mirrors the soak fixture's wiring
+    /// (`crates/pi-coding-agent/tests/long_session_soak.rs:1474-1533`).
+    async fn test_session_with_credentials() -> Arc<AgentSession> {
+        let provider = pi_ai::providers::faux::register_faux_provider(Some(
+            pi_ai::providers::faux::RegisterFauxProviderOptions {
+                provider: Some(format!("unit-{}", uuid::Uuid::new_v4())),
+                tokens_per_second: Some(0.0),
+                ..Default::default()
+            },
+        ));
+        let model = provider.get_model();
+        let scratch = std::env::temp_dir().canonicalize().unwrap();
+        let root = tempfile::Builder::new()
+            .prefix("agent-session-unit-")
+            .tempdir_in(scratch)
+            .unwrap();
+        let cwd_path = root.path().join("workspace");
+        let agent_dir_path = root.path().join("agent");
+        std::fs::create_dir_all(&cwd_path).unwrap();
+        std::fs::create_dir_all(&agent_dir_path).unwrap();
+        let cwd = cwd_path.to_string_lossy().to_string();
+        let agent_dir = agent_dir_path.to_string_lossy().to_string();
+
+        let settings = Arc::new(Mutex::new(
+            crate::core::settings_manager::SettingsManager::in_memory(
+                serde_json::json!({
+                    "autoRefine": {"enabled": false},
+                    "retry": {"enabled": false},
+                    "compaction": {"enabled": false},
+                    "telemetryEnabled": false,
+                    "agentTracesEnabled": false,
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        ));
+        let session_manager = Arc::new(Mutex::new(
+            crate::core::session_manager::SessionManager::in_memory(Some(&cwd), Some(&agent_dir))
+                .unwrap(),
+        ));
+        let auth_storage = Arc::new(tokio::sync::Mutex::new(
+            crate::core::auth_storage::AuthStorage::in_memory(Default::default(), None),
+        ));
+        let model_registry = Arc::new(Mutex::new(
+            crate::core::model_registry::ModelRegistry::in_memory(
+                crate::core::auth_storage::AuthStorage::in_memory(Default::default(), None),
+            ),
+        ));
+        auth_storage
+            .lock()
+            .await
+            .set_runtime_api_key(&model.provider, "unit-faux-key");
+        model_registry
+            .lock()
+            .unwrap()
+            .set_runtime_api_key(&model.provider, "unit-faux-key");
+
+        let services = crate::core::agent_session_services::create_agent_session_services(
+            crate::core::agent_session_services::CreateAgentSessionServicesOptions {
+                cwd: cwd.clone(),
+                agent_dir: Some(agent_dir.clone()),
+                auth_storage: Some(Arc::clone(&auth_storage)),
+                settings_manager: Some(Arc::clone(&settings)),
+                model_registry: Some(Arc::clone(&model_registry)),
+                extension_flag_values: None,
+                no_builtin_herdr_reporter: Some(true),
+                telemetry_disabled: Some(true),
+                resource_loader_options: Some(
+                    crate::core::resource_loader::DefaultResourceLoaderOptions {
+                        cwd: cwd.clone(),
+                        agent_dir: agent_dir.clone(),
+                        settings_manager: Some(Arc::clone(&settings)),
+                        no_extensions: true,
+                        no_skills: true,
+                        no_prompt_templates: true,
+                        no_themes: true,
+                        no_context_files: true,
+                        bundled_skills_dir: Some(None),
+                        ..Default::default()
+                    },
+                ),
+            },
+        )
+        .await
+        .expect("session services");
+        let created = crate::core::agent_session_services::create_agent_session_from_services(
+            crate::core::agent_session_services::CreateAgentSessionFromServicesOptions {
+                services: Arc::new(services),
+                session_manager,
+                session_start_event: None,
+                creation: crate::core::agent_session_services::AgentSessionCreationOptions {
+                    model: Some(model),
+                    no_tools: Some("all".to_string()),
+                    prewarm_ipython_kernel: Some(false),
+                    telemetry_disabled: Some(true),
+                    ..Default::default()
+                },
+            },
+        )
+        .await
+        .expect("agent session");
+        // The fixture root must outlive the session for the whole test.
+        std::mem::forget(root);
+        created.session
+    }
+
     /// One in-memory session over the scripted agent.
     fn test_session(agent: Arc<ScriptedAgent>) -> Arc<AgentSession> {
         let cwd = std::env::temp_dir().to_string_lossy().to_string();
@@ -15504,6 +15659,84 @@ mod post_compaction_continuation_tests {
         assert!(
             session.compaction_operation.lock().unwrap().is_none(),
             "the owning finally clears the operation (TS 9717-9720)"
+        );
+        session.dispose_async(Some(false)).await;
+    }
+
+    /// REGRESSION (fast): a session slash command must settle the awaiting `prompt`
+    /// AND leave the session usable.
+    ///
+    /// Measured defect: `prompt("/goal status")` never returned. The transcript
+    /// already held the `session_slash_command` and `session_slash_command_result`
+    /// rows and `is_streaming()` was false, so the handler had finished - the
+    /// awaiting call at `prompt_internal_with` (`agent_session.rs:8219`
+    /// `wait_for_session_input_idle`) was what never resolved.
+    ///
+    /// Root cause: `execute_selected_session_command` transitioned a STALE
+    /// PUMP-LOCAL SNAPSHOT of the action (a clone captured while it was
+    /// `queued`/`selected`) instead of the store's live entry.
+    /// `transition_session_action` rejected the illegal `selected -> running` step,
+    /// the error was dropped by `let _ =`, and `update_action` then wrote the stale
+    /// `selected` lifecycle back over the row the pump had already moved to
+    /// `running`. `release_terminal` then refused the still-nonterminal entry
+    /// ("Cannot release nonterminal session action"), so a `selected` action stayed
+    /// in the store forever: `has_selectable_session_input()` stayed true and the
+    /// pump re-selected and re-ran the same command in an infinite loop, so the
+    /// session never reached idle and the awaiting `prompt` never resolved.
+    ///
+    /// TypeScript reference: `_executeSelectedSessionCommand`
+    /// (agent-session.ts:6518-6557) transitions the SAME object the store holds
+    /// (`ActionStore.selectFirst()` at session-action-store.ts:227-233 returns the
+    /// element and `transitionSessionAction` at :107-127 mutates `action.lifecycle`
+    /// in place), so a stale write-back cannot happen there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn session_command_prompt_settles_and_the_session_stays_usable() {
+        let session = test_session_with_credentials().await;
+
+        // A session command must settle promptly instead of parking forever.
+        let started = std::time::Instant::now();
+        let command = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session.prompt("/goal status", None),
+        )
+        .await
+        .expect("DEFECT: prompt(\"/goal status\") never returned; the session command wedged the session");
+        command.expect("the session command prompt must not reject");
+        let command_elapsed = started.elapsed();
+
+        // The action must be gone from the store, not stranded as `selected`.
+        assert_eq!(
+            session.unfinished_action_count(),
+            0,
+            "the finished session-command action must be released, not left unfinished (it stayed \"selected\" forever)"
+        );
+        assert!(
+            !session.has_selectable_session_input(),
+            "no action may remain selectable after the session command completed, or the pump re-runs it forever"
+        );
+        // TS 6555 `this._actionStore.releaseTerminal(action)` runs in the `finally`
+        // of `_executeSelectedSessionCommand`, so the finished command is REMOVED
+        // from the store. Reverting only that release (keeping the live-state
+        // transitions) leaves a terminal row behind: the store grows without bound
+        // over a long session and its tickets are never deleted.
+        assert_eq!(
+            session.action_store.lock().unwrap().owned_actions().len(),
+            0,
+            "the finished session command must be released from the store, not retained as a terminal row (TS 6555)"
+        );
+
+        // The session must still be usable for a normal turn.
+        let follow_up = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            session.prompt("plain prompt after the session command", None),
+        )
+        .await
+        .expect("DEFECT: a plain prompt after a session command never returned; the session stayed wedged");
+        follow_up.expect("the follow-up prompt must not reject");
+
+        assert!(
+            command_elapsed < std::time::Duration::from_secs(5),
+            "the session command must settle promptly, took {command_elapsed:?}"
         );
         session.dispose_async(Some(false)).await;
     }

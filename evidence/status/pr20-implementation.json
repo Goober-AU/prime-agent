@@ -1,0 +1,408 @@
+{
+  "slice": "pr20-implementation",
+  "status": "implemented; runtime validation deferred",
+  "date": "2026-09-15",
+  "base_pr": 20,
+  "base_pr_head": "f40da72a818f594a49101fa4ceb2e241a2f7abb1",
+  "documentation": "docs/PR20-IMPLEMENTATION.md",
+  "implemented": [
+    "separate supervisor launch lock and fail-closed directory recovery",
+    "nine slash command handlers and MCP subcommands",
+    "real side-question execution in local and daemon adapters",
+    "periodic idle worker eviction and child passivation",
+    "native extension UI binding and owned surface lifecycle",
+    "Mermaid renderer and transcript transform"
+  ],
+  "preserved_existing": [
+    "six original handoff fixes",
+    "onboarding",
+    "shortcut and hotkey guides",
+    "configurable keybindings and prompt stash"
+  ],
+  "checks": {
+    "cargo check -p pi-coding-agent": "passed; existing warnings remain",
+    "node_modules/.bin/tsgo --noEmit": "passed",
+    "node_modules/.bin/biome check --error-on-warnings .": "passed; 1072 files, no writes",
+    "git diff --check": "passed"
+  },
+  "tests": {
+    "executed": false,
+    "reason": "User explicitly requested NO TESTS; testing will follow implementation.",
+    "new_runtime_parity_claims": false
+  },
+  "commit_hook": "HUSKY=0: npm run check includes installer/browser smoke suites; its non-test checks passed separately.",
+  "daemon_wire_change": false,
+  "windows_runtime_verified": false,
+  "production_registry_touched": false,
+  "dependency_release_age": [
+    {
+      "name": "allocator-api2",
+      "version": "0.2.21",
+      "published": "2024-12-01T14:49:16.555989Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "arraydeque",
+      "version": "0.5.1",
+      "published": "2023-02-05T09:45:24.217513Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "ascii-canvas",
+      "version": "4.0.0",
+      "published": "2024-09-30T16:34:10.453811Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "bit-set",
+      "version": "0.9.1",
+      "published": "2026-03-12T12:00:27.908782Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "bit-vec",
+      "version": "0.9.1",
+      "published": "2026-03-12T11:58:25.849464Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "cssparser",
+      "version": "0.36.0",
+      "published": "2025-11-10T06:01:09.857100Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "cssparser-macros",
+      "version": "0.6.1",
+      "published": "2023-06-04T10:13:01.560015Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "derive_more",
+      "version": "2.1.1",
+      "published": "2025-12-22T09:13:44.198298Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "derive_more-impl",
+      "version": "2.1.1",
+      "published": "2025-12-22T09:13:41.301481Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "dtoa",
+      "version": "1.0.11",
+      "published": "2025-12-27T06:45:26.518961Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "dtoa-short",
+      "version": "0.3.5",
+      "published": "2024-06-07T11:52:25.119732Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "ena",
+      "version": "0.14.4",
+      "published": "2026-02-10T23:17:07.042876Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "euclid",
+      "version": "0.22.14",
+      "published": "2026-03-18T20:00:26.960761Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "fixedbitset",
+      "version": "0.5.7",
+      "published": "2024-04-14T23:53:05.918820Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "foldhash",
+      "version": "0.1.5",
+      "published": "2025-03-15T20:10:19.156505Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "foldhash",
+      "version": "0.2.0",
+      "published": "2025-08-23T19:14:01.103482Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "granit-parser",
+      "version": "0.0.6",
+      "published": "2026-06-18T19:58:46.234787Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "htmlize",
+      "version": "1.1.0",
+      "published": "2026-04-13T17:58:02.890522Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "itertools",
+      "version": "0.14.0",
+      "published": "2024-12-31T12:32:06.925445Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "json5",
+      "version": "1.3.1",
+      "published": "2026-02-07T15:06:21.055329Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "keccak",
+      "version": "0.1.6",
+      "published": "2026-02-13T17:56:37.644814Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "lalrpop",
+      "version": "0.23.1",
+      "published": "2026-03-11T12:51:30.241422Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "lalrpop-util",
+      "version": "0.23.1",
+      "published": "2026-03-11T12:50:54.981064Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "lol_html",
+      "version": "3.0.1",
+      "published": "2026-07-29T17:24:33.400952Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "merman-ascii",
+      "version": "0.8.0-alpha.3",
+      "published": "2026-07-09T05:52:15.328128Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "merman-core",
+      "version": "0.8.0-alpha.3",
+      "published": "2026-07-09T05:51:40.840573Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "mermansi",
+      "version": "0.1.6",
+      "published": "2026-08-04T10:12:39.714501Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "new_debug_unreachable",
+      "version": "1.0.6",
+      "published": "2024-03-15T17:26:05.782555Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "pastey",
+      "version": "0.1.1",
+      "published": "2025-08-12T04:24:33.504602Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "petgraph",
+      "version": "0.8.3",
+      "published": "2025-09-30T13:16:04.011947Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "phf_codegen",
+      "version": "0.13.1",
+      "published": "2025-08-23T11:06:57.311913Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "phf_generator",
+      "version": "0.13.1",
+      "published": "2025-08-23T11:06:08.136816Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "phf_macros",
+      "version": "0.13.1",
+      "published": "2025-08-23T11:06:20.808422Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "pico-args",
+      "version": "0.5.0",
+      "published": "2022-06-04T12:11:35.198777Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "precomputed-hash",
+      "version": "0.1.1",
+      "published": "2017-09-29T20:25:54.097804Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "rustc-hash",
+      "version": "2.1.3",
+      "published": "2026-07-02T19:13:03.150587Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "rustc_version",
+      "version": "0.4.1",
+      "published": "2024-08-28T09:21:22.033328Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "ryu-js",
+      "version": "1.0.3",
+      "published": "2026-07-10T21:05:46.645363Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "selectors",
+      "version": "0.37.0",
+      "published": "2026-04-12T07:15:28.973339Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "semver",
+      "version": "1.0.28",
+      "published": "2026-04-04T00:25:14.379075Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "servo_arc",
+      "version": "0.4.3",
+      "published": "2025-11-12T14:54:32.018040Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "sha3",
+      "version": "0.10.9",
+      "published": "2026-04-19T16:47:09.142031Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "smallvec",
+      "version": "1.15.2",
+      "published": "2026-06-11T20:52:32.050589Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "string_cache",
+      "version": "0.9.0",
+      "published": "2025-08-26T07:52:45.257203Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "term",
+      "version": "1.2.1",
+      "published": "2025-12-06T16:40:14.525516Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "ucd-trie",
+      "version": "0.1.7",
+      "published": "2024-09-29T12:17:30.563304Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "unicode-xid",
+      "version": "0.2.6",
+      "published": "2024-09-19T15:55:24.420864Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    },
+    {
+      "name": "web-time",
+      "version": "1.1.0",
+      "published": "2024-03-01T10:51:46.373917Z",
+      "yanked": false,
+      "minimum_age_pass": true
+    }
+  ],
+  "deferred": [
+    "live slash-command matrix and fixture rebaseline",
+    "in-process daemon and Windows recovery coverage",
+    "VT rendering/style-leak validation and missing fixtures",
+    "long-session soak and runtime update/share/auth validation",
+    "existing native supervisor update-restart transaction implementation",
+    "extension custom-editor/autocomplete-provider bridge parity",
+    "pre-existing formatting debt"
+  ],
+  "blocked_on": null,
+  "source_sha256": {
+    "crates/pi-coding-agent/src/utils/dir_lock.rs": "327ac313542431cbe0deaf513726de81362d46052d4bb38a2e1db9eb54021e72",
+    "crates/pi-coding-agent/src/modes/daemon/native_supervisor.rs": "a7b85ac48a29bb0e30a29f380ada790049764edd34caa8d99c2354c82136d4fd",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs": "4ebf2fb24448f1e19304ac7e980d851503f7fec8b8b44bfa1f6fbeddd343882e",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_commands.rs": "c0e9233d56e33ad53b37e1e9a681d6451a10ca5a1945b71ec809add0db33e783",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_extensions.rs": "79ee1c7f3e6c67d86a67081e4fd0a57099a206d79dd8763e55f38b39b65ad9cf",
+    "crates/pi-coding-agent/src/modes/interactive/auth_flows.rs": "eafbc2c742f412c27a4780299b6b2acee6bc103f5a91cbe7b746e1d8cc394e2d",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs": "c17564cce28117e6437b6d79e7ca08585850ace8f849e81036d3fb012375f515",
+    "crates/pi-coding-agent/src/modes/interactive/components/mermaid.rs": "e4d00a1b082f79eb5170cb32e69ec25939049ce64fe1da0c066b7d09eb9fe0fc",
+    "crates/pi-tui/src/tui.rs": "b74722a84c19d5ca5612888659921a799df2fd7314ab79d316dc7bd03a8629de",
+    "crates/pi-coding-agent/src/core/extensions/types.rs": "968026510213fb331976d108d175faa4e36f85b2eed76e43d765c09c6de8ebf9",
+    "crates/pi-coding-agent/src/core/extensions/runner.rs": "232bd84ca244900db8f4df32b1331ad98577d719ad90169b24af39e1b4d521ec",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_extension_binding.rs": "38142fb9299585322c827f8abe064b1547c7e368fd3ba35db90829f71f36492f",
+    "crates/pi-coding-agent/src/modes/rpc/rpc_extension_ui_context.rs": "34728c1b94f5f2bdf6cb1edae29cd5b99c319cf9d611685e72c2aa46ddccdc86",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_extension_bridge.rs": "2ca4ffde7dbd8f883d8c5ee72560993052f2056c893864bf82ec0feb00b8aed5",
+    "crates/pi-coding-agent/src/core/agent_session.rs": "3ede78afb6b15173d63262981e44ea96b0307f75ae3705b260193e0f4e716969",
+    "crates/pi-coding-agent/src/core/agent_session/agent_handle.rs": "dfdc030fcb2ff8ab1f488bf6c3d7f9b2ae4ecf89bd4d2dca7aa6d026d8e322e0",
+    "crates/pi-coding-agent/src/core/side_question.rs": "8d2f13c414a4013d471d547c260b606c85d9b0a04c86f52a890ebcf193a988d9",
+    "crates/pi-coding-agent/src/core/side_question/native.rs": "50f3c89ea12d52b4b4be9e290f84249287e73734ee92353e9c002714ad73e19b",
+    "crates/pi-coding-agent/src/core/agent_session_runtime/daemon_adapter.rs": "9faaf8c6958777c3140fa316667c853cc1553a063ea8b5599be8d3ba9b16477e",
+    "crates/pi-coding-agent/src/core/agent_session_runtime/in_process_adapter.rs": "04f4d61ee508ebcf2baa4e82cc99dce33c7ff2a289818cd688394c615417c37f",
+    "crates/pi-coding-agent/src/modes/agent_connection/in_process_agent_connection.rs": "67e566ad50aeaa2804f6f590bb5560c94eefaf6c12108a45d8f6aebc1f7eaa72"
+  }
+}

@@ -9,6 +9,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 unicode-segmentation = { workspace = true }
 unicode-general-category = { workspace = true }
+emojis = "=0.9.0"
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }

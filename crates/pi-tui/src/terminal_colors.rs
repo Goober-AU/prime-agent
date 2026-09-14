@@ -2,8 +2,8 @@
 
 use once_cell::sync::Lazy;
 use regex::Regex;
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// 24-bit colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -77,10 +77,24 @@ fn gray_values() -> [i64; 24] {
     out
 }
 
-thread_local! {
-    static DEFAULT_COLOR_LISTENERS: RefCell<HashMap<u64, Box<dyn Fn()>>> = RefCell::new(HashMap::new());
-    static DEFAULT_COLOR_LISTENER_IDS: RefCell<u64> = const { RefCell::new(0) };
-    static DEFAULT_TERMINAL_COLORS: RefCell<Option<DefaultTerminalColors>> = const { RefCell::new(None) };
+/// `let defaultTerminalColors` (terminal-colors.ts:28): ONE cell for the whole
+/// process. `getDefaultTerminalColors`/`setDefaultTerminalColors`
+/// (terminal-colors.ts:180-187) and the OSC 10/11 probe that writes it
+/// (terminal.rs:382,535) must observe the same value, exactly like the
+/// module-level variable in the TypeScript module.
+static DEFAULT_TERMINAL_COLORS: Mutex<Option<DefaultTerminalColors>> = Mutex::new(None);
+
+/// `const defaultColorListeners = new Set<() => void>()` (terminal-colors.ts:26):
+/// also process-wide, in insertion order. A listener must be callable from the
+/// thread that finishes the probe.
+static DEFAULT_COLOR_LISTENERS: Mutex<Vec<(u64, Arc<dyn Fn() + Send + Sync>)>> =
+    Mutex::new(Vec::new());
+static DEFAULT_COLOR_LISTENER_IDS: AtomicU64 = AtomicU64::new(0);
+
+fn color_listeners() -> std::sync::MutexGuard<'static, Vec<(u64, Arc<dyn Fn() + Send + Sync>)>> {
+    DEFAULT_COLOR_LISTENERS
+        .lock()
+        .expect("terminal color listeners")
 }
 
 fn clamp_channel(value: f64) -> i64 {
@@ -146,16 +160,17 @@ fn find_closest_index(value: i64, values: &[i64]) -> usize {
     min_idx
 }
 
+/// `notifyDefaultColorListeners` (terminal-colors.ts:90-94): call every
+/// registered listener. The listener set is copied out first so a listener that
+/// (un)subscribes during the notification cannot deadlock or skip an entry.
 fn notify_default_color_listeners() {
-    let listeners: Vec<Box<dyn Fn()>> = DEFAULT_COLOR_LISTENERS.with(|l| {
-        l.borrow().values().map(|_| Box::new(|| {}) as Box<dyn Fn()>).collect()
-    });
-    let _ = listeners;
-    DEFAULT_COLOR_LISTENERS.with(|l| {
-        for listener in l.borrow().values() {
-            listener();
-        }
-    });
+    let listeners: Vec<Arc<dyn Fn() + Send + Sync>> = color_listeners()
+        .iter()
+        .map(|(_, listener)| listener.clone())
+        .collect();
+    for listener in listeners {
+        listener();
+    }
 }
 
 pub fn rgb_to_hex(rgb: &Rgb) -> String {
@@ -266,11 +281,15 @@ pub fn detect_background_from_color_fg_bg(value: Option<&str>) -> Option<Termina
 }
 
 pub fn get_default_terminal_colors() -> Option<DefaultTerminalColors> {
-    DEFAULT_TERMINAL_COLORS.with(|c| *c.borrow())
+    *DEFAULT_TERMINAL_COLORS
+        .lock()
+        .expect("default terminal colors")
 }
 
 pub fn set_default_terminal_colors(colors: Option<DefaultTerminalColors>) {
-    DEFAULT_TERMINAL_COLORS.with(|c| *c.borrow_mut() = colors);
+    *DEFAULT_TERMINAL_COLORS
+        .lock()
+        .expect("default terminal colors") = colors;
     notify_default_color_listeners();
 }
 
@@ -290,19 +309,17 @@ pub fn get_terminal_background_kind() -> Option<TerminalBackgroundKind> {
     detect_background_from_color_fg_bg(None)
 }
 
-/// Register a listener; the returned id removes it again (port of the unsubscribe closure).
-pub fn on_default_terminal_colors_change(listener: Box<dyn Fn()>) -> u64 {
-    let id = DEFAULT_COLOR_LISTENER_IDS.with(|ids| {
-        let mut ids = ids.borrow_mut();
-        *ids += 1;
-        *ids
-    });
-    DEFAULT_COLOR_LISTENERS.with(|l| l.borrow_mut().insert(id, listener));
+/// Register a listener; the returned id removes it again (port of the
+/// unsubscribe closure returned by `onDefaultTerminalColorsChange`,
+/// terminal-colors.ts:201-206).
+pub fn on_default_terminal_colors_change(listener: Arc<dyn Fn() + Send + Sync>) -> u64 {
+    let id = DEFAULT_COLOR_LISTENER_IDS.fetch_add(1, Ordering::SeqCst) + 1;
+    color_listeners().push((id, listener));
     id
 }
 
 pub fn remove_default_terminal_colors_listener(id: u64) {
-    DEFAULT_COLOR_LISTENERS.with(|l| l.borrow_mut().remove(&id));
+    color_listeners().retain(|(listener_id, _)| *listener_id != id);
 }
 
 #[cfg(test)]
@@ -357,6 +374,52 @@ mod tests {
         let bg = parse_osc_color_response("\x1b]11;#000000\x07").unwrap();
         assert_eq!(bg.kind, OscColorKind::Background);
         assert_eq!(parse_osc_color_response("nope"), None);
+    }
+
+    #[test]
+    fn set_and_get_share_one_store_and_notify_listeners() {
+        // terminal-colors.ts:28 is ONE module-level variable that
+        // `getDefaultTerminalColors` reads (terminal-colors.ts:180-182) and
+        // `setDefaultTerminalColors` writes (terminal-colors.ts:184-187). This is
+        // exactly the value the OSC 10/11 probe publishes
+        // (packages/tui/src/terminal.ts:348) and the theme subscribes to
+        // (packages/coding-agent/.../theme.ts:847).
+        clear_default_terminal_colors();
+        let hits = Arc::new(AtomicU64::new(0));
+        let seen = hits.clone();
+        let id = on_default_terminal_colors_change(Arc::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }));
+        let colors = DefaultTerminalColors {
+            foreground: Rgb { r: 1, g: 2, b: 3 },
+            background: Rgb {
+                r: 240,
+                g: 240,
+                b: 240,
+            },
+        };
+        set_default_terminal_colors(Some(colors));
+        assert_eq!(
+            get_default_terminal_colors(),
+            Some(colors),
+            "the setter must be observable through the getter"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "a set notifies once");
+        assert_eq!(
+            get_terminal_background_kind(),
+            Some(TerminalBackgroundKind::Light)
+        );
+        clear_default_terminal_colors();
+        assert_eq!(get_default_terminal_colors(), None);
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "a clear also notifies");
+        remove_default_terminal_colors_listener(id);
+        set_default_terminal_colors(Some(colors));
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "a removed listener stays removed"
+        );
+        clear_default_terminal_colors();
     }
 
     #[test]

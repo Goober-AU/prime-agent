@@ -24,7 +24,7 @@ impl DirLockAttempt {
 
 /// link(2)-published lock file: born with its owner content, EEXIST the only
 /// collision signal; stale locks are renamed aside, verified, then deleted or
-/// restored. A directory at the lock path is a legacy lock from the old protocol.
+/// restored. Directories at the lock path are preserved and require owner intervention.
 const CANDIDATE_SWEEP_AGE_MS: u128 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,15 +37,18 @@ struct StatIdentity {
 // The candidate prefix can never match the lock; the age gate spares mid-publish rivals.
 fn sweep_abandoned_candidates(lock_path: &str) {
     let path = Path::new(lock_path);
-    let Some(directory) = path.parent() else { return };
+    let Some(directory) = path.parent() else {
+        return;
+    };
     let prefix = format!(
         "{}.candidate-",
         path.file_name()
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_default()
     );
-    let cutoff = std::time::SystemTime::now()
-        .checked_sub(std::time::Duration::from_millis(CANDIDATE_SWEEP_AGE_MS as u64));
+    let cutoff = std::time::SystemTime::now().checked_sub(std::time::Duration::from_millis(
+        CANDIDATE_SWEEP_AGE_MS as u64,
+    ));
 
     let Ok(entries) = std::fs::read_dir(directory) else {
         return;
@@ -56,8 +59,12 @@ fn sweep_abandoned_candidates(lock_path: &str) {
             continue;
         }
         // Litter collection only.
-        let Ok(metadata) = entry.metadata() else { continue };
-        let Ok(modified) = metadata.modified() else { continue };
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
         let is_old = match cutoff {
             Some(cutoff) => modified < cutoff,
             None => false,
@@ -70,36 +77,61 @@ fn sweep_abandoned_candidates(lock_path: &str) {
 
 /// Node's `statSync(path, { bigint: true })` identity plus the directory flag.
 fn stat_identity(path: &Path) -> Option<StatIdentity> {
-    let metadata = std::fs::metadata(path).ok()?;
-    Some(identity_from_metadata(&metadata))
+    let file = open_lock(path).ok()?;
+    file_identity(&file)
 }
 
 #[cfg(unix)]
-fn identity_from_metadata(metadata: &std::fs::Metadata) -> StatIdentity {
+fn file_identity(file: &std::fs::File) -> Option<StatIdentity> {
     use std::os::unix::fs::MetadataExt;
-    StatIdentity {
+    let metadata = file.metadata().ok()?;
+    Some(StatIdentity {
         dev: metadata.dev(),
         ino: metadata.ino(),
         is_dir: metadata.is_dir(),
-    }
+    })
 }
 
 #[cfg(windows)]
-fn identity_from_metadata(metadata: &std::fs::Metadata) -> StatIdentity {
-    // Windows has no stable dev/inode pair in std; the creation time is the
-    // strongest identity available here, and a zero identity means "held".
-    use std::time::UNIX_EPOCH;
-    let created = metadata
-        .created()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_nanos() as u64)
-        .unwrap_or(0);
-    StatIdentity {
-        dev: 0,
-        ino: created,
-        is_dir: metadata.is_dir(),
+fn file_identity(file: &std::fs::File) -> Option<StatIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // The owned File keeps the handle and file index alive through reclamation.
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0 {
+        return None;
     }
+    Some(StatIdentity {
+        dev: u64::from(info.dwVolumeSerialNumber),
+        ino: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        is_dir: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+    })
+}
+
+fn open_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(std::io::Error::other(
+            "Refusing to reclaim a symbolic link as a lock",
+        ));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        };
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
 }
 
 pub fn try_acquire_dir_lock<F, Fut>(
@@ -112,6 +144,13 @@ where
 {
     let lock_path = lock_path.to_string();
     async move {
+        // A directory can contain shared registry state or an old lock whose
+        // owner is still publishing its marker. Neither is safe to reclaim.
+        if std::fs::symlink_metadata(&lock_path)
+            .is_ok_and(|m| m.is_dir() || m.file_type().is_symlink())
+        {
+            return Ok(DirLockAttempt::Held);
+        }
         sweep_abandoned_candidates(&lock_path);
         acquire_attempt(&lock_path, owner_alive, true).await
     }
@@ -129,58 +168,66 @@ where
     Fut: Future<Output = bool> + Send + 'a,
 {
     Box::pin(async move {
-    let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4());
-    let temp_path = format!("{}.candidate-{}", lock_path, token);
+        let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4());
+        let temp_path = format!("{}.candidate-{}", lock_path, token);
 
-    write_owner_file(&temp_path, std::process::id())?;
+        write_owner_file(&temp_path, std::process::id())?;
 
-    let result = async {
-        match link_onto(&temp_path, lock_path) {
-            Ok(()) => return Ok(DirLockAttempt::Acquired),
-            Err(link_error) => {
-                // NFS can report failure for a link that landed: nlink 2 means it published.
-                let mut candidate_swept = false;
-                let mut rechecked_nlink: Option<u64> = None;
-                match std::fs::metadata(&temp_path) {
-                    Ok(metadata) => rechecked_nlink = Some(link_count(&metadata)),
-                    Err(stat_error) => {
-                        // Only a definite ENOENT means the candidate was swept.
-                        if stat_error.kind() != std::io::ErrorKind::NotFound {
-                            return Err(link_error);
+        let result = async {
+            match link_onto(&temp_path, lock_path) {
+                Ok(()) => return Ok(DirLockAttempt::Acquired),
+                Err(link_error) => {
+                    // NFS can report failure for a link that landed: nlink 2 means it published.
+                    let mut candidate_swept = false;
+                    let mut rechecked_nlink: Option<u64> = None;
+                    match std::fs::metadata(&temp_path) {
+                        Ok(metadata) => rechecked_nlink = Some(link_count(&metadata)),
+                        Err(stat_error) => {
+                            // Only a definite ENOENT means the candidate was swept.
+                            if stat_error.kind() != std::io::ErrorKind::NotFound {
+                                return Err(link_error);
+                            }
+                            candidate_swept = true;
                         }
-                        candidate_swept = true;
+                    }
+                    if rechecked_nlink == Some(2) {
+                        return Ok(DirLockAttempt::Acquired);
+                    }
+                    if candidate_swept && retry_on_swept_candidate {
+                        return acquire_attempt(lock_path, owner_alive, false).await;
+                    }
+
+                    if !is_already_exists(&link_error) {
+                        return Err(link_error);
                     }
                 }
-                if rechecked_nlink == Some(2) {
-                    return Ok(DirLockAttempt::Acquired);
-                }
-                if candidate_swept && retry_on_swept_candidate {
-                    return acquire_attempt(lock_path, owner_alive, false).await;
-                }
-
-                if !is_already_exists(&link_error) {
-                    return Err(link_error);
-                }
             }
+
+            // One immutable dev+ino capture keys every later decision about the judged lock.
+            let pinned = match open_lock(Path::new(lock_path)) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    return Ok(DirLockAttempt::Reclaimed)
+                }
+                Err(_) => return Ok(DirLockAttempt::Held),
+            };
+            let Some(captured) = file_identity(&pinned) else {
+                return Ok(DirLockAttempt::Held);
+            };
+            if captured.ino == 0 {
+                // Some Windows filesystems report no stable file index: identity unavailable.
+                return Ok(DirLockAttempt::Held);
+            }
+
+            let result = judge_and_reclaim(lock_path, owner_alive, captured, &token).await;
+            drop(pinned);
+            result
         }
+        .await;
 
-        // One immutable dev+ino capture keys every later decision about the judged lock.
-        let captured = match stat_identity(Path::new(lock_path)) {
-            Some(captured) => captured,
-            None => return Ok(DirLockAttempt::Reclaimed),
-        };
-        if captured.ino == 0 {
-            // Some Windows filesystems report no stable file index: identity unavailable.
-            return Ok(DirLockAttempt::Held);
-        }
-
-        judge_and_reclaim(lock_path, owner_alive, captured, &token).await
-    }
-    .await;
-
-    // Cleanup only: a leaked candidate must never mask a settled acquisition.
-    let _ = std::fs::remove_file(&temp_path);
-    result
+        // Cleanup only: a leaked candidate must never mask a settled acquisition.
+        let _ = std::fs::remove_file(&temp_path);
+        result
     })
 }
 
@@ -202,7 +249,7 @@ fn is_already_exists(error: &std::io::Error) -> bool {
 
 fn write_owner_file(temp_path: &str, pid: u32) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -227,6 +274,11 @@ where
     F: Fn(Option<i32>) -> Fut + Copy + Send + Sync,
     Fut: Future<Output = bool> + Send,
 {
+    // A registry, session directory, or unexpected legacy payload is durable
+    // state, not a disposable lock. Never rename or recursively delete it.
+    if captured.is_dir {
+        return Ok(DirLockAttempt::Held);
+    }
     let judged = read_owner_raw(lock_path, captured.is_dir);
     if judged == OwnerRead::Unreadable {
         // A transient read failure may hide a LIVE lock: never judge it stale.
@@ -238,6 +290,9 @@ where
         OwnerRead::Unreadable => unreachable!(),
     };
     if owner_alive(owner_pid).await {
+        return Ok(DirLockAttempt::Held);
+    }
+    if stat_identity(Path::new(lock_path)) != Some(captured) {
         return Ok(DirLockAttempt::Held);
     }
 
@@ -259,17 +314,22 @@ where
     let aside = stat_identity(Path::new(&aside_path));
     if let Some(aside) = aside {
         if aside.dev == captured.dev && aside.ino == captured.ino {
-            let _ = std::fs::remove_dir_all(&aside_path);
-            let _ = std::fs::remove_file(&aside_path);
+            // Only a pinned regular file can enter this path. Never recursively
+            // remove a directory, even if a caller chose the wrong lock path.
+            if aside.is_dir {
+                return Ok(DirLockAttempt::Held);
+            }
+            std::fs::remove_file(&aside_path)?;
             return Ok(DirLockAttempt::Reclaimed);
         }
     }
 
-    // Not the judged lock: restore, never delete. Known dirs rename back; everything
-    // else links back (link can never replace a rival). Any failure leaves it aside.
+    // Not the judged lock: preserve directories and restore files only through
+    // a no-clobber hard link. Any failure leaves the replacement intact aside.
     match aside {
         Some(aside) if aside.is_dir => {
-            let _ = std::fs::rename(&aside_path, lock_path);
+            // An unexpected replacement is preserved at its unique aside path.
+            // rename() could overwrite a new owner's directory on Unix.
         }
         _ => {
             if std::fs::hard_link(&aside_path, lock_path).is_ok() {
@@ -333,7 +393,10 @@ mod tests {
             .unwrap();
         assert_eq!(attempt, DirLockAttempt::Acquired);
         assert!(lock.exists());
-        assert_eq!(std::fs::read_to_string(&lock).unwrap(), format!("{}\n", std::process::id()));
+        assert_eq!(
+            std::fs::read_to_string(&lock).unwrap(),
+            format!("{}\n", std::process::id())
+        );
     }
 
     #[tokio::test]
@@ -341,9 +404,10 @@ mod tests {
         let dir = temp_dir();
         let lock = dir.join("session.lock");
         std::fs::write(&lock, format!("{}\n", std::process::id())).unwrap();
-        let attempt = try_acquire_dir_lock(lock.to_str().unwrap(), |pid| async move { pid.is_some() })
-            .await
-            .unwrap();
+        let attempt =
+            try_acquire_dir_lock(lock.to_str().unwrap(), |pid| async move { pid.is_some() })
+                .await
+                .unwrap();
         assert_eq!(attempt, DirLockAttempt::Held);
         assert!(lock.exists());
     }
@@ -380,9 +444,10 @@ mod tests {
         let lock = dir.join("session.lock");
         std::fs::create_dir_all(&lock).unwrap();
         std::fs::write(lock.join("pid"), format!("{}\n", std::process::id())).unwrap();
-        let attempt = try_acquire_dir_lock(lock.to_str().unwrap(), |pid| async move { pid.is_some() })
-            .await
-            .unwrap();
+        let attempt =
+            try_acquire_dir_lock(lock.to_str().unwrap(), |pid| async move { pid.is_some() })
+                .await
+                .unwrap();
         assert_eq!(attempt, DirLockAttempt::Held);
         assert!(lock.exists());
     }

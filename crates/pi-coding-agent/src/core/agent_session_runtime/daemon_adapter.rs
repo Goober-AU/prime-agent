@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use futures::future::BoxFuture;
+use std::sync::Mutex;
 use serde_json::{json, Map, Value};
 
 use pi_agent_core::types::{AgentMessage, ThinkingLevel};
@@ -32,11 +33,12 @@ use crate::modes::daemon::daemon_mode::{
 /// `state.runtime.session`.
 pub struct AgentSessionDaemonAdapter {
     runtime: Arc<super::AgentSessionRuntime>,
+    side_questions: Arc<Mutex<std::collections::HashMap<String, Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl AgentSessionDaemonAdapter {
     pub fn new(runtime: Arc<super::AgentSessionRuntime>) -> Self {
-        Self { runtime }
+        Self { runtime, side_questions: Arc::new(Mutex::new(std::collections::HashMap::new())) }
     }
 
     /// The wrapped session, for callers that already hold the adapter.
@@ -1068,40 +1070,31 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         })
     }
 
-    /// `startSideQuestion(session.agent, id, question, onEvent, previousTurns, retry)`
-    /// (`daemon-mode.ts:4692-4708`).
-    ///
-    /// blocked_on: `core::side_question::start_side_question`
-    /// (`core/side_question.rs:148`) exists, but it needs a
-    /// `Arc<dyn SideQuestionParent>` (`side_question.rs:84`). Nothing in the crate
-    /// implements that trait for `AgentSession`, so `state.runtime.session.agent`
-    /// (`agent-session.ts:4693`) has no Rust equivalent; the daemon's own call
-    /// site (`modes/daemon/daemon_mode.rs:5057`) hits the same gap. Owner to add:
-    /// `core/agent_session.rs`, `impl SideQuestionParent for AgentSession`
-    /// (state/convertToLlm/transformContext/streamFn/getApiKey/onPayload/
-    /// onResponse/toolExecution/sessionId/thinkingBudgets) plus a
-    /// `pub fn start_side_question(...)` that calls it. Needs
-    /// `core/agent_session.rs` edited. (Note: the daemon adapter is constructed
-    /// once per runtime, not per connection, so a per-connection
-    /// `sideQuestionRuns` registry from `daemon-mode.ts:4686` has no home here.)
-    fn start_side_question(
-        &self,
-        question: &str,
-        options: SideQuestionOptions,
-    ) -> BoxFuture<'static, Result<(), String>> {
-        let _ = (question, options);
-        Box::pin(async { Err("blocked_on: no startSideQuestion owner".to_string()) })
+    /// Standalone side agents retain the parent's async auth/stream callbacks,
+    /// but never append to the parent transcript or execute its tools.
+    fn start_side_question(&self, question: &str, options: SideQuestionOptions) -> BoxFuture<'static, Result<(), String>> {
+        let id = options.id;
+        let previous = match options.previous_turns.map(serde_json::from_value).transpose() {
+            Ok(previous) => previous, Err(error) => return Box::pin(async move { Err(error.to_string()) }),
+        };
+        let listener = options.on_event;
+        let run = crate::core::side_question::native::start(self.session().agent.clone(), id.clone(), question.into(),
+            Arc::new(move |event| {
+                if let Some(listener) = &listener {
+                    if let Ok(event) = serde_json::to_value(event) { listener(&event); }
+                }
+                Box::pin(async {})
+            }), previous, None);
+        let run = match run { Ok(run) => run, Err(error) => return Box::pin(async move { Err(error) }) };
+        self.side_questions.lock().unwrap().insert(id.clone(), run.abort);
+        let runs = self.side_questions.clone();
+        tokio::spawn(async move { run.done.await; runs.lock().unwrap().remove(&id); });
+        Box::pin(async { Ok(()) })
     }
 
-    /// `entry.run.abort()` (`daemon-mode.ts:4729`). The run lives in the daemon's
-    /// `sideQuestionRuns` map, which this per-runtime adapter does not own, so
-    /// there is nothing to abort here.
-    ///
-    /// blocked_on: an `AgentSession`-level owner for a started side-question run
-    /// (see `start_side_question` above); only `SideQuestionRun.abort`
-    /// (`core/side_question.rs:49`) exists, held by the caller.
-    fn abort_side_question(&self, side_question_id: &str) {
-        let _ = side_question_id;
+    fn abort_side_question(&self, id: &str) {
+        let abort = self.side_questions.lock().unwrap().remove(id);
+        if let Some(abort) = abort { abort(); }
     }
 
     fn new_session(&self, options: Option<NewSessionRuntimeOptions>) -> BoxFuture<'static, Result<Value, String>> { self.runtime().new_session(options) }

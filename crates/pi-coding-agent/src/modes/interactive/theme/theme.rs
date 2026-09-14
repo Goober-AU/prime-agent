@@ -138,39 +138,58 @@ fn best_ansi_color(rgb: &Rgb, mode: TerminalColorMode) -> AnsiColor {
     AnsiColor::Hex(String::new())
 }
 
+fn rgb_from_terminal_colors(rgb: pi_tui::terminal_colors::Rgb) -> Rgb {
+    Rgb {
+        r: rgb.r as f64,
+        g: rgb.g as f64,
+        b: rgb.b as f64,
+    }
+}
+
+fn rgb_to_terminal_colors(rgb: &Rgb) -> pi_tui::terminal_colors::Rgb {
+    pi_tui::terminal_colors::Rgb {
+        r: clamp_channel(rgb.r) as i64,
+        g: clamp_channel(rgb.g) as i64,
+        b: clamp_channel(rgb.b) as i64,
+    }
+}
+
+/// `getDefaultTerminalColors` (theme.ts:7-11 imports it from pi-tui).
+///
+/// The theme reads the ONE module-level cell owned by `terminal-colors.ts:28`,
+/// which is also what the OSC 10/11 probe writes (`packages/tui/src/terminal.ts:348`
+/// -> `terminal.rs:382,535`). The earlier port kept a second function-local
+/// `OnceLock` here, so a probe result could never be observed by the theme.
 fn get_default_terminal_colors() -> Option<DefaultTerminalColors> {
-    static COLORS: OnceLock<Mutex<Option<DefaultTerminalColors>>> = OnceLock::new();
-    *COLORS.get_or_init(|| Mutex::new(None)).lock().expect("terminal colors")
+    pi_tui::terminal_colors::get_default_terminal_colors().map(|colors| DefaultTerminalColors {
+        foreground: rgb_from_terminal_colors(colors.foreground),
+        background: rgb_from_terminal_colors(colors.background),
+    })
 }
 
-/// `setDefaultTerminalColors` - used by tests and the terminal probe.
+/// `setDefaultTerminalColors` (terminal-colors.ts:184-187) - used by tests and
+/// the terminal probe. Writes the shared cell and notifies the listeners.
 pub fn set_default_terminal_colors(colors: Option<DefaultTerminalColors>) {
-    static COLORS: OnceLock<Mutex<Option<DefaultTerminalColors>>> = OnceLock::new();
-    *COLORS.get_or_init(|| Mutex::new(None)).lock().expect("terminal colors") = colors;
+    pi_tui::terminal_colors::set_default_terminal_colors(colors.map(|colors| {
+        pi_tui::terminal_colors::DefaultTerminalColors {
+            foreground: rgb_to_terminal_colors(&colors.foreground),
+            background: rgb_to_terminal_colors(&colors.background),
+        }
+    }));
 }
 
-fn detect_background_from_color_fg_bg() -> Option<TerminalBackgroundKind> {
-    let value = std::env::var("COLORFGBG").ok()?;
-    if value.is_empty() {
-        return None;
-    }
-    let parts: Vec<&str> = value.split(';').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let bg = parts[1].parse::<f64>().ok()?;
-    Some(if bg < 8.0 { TerminalBackgroundKind::Dark } else { TerminalBackgroundKind::Light })
+/// `clearDefaultTerminalColors` (terminal-colors.ts:189-191).
+pub fn clear_default_terminal_colors() {
+    pi_tui::terminal_colors::clear_default_terminal_colors();
 }
 
+/// `getTerminalBackgroundKind` (terminal-colors.ts:193-199): the probed
+/// background wins, `COLORFGBG` is the fallback.
 fn get_terminal_background_kind() -> Option<TerminalBackgroundKind> {
-    if let Some(colors) = get_default_terminal_colors() {
-        return Some(if is_light_color(&colors.background) {
-            TerminalBackgroundKind::Light
-        } else {
-            TerminalBackgroundKind::Dark
-        });
-    }
-    detect_background_from_color_fg_bg()
+    pi_tui::terminal_colors::get_terminal_background_kind().map(|kind| match kind {
+        pi_tui::terminal_colors::TerminalBackgroundKind::Dark => TerminalBackgroundKind::Dark,
+        pi_tui::terminal_colors::TerminalBackgroundKind::Light => TerminalBackgroundKind::Light,
+    })
 }
 
 // ============================================================================
@@ -1080,6 +1099,48 @@ pub fn get_theme_by_name(name: &str) -> Option<Theme> {
     load_theme(name, None).ok()
 }
 
+/// Port of the module-level `onDefaultTerminalColorsChange(...)` subscription
+/// (theme.ts:847-863): when the OSC 10/11 probe lands late, an automatic theme
+/// re-resolves `getDefaultTheme()` and the registered `onThemeChange` callback
+/// runs.
+fn ensure_default_terminal_colors_subscription() {
+    static SUBSCRIBED: OnceLock<()> = OnceLock::new();
+    SUBSCRIBED.get_or_init(|| {
+        pi_tui::terminal_colors::on_default_terminal_colors_change(Arc::new(|| {
+            let automatic = current_theme_state()
+                .lock()
+                .expect("theme state")
+                .current_theme_is_automatic;
+            if automatic {
+                let name = get_default_theme().to_string();
+                let current = current_theme_state()
+                    .lock()
+                    .expect("theme state")
+                    .current_theme_name
+                    .clone();
+                if current.as_deref() != Some(name.as_str()) {
+                    {
+                        let mut state = current_theme_state().lock().expect("theme state");
+                        state.current_theme_name = Some(name.clone());
+                    }
+                    match load_theme(&name, None) {
+                        Ok(theme) => set_global_theme(std::sync::Arc::new(theme)),
+                        Err(_error) => {
+                            let mut state = current_theme_state().lock().expect("theme state");
+                            state.current_theme_name = Some("dark".to_string());
+                            drop(state);
+                            if let Ok(theme) = load_theme("dark", None) {
+                                set_global_theme(std::sync::Arc::new(theme));
+                            }
+                        }
+                    }
+                }
+            }
+            notify_theme_change();
+        }));
+    });
+}
+
 /// Port of `detectTerminalBackground`.
 fn detect_terminal_background() -> &'static str {
     match get_terminal_background_kind() {
@@ -1208,6 +1269,9 @@ pub fn preload_code_highlighter() -> bool {
 pub fn init_theme(theme_name: Option<&str>, enable_watcher: bool) {
     preload_code_highlighter();
     preload_theme_validator();
+    // theme.ts:847 subscribes while the module is evaluated, i.e. before any
+    // theme consumer can start the terminal probe.
+    ensure_default_terminal_colors_subscription();
     let name = theme_name.unwrap_or_else(|| get_default_theme()).to_string();
     let mut state = current_theme_state().lock().expect("theme state");
     state.current_theme_name = Some(name.clone());
@@ -1285,6 +1349,7 @@ pub fn set_theme_instance(theme_instance: Theme) {
 
 /// Port of `onThemeChange`.
 pub fn on_theme_change(callback: Box<dyn Fn() + Send + Sync>) {
+    ensure_default_terminal_colors_subscription();
     {
         let mut state = current_theme_state().lock().expect("theme state");
         state.on_theme_change_callback = Some(callback);
@@ -1789,6 +1854,7 @@ fn _source_info_marker(_info: &AgentConnectionSourceInfo) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn colors(map: &[(&str, ColorValue)]) -> HashMap<String, ColorValue> {
         map.iter().map(|(key, value)| ((*key).to_string(), value.clone())).collect()
@@ -1991,6 +2057,86 @@ mod tests {
         assert_eq!(info.path.as_deref(), Some("/tmp/custom-name.json"));
         set_registered_themes(Vec::new());
         assert!(!registered_theme_names().contains(&"custom-name".to_string()));
+    }
+
+    /// Row 76/125 of the terminal audit: a late OSC 10/11 probe result must reach
+    /// the theme. TS has ONE module-level cell (terminal-colors.ts:28) that the
+    /// probe writes (packages/tui/src/terminal.ts:348) and the theme reads
+    /// (theme.ts:428,502,524,946), plus a module-level subscription
+    /// (theme.ts:847-863) that re-resolves the automatic theme and fires
+    /// `onThemeChange`.
+    ///
+    /// Teeth: with the old duplicate function-local `OnceLock` in
+    /// `get_default_terminal_colors` (two distinct cells for get and set), the
+    /// first assertion fails with "the theme must observe the probe result",
+    /// because the getter stays `None` forever.
+    #[test]
+    fn a_late_color_probe_reaches_the_theme_and_fires_theme_change() {
+        // The probe publishes through the pi-tui store (terminal.rs:382,535).
+        pi_tui::terminal_colors::clear_default_terminal_colors();
+        assert_eq!(
+            get_default_terminal_colors(),
+            None,
+            "no probe result yet: the theme sees the terminal default"
+        );
+
+        let changes = Arc::new(AtomicU64::new(0));
+        let seen = changes.clone();
+        ensure_default_terminal_colors_subscription();
+        on_theme_change(Box::new(move || {
+            seen.fetch_add(1, Ordering::SeqCst);
+        }));
+
+        // Exactly the call the OSC 10/11 probe makes on completion.
+        pi_tui::terminal_colors::set_default_terminal_colors(Some(
+            pi_tui::terminal_colors::DefaultTerminalColors {
+                foreground: pi_tui::terminal_colors::Rgb {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                },
+                background: pi_tui::terminal_colors::Rgb {
+                    r: 250,
+                    g: 250,
+                    b: 250,
+                },
+            },
+        ));
+
+        let observed =
+            get_default_terminal_colors().expect("the theme must observe the probe result");
+        assert_eq!(
+            observed.background,
+            Rgb {
+                r: 250.0,
+                g: 250.0,
+                b: 250.0
+            }
+        );
+        assert_eq!(
+            get_terminal_background_kind(),
+            Some(TerminalBackgroundKind::Light),
+            "a light probed background must switch the adaptive accent (theme.ts:522-528)"
+        );
+        assert_eq!(
+            get_default_theme(),
+            "light",
+            "an automatic theme must re-resolve to the light preset (theme.ts:848-858)"
+        );
+        assert_eq!(
+            changes.load(Ordering::SeqCst),
+            1,
+            "the subscription must fire onThemeChange once (theme.ts:860-862)"
+        );
+
+        pi_tui::terminal_colors::clear_default_terminal_colors();
+        // Test hygiene: the subscription itself is permanent (theme.ts:847 runs
+        // at import time), but the process-global callback must not leak into
+        // the tests that run after this one.
+        current_theme_state()
+            .lock()
+            .expect("theme state")
+            .on_theme_change_callback = None;
     }
 
     #[test]

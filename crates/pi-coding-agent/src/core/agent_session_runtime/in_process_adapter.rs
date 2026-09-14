@@ -284,6 +284,12 @@ fn session_context_value(session: &Arc<AgentSession>) -> AgentConnectionSessionC
 
 /// The `runtimeHost` implementation for a live `AgentSessionRuntime`.
 impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
+    fn session_start_side_question(&self, id: String, question: String,
+        previous: Option<Vec<crate::core::side_question::SideQuestionTurn>>,
+        on_event: Arc<dyn Fn(crate::core::side_question::SideQuestionEvent) -> BoxFuture<()> + Send + Sync>,
+    ) -> Result<crate::core::side_question::SideQuestionRun, String> {
+        crate::core::side_question::native::start(self.session().agent.clone(), id, question, on_event, previous, None)
+    }
     // Members whose canonical owner is missing return an explicit failure or an empty roster with a
     // `blocked_on:` note, rather than being omitted: the trait has no default bodies, so an omitted
     // member is a hard E0046 that stops the whole crate from compiling and keeps every test from

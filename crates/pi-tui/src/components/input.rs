@@ -377,6 +377,11 @@ impl Focusable for Input {
 }
 
 impl Component for Input {
+    /// `isFocusable(component)` gate (`packages/tui/src/tui.ts:418-421`).
+    fn as_focusable(&mut self) -> Option<&mut dyn super::super::tui::Focusable> {
+        Some(self)
+    }
+
     fn handle_input(&mut self, data: &str) {
         let mut data = data.to_string();
         if data.contains("\x1b[200~") {

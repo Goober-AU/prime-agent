@@ -466,6 +466,84 @@ fn colorize_optimus_logo(line: &str) -> String {
     theme().fg("accent", line)
 }
 
+/// `theme.ts`'s `MarkdownTheme` holds `Arc` closures with `Send + Sync`; the
+/// pi-tui renderer holds `Rc` closures. Private port of `toTuiMarkdownTheme`.
+fn to_tui_markdown_theme(
+    theme_source: super::theme::theme::MarkdownTheme,
+) -> pi_tui::components::markdown::MarkdownTheme {
+    fn rc(value: Arc<dyn Fn(&str) -> String + Send + Sync>) -> std::rc::Rc<dyn Fn(&str) -> String> {
+        std::rc::Rc::new(move |text: &str| value(text))
+    }
+
+    pi_tui::components::markdown::MarkdownTheme {
+        heading: rc(theme_source.heading),
+        link: rc(theme_source.link),
+        link_url: rc(theme_source.link_url),
+        code: rc(theme_source.code),
+        code_block: rc(theme_source.code_block),
+        code_block_border: rc(theme_source.code_block_border),
+        quote: rc(theme_source.quote),
+        quote_border: rc(theme_source.quote_border),
+        hr: rc(theme_source.hr),
+        list_bullet: rc(theme_source.list_bullet),
+        bold: rc(theme_source.bold),
+        italic: rc(theme_source.italic),
+        strikethrough: rc(theme_source.strikethrough),
+        underline: rc(theme_source.underline),
+        highlight_code: Some(std::rc::Rc::new(move |code: &str, language: Option<&str>| {
+            (theme_source.highlight_code)(code, language)
+        })),
+        code_block_indent: theme_source.code_block_indent,
+        math: Some(rc(theme_source.math)),
+        math_block: Some(rc(theme_source.math_block)),
+    }
+}
+
+/// Adapter that lets a pi-tui `Markdown` live in an `InteractiveMode` container.
+///
+/// The TypeScript adds `new Markdown(...)` straight to `chatContainer` /
+/// `shortcutGuideContainer`. The port's containers hold the slice's local
+/// `Component` trait, which is `Send`, while the pi-tui `MarkdownTheme` holds
+/// `Rc` closures. The block therefore keeps the owned `Send + Sync` theme and
+/// builds the renderer per render call.
+struct MarkdownBlock {
+    text: String,
+    padding_x: usize,
+    padding_y: usize,
+    markdown_theme: super::theme::theme::MarkdownTheme,
+}
+
+impl MarkdownBlock {
+    fn new(
+        text: String,
+        padding_x: usize,
+        padding_y: usize,
+        markdown_theme: super::theme::theme::MarkdownTheme,
+    ) -> Self {
+        Self { text, padding_x, padding_y, markdown_theme }
+    }
+}
+
+impl super::interactive_mode_services::Component for MarkdownBlock {
+    fn render(&self, width: usize) -> Vec<String> {
+        let mut markdown = pi_tui::components::markdown::Markdown::new(
+            self.text.clone(),
+            self.padding_x,
+            self.padding_y,
+            to_tui_markdown_theme(self.markdown_theme.clone()),
+            None,
+            pi_tui::components::markdown::MarkdownOptions::default(),
+        );
+        pi_tui::tui::Component::render(&mut markdown, width as f64)
+    }
+
+    fn invalidate(&mut self) {}
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// `StartupPromptBarrierOutcome`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupPromptBarrierOutcome {
@@ -1322,6 +1400,8 @@ pub struct InteractiveMode {
     working_visible: bool,
     working_message: Option<String>,
     working_started_at: Option<f64>,
+    /// `autoCompactionLoader` - the label of the mounted compaction loader.
+    compaction_loader_label: Option<String>,
     turn_started_at: Option<f64>,
     working_indicator_options: Option<LoaderIndicatorOptions>,
     pulse_frame: i64,
@@ -1458,6 +1538,7 @@ impl InteractiveMode {
             working_visible: true,
             working_message: None,
             working_started_at: None,
+            compaction_loader_label: None,
             turn_started_at: None,
             working_indicator_options: None,
             pulse_frame: 0,
@@ -1731,11 +1812,37 @@ impl InteractiveMode {
         super::onboarding::should_run_prime_cli_onboarding_splash(&self.get_onboarding_state())
     }
 
-    /// Port of `markOnboardingShown`.
-    fn mark_onboarding_shown(&self) {
+    /// Port of `markOnboardingShown` (interactive-mode.ts:1865-1869).
+    ///
+    /// `SettingsManager::set_onboarding_shown` writes the global settings file,
+    /// so this is the persistence point `runStartupOnboarding` performs *before*
+    /// the flow opens (TS:1880-1881).
+    pub fn mark_onboarding_shown(&self) {
         if !self.with_settings(|settings| settings.get_onboarding_shown()) {
             self.with_settings_mut(|settings| settings.set_onboarding_shown(true));
         }
+    }
+
+    /// Port of `runStartupOnboarding`'s pre-splash half
+    /// (interactive-mode.ts:1871-1881).
+    ///
+    /// Returns whether the onboarding flow should open. PARTIAL: the telemetry
+    /// `captureOnboardingCompleted` call (TS:1888-1901) belongs to the telemetry
+    /// slice, and the `runOnboardingFlow` body is driven by the native host
+    /// (`showOnboardingSplash` / the model selector) because it needs the TUI.
+    pub fn run_startup_onboarding(&mut self) -> bool {
+        if !self.should_run_onboarding() {
+            return false;
+        }
+        self.mark_onboarding_shown();
+        true
+    }
+
+    /// `runOnboardingFlow`'s splash branch key
+    /// (interactive-mode.ts:1912-1922): the Prime CLI users get the splash first,
+    /// everyone else goes straight to the model menu.
+    pub fn onboarding_uses_prime_cli_splash(&self) -> bool {
+        self.should_run_prime_cli_onboarding_splash()
     }
 
     /// Port of `formatDisplayPath`.
@@ -2353,6 +2460,219 @@ impl InteractiveMode {
         self.ctrl_c_exit_hint_expires_at > now_ms()
     }
 
+    /// Port of `getShortcutGuide` (interactive-mode.ts:10045-10073).
+    pub fn get_shortcut_guide(&self) -> String {
+        let tab = self.get_editor_key_display("tui.input.tab");
+        let new_line = self.get_editor_key_display("tui.input.newLine");
+        let clear_input = self.get_app_key_display("app.input.clear");
+        let shortcuts_key = self.get_app_key_display("app.shortcuts");
+        let select_model = self.get_app_key_display("app.model.select");
+        let expand_tools = self.get_app_key_display("app.tools.expand");
+        let expand_messages = self.get_app_key_display("app.messages.expand");
+        let expand_edits = self.get_app_key_display("app.edits.expand");
+        let toggle_thinking = self.get_app_key_display("app.thinking.toggle");
+        let external_editor = self.get_app_key_display("app.editor.external");
+        let prompt_stash = self.get_app_key_display("app.prompt.stash");
+        let paste_image = self.get_app_key_display("app.clipboard.pasteImage");
+        let help_line = if shortcuts_key.is_empty() {
+            "`/hotkeys` full reference".to_string()
+        } else {
+            format!("`{shortcuts_key}` quick shortcuts \u{b7} `/hotkeys` full reference")
+        };
+
+        format!(
+            "\
+**Prompt**
+`!` shell mode \u{b7} `/` commands \u{b7} `@` file paths
+`{tab}` complete paths \u{b7} `{new_line}` new line
+`{clear_input}` interrupt \u{b7} press twice to rewind or clear the prompt
+
+**Controls**
+`{select_model}` select model \u{b7} `/effort` set reasoning \u{b7} `{expand_tools}` tool output
+`{expand_messages}` agent messages \u{b7} `{expand_edits}` edit diffs \u{b7} `{toggle_thinking}` thinking blocks \u{b7} `{prompt_stash}` stash prompt \u{b7} `{external_editor}` edit in `$EDITOR`
+`{paste_image}` paste image
+
+**Help**
+{help_line}
+"
+        )
+    }
+
+    /// Port of `getHotkeysGuide` (interactive-mode.ts:10075-10195).
+    ///
+    /// The `**Extensions**` table the TypeScript appends when the local session
+    /// host exposes registered shortcuts is omitted: the Rust
+    /// `InteractiveModeLocalSessionHost` trait has no shortcut accessor, and the
+    /// base guide is the full reference promised by `/hotkeys`.
+    pub fn get_hotkeys_guide(&self) -> String {
+        let cursor_up = self.get_editor_key_display("tui.editor.cursorUp");
+        let cursor_down = self.get_editor_key_display("tui.editor.cursorDown");
+        let cursor_left = self.get_editor_key_display("tui.editor.cursorLeft");
+        let cursor_right = self.get_editor_key_display("tui.editor.cursorRight");
+        let cursor_word_left = self.get_editor_key_display("tui.editor.cursorWordLeft");
+        let cursor_word_right = self.get_editor_key_display("tui.editor.cursorWordRight");
+        let cursor_line_start = self.get_editor_key_display("tui.editor.cursorLineStart");
+        let cursor_line_end = self.get_editor_key_display("tui.editor.cursorLineEnd");
+        let jump_forward = self.get_editor_key_display("tui.editor.jumpForward");
+        let jump_backward = self.get_editor_key_display("tui.editor.jumpBackward");
+        let page_up = self.get_editor_key_display("tui.editor.pageUp");
+        let page_down = self.get_editor_key_display("tui.editor.pageDown");
+        let submit = self.get_editor_key_display("tui.input.submit");
+        let new_line = self.get_editor_key_display("tui.input.newLine");
+        let delete_word_backward = self.get_editor_key_display("tui.editor.deleteWordBackward");
+        let delete_word_forward = self.get_editor_key_display("tui.editor.deleteWordForward");
+        let delete_to_line_start = self.get_editor_key_display("tui.editor.deleteToLineStart");
+        let delete_to_line_end = self.get_editor_key_display("tui.editor.deleteToLineEnd");
+        let yank = self.get_editor_key_display("tui.editor.yank");
+        let yank_pop = self.get_editor_key_display("tui.editor.yankPop");
+        let undo = self.get_editor_key_display("tui.editor.undo");
+        let tab = self.get_editor_key_display("tui.input.tab");
+        let clear = self.get_app_key_display("app.clear");
+        let clear_input = self.get_app_key_display("app.input.clear");
+        let interrupt = self.get_app_key_display("app.interrupt");
+        let shortcuts_key = self.get_app_key_display("app.shortcuts");
+        let exit = self.get_app_key_display("app.exit");
+        let select_model = self.get_app_key_display("app.model.select");
+        let expand_tools = self.get_app_key_display("app.tools.expand");
+        let expand_messages = self.get_app_key_display("app.messages.expand");
+        let expand_edits = self.get_app_key_display("app.edits.expand");
+        let toggle_thinking = self.get_app_key_display("app.thinking.toggle");
+        let focus_subagents = self.get_app_key_display("app.subagents.focus");
+        let manage_heartbeats = self.get_app_key_display("app.heartbeats.open");
+        let external_editor = self.get_app_key_display("app.editor.external");
+        let prompt_stash = self.get_app_key_display("app.prompt.stash");
+        let follow_up = self.get_app_key_display("app.message.followUp");
+        let browse_queue = self.get_app_key_display("app.message.navigateOlder");
+        let reorder_queue = format!(
+            "{} / {}",
+            self.get_app_key_display("app.message.moveEarlier"),
+            self.get_app_key_display("app.message.moveLater"),
+        );
+        let paste_image = self.get_app_key_display("app.clipboard.pasteImage");
+        let viewport_page_up = self.get_editor_key_display("tui.viewport.pageUp");
+        let viewport_page_down = self.get_editor_key_display("tui.viewport.pageDown");
+        let viewport_top = self.get_editor_key_display("tui.viewport.top");
+        let viewport_follow = self.get_editor_key_display("tui.viewport.follow");
+        let new_line_note = if crate::utils::pi_user_agent::process_platform() == "win32" {
+            " (Ctrl+Enter on Windows Terminal)"
+        } else {
+            ""
+        };
+        let interrupt_row = if interrupt.is_empty() {
+            String::new()
+        } else {
+            format!("| `{interrupt}` | Interrupt current operation |\n")
+        };
+        let shortcuts_row = if shortcuts_key.is_empty() {
+            String::new()
+        } else {
+            format!("| `{shortcuts_key}` | Show quick shortcuts |\n")
+        };
+
+        format!(
+            "\
+**Navigation**
+| Key | Action |
+|-----|--------|
+| `{cursor_up}` / `{cursor_down}` / `{cursor_left}` / `{cursor_right}` | Move cursor / browse history (Up when empty) |
+| `{cursor_word_left}` / `{cursor_word_right}` | Move by word |
+| `{cursor_line_start}` | Start of line |
+| `{cursor_line_end}` | End of line |
+| `{jump_forward}` | Jump forward to character |
+| `{jump_backward}` | Jump backward to character |
+| `{page_up}` / `{page_down}` | Scroll by page |
+
+**Editing**
+| Key | Action |
+|-----|--------|
+| `{submit}` | Send message |
+| `{new_line}` | New line{new_line_note} |
+| `{delete_word_backward}` | Delete word backwards |
+| `{delete_word_forward}` | Delete word forwards |
+| `{delete_to_line_start}` | Delete to start of line |
+| `{delete_to_line_end}` | Delete to end of line |
+| `{yank}` | Paste the most-recently-deleted text |
+| `{yank_pop}` | Cycle through the deleted text after pasting |
+| `{undo}` | Undo |
+
+**Other**
+| Key | Action |
+|-----|--------|
+| `{tab}` | Path completion / accept autocomplete |
+| `{clear_input}` | Clear input / cancel autocomplete |
+| `{clear}` | Interrupt current operation (first) / exit (second) |
+{interrupt_row}{shortcuts_row}| `{exit}` | Exit (when editor is empty) |
+| `{select_model}` | Open model selector |
+| `{expand_tools}` | Toggle tool output expansion |
+| `{expand_messages}` | Toggle agent message expansion |
+| `{expand_edits}` | Toggle edit diff expansion |
+| `{toggle_thinking}` | Toggle thinking block visibility |
+| `{focus_subagents}` | Focus the subagent summary / open the scoped agents view |
+| `{manage_heartbeats}` | Manage heartbeats |
+| `{external_editor}` | Edit message in external editor |
+| `{prompt_stash}` | Stash or restore draft prompt |
+| `{follow_up}` | Queue follow-up message |
+| `{browse_queue}` | Browse and edit queued messages |
+| `{reorder_queue}` | Reorder the selected queued message |
+| `{paste_image}` | Paste image from clipboard |
+| `/` | Slash commands |
+
+**Fullscreen mode (`/fullscreen`)**
+| Key | Action |
+|-----|--------|
+| `{viewport_page_up}` / `{viewport_page_down}` | Scroll transcript by page |
+| `{viewport_top}` | Scroll to top |
+| `{viewport_follow}` | Scroll to bottom and follow output |
+| mouse wheel | Scroll transcript |
+| mouse drag | Select and copy text |
+| mouse click on link | Open link in browser |
+"
+        )
+    }
+
+    /// Port of `showShortcutGuide` (interactive-mode.ts:10197-10204): an
+    /// ephemeral spacer + markdown in `shortcutGuideContainer`, never appended to
+    /// the chat history.
+    pub fn show_shortcut_guide(&mut self) {
+        let hotkeys = self.get_shortcut_guide();
+        self.shortcut_guide_container.clear();
+        self.shortcut_guide_container
+            .add_child(Box::new(super::interactive_mode_services::Spacer::new(1)));
+        self.shortcut_guide_container.add_child(Box::new(MarkdownBlock::new(
+            hotkeys.trim().to_string(),
+            1,
+            1,
+            self.get_markdown_theme_with_settings(),
+        )));
+        self.ui.request_render();
+    }
+
+    /// Port of `handleHotkeysCommand` (interactive-mode.ts:10206-10212): the full
+    /// guide is durable chat content, unlike the `?` guide.
+    pub fn handle_hotkeys_command(&mut self) {
+        let hotkeys = self.get_hotkeys_guide();
+        self.chat_container
+            .add_child(Box::new(super::interactive_mode_services::Spacer::new(1)));
+        self.chat_container.add_child(Box::new(MarkdownBlock::new(
+            hotkeys.trim().to_string(),
+            1,
+            1,
+            self.get_markdown_theme_with_settings(),
+        )));
+        self.last_status_spacer_index = None;
+        self.last_status_text_index = None;
+        self.ui.request_render();
+    }
+
+    /// Port of `clearShortcutGuide` (interactive-mode.ts:10214-10220).
+    pub fn clear_shortcut_guide(&mut self) {
+        if self.shortcut_guide_container.is_empty() {
+            return;
+        }
+        self.shortcut_guide_container.clear();
+        self.ui.request_render();
+    }
+
     /// Port of `getQueueSelectionHeader`.
     pub fn get_queue_selection_header(&self) -> Option<String> {
         let selected = self.queue_selection.selected()?;
@@ -2593,29 +2913,7 @@ impl InteractiveMode {
 
     /// Port of `getPathCommandArgument`.
     pub fn get_path_command_argument(&self, text: &str, command: &str) -> Option<String> {
-        if text == command {
-            return None;
-        }
-        if !text.starts_with(&format!("{command} ")) {
-            return None;
-        }
-
-        let args_string = text[command.len() + 1..].trim_start();
-        if args_string.is_empty() {
-            return None;
-        }
-
-        let first_char = args_string.chars().next()?;
-        if first_char == '"' || first_char == '\'' {
-            let rest = &args_string[1..];
-            let closing_quote_index = rest.find(first_char)?;
-            return Some(rest[..closing_quote_index].to_string());
-        }
-
-        match args_string.find(char::is_whitespace) {
-            Some(index) => Some(args_string[..index].to_string()),
-            None => Some(args_string.to_string()),
-        }
+        path_command_argument(text, command)
     }
 
     /// Port of `capitalizeKey`.
@@ -2921,21 +3219,88 @@ impl InteractiveMode {
         self.ui.request_render();
     }
 
+    /// Port of the `showCtrlCExitHint` timeout callback
+    /// (interactive-mode.ts:7018-7025). The Rust mode has no `setTimeout`; the
+    /// host drives this from its existing tick so the exit hint auto-expires and
+    /// the tray repaints without a stale "Press Ctrl+C again to exit".
+    pub fn expire_ctrl_c_exit_hint(&mut self) {
+        if self.ctrl_c_exit_hint_expires_at == 0.0 || self.is_ctrl_c_exit_hint_visible() {
+            return;
+        }
+        self.ctrl_c_exit_hint_expires_at = 0.0;
+        self.ui.request_render();
+    }
+
     /// Port of `stopWorkingPulse`.
     pub fn stop_working_pulse(&mut self) {
         self.working_pulse_active = false;
     }
 
-    /// Port of `syncWorkingLoader`.
+    /// Port of `startCompactionLoader` (interactive-mode.ts:3528-3555).
+    pub fn start_compaction_loader(&mut self, reason: &str, custom_instructions: Option<&str>) {
+        // Keep the editor active; submissions are queued during compaction. Fully
+        // stop the working loader (not just detach) so it is not orphaned.
+        self.stop_working_loader();
+        self.compaction_loader_label = Some(self.format_compaction_loader_label(
+            reason,
+            custom_instructions,
+        ));
+        self.sync_working_loader();
+    }
+
+    /// The `startCompactionLoader` label ladder (interactive-mode.ts:3539-3546).
+    fn format_compaction_loader_label(
+        &self,
+        reason: &str,
+        custom_instructions: Option<&str>,
+    ) -> String {
+        let cancel_hint = format!("({} to cancel)", self.key_text("app.clear"));
+        let focus = custom_instructions
+            .filter(|instructions| !instructions.is_empty())
+            .map(|instructions| {
+                format!(
+                    " (focus: {})",
+                    truncate_to_width(instructions, 60.0, "\u{2026}", false)
+                )
+            })
+            .unwrap_or_default();
+        match reason {
+            "manual" => format!("Compacting context{focus}... {cancel_hint}"),
+            "requested" => {
+                format!("Agent requested compaction, compacting context{focus}... {cancel_hint}")
+            }
+            _ => format!(
+                "{}Auto-compacting... {cancel_hint}",
+                if reason == "overflow" { "Context overflow detected, " } else { "" }
+            ),
+        }
+    }
+
+    /// Port of `syncWorkingLoader` (interactive-mode.ts:3586-3616).
     pub fn sync_working_loader(&mut self) {
-        // Compaction/retry own the status container while active; don't fight them.
-        if self.is_agent_compacting() {
+        // A compaction that started before this client attached (or while another
+        // view was open) has no start-event edge; restore its loader from state.
+        if self.compaction_loader_label.is_none() && self.is_agent_compacting() {
+            self.start_compaction_loader("manual", None);
             return;
         }
-        if self.should_show_working_loader() {
-            self.status_container.clear();
+        self.status_container.clear();
+        if let Some(label) = &self.compaction_loader_label {
+            self.status_container.add_child(Box::new(
+                super::interactive_mode_services::Text::new(theme().fg("muted", label), 1, 0),
+            ));
         }
         self.ui.request_render();
+    }
+
+    /// Port of the `compaction_end` loader teardown
+    /// (interactive-mode.ts:5812-5814).
+    pub fn stop_compaction_loader(&mut self) {
+        if self.compaction_loader_label.is_none() {
+            return;
+        }
+        self.compaction_loader_label = None;
+        self.sync_working_loader();
     }
 
     /// Port of `setWorkingVisible`.
@@ -3099,11 +3464,29 @@ impl InteractiveMode {
     }
 
     /// Port of `showStatus`.
+    ///
+    /// Back-to-back status messages update the previous status line instead of
+    /// appending new ones to avoid log spam (interactive-mode.ts:6372-6390).
     pub fn show_status(&mut self, message: &str, tone: ThemeColor) {
+        let children = self.chat_container.len();
+        let last_is_previous_status = matches!(
+            (self.last_status_spacer_index, self.last_status_text_index),
+            (Some(spacer), Some(text)) if spacer + 2 == children && text + 1 == children
+        );
+        if last_is_previous_status {
+            if let Some(index) = self.last_status_text_index {
+                self.chat_container.children[index] =
+                    Box::new(Text::new(theme().fg(tone, message), 1, 0));
+            }
+            self.ui.request_render();
+            return;
+        }
         self.chat_container
             .add_child(Box::new(super::interactive_mode_services::Spacer::new(1)));
         self.chat_container
             .add_child(Box::new(Text::new(theme().fg(tone, message), 1, 0)));
+        self.last_status_spacer_index = Some(self.chat_container.len() - 2);
+        self.last_status_text_index = Some(self.chat_container.len() - 1);
         self.ui.request_render();
     }
 
@@ -3352,6 +3735,35 @@ fn truncate_to_width(text: &str, max_width: f64, ellipsis: &str, pad: bool) -> S
     pi_tui::utils::truncate_to_width(text, max_width, ellipsis, pad)
 }
 
+/// `getPathCommandArgument` (interactive-mode.ts:9255-9260 region) as a free
+/// function, so the native host can resolve `/import <path>` without holding the
+/// mode across a spawned task.
+pub(crate) fn path_command_argument(text: &str, command: &str) -> Option<String> {
+    if text == command {
+        return None;
+    }
+    if !text.starts_with(&format!("{command} ")) {
+        return None;
+    }
+
+    let args_string = text[command.len() + 1..].trim_start();
+    if args_string.is_empty() {
+        return None;
+    }
+
+    let first_char = args_string.chars().next()?;
+    if first_char == '"' || first_char == '\'' {
+        let rest = &args_string[1..];
+        let closing_quote_index = rest.find(first_char)?;
+        return Some(rest[..closing_quote_index].to_string());
+    }
+
+    match args_string.find(char::is_whitespace) {
+        Some(index) => Some(args_string[..index].to_string()),
+        None => Some(args_string.to_string()),
+    }
+}
+
 fn options_agent_connection(options: &InteractiveModeOptions) -> AgentConnection {
     Arc::clone(&options.agent_connection)
 }
@@ -3485,6 +3897,20 @@ impl InteractiveMode {
         self.shutdown().await;
     }
 
+    /// Port of `handleCtrlZ` (interactive-mode.ts:7201-7240).
+    ///
+    /// PARTIAL: the Windows branch is exact (`showStatus` + skip, TS:7202-7205).
+    /// The Unix branch needs a SIGTSTP/SIGCONT pair around `ui.stop()`/`ui.start()`;
+    /// the mode handle owns only the `Tui` stand-in, so the port reports the
+    /// unsupported host instead of stopping the terminal with no restore path.
+    pub fn handle_ctrl_z(&mut self) {
+        if crate::utils::pi_user_agent::process_platform() == "win32" {
+            self.show_status("Suspend to background is not supported on Windows", "dim");
+            return;
+        }
+        self.show_status("Suspend to background is not available in this terminal host", "dim");
+    }
+
     /// Port of `interruptOrClearInput`.
     ///
     /// PARTIAL: the aborts are issued through `AgentConnection`, which belongs to
@@ -3504,6 +3930,11 @@ impl InteractiveMode {
         }
         self.return_to_agents_view(InteractiveModeRunResultType::AgentsView);
         true
+    }
+
+    /// Port of `requestAgentsView`.
+    pub fn request_agents_view(&mut self) {
+        self.request_agents_view_blocking();
     }
 
     /// Port of `requestAgentsView`.
@@ -3676,14 +4107,35 @@ impl InteractiveMode {
         self.ui.request_render();
     }
 
-    /// Port of `showError`.
+    /// Port of `showError` (interactive-mode.ts:7672-7676).
+    ///
+    /// Errors always append a fresh spacer + line and never coalesce, so the
+    /// `Error: ` prefix is never overwritten by a later status.
     pub fn show_error(&mut self, message: &str) {
-        self.show_status(message, "error");
+        self.chat_container
+            .add_child(Box::new(super::interactive_mode_services::Spacer::new(1)));
+        self.chat_container.add_child(Box::new(Text::new(
+            theme().fg("error", &format!("Error: {message}")),
+            1,
+            0,
+        )));
+        self.last_status_spacer_index = None;
+        self.last_status_text_index = None;
+        self.ui.request_render();
     }
 
-    /// Port of `showWarning`.
+    /// Port of `showWarning` (interactive-mode.ts:7678-7682).
     pub fn show_warning(&mut self, message: &str) {
-        self.show_status(message, "warning");
+        self.chat_container
+            .add_child(Box::new(super::interactive_mode_services::Spacer::new(1)));
+        self.chat_container.add_child(Box::new(Text::new(
+            theme().fg("warning", &format!("\u{26a0} {message}")),
+            1,
+            0,
+        )));
+        self.last_status_spacer_index = None;
+        self.last_status_text_index = None;
+        self.ui.request_render();
     }
 
     /// Port of `updateEditorBorderColor`.
@@ -3699,6 +4151,20 @@ impl InteractiveMode {
             &self.queued_messages_container,
             &self.side_question_container,
             &self.feature_hint_container,
+        ]
+    }
+
+    /// Port of the `mainViewContainer` child order
+    /// (interactive-mode.ts:1268-1272): history, chat, shortcut guide, pending
+    /// messages, status. The host renders these in that order before the prompt
+    /// context containers.
+    pub fn get_main_view_containers(&self) -> Vec<&super::interactive_mode_services::Container> {
+        vec![
+            &self.history_container,
+            &self.chat_container,
+            &self.shortcut_guide_container,
+            &self.pending_messages_container,
+            &self.status_container,
         ]
     }
 
@@ -3772,6 +4238,7 @@ impl InteractiveMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modes::interactive::theme::theme::init_theme;
     use pi_ai::types::{ContentBlock, TextContent, ToolCall, ToolResultMessage};
 
     fn assistant_with_tool_calls(ids: &[&str]) -> AgentMessage {
@@ -4079,6 +4546,250 @@ mod tests {
         );
         assert_eq!(mode.get_path_command_argument("/import 'a.md'", "/import"), Some("a.md".to_string()));
         assert_eq!(mode.get_path_command_argument("/export \"unclosed", "/export"), None);
+    }
+
+    #[test]
+    fn shortcut_guide_is_ephemeral_and_capitalizes_keys() {
+        init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let mut mode = test_mode();
+
+        // `showShortcutGuide` may be called twice; the container is reused
+        // (interactive-mode-startup.test.ts:334-353).
+        mode.show_shortcut_guide();
+        mode.show_shortcut_guide();
+        assert_eq!(mode.chat_container.len(), 0, "the guide must not enter chat history");
+        assert_eq!(mode.shortcut_guide_container.len(), 2, "spacer + markdown");
+
+        let rendered =
+            crate::modes::interactive::interactive_mode_services::Component::render(
+                &mode.shortcut_guide_container,
+                80,
+            )
+            .join("\n");
+        assert!(rendered.contains("shell mode"), "{rendered:?}");
+        assert!(rendered.contains("file paths"));
+        assert!(rendered.contains("stash prompt"));
+        assert!(rendered.contains("full reference"), "{rendered:?}");
+        // Row 27: capitalized key text, never the raw `ctrl+s`.
+        assert!(!rendered.contains("ctrl+s"), "{rendered:?}");
+        assert!(!rendered.contains("ctrl+o"));
+        assert!(!rendered.contains("Ctrl+Z"));
+
+        mode.clear_shortcut_guide();
+        assert_eq!(mode.shortcut_guide_container.len(), 0);
+    }
+
+    #[test]
+    fn compaction_loader_text_matches_the_reason_ladder() {
+        init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let mut mode = test_mode();
+        mode.connection_state = Some(AgentConnectionState::default());
+        mode.patch_connection_state(|state| state.is_compacting = true);
+
+        // "manual" (interactive-mode.ts:3543).
+        mode.start_compaction_loader("manual", None);
+        let manual = mode.compaction_loader_label.clone().expect("label");
+        assert!(manual.starts_with("Compacting context..."), "{manual:?}");
+        assert!(manual.contains("(Ctrl+C to cancel)"), "{manual:?}");
+
+        // "requested" + custom instructions (interactive-mode.ts:3545, :3540).
+        mode.start_compaction_loader("requested", Some("keep the API notes"));
+        let requested = mode.compaction_loader_label.clone().expect("label");
+        assert!(requested.starts_with("Agent requested compaction, compacting context"), "{requested:?}");
+        assert!(requested.contains("(focus: keep the API notes)"), "{requested:?}");
+
+        // "overflow" (interactive-mode.ts:3546).
+        mode.start_compaction_loader("overflow", None);
+        let overflow = mode.compaction_loader_label.clone().expect("label");
+        assert!(overflow.starts_with("Context overflow detected, Auto-compacting..."), "{overflow:?}");
+
+        // "threshold" - the auto branch without the overflow prefix.
+        mode.start_compaction_loader("threshold", None);
+        let threshold = mode.compaction_loader_label.clone().expect("label");
+        assert!(threshold.starts_with("Auto-compacting..."), "{threshold:?}");
+
+        // `syncWorkingLoader` re-arms the loader while `isAgentCompacting()` is
+        // still true (interactive-mode.ts:3589-3591), so the end event clears the
+        // flag before the teardown.
+        mode.patch_connection_state(|state| state.is_compacting = false);
+        mode.stop_compaction_loader();
+        assert_eq!(mode.compaction_loader_label, None);
+    }
+
+    #[test]
+    fn sync_working_loader_restores_the_compaction_loader_from_state() {
+        init_theme(Some("prime"), false);
+        let mut mode = test_mode();
+        // No start event was seen: the mode only knows `isCompacting`.
+        mode.connection_state = Some(AgentConnectionState::default());
+        mode.patch_connection_state(|state| state.is_compacting = true);
+        assert_eq!(mode.compaction_loader_label, None);
+
+        mode.sync_working_loader();
+        assert!(mode.compaction_loader_label.is_some(), "restored from state");
+        assert_eq!(
+            crate::modes::interactive::interactive_mode_services::Component::render(
+                &mode.status_container,
+                80
+            )
+            .join("\n")
+            .contains("Compacting context"),
+            true
+        );
+    }
+
+    #[test]
+    fn onboarding_shown_is_persisted_before_the_flow_opens() {
+        let mut mode = test_mode();
+        // `test_mode` uses an in-memory `SettingsManager` with no model configured,
+        // so `shouldRunOnboarding` is true (onboarding.rs:74-83).
+        assert!(mode.should_run_onboarding());
+        assert!(!mode
+            .settings_manager()
+            .lock()
+            .expect("settings")
+            .get_onboarding_shown());
+
+        assert!(mode.run_startup_onboarding());
+        // Persisted before the flow body runs (TS:1880-1881); a second call is a
+        // no-op because the flag is now set.
+        assert!(mode
+            .settings_manager()
+            .lock()
+            .expect("settings")
+            .get_onboarding_shown());
+        assert!(!mode.run_startup_onboarding());
+    }
+
+    #[test]
+    fn hotkeys_guide_lands_in_chat_history_not_the_ephemeral_container() {
+        init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let mut mode = test_mode();
+        mode.handle_hotkeys_command();
+        assert_eq!(mode.chat_container.len(), 2, "spacer + markdown");
+        assert_eq!(mode.shortcut_guide_container.len(), 0);
+
+        let rendered = chat_lines(&mode).join("\n");
+        assert!(rendered.contains("Navigation"));
+        assert!(rendered.contains("Editing"));
+        assert!(rendered.contains("Queue follow-up message"), "{rendered:?}");
+        assert!(rendered.contains("Browse and edit queued messages"), "{rendered:?}");
+        assert!(!rendered.contains("Ctrl+Z"), "Ctrl+Z stays out of the guide");
+    }
+
+    #[test]
+    fn ctrl_c_exit_hint_arms_a_two_second_window_then_expires() {
+        init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let mut mode = test_mode();
+
+        // Idle + empty editor: the first press only arms the hint.
+        mode.show_ctrl_c_exit_hint();
+        assert!(mode.is_ctrl_c_exit_hint_visible());
+        assert_eq!(
+            mode.get_tray_override_label(""),
+            Some("Press Ctrl+C again to exit".to_string())
+        );
+
+        // The window is 2 s (InteractiveMode.EXIT_HINT_DURATION_MS, TS:976).
+        assert!(mode.ctrl_c_exit_hint_expires_at > now_ms());
+        assert!(mode.ctrl_c_exit_hint_expires_at <= now_ms() + 2_000.0);
+
+        // Simulate the elapsed window: the host tick must drop the hint so the
+        // tray stops overriding the location label (TS:7018-7025).
+        mode.ctrl_c_exit_hint_expires_at = now_ms() - 1.0;
+        assert!(!mode.is_ctrl_c_exit_hint_visible());
+        mode.expire_ctrl_c_exit_hint();
+        assert_eq!(mode.ctrl_c_exit_hint_expires_at, 0.0);
+        assert_eq!(mode.get_tray_override_label(""), None);
+    }
+
+    /// Reads back the rendered text of the chat container, matching the TS test
+    /// helper `renderLastLine` (interactive-mode-status.test.ts:167-205).
+    fn chat_lines(mode: &InteractiveMode) -> Vec<String> {
+        mode.chat_container.children.iter().flat_map(|child| child.render(80)).collect()
+    }
+
+
+    #[test]
+    fn show_status_coalesces_sequential_messages_into_the_previous_line() {
+        init_theme(Some("prime"), false);
+        let mut mode = test_mode();
+        mode.show_status("STATUS_ONE", "dim");
+        assert_eq!(mode.chat_container.len(), 2, "spacer + text");
+        assert!(chat_lines(&mode).join("\n").contains("STATUS_ONE"));
+
+        mode.show_status("STATUS_TWO", "dim");
+        // The second status updates the previous line instead of appending.
+        assert_eq!(mode.chat_container.len(), 2);
+        let joined = chat_lines(&mode).join("\n");
+        assert!(joined.contains("STATUS_TWO"));
+        assert!(!joined.contains("STATUS_ONE"));
+    }
+
+    #[test]
+    fn show_status_appends_a_new_line_when_something_else_was_added_between() {
+        init_theme(Some("prime"), false);
+        let mut mode = test_mode();
+        mode.show_status("STATUS_ONE", "dim");
+        assert_eq!(mode.chat_container.len(), 2);
+
+        mode.chat_container.add_child(Box::new(Text::new("OTHER", 1, 0)));
+        assert_eq!(mode.chat_container.len(), 3);
+
+        mode.show_status("STATUS_TWO", "dim");
+        // Adds a fresh spacer + text.
+        assert_eq!(mode.chat_container.len(), 5);
+        let joined = chat_lines(&mode).join("\n");
+        assert!(joined.contains("STATUS_ONE"));
+        assert!(joined.contains("STATUS_TWO"));
+    }
+
+    #[test]
+    fn show_warning_and_show_error_use_the_typescript_prefixes() {
+        init_theme(Some("prime"), false);
+        let mut mode = test_mode();
+        mode.show_warning("careful");
+        let warned = chat_lines(&mode).join("\n");
+        assert!(warned.contains("\u{26a0} careful"), "warning keeps the marker: {warned:?}");
+
+        let mut mode = test_mode();
+        mode.show_error("boom");
+        let errored = chat_lines(&mode).join("\n");
+        assert!(errored.contains("Error: boom"), "error keeps the prefix: {errored:?}");
+
+        // Neither coalesces into a neighbouring status line.
+        let mut mode = test_mode();
+        mode.show_status("first", "dim");
+        mode.show_error("boom");
+        mode.show_status("second", "dim");
+        assert_eq!(mode.chat_container.len(), 6);
+        let joined = chat_lines(&mode).join("\n");
+        assert!(joined.contains("first"));
+        assert!(joined.contains("Error: boom"));
+        assert!(joined.contains("second"));
+    }
+
+    #[test]
+    fn path_command_argument_matches_the_import_cases() {
+        // interactive-mode-import-command.test.ts:29-52.
+        let mode = test_mode();
+        assert_eq!(
+            mode.get_path_command_argument("/import \"path/to/session.jsonl\"", "/import"),
+            Some("path/to/session.jsonl".to_string())
+        );
+        assert_eq!(
+            mode.get_path_command_argument("/import john's/session.jsonl", "/import"),
+            Some("john's/session.jsonl".to_string())
+        );
+        assert_eq!(
+            mode.get_path_command_argument("/important /tmp/session.jsonl", "/import"),
+            None
+        );
+        assert_eq!(mode.get_path_command_argument("/exporter out.html", "/export"), None);
     }
 
     #[test]
