@@ -1647,12 +1647,26 @@ pub struct ForkOptionsInput {
     pub with_session: Option<WithSessionCallback>,
 }
 
-/// `path.resolve(value)`.
+/// `path.resolve(value)` (`agent-session-runtime.ts:2` imports `resolve` from
+/// `node:path`; `importFromJsonl` calls it at `agent-session-runtime.ts:190`).
+///
+/// Node's win32 `isAbsolute` treats a bare rooted path as absolute
+/// (`path.isAbsolute("/tmp/x.jsonl") === true`, measured on Node v24.16.0), so
+/// `resolve` returns it unchanged. `std::path::Path::is_absolute` needs a drive
+/// or UNC prefix and reports false, and `cwd.join(...)` then prefixes the
+/// current drive: `"/tmp/x.jsonl"` became `"C:/tmp/x.jsonl"`.
 fn resolve_path(value: &str) -> String {
-    if std::path::Path::new(value).is_absolute() {
-        return std::path::Path::new(value)
-            .to_string_lossy()
-            .to_string();
+    if crate::utils::pi_user_agent::process_platform() == "win32" {
+        let bytes = value.as_bytes();
+        let drive_absolute = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/');
+        if !value.is_empty() && (drive_absolute || bytes[0] == b'\\' || bytes[0] == b'/') {
+            return value.to_string();
+        }
+    } else if std::path::Path::new(value).is_absolute() {
+        return value.to_string();
     }
     let cwd = std::env::current_dir().unwrap_or_default();
     std::fs::canonicalize(cwd.join(value))

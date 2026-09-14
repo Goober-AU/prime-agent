@@ -2983,17 +2983,44 @@ fn create_unique_session_file_target(session_dir: &str) -> (String, String) {
 }
 
 pub fn get_session_artifacts_root(session_dir: &str) -> String {
+    // `session-manager.ts:525`: `join(dirname(sessionDir), "session-artifacts")`,
+    // so this is a plain host join. Only the full artifact path below is
+    // POSIX-normalised (see `join_posix`).
     Path::new(&dirname(session_dir))
         .join("session-artifacts")
         .to_string_lossy()
         .to_string()
 }
 
+/// Forward-slash join for the artifact path, mirroring the port's existing
+/// POSIX-normalisation convention (`to_posix_path`, `package_manager.rs:246`,
+/// and `core/refinement/refinement.rs` for the harness-state paths that live
+/// under this same artifact directory).
+///
+/// `session-file-actions.ts:16` documents the shape as
+/// `<dirname(sessionDir)>/session-artifacts/<id>`, and session artifact paths
+/// are exported to the RLM kernel and recorded in the session JSON, so a
+/// host-style separator must not leak into them.
+fn to_posix_path(value: &str) -> String {
+    value.replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+/// `join(base, leaf)` after POSIX normalisation; an empty base stays empty so
+/// the daemon's `artifact_dir.is_empty()` guard still works.
+fn join_posix(base: &str, leaf: &str) -> String {
+    let base = to_posix_path(base);
+    if base.is_empty() {
+        return leaf.to_string();
+    }
+    if base.ends_with('/') || leaf.is_empty() {
+        format!("{base}{leaf}")
+    } else {
+        format!("{base}/{leaf}")
+    }
+}
+
 pub fn get_session_artifact_path(session_dir: &str, session_id: &str) -> String {
-    Path::new(&get_session_artifacts_root(session_dir))
-        .join(session_id)
-        .to_string_lossy()
-        .to_string()
+    join_posix(&get_session_artifacts_root(session_dir), session_id)
 }
 
 pub fn get_session_artifact_path_for_file(session_file: &str, session_id: Option<&str>) -> String {

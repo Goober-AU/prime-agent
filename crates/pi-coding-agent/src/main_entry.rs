@@ -967,20 +967,34 @@ pub struct BuildSessionOptionsResult {
     pub diagnostics: Vec<AgentSessionRuntimeDiagnostic>,
 }
 
-/// `resolveCliPaths(cwd, paths)`.
+/// `resolveCliPaths(cwd, paths)` (`main.ts:629-631`).
+///
+/// The TypeScript resolves a local entry with `resolve(cwd, value)` from
+/// `node:path` (`main.ts:8`), so the host flavour applies: on win32 the result
+/// is drive-absolute with the platform separator. `Path::join` alone neither
+/// normalises `.` away nor produces the drive, which is why
+/// `resolve_cli_paths("/work", ["./skills"])` returned `"/work\\./skills"` while
+/// the TypeScript returns `"C:\\work\\skills"` (measured with the pinned
+/// `resolveToCwd`/`resolve` pair on Node v24.16.0).
 pub fn resolve_cli_paths(cwd: &str, paths: Option<&Vec<String>>) -> Option<Vec<String>> {
     paths.map(|paths| {
         paths
             .iter()
             .map(|value| {
                 if is_local_path(value) {
-                    Path::new(cwd).join(value).to_string_lossy().to_string()
+                    resolve_path(cwd, value)
                 } else {
                     value.clone()
                 }
             })
             .collect()
     })
+}
+
+/// `path.resolve(base, target)`; see [`crate::core::tools::path_utils::resolve_path`]
+/// for the Node win32 semantics this mirrors.
+fn resolve_path(base: &str, target: &str) -> String {
+    crate::core::tools::path_utils::resolve_path(base, target)
 }
 
 /// `runtimeAutonomousConfigFromArgs(parsed)`.
@@ -4038,6 +4052,29 @@ mod tests {
         assert_eq!(conflicting, [true, false, false]);
     }
 
+    /// The drive `path.resolve` prefixes to a drive-less rooted input, plus the
+    /// host separator. Node's `resolve('/work', './skills')` is `C:\\work\\skills`
+    /// on this host (measured with the pinned pair on Node v24.16.0), so the
+    /// expectation is derived from the host rather than written as a POSIX
+    /// literal that the TypeScript never produces.
+    fn host_resolved(base: &str, tail: &str) -> String {
+        let drive = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| {
+                cwd.components().next().and_then(|component| match component {
+                    std::path::Component::Prefix(prefix) => {
+                        Some(prefix.as_os_str().to_string_lossy().to_string())
+                    }
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        let sep = std::path::MAIN_SEPARATOR;
+        let base = base.trim_start_matches(['/', '\\']);
+        let tail = tail.trim_start_matches("./");
+        format!("{drive}{sep}{base}{sep}{tail}")
+    }
+
     #[test]
     fn runtime_config_mirrors_the_cli_flags() {
         let parsed = args(&[
@@ -4058,9 +4095,15 @@ mod tests {
         assert_eq!(config.session_dir.as_deref(), Some("/sessions"));
         assert_eq!(config.model.as_deref(), Some("provider/model"));
         assert_eq!(config.no_tools, Some(true));
+        // `main.ts:629-631` resolves each local CLI path with `resolve(cwd, value)`
+        // (`main.ts:8` imports it from `node:path`), and on win32 that call returns
+        // a drive-absolute, backslash path with `.` collapsed: the pinned behaviour
+        // measured here is `resolve("/work", "./skills") === "C:\\work\\skills"`.
+        // The POSIX literal "/work/./skills" cannot be produced by that call, so it
+        // was not a valid expectation.
         assert_eq!(
             config.skills.as_ref().map(|skills| skills[0].clone()),
-            Some("/work/./skills".to_string())
+            Some(host_resolved("/work", "./skills"))
         );
         assert_eq!(config.execution_mode.as_deref(), Some("print"));
         assert_eq!(config.serialized_refine, Some(true));
@@ -4126,12 +4169,12 @@ mod tests {
 
     #[test]
     fn local_cli_paths_are_resolved_and_urls_are_kept() {
+        // Same `resolve(cwd, value)` rule as above: `Path::join` is not a
+        // substitute (it keeps "./a" and drops the drive), so the sibling
+        // assertion derived from it was not a valid expectation either.
         assert_eq!(
             resolve_cli_paths("/work", Some(&vec!["./a".to_string(), "https://x/y".to_string()])),
-            Some(vec![
-                Path::new("/work").join("./a").to_string_lossy().to_string(),
-                "https://x/y".to_string()
-            ])
+            Some(vec![host_resolved("/work", "./a"), "https://x/y".to_string()])
         );
         assert!(resolve_cli_paths("/work", None).is_none());
     }
