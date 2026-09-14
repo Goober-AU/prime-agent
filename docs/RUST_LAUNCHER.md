@@ -43,4 +43,14 @@ optimus-rust --version
 
 The launcher respects `PRIME_AGENT_CODING_AGENT_DIR` and `PRIME_AGENT_KERNEL_VENV` overrides. `OPTIMUS_RUST_TMPDIR` overrides the socket directory; keep it short enough for Unix socket limits. The default is `$XDG_RUNTIME_DIR/optimus-rust`, falling back to `~/.cache/optimus-rust`. It is separate from Prime's temporary socket directory.
 
+To reuse an existing Prime OAuth login, share its `auth.json` through a symlink after backing up the Rust credential file. Independent copies of a rotating refresh token can become stale. Rust resolves the credential path before locking, so it coordinates refreshes with Prime's `proper-lockfile` lock on the original file. Settings, sessions, and daemon state can remain in the separate Rust profile. Only share credentials between trusted local profiles.
+
+To use an existing Codex CLI login instead, configure `providers.openai-codex.apiKey` in the Rust profile's `models.json` with a command that reads the current access token:
+
+```json
+"apiKey": "!python3 -c 'import json; from pathlib import Path; print(json.loads((Path.home()/\".codex/auth.json\").read_text())[\"tokens\"][\"access_token\"])'"
+```
+
+Back up and remove any `openai-codex` entry in the Rust profile's `auth.json` first, because stored credentials take precedence over `models.json`. Keep the existing model definitions. This command is resolved for each request; Codex remains responsible for its login and token refresh. Use the actual Codex auth path if `CODEX_HOME` is customized. Do not symlink the whole Codex auth file: its format differs from Prime's.
+
 Retain previous releases during upgrades. An already-running client keeps its loaded executable; relaunch `optimus-rust` to use an updated client. Do not replace a Python environment while it is executing tools.

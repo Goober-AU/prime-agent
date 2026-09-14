@@ -4,11 +4,6 @@
 //! and refreshing credentials from auth.json, with a file lock so concurrent
 //! instances cannot race on a token refresh.
 //!
-//! Boundary note: the OAuth provider registry, `findEnvKeys`/`getEnvApiKey` and
-//! `getOAuthApiKey` live in pi-ai (`utils/oauth/index.ts`, `env-api-keys.ts`).
-//! Those modules are not ported yet, so this file carries a minimal, faithful
-//! local implementation of the registry plus the env-key lookups and re-exports
-//! them for the rest of the crate. See `blocked_on` in the slice status.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,10 +13,16 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use pi_ai::types::BoxFuture;
 use pi_ai::utils::oauth::types::{
-    OAuthCredentials, OAuthProviderId, OAuthProviderInterface,
+    OAuthCredentials, OAuthProviderInterface,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+pub(crate) use pi_ai::mcp::catalog::register_builtin_mcp_oauth_providers;
+use pi_ai::utils::oauth::get_oauth_api_key;
+pub(crate) use pi_ai::utils::oauth::{
+    get_oauth_provider, get_oauth_providers, register_oauth_provider, reset_oauth_providers,
+};
 
 use crate::core::prime_inference_auth::{
     clear_prime_cli_credentials, get_prime_cli_config_path, load_prime_cli_config,
@@ -31,12 +32,7 @@ use crate::core::prime_inference_auth::{
 use crate::utils::atomic_file::{realpath_if_present_sync, write_file_atomic_sync, WriteFileAtomicOptions};
 
 // ---------------------------------------------------------------------------
-// Boundary plumbing, pending the pi-ai slice.
-//
-// `findEnvKeys`/`getEnvApiKey`/`getPrimeTeamId` live in packages/ai/src/env-api-keys.ts
-// and the OAuth registry in packages/ai/src/utils/oauth/index.ts. Those files are
-// not ported yet, so this module keeps a private (`pub(crate)`) copy of exactly
-// those functions for its own use. Replace with `pi_ai::...` once that slice lands.
+// Environment-key lookup helpers.
 // ---------------------------------------------------------------------------
 
 fn api_key_env_vars(provider: &str) -> Option<Vec<&'static str>> {
@@ -209,79 +205,6 @@ pub(crate) fn get_prime_team_id() -> Option<String> {
     }
 }
 
-/// `utils/oauth/index.ts` registry. Built-in providers (anthropic, github-copilot,
-/// openai-codex) are not ported yet, so the registry starts empty and only
-/// registered providers are known - same behaviour as `resetOAuthProviders()`
-/// followed by the built-in re-registration this module performs.
-fn oauth_registry() -> &'static Mutex<IndexMap<String, OAuthProviderInterface>> {
-    static REGISTRY: OnceLock<Mutex<IndexMap<String, OAuthProviderInterface>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(IndexMap::new()))
-}
-
-fn lock_oauth_registry() -> std::sync::MutexGuard<'static, IndexMap<String, OAuthProviderInterface>> {
-    oauth_registry()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-pub(crate) fn get_oauth_provider(id: &str) -> Option<OAuthProviderInterface> {
-    lock_oauth_registry().get(id).cloned()
-}
-
-pub(crate) fn register_oauth_provider(provider: OAuthProviderInterface) {
-    lock_oauth_registry().insert(provider.id.clone(), provider);
-}
-
-pub(crate) fn unregister_oauth_provider(id: &str) {
-    lock_oauth_registry().shift_remove(id);
-}
-
-pub(crate) fn reset_oauth_providers() {
-    lock_oauth_registry().clear();
-}
-
-pub(crate) fn get_oauth_providers() -> Vec<OAuthProviderInterface> {
-    lock_oauth_registry().values().cloned().collect()
-}
-
-/// `getOAuthProviderInfoList()`.
-pub(crate) fn get_oauth_provider_info_list() -> Vec<pi_ai::utils::oauth::types::OAuthProviderInfo> {
-    get_oauth_providers()
-        .into_iter()
-        .map(|provider| pi_ai::utils::oauth::types::OAuthProviderInfo {
-            id: provider.id,
-            name: provider.name,
-            available: true,
-        })
-        .collect()
-}
-
-/// `registerBuiltinMcpOAuthProviders()` (packages/ai/src/mcp/catalog.ts).
-/// The catalog and `createMcpOAuthProvider` live in the pi-ai MCP slice, which is
-/// not ported yet: the catalog is empty here, so the call is a no-op that keeps
-/// the call site and ordering identical.
-pub(crate) fn register_builtin_mcp_oauth_providers() {}
-
-/// `getOAuthApiKey(providerId, credentials)`.
-pub(crate) async fn get_oauth_api_key(
-    provider_id: &str,
-    credentials: &IndexMap<String, OAuthCredentials>,
-) -> Option<(String, OAuthCredentials)> {
-    let provider = get_oauth_provider(provider_id)?;
-    let current = credentials.get(provider_id)?;
-    if (current.expires as i64) > now_millis() {
-        return Some(((provider.get_api_key)(current), current.clone()));
-    }
-    let refreshed = match (provider.refresh_token)(current.clone()).await {
-        Ok(refreshed) => refreshed,
-        // TS rethrows as `Failed to refresh OAuth token for <id>`; this boundary
-        // copy reports "no key" so the call site falls back like the TS catch does.
-        Err(_) => return None,
-    };
-    let api_key = (provider.get_api_key)(&refreshed);
-    Some((api_key, refreshed))
-}
-
 fn now_millis() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -445,9 +368,11 @@ pub struct FileAuthStorageBackend {
 
 impl FileAuthStorageBackend {
     pub fn new(auth_path: Option<String>) -> Self {
-        Self {
-            auth_path: auth_path.unwrap_or_else(auth_path_default),
-        }
+        let auth_path = auth_path.unwrap_or_else(auth_path_default);
+        // proper-lockfile resolves symlinks before locking. Both profiles must
+        // lock the same credential file when sharing rotating OAuth tokens.
+        let auth_path = realpath_if_present_sync(&auth_path).unwrap_or(auth_path);
+        Self { auth_path }
     }
 
     fn ensure_parent_dir(&self) -> std::io::Result<()> {
@@ -1813,18 +1738,20 @@ impl AuthStorage {
                             return Ok(None);
                         }
 
-                        let mut oauth_creds: IndexMap<String, OAuthCredentials> = IndexMap::new();
+                        let mut oauth_creds: HashMap<String, OAuthCredentials> = HashMap::new();
                         for (key, value) in AuthStorage::parse_storage_data(current.as_deref()) {
                             if let AuthCredential::OAuth { credentials } = value {
                                 oauth_creds.insert(key, credentials);
                             }
                         }
 
-                        let Some((api_key, new_credentials)) =
-                            get_oauth_api_key(&provider_id_for_lock, &oauth_creds).await
+                        let Some(refreshed) =
+                            get_oauth_api_key(&provider_id_for_lock, &oauth_creds).await?
                         else {
                             return Ok(None);
                         };
+                        let api_key = refreshed.api_key;
+                        let new_credentials = refreshed.new_credentials;
 
                         // `merged = { ...currentData, [providerId]: { type: "oauth",
                         // ...refreshed.newCredentials } }` (auth-storage.ts:848-854):
@@ -2305,6 +2232,7 @@ mod tests {
         OAuthLoginCallbacks, OAuthProviderInfo, OAuthSelectPrompt,
     };
     use serde_json::json;
+    use pi_ai::utils::oauth::{get_oauth_provider_info_list, unregister_oauth_provider};
 
     /// Age a lock *directory* so the stale-lock takeover can be exercised.
     fn set_directory_mtime_to_now_minus(path: &str, seconds: u64) {
@@ -2626,7 +2554,7 @@ mod tests {
     #[test]
     fn oauth_registry_registers_and_resets() {
         reset_oauth_providers();
-        assert!(get_oauth_providers().is_empty());
+        assert!(get_oauth_provider("openai-codex").is_some());
         let provider = OAuthProviderInterface {
             id: "test-provider".to_string(),
             name: "Test".to_string(),
@@ -2643,21 +2571,17 @@ mod tests {
             modify_models: None,
         };
         register_oauth_provider(provider);
-        assert_eq!(get_oauth_providers().len(), 1);
-        assert_eq!(
-            get_oauth_provider_info_list(),
-            vec![OAuthProviderInfo {
-                id: "test-provider".to_string(),
-                name: "Test".to_string(),
-                available: true
-            }]
-        );
+        assert!(get_oauth_provider_info_list().contains(&OAuthProviderInfo {
+            id: "test-provider".to_string(),
+            name: "Test".to_string(),
+            available: true,
+        }));
         assert_eq!(get_oauth_provider("test-provider").unwrap().name, "Test");
         unregister_oauth_provider("test-provider");
         assert!(get_oauth_provider("test-provider").is_none());
-        // Built-in MCP catalog providers are not ported yet: the call is a no-op.
         register_builtin_mcp_oauth_providers();
-        assert!(get_oauth_providers().is_empty());
+        assert!(get_oauth_provider("mcp:linear").is_some());
+        assert!(get_oauth_provider("openai-codex").is_some());
     }
 
     #[test]

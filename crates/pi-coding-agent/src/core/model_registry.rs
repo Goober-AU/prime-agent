@@ -3563,7 +3563,7 @@ mod tests {
         assert_eq!(model.base_url, "https://x.test");
         assert_eq!(model.context_window, 1000.0);
         assert_eq!(registry.get_provider_display_name("custom"), "Custom");
-        assert_eq!(registry.get_provider_display_name("anthropic"), "Anthropic");
+        assert_eq!(registry.get_provider_display_name("anthropic"), "Anthropic (Claude Pro/Max)");
         assert_eq!(registry.get_provider_display_name("unknown-provider"), "unknown-provider");
 
         // baseUrl-only registration rewrites the provider's existing models.

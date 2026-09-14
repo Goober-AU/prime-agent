@@ -1,0 +1,107 @@
+{
+  "slice": "rust-codex-auth",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/core/auth-storage.ts",
+      "rust": "crates/pi-coding-agent/src/core/auth_storage.rs",
+      "status": "ported",
+      "notes": "Replaced the obsolete empty OAuth registry and MCP no-op with the existing pi-ai implementation. Propagates refresh errors into the existing reload fallback. Canonical credential paths coordinate locks across symlinked profiles."
+    }
+  ],
+  "build": "cargo check --locked -p pi-coding-agent: ok (existing port warnings)",
+  "validation": {
+    "rust": [
+      {
+        "name": "native_cli",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.589,
+        "summaries": [
+          "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.57s"
+        ]
+      },
+      {
+        "name": "oauth_auth_storage",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.169,
+        "summaries": [
+          "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.15s"
+        ]
+      },
+      {
+        "name": "pi_coding_agent",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 19.688,
+        "summaries": [
+          "ok. 2174 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.65s"
+        ]
+      },
+      {
+        "name": "pi_tui",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.251,
+        "summaries": [
+          "ok. 217 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s"
+        ]
+      },
+      {
+        "name": "pi_agent_core",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.023,
+        "summaries": [
+          "ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+        ]
+      },
+      {
+        "name": "pi_ai",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.181,
+        "summaries": [
+          "ok. 668 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s"
+        ]
+      }
+    ],
+    "typescript_auth_storage": "60 passed in an isolated profile with network disabled",
+    "npm_check": "passed: Biome, TypeScript, installer and browser smoke checks",
+    "baseline": {
+      "configured": true,
+      "auth_registry_has_codex": false,
+      "ui_registry_has_codex": true,
+      "resolved_key": false
+    },
+    "fixed_synthetic_probe": {
+      "configured": true,
+      "auth_registry_has_codex": true,
+      "ui_registry_has_codex": true,
+      "resolved_key": true,
+      "recorded_errors": 0
+    },
+    "live_rust_oauth": {
+      "exitCode": 0,
+      "seconds": 2.04,
+      "provider": "openai-codex",
+      "model": "gpt-6-astra",
+      "expectedReplyObserved": true,
+      "refreshRequiredBefore": false,
+      "credentialRefreshed": false,
+      "refreshTokenRotated": false,
+      "errorMarkers": []
+    },
+    "live_typescript_reference": {
+      "provider": "openai-codex",
+      "model": "gpt-6-astra",
+      "stopReason": "stop",
+      "expectedReplyObserved": true,
+      "errorPresent": false
+    }
+  },
+  "live_notes": "Explicit user-authorized checks used the working Codex CLI login and marker-only prompts. Prime copied credentials were expired and OpenAI rejected their refresh with refresh_token_reused; a valid existing Codex access token succeeded without refreshing. No secrets or private request logs are included. Local configuration reads the current Codex access token via models.json on each request, leaving Codex responsible for refresh. Synthetic tests cover rotation, concurrent shared-file refresh, error preservation and peer-reload recovery.",
+  "protocol": "No wire changes.",
+  "parity": "Shared application auth resolution covers Rust CLI/TUI and daemon consumers. TypeScript remains unchanged and passed the live differential request. Telemus 3D and Web surfaces are unaffected: this is the separate optimus-agent repository. Linux tested; other platform limitations remain unchanged.",
+  "blocked_on": null
+}
