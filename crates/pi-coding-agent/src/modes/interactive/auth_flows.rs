@@ -237,6 +237,16 @@ pub const PRIME_AGENT_TRACES_PROVIDER_ID: &str = "prime-agent-traces";
 /// `PRIME_AGENT_TRACES_PROVIDER_NAME`
 pub const PRIME_AGENT_TRACES_PROVIDER_NAME: &str = "Prime Agent Traces";
 
+/// Shared credential mutation for the controller and the native terminal host.
+/// AuthStorage.logout also clears a Prime CLI credential when that is its source.
+pub fn logout_provider(auth: &mut crate::core::auth_storage::AuthStorage, provider: &str) -> Result<String, String> {
+    let oauth = matches!(auth.get(provider), Some(crate::core::auth_storage::AuthCredential::OAuth { .. }));
+    auth.logout(provider)?;
+    auth.remove_verified(provider)?;
+    Ok(if oauth { format!("Logged out of {provider}") }
+       else { format!("Removed stored API key for {provider}. Environment variables and models.json config are unchanged.") })
+}
+
 // ---------------------------------------------------------------------------
 // Ported module
 // ---------------------------------------------------------------------------
@@ -323,6 +333,10 @@ pub trait ProviderAuthFlowsHost: Send + Sync {
     fn model_registry(&self) -> Arc<std::sync::Mutex<ModelRegistry>>;
     fn show_status(&self, message: &str);
     fn show_error(&self, message: &str);
+    /// Selection belongs to the terminal owner; a headless host must decline it.
+    fn select_logout_provider(&self, _providers: Vec<AuthSelectorProvider>) -> pi_ai::types::BoxFuture<Result<Option<String>, String>> {
+        Box::pin(async { Err("Logout selection requires an interactive terminal host".into()) })
+    }
     /// Models currently visible to the host; used to detect providers configured via external credentials.
     fn get_available_models(&self) -> Vec<AgentConnectionModel>;
     /// Invoked after stored credentials change so the host can refresh dependent UI.
@@ -418,8 +432,22 @@ impl<'a> ProviderAuthFlows<'a> {
             return None;
         }
 
-        let _handle = show_full_pane_overlay(self.host.ui(), OverlayHandle::default(), 78.0);
-        None
+        let selected = match self.host.select_logout_provider(provider_options).await {
+            Ok(Some(provider)) => provider,
+            Ok(None) => return None,
+            Err(error) => { self.host.show_error(&error); return None; }
+        };
+        let result = {
+            let registry = self.host.model_registry();
+            let mut registry = registry.lock().unwrap_or_else(|e| e.into_inner());
+            logout_provider(registry.auth_storage_mut(), &selected).map(|message| {
+                registry.refresh(); message
+            })
+        };
+        match result {
+            Ok(message) => { self.host.on_auth_changed(); self.host.show_status(&message); Some(selected) }
+            Err(error) => { self.host.show_error(&format!("Logout failed: {error}")); None }
+        }
     }
 
     /// Port of `getLoginProviderOptions`.

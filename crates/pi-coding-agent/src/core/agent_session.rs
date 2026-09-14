@@ -245,6 +245,8 @@ pub type AfterToolCallHook = Arc<dyn Fn(AfterToolCallContext, Option<Cancellatio
 pub type GetContinuationMessagesHook = Arc<dyn Fn(GetContinuationMessagesContext, Option<CancellationToken>) -> BoxFuture<Vec<AgentMessage>> + Send + Sync>;
 
 pub trait AgentHandle: Send + Sync {
+    /// Snapshot the live callbacks copied by TypeScript's standalone side agent.
+    fn side_question_options(&self) -> Option<pi_agent_core::agent::AgentOptions> { None }
     fn state(&self) -> AgentState;
     fn set_state(&self, state: AgentState);
     fn subscribe(&self, listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;

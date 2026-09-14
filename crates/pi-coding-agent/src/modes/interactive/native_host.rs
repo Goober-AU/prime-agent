@@ -46,6 +46,12 @@ mod native_history;
 mod native_queue;
 #[path = "native_host_settings.rs"]
 mod native_settings;
+#[path = "native_host_commands.rs"]
+mod native_commands;
+#[path = "native_host_extensions.rs"]
+mod native_extensions;
+#[path = "native_host_extension_bridge.rs"]
+mod native_extension_bridge;
 
 pub(crate) async fn run_interactive_mode(
     options: InteractiveModeSeamOptions,
@@ -83,9 +89,13 @@ impl<T: TuiComponent> TuiComponent for SharedComponent<T> {
     fn invalidate(&mut self) {
         self.0.borrow_mut().invalidate();
     }
+    fn get_selection_regions(&self) -> Vec<pi_tui::selection_metadata::TableCellSelectionRegion> {
+        self.0.borrow().get_selection_regions()
+    }
 }
 
 struct Transcript {
+    extension_surfaces: Option<Rc<RefCell<native_extensions::Surfaces>>>,
     history: Option<Box<Transcript>>,
     mode: Rc<RefCell<InteractiveMode>>,
     rows: Vec<Box<dyn TuiComponent>>,
@@ -129,6 +139,7 @@ impl Transcript {
 
     fn new(mode: Rc<RefCell<InteractiveMode>>) -> Self {
         Self {
+            extension_surfaces: None,
             history: None,
             mode,
             rows: Vec::new(),
@@ -197,6 +208,12 @@ impl Transcript {
                         AssistantMessageComponentOptions {
                             cwd: Some(mode.get_current_cwd()),
                             expanded: mode.agent_messages_expanded,
+                            mermaid_transform: Some(Rc::new(crate::modes::interactive::components::mermaid::create_mermaid_markdown_transform(
+                                crate::modes::interactive::components::mermaid::MermaidTransformOptions {
+                                    get_mode: { let settings = mode.settings_manager().clone(); Box::new(move || settings.lock().map(|s| s.get_mermaid_rendering_mode()).unwrap_or_else(|_| "off".into())) },
+                                    theme: Some(theme()),
+                                },
+                            ))),
                             ..Default::default()
                         },
                     )));
@@ -297,7 +314,11 @@ impl TuiComponent for Transcript {
     fn render(&mut self, width: f64) -> Vec<String> {
         let mode = self.mode.borrow();
         let mut lines = Vec::new();
-        if self.rows.is_empty() && self.history.as_ref().is_none_or(|h| h.rows.is_empty()) {
+        let mut custom_header = false;
+        if let Some(surfaces) = &self.extension_surfaces {
+            if let Some(header) = &mut surfaces.borrow_mut().header { lines.extend(header.render(width)); custom_header = true; }
+        }
+        if !custom_header && self.rows.is_empty() && self.history.as_ref().is_none_or(|h| h.rows.is_empty()) {
             let model = mode.get_current_model_id();
             let cwd = mode.get_current_cwd();
             let hint = mode.start_hint.to_string();
@@ -335,16 +356,20 @@ impl TuiComponent for Transcript {
             // `createWorkingLoader` mounts the animated pi-tui `Loader`
             // (interactive-mode.ts:3305-3313); the native host renders the same
             // component's frame cycle in place, advanced by the host ticker.
-            let frames = pi_tui::components::loader::DEFAULT_FRAMES;
+            let custom = mode.working_indicator_options.as_ref();
+            let default_frames = pi_tui::components::loader::DEFAULT_FRAMES.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+            let frames = custom.and_then(|c| c.frames.as_ref()).filter(|f| !f.is_empty()).unwrap_or(&default_frames);
+            let interval = custom.and_then(|c| c.interval_ms).filter(|n| n.is_finite() && *n > 0.0)
+                .unwrap_or(pi_tui::components::loader::DEFAULT_INTERVAL_MS as f64).max(16.0);
             // The pi-tui `Loader` advances one frame per `DEFAULT_INTERVAL_MS`
             // (crates/pi-tui/src/components/loader.rs:11-12); driving the index from
             // the wall clock reproduces that cadence without a second timer.
-            let frame = ((now_ms() / pi_tui::components::loader::DEFAULT_INTERVAL_MS as f64).floor()
+            let frame = ((now_ms() / interval).floor()
                 as i64)
                 .rem_euclid(frames.len() as i64) as usize;
             lines.push(format!(
                 "{}{}",
-                theme().fg("accent", frames[frame]),
+                theme().fg("accent", &frames[frame]),
                 theme().fg("muted", &format!(" {}", mode.get_working_loader_message())),
             ));
         }
@@ -421,6 +446,19 @@ enum InputAction {
     PromptStash,
 }
 enum HostEvent {
+    Extension(native_extension_bridge::Event),
+    Shutdown,
+    CommandDialog(native_commands::Dialog),
+    CloseCommandDialog,
+    CommandBusy(String, tokio_util::sync::CancellationToken),
+    RefreshSnapshot(wire::AgentConnectionSnapshot),
+    EditorText(String),
+    AuthChanged,
+    ReloadSettings,
+    ScopeChanged(String, Vec<wire::AgentConnectionScopedModel>),
+    RunUpdate(Vec<String>),
+    SideQuestion(String),
+    Debug,
     Connection(wire::AgentConnectionEvent),
     Completed(Result<(), String>),
     Status(String),
@@ -626,7 +664,9 @@ fn respond_extension(
     connection: &Arc<dyn wire::AgentConnection>,
     send: &mpsc::Sender<HostEvent>,
     reply: ExtensionReply,
+    local: Option<&Arc<native_extension_bridge::Bridge>>,
 ) {
+    if local.is_some_and(|bridge| bridge.response(&reply)) { return; }
     let (connection, send) = (connection.clone(), send.clone());
     tokio::spawn(async move {
         if let Err(error) = connection
@@ -927,6 +967,7 @@ async fn run_terminal(
     options: InteractiveModeSeamOptions,
     benchmark: bool,
 ) -> Result<Option<InteractiveModeRunResult>, String> {
+    let mut in_process_connection = None;
     let connection: Arc<dyn wire::AgentConnection> = match options.connection.clone() {
         Some(connection) => connection,
         None => {
@@ -934,9 +975,11 @@ async fn run_terminal(
                 .runtime
                 .clone()
                 .ok_or("Interactive mode requires a session runtime or connection")?;
-            Arc::new(crate::modes::agent_connection::in_process_agent_connection::InProcessAgentConnection::new(
+            let local = Arc::new(crate::modes::agent_connection::in_process_agent_connection::InProcessAgentConnection::new(
                 Arc::new(crate::core::agent_session_runtime::InProcessRuntimeHostAdapter::new(runtime)),
-            ))
+            ));
+            in_process_connection = Some(local.clone());
+            local
         }
     };
     let snapshot = connection.get_initial_snapshot().await?;
@@ -966,7 +1009,7 @@ async fn run_terminal(
     let initial_images = options.initial_images.clone();
     let initial_messages = options.initial_messages.clone();
     let mut controller = InteractiveMode::new(InteractiveModeOptions {
-        migrated_providers: Some(options.migrated_providers),
+        migrated_providers: Some(options.migrated_providers.clone()),
         model_fallback_message: options.model_fallback_message.clone(),
         startup_notice: None,
         initial_message: None,
@@ -975,7 +1018,7 @@ async fn run_terminal(
         initial_prompts: None,
         verbose: options.verbose,
         agent_connection: Arc::new(connection.clone()),
-        daemon_socket_path: options.daemon_socket_path,
+        daemon_socket_path: options.daemon_socket_path.clone(),
         local_session_host: None,
         bind_local_session_extensions: false,
         ui_services: Some(services),
@@ -998,7 +1041,7 @@ async fn run_terminal(
     if controller.get_current_model().is_none() {
         controller.show_status("Welcome to Optimus. Connect a provider with /login, then choose a model with /model. Type /help for commands.", "accent");
     }
-    if let Some(warning) = options.model_fallback_message {
+    if let Some(warning) = &options.model_fallback_message {
         controller.show_warning(&warning);
     }
     let mode = Rc::new(RefCell::new(controller));
@@ -1136,10 +1179,15 @@ async fn run_terminal(
             }
         }));
     }
+    let extension_surfaces = Rc::new(RefCell::new(native_extensions::Surfaces::default()));
+    transcript.borrow_mut().extension_surfaces = Some(extension_surfaces.clone());
+    let side_pane = Rc::new(RefCell::new(native_extensions::SidePane::default()));
     ui.borrow_mut().add_child(transcript.clone());
+    ui.borrow_mut().add_child(side_pane.clone());
+    ui.borrow_mut().add_child(Rc::new(RefCell::new(native_extensions::Widgets(extension_surfaces.clone(), false))));
     ui.borrow_mut().add_child(editor.clone());
-    ui.borrow_mut()
-        .add_child(Rc::new(RefCell::new(Tray(mode.clone(), editor.clone()))));
+    ui.borrow_mut().add_child(Rc::new(RefCell::new(native_extensions::Widgets(extension_surfaces.clone(), true))));
+    ui.borrow_mut().add_child(Rc::new(RefCell::new(native_extensions::Statuses(extension_surfaces.clone(), Tray(mode.clone(), editor.clone())))));
     ui.borrow_mut().set_focus(Some(editor.clone()));
     ui.borrow_mut().start();
     let guard = TerminalGuard(ui.clone());
@@ -1169,6 +1217,31 @@ async fn run_terminal(
         return Ok(None);
     }
     let (send, receive) = mpsc::channel();
+    let local_extension_bridge = in_process_connection.as_ref().map(|local| {
+        let bridge = native_extension_bridge::Bridge::new(send.clone(), &mode.borrow().get_current_cwd());
+        let shutdown = send.clone();
+        let bindings = crate::modes::agent_connection::in_process_agent_connection::InProcessHeadlessExtensionOptions {
+            ui_context: Some(bridge.clone()), shutdown_handler: Some(Arc::new(move || { let _ = shutdown.send(HostEvent::Shutdown); })),
+        };
+        let future = local.bind_headless_extensions(bindings.clone());
+        let ready = send.clone();
+        tokio::spawn(async move { if let Err(error) = future.await { let _ = ready.send(HostEvent::Error(error)); } });
+        // Rebind the same typed UI after a fork/new/resume changes the runtime.
+        let weak = Arc::downgrade(local);
+        let reset = send.clone();
+        local.runtime_host().runtime_set_rebind_session(Some(Arc::new(move || {
+            let _ = reset.send(HostEvent::Extension(native_extension_bridge::Event::Reset));
+            let connection = weak.upgrade(); let bindings = bindings.clone();
+            Box::pin(async move { if let Some(connection) = connection { let _ = connection.bind_headless_extensions(bindings).await; } })
+        })));
+        bridge
+    });
+    let mut custom_extension: Option<(String, Rc<RefCell<dyn TuiComponent>>, pi_tui::tui::OverlayHandle, tokio::sync::oneshot::Sender<Option<serde_json::Value>>)> = None;
+    let mut early_custom_results = HashMap::<String, serde_json::Value>::new();
+    let mut command_dialog: Option<(Rc<RefCell<dyn TuiComponent>>, pi_tui::tui::OverlayHandle)> = None;
+    let mut command_cancel: Option<tokio_util::sync::CancellationToken> = None;
+    let mut login_provider = String::new();
+    let mut pending_relaunch = None;
     let event_send = send.clone();
     let unsubscribe = connection.subscribe(Arc::new(move |event| {
         let _ = event_send.send(HostEvent::Connection(event));
@@ -1282,12 +1355,21 @@ async fn run_terminal(
             history_runtime.request(&mode.borrow());
         }
         for data in std::mem::take(&mut *input.borrow_mut()) {
+            let data = if let Some(bridge) = &local_extension_bridge {
+                let Some(data) = bridge.filter_input(data) else { continue; }; data
+            } else { data };
             if let Some(splash) = &onboarding_splash {
                 splash.borrow_mut().handle_input(&data);
+            } else if let Some((_, component, _, _)) = custom_extension.as_ref().filter(|(_, _, handle, _)| handle.is_focused()) {
+                component.borrow_mut().handle_input(&data);
             } else if let Some(dialog) = &extension {
                 dialog.component.borrow_mut().handle_input(&data);
             } else if let Some(dialog) = logins.dialog() {
                 dialog.borrow_mut().handle_input(&data);
+            } else if let Some((component, _)) = &command_dialog {
+                if let Some(cancel) = &command_cancel {
+                    if pi_tui::keybindings::get_keybindings().matches(&data, "tui.select.cancel") || pi_tui::keybindings::get_keybindings().matches(&data, "app.interrupt") { cancel.cancel(); }
+                } else { component.borrow_mut().handle_input(&data); }
             } else if let Some(menu) = &configuration {
                 menu.borrow_mut().handle_input(&data);
             } else if let Some(picker) = &model_selector {
@@ -1324,7 +1406,7 @@ async fn run_terminal(
                 if let Some(dialog) = extension.take() {
                     dialog.overlay.hide();
                 }
-                respond_extension(&connection, &send, reply);
+                respond_extension(&connection, &send, reply, local_extension_bridge.as_ref());
             }
         }
         while let Ok(selected) = selection_receive.try_recv() {
@@ -1445,6 +1527,16 @@ async fn run_terminal(
         for action in std::mem::take(&mut *actions.borrow_mut()) {
             match action {
                 InputAction::Submit(text, follow_up) => {
+                    if side_pane.borrow().is_open() && !text.trim_start().starts_with('/') {
+                        if side_pane.borrow().running() {
+                            mode.borrow_mut().show_warning("Wait for the side answer, or press Esc to cancel it.");
+                        } else if !text.trim().is_empty() {
+                            editor.borrow_mut().editor_mut().add_to_history(&text);
+                            editor.borrow_mut().editor_mut().set_text("");
+                            side_pane.borrow_mut().start(text, connection.clone(), send.clone());
+                        }
+                        continue;
+                    }
                     if queue_runtime.submit(&text, follow_up) {
                         continue;
                     }
@@ -1468,6 +1560,10 @@ async fn run_terminal(
                     }
                 }
                 InputAction::Interrupt | InputAction::Escape => {
+                    if side_pane.borrow().is_open() {
+                        side_pane.borrow_mut().close(connection.clone());
+                        continue;
+                    }
                     let second = matches!(action, InputAction::Interrupt)
                         && mode.borrow().is_ctrl_c_exit_hint_visible();
                     if second {
@@ -1606,6 +1702,125 @@ async fn run_terminal(
         }
         while let Ok(event) = receive.try_recv() {
             match event {
+                HostEvent::Shutdown => mode.borrow_mut().shutdown_requested = true,
+                HostEvent::Extension(event) => {
+                    use native_extension_bridge::Event;
+                    use crate::core::extensions::types::ExtensionUiContext;
+                    match event {
+                        Event::Reset => {
+                            extension_surfaces.borrow_mut().reset();
+                            if let Some(bridge) = &local_extension_bridge { bridge.reset(); }
+                            if let Some((_, _, handle, reply)) = custom_extension.take() { handle.hide(); let _ = reply.send(None); }
+                            early_custom_results.clear();
+                            if let Some(dialog) = extension.take() {
+                                dialog.overlay.hide();
+                                respond_extension(&connection, &send, (dialog.request.id, cancel_extension_response(&dialog.request.method)), local_extension_bridge.as_ref());
+                            }
+                            for request in extension_queue.drain(..) { respond_extension(&connection, &send, (request.id, cancel_extension_response(&request.method)), local_extension_bridge.as_ref()); }
+                            let mut mode = mode.borrow_mut();
+                            mode.working_message = None; mode.set_working_visible(true); mode.set_working_indicator(None);
+                            mode.update_terminal_title();
+                            ui.borrow_mut().terminal.set_title(&mode.ui.terminal.title);
+                        }
+                        Event::Paste(text) => editor.borrow_mut().handle_input(&format!("\x1b[200~{text}\x1b[201~")),
+                        Event::ToolsExpanded(expanded) => {
+                            mode.borrow_mut().set_tools_expanded(expanded);
+                            for tool in transcript.borrow().all_tools() { tool.borrow_mut().set_expanded(expanded); }
+                        }
+                        Event::Widget(key, factory, options) => {
+                            if let Some(bridge) = &local_extension_bridge {
+                                let component = factory.map(|factory| Box::new(native_extension_bridge::ComponentAdapter(factory(bridge.tui(), bridge.theme()), false)) as Box<dyn TuiComponent>);
+                                let below = options.and_then(|o| o.placement) == Some(crate::core::extensions::types::WidgetPlacement::BelowEditor);
+                                extension_surfaces.borrow_mut().set_widget_component(key, component, below);
+                            }
+                        }
+                        Event::Header(factory) => {
+                            if let Some(bridge) = &local_extension_bridge {
+                                extension_surfaces.borrow_mut().header = factory.map(|f| Box::new(native_extension_bridge::ComponentAdapter(f(bridge.tui(), bridge.theme()), false)) as Box<dyn TuiComponent>);
+                            }
+                        }
+                        Event::Footer(factory) => {
+                            if let Some(bridge) = &local_extension_bridge {
+                                extension_surfaces.borrow_mut().footer = factory.map(|f| Box::new(native_extension_bridge::ComponentAdapter(f(bridge.tui(), bridge.theme(), bridge.footer_data.clone()), false)) as Box<dyn TuiComponent>);
+                            }
+                        }
+                        Event::Custom(id, component, options, reply) => {
+                            if let Some(result) = early_custom_results.remove(&id) { component.dispose(); let _ = reply.send(Some(result)); continue; }
+                            if let Some((_, _, handle, previous)) = custom_extension.take() { handle.hide(); let _ = previous.send(None); }
+                            let component: Rc<RefCell<dyn TuiComponent>> = Rc::new(RefCell::new(native_extension_bridge::ComponentAdapter(component, false)));
+                            let handle = ui.borrow_mut().show_overlay(component.clone(), native_extension_bridge::overlay_options(options.as_ref()));
+                            custom_extension = Some((id, component, handle, reply));
+                        }
+                        Event::Done(id, value) => {
+                            if custom_extension.as_ref().is_some_and(|(active,_,_,_)| *active == id) {
+                                if let Some((_, _, handle, reply)) = custom_extension.take() { handle.hide(); let _ = reply.send(Some(value)); }
+                            } else { early_custom_results.insert(id, value); }
+                        }
+                    }
+                }
+                HostEvent::CommandDialog(dialog) => {
+                    if let Some((_, handle)) = command_dialog.take() { handle.hide(); }
+                    if let Some(cancel) = command_cancel.take() { cancel.cancel(); }
+                    let component = native_commands::mount(dialog, ui.clone(), &mode.borrow(), connection.clone(), send.clone());
+                    let handle = ui.borrow_mut().show_overlay(component.clone(), pi_tui::tui::OverlayOptions {
+                        width: Some(pi_tui::tui::SizeValue::Percent("100%".into())),
+                        max_height: Some(pi_tui::tui::SizeValue::Percent("100%".into())),
+                        row: Some(pi_tui::tui::SizeValue::Number(0.0)), col: Some(pi_tui::tui::SizeValue::Number(0.0)),
+                        ..Default::default()
+                    });
+                    command_dialog = Some((component, handle));
+                }
+                HostEvent::CommandBusy(message, cancel) => {
+                    if let Some((_, handle)) = command_dialog.take() { handle.hide(); }
+                    if let Some(cancel) = command_cancel.replace(cancel) { cancel.cancel(); }
+                    let component: Rc<RefCell<dyn TuiComponent>> = Rc::new(RefCell::new(TuiText::new(format!("{message}\nEsc to cancel"), 1, 1, None)));
+                    let handle = ui.borrow_mut().show_overlay(component.clone(), Default::default());
+                    command_dialog = Some((component, handle));
+                }
+                HostEvent::CloseCommandDialog => {
+                    if let Some((_, handle)) = command_dialog.take() { handle.hide(); }
+                    command_cancel = None;
+                }
+                HostEvent::EditorText(text) => editor.borrow_mut().editor_mut().set_text(&text),
+                HostEvent::ReloadSettings => {
+                    mode.borrow().settings_manager().lock().map_err(|e| e.to_string())?.reload().await;
+                }
+                HostEvent::ScopeChanged(session, scoped) => {
+                    if current_session_id == session {
+                        if let Some(state) = mode.borrow_mut().connection_state.as_mut() {
+                            state.scoped_models = scoped.into_iter().map(|s| local::AgentConnectionScopedModel { model: s.model }).collect();
+                        }
+                    }
+                }
+                HostEvent::AuthChanged => {
+                    if let Some(runtime) = &options.runtime { runtime.services().model_registry.lock().map_err(|e| e.to_string())?.refresh(); }
+                    let current_model = mode.borrow().get_current_model().cloned();
+                    let scoped = mode.borrow().get_scoped_model_state().into_iter().map(|s| s.model).collect::<Vec<_>>();
+                    match native_configuration::refresh_after_login(connection.as_ref(), configuration.as_ref(), current_model.as_ref(), &scoped).await {
+                        Ok(catalog) => { models = catalog.models; configured_providers = catalog.configured_providers; }
+                        Err(error) => mode.borrow_mut().show_error(&error),
+                    }
+                }
+                HostEvent::RunUpdate(args) => {
+                    match native_commands::update(&args, &options, &mode, &ui, &connection).await {
+                        Ok(Some(args)) => { pending_relaunch = Some(args); mode.borrow_mut().shutdown_requested = true; }
+                        Ok(None) => {
+                            let fullscreen = mode.borrow().fullscreen_enabled;
+                            native_settings::fullscreen(fullscreen, &mode, &editor, &ui, &transcript);
+                            extension_surfaces.borrow_mut().reset(); submit(&connection, &send, "/reload".into(), false, None);
+                        }
+                        Err(error) => {
+                            let fullscreen = mode.borrow().fullscreen_enabled;
+                            native_settings::fullscreen(fullscreen, &mode, &editor, &ui, &transcript);
+                            mode.borrow_mut().show_error(&error);
+                        }
+                    }
+                }
+                HostEvent::SideQuestion(question) => side_pane.borrow_mut().start(question, connection.clone(), send.clone()),
+                HostEvent::Debug => {
+                    if let Err(error) = native_commands::debug(&ui, &connection, &send).await { mode.borrow_mut().show_error(&error); }
+                }
+                HostEvent::Connection(wire::AgentConnectionEvent::SideQuestionEvent { event }) => side_pane.borrow_mut().update(event),
                 HostEvent::Connection(wire::AgentConnectionEvent::Closed { error }) => {
                     exit_error = error;
                     mode.borrow_mut().shutdown_requested = true;
@@ -1620,6 +1835,8 @@ async fn run_terminal(
                     state,
                     messages,
                 }) => {
+                    extension_surfaces.borrow_mut().reset();
+                    side_pane.borrow_mut().close(connection.clone());
                     if let Some(dialog) = extension.take() {
                         dialog.overlay.hide();
                         respond_extension(
@@ -1631,6 +1848,7 @@ async fn run_terminal(
                                     cancelled: true,
                                 },
                             ),
+                        local_extension_bridge.as_ref(),
                         );
                     }
                     for request in extension_queue.drain(..) {
@@ -1643,6 +1861,7 @@ async fn run_terminal(
                                     cancelled: true,
                                 },
                             ),
+                        local_extension_bridge.as_ref(),
                         );
                     }
                     current_session_id = state.session_id.clone();
@@ -1660,7 +1879,11 @@ async fn run_terminal(
                         mode.borrow_mut().show_error(&error);
                     }
                 }
-                HostEvent::Connection(wire::AgentConnectionEvent::SessionResynced { snapshot }) => {
+                HostEvent::RefreshSnapshot(snapshot) | HostEvent::Connection(wire::AgentConnectionEvent::SessionResynced { snapshot }) => {
+                    if current_session_id != snapshot.state.session_id {
+                        extension_surfaces.borrow_mut().reset();
+                        side_pane.borrow_mut().close(connection.clone());
+                    }
                     current_session_id = snapshot.state.session_id.clone();
                     queue_runtime.reset_session(current_session_id.clone());
                     mode.borrow_mut()
@@ -1682,6 +1905,15 @@ async fn run_terminal(
                 HostEvent::Connection(wire::AgentConnectionEvent::ExtensionUiRequest {
                     request,
                 }) => match request.method.as_str() {
+                    "setStatus" => {
+                        if let Some(key) = optional_string(&request.payload, "statusKey") { extension_surfaces.borrow_mut().set_status(key, optional_string(&request.payload, "statusText")); }
+                    }
+                    "setWidget" => {
+                        if let Some(key) = optional_string(&request.payload, "widgetKey") {
+                            extension_surfaces.borrow_mut().set_widget(key, get_payload_string_array(&request.payload, "widgetLines"), optional_string(&request.payload, "widgetPlacement").as_deref() == Some("belowEditor"));
+                        }
+                    }
+                    "setWorkingIndicator" => { mode.borrow_mut().set_working_indicator(get_payload_working_indicator_options(&request.payload, "options")); }
                     "select" | "confirm" | "input" | "editor" => extension_queue.push_back(request),
                     "notify" => {
                         let message = string(&request.payload, "message");
@@ -1747,7 +1979,6 @@ async fn run_terminal(
                         }
                     });
                 }
-                HostEvent::Connection(_) => {}
                 HostEvent::ModelSelected {
                     session_id,
                     model,
@@ -2002,6 +2233,7 @@ async fn run_terminal(
                     configuration = Some(menu);
                 }
                 HostEvent::BeginLogin(provider, oauth) => {
+                    login_provider = provider.clone();
                     // `new LoginDialogComponent(...)` gives this login its own
                     // `abortController` (login-dialog.ts:77). `begin()` retires
                     // the previous login first, exactly like the previous
@@ -2072,6 +2304,13 @@ async fn run_terminal(
                     }
                     match result {
                         Ok(()) => {
+                            if login_provider.starts_with("mcp:") {
+                                mode.borrow_mut().show_status("MCP credentials saved. Reloading connections...", "success");
+                                let _ = send.send(HostEvent::AuthChanged);
+                                if !mode.borrow().is_agent_streaming() { submit(&connection, &send, "/reload".into(), false, None); }
+                                else { mode.borrow_mut().show_status("Run /reload after the current turn to activate the connection.", "dim"); }
+                                continue;
+                            }
                             mode.borrow_mut().show_status(
                                 "Credentials saved. Choose a model with /model.",
                                 "success",
@@ -2188,10 +2427,12 @@ async fn run_terminal(
             if let Some(dialog) = extension.take() {
                 dialog.overlay.hide();
                 let response = cancel_extension_response(&dialog.request.method);
-                respond_extension(&connection, &send, (dialog.request.id, response));
+                respond_extension(&connection, &send, (dialog.request.id, response), local_extension_bridge.as_ref());
             }
         }
         if extension.is_none()
+            && custom_extension.is_none()
+            && command_dialog.is_none()
             && !logins.is_active()
             && heartbeat_manager.is_none()
             && settings_selector.is_none()
@@ -2210,7 +2451,8 @@ async fn run_terminal(
                             request.id,
                             wire::AgentConnectionExtensionUiResponse::Cancelled { cancelled: true },
                         ),
-                    );
+                    local_extension_bridge.as_ref(),
+                        );
                 }
                 ui.borrow_mut().request_render();
             }
@@ -2259,6 +2501,12 @@ async fn run_terminal(
         // expires the hint on its own 16 ms cadence (interactive-mode.ts:7018-7025).
         mode.borrow_mut().expire_ctrl_c_exit_hint();
         history_runtime.poll(&mode, &transcript, &ui);
+        if let Some(bridge) = &local_extension_bridge {
+            *bridge.editor_text.lock().unwrap_or_else(|e| e.into_inner()) = editor.borrow().editor().get_text();
+            bridge.tools_expanded.store(mode.borrow().tool_output_expanded, std::sync::atomic::Ordering::Relaxed);
+            bridge.footer_data.set_cwd(&mode.borrow().get_current_cwd());
+            bridge.footer_data.set_available_provider_count(models.iter().map(|m| &m.provider).collect::<std::collections::HashSet<_>>().len());
+        }
         queue_runtime.poll();
         let rows = ui.borrow().terminal_rows();
         model_rows.set(rows as f64);
@@ -2268,6 +2516,12 @@ async fn run_terminal(
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
     unsubscribe();
+    if let Some(bridge) = &local_extension_bridge { bridge.close(); }
+    if let Some((_, _, handle, reply)) = custom_extension { handle.hide(); let _ = reply.send(None); }
+    extension_surfaces.borrow_mut().reset();
+    if let Some(cancel) = command_cancel { cancel.cancel(); }
+    if let Some((_, handle)) = command_dialog { handle.hide(); }
+    side_pane.borrow_mut().close(connection.clone());
     if let Some(dialog) = extension {
         dialog.overlay.hide();
         let _ = connection
@@ -2291,6 +2545,12 @@ async fn run_terminal(
     mode.borrow_mut().shutdown().await;
     drop(guard);
     connection.dispose().await?;
+    if let Some(args) = pending_relaunch {
+        let status = std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+            .args(args).current_dir(mode.borrow().get_current_cwd()).status().map_err(|e| format!("Failed to relaunch optimus-rust: {e}"))?;
+        if !status.success() { return Err(format!("Relaunched optimus-rust exited with {status}")); }
+        return Ok(None);
+    }
     let result = if mode.borrow().agents_view_request.is_some() {
         Some(mode.borrow_mut().run().await)
     } else {
@@ -2886,6 +3146,7 @@ async fn run_builtin_command(
             ));
             Ok(CommandOutput::Nothing)
         }
+        "btw" | "side" | "fork" | "logout" | "scoped-models" | "share" | "traces" | "tree" | "update" | "debug" | "mcp" => native_commands::run(connection, send, if name == "side" { "btw" } else { name }, args).await,
         "settings" => {
             let _ = send.send(HostEvent::Settings(connection.get_state().await?));
             Ok(CommandOutput::Nothing)
@@ -3145,6 +3406,7 @@ async fn run_builtin_command(
                     "Wait for compaction to finish before reloading.".to_string(),
                 ));
             }
+            let _ = send.send(HostEvent::Extension(native_extension_bridge::Event::Reset));
             connection.reload().await?;
             Ok(CommandOutput::Status(
                 "Reloaded keybindings, extensions, skills, prompts, themes".to_string(),

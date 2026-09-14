@@ -39,6 +39,8 @@ pub struct Theme {
 /// blocked_on: needs pi-tui::components::Component
 pub trait Component: Send + Sync {
     fn render(&self, width: usize) -> Vec<String>;
+    fn handle_input(&self, _data: &str) {}
+    fn set_focused(&self, _focused: bool) {}
     fn invalidate(&self) {}
     fn dispose(&self) {}
 }
@@ -299,8 +301,7 @@ pub trait KeybindingsManager: Send + Sync {
 /// blocked_on: needs core::keybindings::KeybindingsConfig
 pub type KeybindingsConfig = Map<String, Value>;
 
-/// blocked_on: needs core::footer_data_provider::ReadonlyFooterDataProvider
-pub trait ReadonlyFooterDataProvider: Send + Sync {}
+pub use crate::core::footer_data_provider::ReadonlyFooterDataProvider;
 
 /// blocked_on: needs core::system_prompt::BuildSystemPromptOptions
 pub use crate::core::system_prompt::BuildSystemPromptOptions;
@@ -401,9 +402,16 @@ pub type FooterFactory = Arc<
 /// Header component factory `(tui, theme) => Component`.
 pub type HeaderFactory = Arc<dyn Fn(Arc<dyn Tui>, Theme) -> Arc<dyn Component> + Send + Sync>;
 
-/// Custom component result plus its dispose hook.
+/// Live factory and completion callback for `ui.custom(factory, options)`.
+/// Functions cannot be serialized into JSON; daemon/RPC modes intentionally
+/// decline these factories, while the interactive owner mounts the component.
+pub type CustomComponentFactory = Arc<dyn Fn(
+    Arc<dyn Tui>, Theme, Arc<dyn KeybindingsManager>, Arc<dyn Fn(Value) + Send + Sync>,
+) -> Pin<Box<dyn std::future::Future<Output = Arc<dyn Component>> + Send>> + Send + Sync>;
+
+/// The value passed to the custom factory's `done` callback.
 pub type CustomComponentResult =
-    Pin<Box<dyn std::future::Future<Output = Option<Arc<dyn Component>>> + Send>>;
+    Pin<Box<dyn std::future::Future<Output = Option<Value>> + Send>>;
 
 /// Options for `ui.custom()`.
 pub type CustomOptions = Value;
@@ -483,7 +491,7 @@ pub trait ExtensionUiContext: Send + Sync {
     fn set_title(&self, title: String);
 
     /// Show a custom component with keyboard focus.
-    fn custom(&self, factory: Value, options: Option<Value>) -> CustomComponentResult;
+    fn custom(&self, factory: CustomComponentFactory, options: Option<Value>) -> CustomComponentResult;
 
     /// Paste text into the editor, triggering paste handling.
     fn paste_to_editor(&self, text: String);

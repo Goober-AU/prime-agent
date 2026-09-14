@@ -533,7 +533,7 @@ impl crate::core::extensions::types::ExtensionUiContext for ExtensionUiContext {
     fn set_footer(&self, _factory: Option<crate::core::extensions::types::FooterFactory>) {}
     fn set_header(&self, _factory: Option<crate::core::extensions::types::HeaderFactory>) {}
     fn set_title(&self, title: String) { ExtensionUiContext::set_title(self, &title); }
-    fn custom(&self, _factory: Value, _options: Option<Value>) -> crate::core::extensions::types::CustomComponentResult { Box::pin(async { None }) }
+    fn custom(&self, _factory: crate::core::extensions::types::CustomComponentFactory, _options: Option<Value>) -> crate::core::extensions::types::CustomComponentResult { Box::pin(async { None }) }
     fn paste_to_editor(&self, text: String) { ExtensionUiContext::paste_to_editor(self, &text); }
     fn set_editor_text(&self, text: String) { ExtensionUiContext::set_editor_text(self, &text); }
     fn get_editor_text(&self) -> String { ExtensionUiContext::get_editor_text(self) }

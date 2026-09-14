@@ -472,6 +472,12 @@ pub struct TUI {
 }
 
 impl TUI {
+    /// Render the component tree for diagnostics without writing to the terminal.
+    /// Mirrors the inherited Container.render API of the TypeScript TUI.
+    pub fn render(&mut self, width: f64) -> Vec<String> {
+        self.container.render(width)
+    }
+
     pub const MIN_RENDER_INTERVAL_MS: f64 = 16.0;
     pub const WHEEL_SCROLL_LINES: i64 = 3;
     pub const SELECTION_AUTO_SCROLL_DELAY_MS: u64 = 150;

@@ -18,6 +18,21 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 impl AgentHandle for Arc<Agent> {
+    fn side_question_options(&self) -> Option<pi_agent_core::agent::AgentOptions> {
+        Some(pi_agent_core::agent::AgentOptions {
+            initial_state: Some(self.state()),
+            convert_to_llm: Some(self.convert_to_llm.lock().unwrap_or_else(|e| e.into_inner()).clone()),
+            transform_context: self.transform_context.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            stream_fn: Some(crate::core::semantic_edges::unwrap_semantic_edge_stream_fn(&self.stream_fn())),
+            get_api_key: self.get_api_key.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            on_payload: self.on_payload.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            on_response: self.on_response.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            session_id: self.session_id.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            thinking_budgets: self.thinking_budgets.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            tool_execution: Some(*self.tool_execution.lock().unwrap_or_else(|e| e.into_inner())),
+            ..Default::default()
+        })
+    }
     fn state(&self) -> AgentState {
         Agent::state(self)
     }

@@ -331,7 +331,7 @@ impl ExtensionUiContext for RpcExtensionUiContext {
         self.state.fire_and_forget("setTitle", payload);
     }
 
-    fn custom(&self, _factory: Value, _options: Option<Value>) -> CustomComponentResult {
+    fn custom(&self, _factory: crate::core::extensions::types::CustomComponentFactory, _options: Option<Value>) -> CustomComponentResult {
         Box::pin(async { None })
     }
 

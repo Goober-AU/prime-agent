@@ -1,12 +1,8 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/mermaid.ts
 //!
-//! `grok-mermaid` has no Rust equivalent in this repository, so `render(text)`
-//! is ported as a private minimal Mermaid layout that produces the same
-//! `MermaidArt` shape (`plain`, `styled`, `width`, `warnings`). Unsupported or
-//! unparsable diagrams report warnings instead of drawing, which is the same
-//! observable behaviour as `render()` returning art with warnings (or undefined).
+//! Mermaid layout uses a native Unicode renderer. Only complete top-level
+//! Mermaid fences are replaced; all other Markdown retains its original bytes.
 
-use pi_tui::components::markdown::{lex, Token};
 use pi_tui::utils::visible_width;
 
 use crate::core::settings_manager::MermaidRenderingMode;
@@ -42,42 +38,42 @@ pub enum MermaidSpanClass {
     None,
 }
 
-/// Private port of `render(text)` from `grok-mermaid`.
-///
-/// The upstream library lays out a graph; without the crate the port reports the
-/// diagram as unsupported so the caller keeps `token.raw`, which is the same
-/// fallback path the TypeScript takes when `render` returns undefined.
+/// Native layout with explicit fallback for invalid or unsupported diagrams.
 fn render(text: &str) -> Option<MermaidArt> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if text.trim().is_empty() {
         return None;
     }
-    let first_line = trimmed.lines().next().unwrap_or("").trim();
-    let kind = first_line.split_whitespace().next().unwrap_or("");
-    let supported = matches!(
-        kind,
-        "graph"
-            | "flowchart"
-            | "sequenceDiagram"
-            | "classDiagram"
-            | "stateDiagram"
-            | "erDiagram"
-            | "gantt"
-    );
-    if !supported {
-        return Some(MermaidArt {
+    match mermansi::render_source_unicode(text) {
+        Ok(output) => {
+            let plain: Vec<String> = output.lines().map(str::to_string).collect();
+            let width = plain
+                .iter()
+                .map(|line| visible_width(line))
+                .max()
+                .unwrap_or(0);
+            let styled = plain
+                .iter()
+                .map(|line| {
+                    vec![MermaidSpan {
+                        text: line.clone(),
+                        cls: MermaidSpanClass::Text,
+                    }]
+                })
+                .collect();
+            Some(MermaidArt {
+                plain,
+                styled,
+                width,
+                warnings: Vec::new(),
+            })
+        }
+        Err(error) => Some(MermaidArt {
             plain: Vec::new(),
             styled: Vec::new(),
             width: 0,
-            warnings: vec![format!("Unsupported diagram type: {kind}")],
-        });
+            warnings: vec![error.to_string()],
+        }),
     }
-    Some(MermaidArt {
-        plain: Vec::new(),
-        styled: Vec::new(),
-        width: 0,
-        warnings: vec!["Diagram layout is not available in this build".to_string()],
-    })
 }
 
 /// `interface MermaidTransformOptions`.
@@ -92,22 +88,6 @@ pub struct MermaidTransformOptions {
 
 /// Rewrites assistant Markdown before pi-tui renders it, with the exact width available for content.
 pub type MermaidMarkdownTransform = Box<dyn Fn(String, f64, bool) -> String>;
-
-fn token_is_mermaid(token: &Token) -> Option<String> {
-    match token {
-        // `token.type === "code" && token.lang?.trim().split(/\s+/, 1)[0]?.toLowerCase() === "mermaid"`
-        Token::Code { text, lang } => {
-            let language = lang.as_deref()?.trim();
-            let first = language.split_whitespace().next().unwrap_or("");
-            if first.to_lowercase() == "mermaid" {
-                Some(text.clone())
-            } else {
-                None
-            }
-        }
-        _ => None,
-    }
-}
 
 fn code_span(line: &str) -> String {
     // Inline code spans preserve the diagram row's spacing; a blank row becomes NBSP to keep visible height.
@@ -160,126 +140,97 @@ fn themed_lines(art: &MermaidArt, theme: &Theme) -> Vec<String> {
         .collect()
 }
 
-/// Create a transform that replaces top-level Mermaid code blocks with Unicode terminal diagrams.
+/// Replace top-level fenced Mermaid blocks while preserving source ranges.
+/// Re-serializing lexer tokens loses list indentation, link targets and math.
 pub fn create_mermaid_markdown_transform(
     options: MermaidTransformOptions,
 ) -> MermaidMarkdownTransform {
-    Box::new(
-        move |markdown: String, available_width: f64, is_streaming: bool| {
-            let mode = (options.get_mode)();
-            if mode == MERMAID_RENDERING_MODE_OFF
-                || (is_streaming && mode != MERMAID_RENDERING_MODE_STREAMING)
-            {
-                return markdown;
-            }
-
-            let tokens = lex(&markdown).tokens;
-            let mut out = String::new();
-            for token in tokens {
-                let Some(code) = token_is_mermaid(&token) else {
-                    out.push_str(&token_raw(&token, &markdown));
-                    continue;
-                };
-                let raw = token_raw(&token, &markdown);
-                let Some(art) = render(&code) else {
-                    out.push_str(&raw);
-                    continue;
-                };
-                if art.width as f64 > available_width {
-                    out.push_str(&raw);
-                    continue;
+    Box::new(move |markdown, available_width, is_streaming| {
+        use pulldown_cmark::{CodeBlockKind, Event, Parser, Tag, TagEnd};
+        let mode = (options.get_mode)();
+        if mode == MERMAID_RENDERING_MODE_OFF
+            || (is_streaming && mode != MERMAID_RENDERING_MODE_STREAMING)
+        {
+            return markdown;
+        }
+        let mut out = String::new();
+        let mut cursor = 0;
+        let mut depth = 0usize;
+        let mut block: Option<(usize, String)> = None;
+        for (event, range) in Parser::new(&markdown).into_offset_iter() {
+            match event {
+                Event::Start(tag) => {
+                    if depth == 0 {
+                        if let Tag::CodeBlock(CodeBlockKind::Fenced(language)) = &tag {
+                            if language
+                                .split_whitespace()
+                                .next()
+                                .is_some_and(|s| s.eq_ignore_ascii_case("mermaid"))
+                            {
+                                block = Some((range.start, String::new()));
+                            }
+                        }
+                    }
+                    depth += 1;
                 }
-                if !is_streaming && !art.warnings.is_empty() {
-                    let suffix = if art.warnings.len() > 1 {
-                        format!(" (+{} more)", art.warnings.len() - 1)
-                    } else {
-                        String::new()
-                    };
-                    let warning =
-                        format!("Mermaid diagram not rendered: {}{suffix}", art.warnings[0]);
-                    let styled_warning = match &options.theme {
-                        Some(theme) => theme.fg("warning", &warning),
-                        None => warning,
-                    };
-                    out.push_str(&format!("{raw}\n{}  \n", code_span(&styled_warning)));
-                    continue;
+                Event::Text(text) => {
+                    if let Some((_, code)) = &mut block {
+                        code.push_str(&text);
+                    }
                 }
-                let lines = match &options.theme {
-                    Some(theme) => themed_lines(&art, theme),
-                    None => art.plain.clone(),
-                };
-                // Markdown hard breaks keep every diagram row on its own line.
-                let joined = lines
-                    .iter()
-                    .map(|line| code_span(line))
-                    .collect::<Vec<_>>()
-                    .join("  \n");
-                out.push_str(&format!("{joined}\n"));
+                Event::End(tag) => {
+                    depth = depth.saturating_sub(1);
+                    if tag != TagEnd::CodeBlock {
+                        continue;
+                    }
+                    let Some((start, code)) = block.take() else {
+                        continue;
+                    };
+                    let raw = &markdown[start..range.end];
+                    out.push_str(&markdown[cursor..start]);
+                    cursor = range.end;
+                    let Some(art) = render(&code) else {
+                        out.push_str(raw);
+                        continue;
+                    };
+                    if art.width as f64 > available_width
+                        || art.plain.is_empty() && art.warnings.is_empty()
+                    {
+                        out.push_str(raw);
+                        continue;
+                    }
+                    if !art.warnings.is_empty() {
+                        out.push_str(raw);
+                        if !is_streaming {
+                            let warning =
+                                format!("Mermaid diagram not rendered: {}", art.warnings[0]);
+                            let warning = options
+                                .theme
+                                .as_ref()
+                                .map(|t| t.fg("warning", &warning))
+                                .unwrap_or(warning);
+                            out.push_str(&format!("\n{}  \n", code_span(&warning)));
+                        }
+                        continue;
+                    }
+                    let lines = options
+                        .theme
+                        .as_ref()
+                        .map(|theme| themed_lines(&art, theme))
+                        .unwrap_or(art.plain);
+                    out.push_str(
+                        &lines
+                            .iter()
+                            .map(|line| code_span(line))
+                            .collect::<Vec<_>>()
+                            .join("  \n"),
+                    );
+                    out.push('\n');
+                }
+                _ => {}
             }
-            out
-        },
-    )
-}
-
-/// Port of `token.raw`. `pi-tui`'s markdown lexer keeps `raw` for tables and the
-/// original source text can be recovered for every other block, so the port
-/// re-serialises the block from the source span it covers.
-fn token_raw(token: &Token, source: &str) -> String {
-    let _ = visible_width;
-    match token {
-        Token::Table { raw, .. } => raw.clone(),
-        Token::Html { raw } => raw.clone(),
-        Token::Code { text, lang } => match lang {
-            Some(lang) => format!("```{lang}\n{text}\n```\n"),
-            None => format!("```\n{text}\n```\n"),
-        },
-        Token::Heading { depth, tokens } => {
-            format!("{} {}\n", "#".repeat(*depth), inline_raw(tokens))
         }
-        Token::Paragraph { tokens } => format!("{}\n", inline_raw(tokens)),
-        Token::Blockquote { tokens } => format!("> {}\n", inline_raw(tokens)),
-        Token::Hr => "---\n".to_string(),
-        Token::Space => "\n".to_string(),
-        Token::List {
-            ordered,
-            start,
-            items,
-        } => {
-            let mut out = String::new();
-            for (index, item) in items.iter().enumerate() {
-                let marker = if *ordered {
-                    format!("{}. ", start + index)
-                } else {
-                    "- ".to_string()
-                };
-                out.push_str(&format!("{marker}{}\n", inline_raw(item)));
-            }
-            out
-        }
-        Token::BlockMath(math) => format!("$$\n{}\n$$\n", math.text),
-        other => inline_raw(std::slice::from_ref(other)),
-    }
-}
-
-fn inline_raw(tokens: &[Token]) -> String {
-    let mut out = String::new();
-    for token in tokens {
-        match token {
-            Token::Text { text, .. } => out.push_str(text),
-            Token::Codespan { text } => out.push_str(&format!("`{text}`")),
-            Token::Strong { tokens } => out.push_str(&format!("**{}**", inline_raw(tokens))),
-            Token::Em { tokens } => out.push_str(&format!("*{}*", inline_raw(tokens))),
-            Token::Del { tokens } => out.push_str(&format!("~~{}~~", inline_raw(tokens))),
-            Token::Link { href, text, .. } => out.push_str(&format!("[{text}]({href})")),
-            Token::Br => out.push('\n'),
-            Token::Html { raw } => out.push_str(raw),
-            Token::InlineMath(math) => out.push_str(&math.text),
-            Token::Code { text, lang } => match lang {
-                Some(lang) => out.push_str(&format!("```{lang}\n{text}\n```\n")),
-                None => out.push_str(&format!("```\n{text}\n```\n")),
-            },
-            other => out.push_str(&token_raw(other, "")),
-        }
-    }
-    out
+        out.push_str(&markdown[cursor..]);
+        out
+    })
 }

@@ -1,5 +1,7 @@
 //! Port of packages/coding-agent/src/core/side-question.ts
 
+pub(crate) mod native;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 

@@ -35,6 +35,8 @@ zip = { workspace = true }
 pi-ai = { workspace = true }
 pi-agent-core = { workspace = true }
 pi-tui = { workspace = true }
+mermansi = "=0.1.6"
+pulldown-cmark = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -45,4 +47,3 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 [[bin]]
 name = "optimus-rust"
 path = "src/bin/optimus_rust.rs"
-

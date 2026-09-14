@@ -29,6 +29,12 @@ use crate::modes::agent_connection::types::*;
 ///
 /// Every method name mirrors the TypeScript member it replaces.
 pub trait InProcessRuntimeHost: Send + Sync {
+    fn session_start_side_question(&self, _id: String, _question: String,
+        _previous: Option<Vec<crate::core::side_question::SideQuestionTurn>>,
+        _on_event: Arc<dyn Fn(crate::core::side_question::SideQuestionEvent) -> BoxFuture<()> + Send + Sync>,
+    ) -> Result<crate::core::side_question::SideQuestionRun, String> {
+        Err("This runtime does not provide standalone side-question agents".into())
+    }
     fn snapshot_source(&self) -> AgentSessionRuntimeSnapshotSource;
     fn session_header(&self) -> Option<AgentConnectionSessionHeader>;
     fn session_subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync>;
@@ -136,7 +142,7 @@ pub struct InProcessAgentConnection {
     runtime_host: Arc<dyn InProcessRuntimeHost>,
     listeners: Arc<Mutex<Vec<AgentConnectionEventListener>>>,
     before_session_invalidate_listeners: Arc<Mutex<Vec<AgentConnectionBeforeSessionInvalidateListener>>>,
-    side_question_runs: Mutex<HashMap<String, SideQuestionRun>>,
+    side_question_runs: Arc<Mutex<HashMap<String, SideQuestionRun>>>,
     session_input_pauses: Mutex<HashMap<String, AgentConnectionSessionInputPause>>,
     headless_extension_options: Mutex<Option<InProcessHeadlessExtensionOptions>>,
     unsubscribe_session_events: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -148,7 +154,7 @@ impl InProcessAgentConnection {
             runtime_host,
             listeners: Arc::new(Mutex::new(Vec::new())),
             before_session_invalidate_listeners: Arc::new(Mutex::new(Vec::new())),
-            side_question_runs: Mutex::new(HashMap::new()),
+            side_question_runs: Arc::new(Mutex::new(HashMap::new())),
             session_input_pauses: Mutex::new(HashMap::new()),
             headless_extension_options: Mutex::new(None),
             unsubscribe_session_events: Mutex::new(None),
@@ -636,16 +642,26 @@ impl AgentConnection for InProcessAgentConnection {
     fn start_side_question(
         &self,
         id: &str,
-        _question: &str,
-        _previous_turns: Option<Vec<AgentConnectionSideQuestionTurn>>,
+        question: &str,
+        previous_turns: Option<Vec<AgentConnectionSideQuestionTurn>>,
     ) -> BoxFuture<Result<(), String>> {
-        if self.side_question_runs.lock().unwrap().contains_key(id) {
+        let mut runs = self.side_question_runs.lock().unwrap();
+        if runs.contains_key(id) {
             let message = format!("Side question already exists: {id}");
             return Box::pin(async move { Err(message) });
         }
-        // `startSideQuestion` lives in core/side-question.ts (another slice). The
-        // registry entry is recorded so abort/dispose keep the same shape.
-        self.side_question_runs.lock().unwrap().insert(id.to_string(), Arc::new(|| {}));
+        let listeners = self.listeners.clone();
+        let run = self.runtime_host.session_start_side_question(id.into(), question.into(),
+            previous_turns.map(|turns| turns.into_iter().map(|t| crate::core::side_question::SideQuestionTurn { question: t.question, answer: t.answer }).collect()),
+            Arc::new(move |event| emit_to_listeners(&listeners, AgentConnectionEvent::SideQuestionEvent { event: AgentConnectionSideQuestionEvent {
+                id: event.id, question: event.question, answer: event.answer, status: event.status, error_message: event.error_message,
+            } })),
+        );
+        let run = match run { Ok(run) => run, Err(error) => return Box::pin(async move { Err(error) }) };
+        runs.insert(id.to_string(), run.abort);
+        drop(runs);
+        let runs = self.side_question_runs.clone(); let id = id.to_string();
+        tokio::spawn(async move { run.done.await; runs.lock().unwrap().remove(&id); });
         Box::pin(async { Ok(()) })
     }
 

@@ -231,7 +231,7 @@ impl ExtensionUiContext for NoOpUiContext {
     fn set_header(&self, _factory: Option<super::types::HeaderFactory>) {}
     fn set_title(&self, _title: String) {}
 
-    fn custom(&self, _factory: Value, _options: Option<Value>) -> super::types::CustomComponentResult {
+    fn custom(&self, _factory: crate::core::extensions::types::CustomComponentFactory, _options: Option<Value>) -> super::types::CustomComponentResult {
         Box::pin(async { None })
     }
 
