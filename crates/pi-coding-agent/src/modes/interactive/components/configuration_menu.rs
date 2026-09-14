@@ -80,14 +80,14 @@ pub type AuthSelectorCategory = String;
 
 /// `OAuthSelectorComponent` (components/oauth-selector.ts) is owned by another
 /// slice. This module keeps the surface `ConfigurationMenuComponent` calls.
-pub trait OAuthSelectorBody {
+pub trait OAuthSelectorBody: Component {
     fn refresh(&mut self);
     fn get_search_input(&mut self) -> &mut dyn MenuSearchInputSurface;
     fn set_focused(&mut self, focused: bool);
 }
 
 /// `ModelSelectorComponent` (components/model-selector.ts) surface.
-pub trait ModelSelectorBody {
+pub trait ModelSelectorBody: Component {
     fn update_state(
         &mut self,
         current_model: Option<&Model>,
@@ -195,11 +195,7 @@ impl Component for ConfigurationMenuTabBar {
     fn invalidate(&mut self) {}
 }
 
-/// The three bodies the TypeScript constructor builds. `OAuthSelectorComponent`
-/// and `ModelSelectorComponent` belong to slice `ca-interactive-components-4`
-/// and are not landed yet, so the menu takes them as constructed bodies instead
-/// of building them; see evidence/status/ca-interactive-components-3.json ->
-/// blocked_on.
+/// The three selector bodies built by the configuration menu constructor.
 pub struct ConfigurationMenuBodies {
     pub providers: Box<dyn OAuthSelectorBody>,
     pub models: Box<dyn ModelSelectorBody>,
@@ -209,9 +205,12 @@ pub struct ConfigurationMenuBodies {
 /// Port of `ConfigurationMenuComponent`.
 pub struct ConfigurationMenuComponent {
     bodies: ConfigurationMenuBodies,
+    auth_storage: Rc<RefCell<AuthStorage>>,
+    model_registry: Rc<RefCell<ModelRegistry>>,
     active_tab: ConfigurationMenuTab,
     focused: bool,
     render_width: f64,
+    shared_render_width: Option<Rc<std::cell::Cell<f64>>>,
     tab_bar: Rc<RefCell<ConfigurationMenuTabBar>>,
     /// `options.requestRender`.
     request_render: Box<dyn FnMut()>,
@@ -221,16 +220,149 @@ pub struct ConfigurationMenuComponent {
 }
 
 impl ConfigurationMenuComponent {
-    pub fn new(options: ConfigurationMenuOptions, bodies: ConfigurationMenuBodies) -> Self {
+    pub fn new(mut options: ConfigurationMenuOptions) -> Self {
+        use super::model_selector::{
+            ModelSelectorComponent, ModelSelectorOptions, ScopedModelItem,
+        };
+        use super::oauth_selector::{
+            AuthSelectorCategory, OAuthSelectorComponent, OAuthSelectorOptions,
+        };
+        let tab_bar = Rc::new(RefCell::new(ConfigurationMenuTabBar::new(
+            options.initial_tab,
+        )));
+        let render_width = Rc::new(std::cell::Cell::new(78.0));
+        let header = tab_bar.clone();
+        let width = render_width.clone();
+        let header_rows: Rc<dyn Fn() -> f64> = Rc::new(move || {
+            (header
+                .borrow()
+                .get_row_count(get_menu_panel_inner_width(width.get()) as f64)
+                + 1) as f64
+        });
+        let rows = options.get_rows.take().map(Rc::<dyn Fn() -> f64>::from);
+        let cancel = Rc::new(RefCell::new(std::mem::replace(
+            &mut options.on_cancel,
+            Box::new(|| {}),
+        )));
+        let create_oauth = |service: bool| {
+            let registry = options.model_registry.clone();
+            let header_rows = header_rows.clone();
+            let selector = OAuthSelectorComponent::new(
+                "login",
+                Box::new(SharedAuth(options.auth_storage.clone())),
+                options
+                    .provider_options
+                    .iter()
+                    .filter(|p| (p.category.as_deref() == Some("service")) == service)
+                    .map(|p| super::oauth_selector::AuthSelectorProvider {
+                        id: p.id.clone(),
+                        name: p.name.clone(),
+                        auth_type: p.auth_type.clone(),
+                        category: Some(if service {
+                            AuthSelectorCategory::Service
+                        } else {
+                            AuthSelectorCategory::Provider
+                        }),
+                    })
+                    .collect(),
+                Some(Box::new(move |id| {
+                    registry.borrow().get_provider_auth_status(id)
+                })),
+                OAuthSelectorOptions {
+                    get_rows: rows.clone(),
+                    header: Some(tab_bar.clone()),
+                    get_header_rows: Some(Box::new(move || header_rows())),
+                    title: Some(
+                        if service {
+                            "MCP Connections"
+                        } else {
+                            "Providers"
+                        }
+                        .into(),
+                    ),
+                    subtitle: Some(
+                        if service {
+                            "Connect MCP integrations and service credentials."
+                        } else {
+                            "Connect with a subscription or API key."
+                        }
+                        .into(),
+                    ),
+                    search_placeholder: Some(
+                        if service {
+                            "Search MCP connections"
+                        } else {
+                            "Search providers"
+                        }
+                        .into(),
+                    ),
+                    ..Default::default()
+                },
+            );
+            selector
+        };
+        let providers = create_oauth(false);
+        let mcp = create_oauth(true);
+        let models = ModelSelectorComponent::new(
+            options.current_model.as_ref().map(item_model),
+            options
+                .scoped_models
+                .iter()
+                .map(|s| ScopedModelItem {
+                    model: item_model(&s.model),
+                    thinking_level: s.thinking_level.clone(),
+                })
+                .collect(),
+            ModelSelectorOptions {
+                available_models: Some(options.available_models.iter().map(item_model).collect()),
+                configured_providers: Some(options.configured_providers.iter().cloned().collect()),
+                initial_search_input: options.initial_model_search.clone(),
+                recent_models: options.recent_models.clone(),
+                get_rows: rows,
+                header: Some(tab_bar.clone()),
+                get_header_rows: Some(header_rows),
+                ..Default::default()
+            },
+        );
+        let bodies = ConfigurationMenuBodies {
+            providers: Box::new(ProviderBody {
+                search: SharedSearch(providers.search_input()),
+                selector: providers,
+                select: std::mem::replace(&mut options.on_select_provider, Box::new(|_| {})),
+                cancel: cancel.clone(),
+            }),
+            mcp_connections: Box::new(ProviderBody {
+                search: SharedSearch(mcp.search_input()),
+                selector: mcp,
+                select: std::mem::replace(&mut options.on_select_mcp_connection, Box::new(|_| {})),
+                cancel: cancel.clone(),
+            }),
+            models: Box::new(ModelsBody {
+                search: SharedSearch(models.search_input()),
+                selector: models,
+                select: std::mem::replace(&mut options.on_select_model, Box::new(|_| {})),
+                cancel,
+            }),
+        };
+        let mut component = Self::with_bodies(options, bodies);
+        component.tab_bar = tab_bar;
+        component.shared_render_width = Some(render_width);
+        component
+    }
+
+    fn with_bodies(options: ConfigurationMenuOptions, bodies: ConfigurationMenuBodies) -> Self {
         let tab_bar = Rc::new(RefCell::new(ConfigurationMenuTabBar::new(
             options.initial_tab,
         )));
         let active_tab = options.initial_tab;
         Self {
             bodies,
+            auth_storage: options.auth_storage,
+            model_registry: options.model_registry,
             active_tab,
             focused: false,
             render_width: 78.0,
+            shared_render_width: None,
             tab_bar,
             request_render: options.request_render,
             on_cancel: options.on_cancel,
@@ -247,6 +379,7 @@ impl ConfigurationMenuComponent {
         let tab = tab.unwrap_or(self.active_tab);
         match tab {
             "models" => self.bodies.models.get_search_input().get_value(),
+            "mcp-connections" => self.bodies.mcp_connections.get_search_input().get_value(),
             _ => self.bodies.providers.get_search_input().get_value(),
         }
     }
@@ -265,6 +398,8 @@ impl ConfigurationMenuComponent {
 
     /// Port of `refreshAuthentication`.
     pub fn refresh_authentication(&mut self) {
+        self.auth_storage.borrow_mut().reload();
+        self.model_registry.borrow_mut().refresh();
         self.bodies.providers.refresh();
         self.bodies.mcp_connections.refresh();
         (self.request_render)();
@@ -331,17 +466,9 @@ impl ConfigurationMenuComponent {
     /// body surface exposes it.
     fn handle_active_body_input(&mut self, key_data: &str) {
         match self.active_tab {
-            "models" => self.bodies.models.get_search_input().handle_input(key_data),
-            "mcp-connections" => self
-                .bodies
-                .mcp_connections
-                .get_search_input()
-                .handle_input(key_data),
-            _ => self
-                .bodies
-                .providers
-                .get_search_input()
-                .handle_input(key_data),
+            "models" => self.bodies.models.handle_input(key_data),
+            "mcp-connections" => self.bodies.mcp_connections.handle_input(key_data),
+            _ => self.bodies.providers.handle_input(key_data),
         }
     }
 
@@ -359,25 +486,25 @@ impl ConfigurationMenuComponent {
 impl Component for ConfigurationMenuComponent {
     fn render(&mut self, width: f64) -> Vec<String> {
         self.render_width = width;
-        // `super.render(width)` renders the tab bar header, then the active body.
-        let mut lines = self.tab_bar.borrow_mut().render(width);
-        // `getHeaderRows()` is `tabBar.getRowCount(innerWidth) + 1`.
-        let expected_rows = self
-            .tab_bar
-            .borrow()
-            .get_row_count(get_menu_panel_inner_width(width) as f64)
-            + 1;
-        while lines.len() < expected_rows {
-            lines.push(String::new());
+        if let Some(shared) = &self.shared_render_width {
+            shared.set(width);
         }
-        lines
+        match self.active_tab {
+            "models" => self.bodies.models.render(width),
+            "mcp-connections" => self.bodies.mcp_connections.render(width),
+            _ => self.bodies.providers.render(width),
+        }
     }
 
     fn handle_input(&mut self, data: &str) {
         ConfigurationMenuComponent::handle_input(self, data);
     }
 
-    fn invalidate(&mut self) {}
+    fn invalidate(&mut self) {
+        self.bodies.providers.invalidate();
+        self.bodies.models.invalidate();
+        self.bodies.mcp_connections.invalidate();
+    }
 
     fn as_focusable(&mut self) -> Option<&mut dyn Focusable> {
         Some(self)
@@ -392,6 +519,128 @@ impl Focusable for ConfigurationMenuComponent {
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
         self.set_body_focused(self.active_tab, focused);
+    }
+}
+
+struct SharedAuth(Rc<RefCell<AuthStorage>>);
+impl super::oauth_selector::AuthStorageLike for SharedAuth {
+    fn get(&self, provider: &str) -> Option<crate::core::auth_storage::AuthCredential> {
+        self.0.borrow().get(provider)
+    }
+    fn get_auth_status(&self, provider: &str) -> crate::core::auth_storage::AuthStatus {
+        self.0.borrow().get_auth_status(provider)
+    }
+}
+struct SharedSearch(Rc<RefCell<super::menu_panel::MenuSearchInput>>);
+impl MenuSearchInputSurface for SharedSearch {
+    fn get_value(&self) -> String {
+        self.0.borrow().get_value()
+    }
+    fn handle_input(&mut self, data: &str) {
+        self.0.borrow_mut().handle_input(data);
+    }
+}
+type Cancel = Rc<RefCell<Box<dyn FnMut()>>>;
+struct ProviderBody {
+    selector: super::oauth_selector::OAuthSelectorComponent,
+    search: SharedSearch,
+    select: Box<dyn FnMut(&AuthSelectorProvider)>,
+    cancel: Cancel,
+}
+impl Component for ProviderBody {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        self.selector.render(width)
+    }
+    fn invalidate(&mut self) {
+        self.selector.invalidate();
+    }
+    fn handle_input(&mut self, data: &str) {
+        self.selector.handle_input(data);
+        if self.selector.cancelled {
+            self.selector.cancelled = false;
+            (self.cancel.borrow_mut())();
+        }
+        if let Some(p) = self.selector.selected_provider.take() {
+            (self.select)(&AuthSelectorProvider {
+                id: p.id,
+                name: p.name,
+                auth_type: p.auth_type,
+                category: p.category.map(|c| c.as_str().into()),
+            });
+        }
+    }
+}
+impl OAuthSelectorBody for ProviderBody {
+    fn refresh(&mut self) {
+        self.selector.refresh();
+    }
+    fn get_search_input(&mut self) -> &mut dyn MenuSearchInputSurface {
+        &mut self.search
+    }
+    fn set_focused(&mut self, focused: bool) {
+        Focusable::set_focused(&mut self.selector, focused);
+    }
+}
+struct ModelsBody {
+    selector: super::model_selector::ModelSelectorComponent,
+    search: SharedSearch,
+    select: Box<dyn FnMut(&Model)>,
+    cancel: Cancel,
+}
+fn item_model(model: &Model) -> super::model_selector::ModelItemModel {
+    super::model_selector::ModelItemModel {
+        provider: model.provider.clone(),
+        id: model.id.clone(),
+        name: model.name.clone(),
+        featured: model.featured.unwrap_or(false),
+        raw: serde_json::to_value(model).unwrap_or_default(),
+    }
+}
+impl Component for ModelsBody {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        self.selector.render(width)
+    }
+    fn invalidate(&mut self) {
+        self.selector.invalidate();
+    }
+    fn handle_input(&mut self, data: &str) {
+        self.selector.handle_input(data);
+        if self.selector.cancelled {
+            self.selector.cancelled = false;
+            (self.cancel.borrow_mut())();
+        }
+        if let Some(model) = self
+            .selector
+            .selected_model
+            .take()
+            .and_then(|m| serde_json::from_value(m.raw).ok())
+        {
+            (self.select)(&model);
+        }
+    }
+}
+impl ModelSelectorBody for ModelsBody {
+    fn update_state(
+        &mut self,
+        current: Option<&Model>,
+        models: Option<&[Model]>,
+        configured: Option<&std::collections::HashSet<String>>,
+    ) {
+        self.selector.update_state(
+            current.map(item_model),
+            models
+                .map(|models| models.iter().map(item_model).collect())
+                .or_else(|| self.selector.available_models.clone()),
+            configured
+                .map(|p| p.iter().cloned().collect())
+                .or_else(|| self.selector.configured_providers.clone()),
+        );
+    }
+    fn get_search_input(&mut self) -> &mut dyn MenuSearchInputSurface {
+        &mut self.search
+    }
+    fn set_focused(&mut self, focused: bool) {
+        Focusable::set_focused(&mut self.selector, focused);
     }
 }
 
@@ -418,6 +667,16 @@ mod tests {
         refreshes: Rc<RefCell<usize>>,
     }
 
+    impl Component for FakeOAuth {
+        fn render(&mut self, _width: f64) -> Vec<String> {
+            vec!["body".into(), self.search.value.clone()]
+        }
+        fn handle_input(&mut self, data: &str) {
+            self.search.handle_input(data);
+        }
+        fn invalidate(&mut self) {}
+    }
+
     impl OAuthSelectorBody for FakeOAuth {
         fn refresh(&mut self) {
             *self.refreshes.borrow_mut() += 1;
@@ -434,6 +693,16 @@ mod tests {
         search: FakeSearch,
         updates: Rc<RefCell<usize>>,
         focused: bool,
+    }
+
+    impl Component for FakeModel {
+        fn render(&mut self, _width: f64) -> Vec<String> {
+            vec!["body".into(), self.search.value.clone()]
+        }
+        fn handle_input(&mut self, data: &str) {
+            self.search.handle_input(data);
+        }
+        fn invalidate(&mut self) {}
     }
 
     impl ModelSelectorBody for FakeModel {
@@ -529,10 +798,95 @@ mod tests {
             }),
         };
         (
-            ConfigurationMenuComponent::new(options, bodies),
+            ConfigurationMenuComponent::with_bodies(options, bodies),
             provider_refreshes,
             model_updates,
         )
+    }
+
+    #[test]
+    fn real_configuration_tabs_render_filter_select_and_keep_independent_searches() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let selected = Rc::new(RefCell::new(Vec::new()));
+        let provider_selection = selected.clone();
+        let model_selection = selected.clone();
+        let service_selection = selected.clone();
+        let cancelled = Rc::new(std::cell::Cell::new(false));
+        let cancel = cancelled.clone();
+        let mut menu = ConfigurationMenuComponent::new(ConfigurationMenuOptions {
+            initial_tab: "providers",
+            tui: tui(),
+            auth_storage: Rc::new(RefCell::new(auth_storage())),
+            model_registry: Rc::new(RefCell::new(model_registry())),
+            provider_options: vec![
+                AuthSelectorProvider {
+                    id: "alpha".into(),
+                    name: "Alpha Provider".into(),
+                    auth_type: "api_key".into(),
+                    category: None,
+                },
+                AuthSelectorProvider {
+                    id: "service".into(),
+                    name: "Search Service".into(),
+                    auth_type: "api_key".into(),
+                    category: Some("service".into()),
+                },
+            ],
+            current_model: None,
+            scoped_models: vec![],
+            available_models: vec![Model::new(
+                "test-model",
+                "Test Model",
+                "openai-completions",
+                "alpha",
+                "http://127.0.0.1",
+            )],
+            configured_providers: Default::default(),
+            recent_models: None,
+            initial_model_search: None,
+            get_rows: Some(Box::new(|| 24.0)),
+            request_render: Box::new(|| {}),
+            on_select_provider: Box::new(move |p| {
+                provider_selection.borrow_mut().push(p.id.clone())
+            }),
+            on_select_model: Box::new(move |m| model_selection.borrow_mut().push(m.id.clone())),
+            on_select_mcp_connection: Box::new(move |p| {
+                service_selection.borrow_mut().push(p.id.clone())
+            }),
+            on_cancel: Box::new(move || cancel.set(true)),
+        });
+        menu.set_focused(true);
+        for (query, expected) in [
+            ("alpha", "Alpha Provider"),
+            ("test", "test-model"),
+            ("search", "Search Service"),
+        ] {
+            menu.handle_input(query);
+            let lines = menu.render(80.0);
+            let text = lines.join("\n");
+            assert!(text.contains(expected), "{text}");
+            assert!(text.contains("Tabs:"));
+            assert!(text.contains(pi_tui::tui::CURSOR_MARKER));
+            assert!(lines.len() <= 24, "{} rows", lines.len());
+            assert!(lines.iter().all(|line| visible_width(line) <= 80));
+            menu.handle_input("\r");
+            menu.handle_input("\t");
+        }
+        assert_eq!(&*selected.borrow(), &["alpha", "test-model", "service"]);
+        assert_eq!(menu.get_search_value(Some("providers")), "alpha");
+        assert_eq!(menu.get_search_value(Some("models")), "test");
+        assert_eq!(menu.get_search_value(Some("mcp-connections")), "search");
+        menu.set_active_tab("models");
+        for _ in 0..5 {
+            menu.handle_input("\x1b[D");
+        }
+        assert!(
+            !cancelled.get(),
+            "left in model search must not close configuration"
+        );
+        menu.handle_input("\x1b");
+        assert!(cancelled.get());
     }
 
     #[test]

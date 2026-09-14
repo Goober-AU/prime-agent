@@ -211,48 +211,10 @@ const SYMBOLS: &[(&str, &str)] = &[
 ];
 
 const OPERATOR_NAMES: &[&str] = &[
-    "log",
-    "ln",
-    "lg",
-    "exp",
-    "sin",
-    "cos",
-    "tan",
-    "cot",
-    "sec",
-    "csc",
-    "arcsin",
-    "arccos",
-    "arctan",
-    "sinh",
-    "cosh",
-    "tanh",
-    "coth",
-    "min",
-    "max",
-    "argmin",
-    "argmax",
-    "arg",
-    "sup",
-    "inf",
-    "lim",
-    "limsup",
-    "liminf",
-    "det",
-    "dim",
-    "ker",
-    "deg",
-    "gcd",
-    "hom",
-    "Pr",
-    "tr",
-    "Tr",
-    "rank",
-    "diag",
-    "sgn",
-    "softmax",
-    "mod",
-    "bmod",
+    "log", "ln", "lg", "exp", "sin", "cos", "tan", "cot", "sec", "csc", "arcsin", "arccos",
+    "arctan", "sinh", "cosh", "tanh", "coth", "min", "max", "argmin", "argmax", "arg", "sup",
+    "inf", "lim", "limsup", "liminf", "det", "dim", "ker", "deg", "gcd", "hom", "Pr", "tr", "Tr",
+    "rank", "diag", "sgn", "softmax", "mod", "bmod",
 ];
 
 /// Single-character escapes (`\{` -> `{`) and spacing commands.
@@ -442,7 +404,6 @@ fn in_set(table: &[&str], key: &str) -> bool {
     table.contains(&key)
 }
 
-
 /// Code point of the styled "A" in the Mathematical Alphanumeric block.
 #[derive(Debug, Clone)]
 struct AlphabetStyle {
@@ -457,7 +418,15 @@ const ALPHABET_MATHBB: AlphabetStyle = AlphabetStyle {
     upper: Some(0x1d538),
     lower: Some(0x1d552),
     digit: Some(0x1d7d8),
-    exceptions: &[("C", "\u{2102}"), ("H", "\u{210d}"), ("N", "\u{2115}"), ("P", "\u{2119}"), ("Q", "\u{211a}"), ("R", "\u{211d}"), ("Z", "\u{2124}")],
+    exceptions: &[
+        ("C", "\u{2102}"),
+        ("H", "\u{210d}"),
+        ("N", "\u{2115}"),
+        ("P", "\u{2119}"),
+        ("Q", "\u{211a}"),
+        ("R", "\u{211d}"),
+        ("Z", "\u{2124}"),
+    ],
 };
 const ALPHABET_MATHBF: AlphabetStyle = AlphabetStyle {
     upper: Some(0x1d400),
@@ -487,7 +456,13 @@ const ALPHABET_MATHFRAK: AlphabetStyle = AlphabetStyle {
     upper: Some(0x1d504),
     lower: Some(0x1d51e),
     digit: None,
-    exceptions: &[("C", "\u{212d}"), ("H", "\u{210c}"), ("I", "\u{2111}"), ("R", "\u{211c}"), ("Z", "\u{2128}")],
+    exceptions: &[
+        ("C", "\u{212d}"),
+        ("H", "\u{210c}"),
+        ("I", "\u{2111}"),
+        ("R", "\u{211c}"),
+        ("Z", "\u{2128}"),
+    ],
 };
 
 fn alphabet(name: &str) -> Option<&'static AlphabetStyle> {
@@ -506,13 +481,7 @@ fn alphabet(name: &str) -> Option<&'static AlphabetStyle> {
 
 /// Text-mode commands: their argument is literal text, so ^ and _ stay as-is.
 const TEXT_COMMANDS: &[&str] = &[
-    "text",
-    "textrm",
-    "textit",
-    "textsf",
-    "texttt",
-    "mbox",
-    "hbox",
+    "text", "textrm", "textit", "textsf", "texttt", "mbox", "hbox",
 ];
 
 /// Math-mode font commands rendered unstyled; scripts inside still apply.
@@ -664,7 +633,7 @@ impl LatexParser {
             if ch == '&' {
                 // Alignment marker: becomes a separating space unless one is there.
                 self.pos += 1;
-                if !result.ends_with(char::is_whitespace) {
+                if !result.ends_with(is_math_whitespace) {
                     result.push(' ');
                 }
                 continue;
@@ -718,7 +687,7 @@ impl LatexParser {
 
     /// Render the next required argument: a braced group, or a single atom (TeX allows \frac12).
     fn parse_argument(&mut self) -> String {
-        while self.pos < self.src.len() && self.src[self.pos].is_whitespace() {
+        while self.pos < self.src.len() && is_math_whitespace(self.src[self.pos]) {
             self.pos += 1;
         }
         if self.peek() == Some('{') {
@@ -797,7 +766,7 @@ impl LatexParser {
             let content = self.parse_argument();
             let mut out = String::new();
             for c in content.chars() {
-                if c.is_whitespace() {
+                if is_math_whitespace(c) {
                     out.push(c);
                 } else {
                     out.push(c);
@@ -810,10 +779,16 @@ impl LatexParser {
             "frac" | "dfrac" | "tfrac" | "cfrac" => {
                 let numerator = self.parse_argument();
                 let denominator = self.parse_argument();
-                if let Some(common) = lookup(COMMON_FRACTIONS, &format!("{numerator}/{denominator}")) {
+                if let Some(common) =
+                    lookup(COMMON_FRACTIONS, &format!("{numerator}/{denominator}"))
+                {
                     return common.to_string();
                 }
-                format!("{}/{}", parenthesize(&numerator), parenthesize(&denominator))
+                format!(
+                    "{}/{}",
+                    parenthesize(&numerator),
+                    parenthesize(&denominator)
+                )
             }
             "binom" => {
                 let top = self.parse_argument();
@@ -833,7 +808,8 @@ impl LatexParser {
                     Some(index) if index == "3" => format!("\u{221b}{operand}"),
                     Some(index) if index == "4" => format!("\u{221c}{operand}"),
                     Some(index) => {
-                        let mapped = map_script(&index, SUPERSCRIPTS).unwrap_or_else(|| format!("^{index}"));
+                        let mapped =
+                            map_script(&index, SUPERSCRIPTS).unwrap_or_else(|| format!("^{index}"));
                         format!("{mapped}\u{221a}{operand}")
                     }
                 }
@@ -868,7 +844,7 @@ impl LatexParser {
 
     /// Render the delimiter following \left or \right ("." means invisible).
     fn parse_delimiter(&mut self) -> String {
-        while self.pos < self.src.len() && self.src[self.pos].is_whitespace() {
+        while self.pos < self.src.len() && is_math_whitespace(self.src[self.pos]) {
             self.pos += 1;
         }
         let ch = match self.peek() {
@@ -887,6 +863,11 @@ impl LatexParser {
     }
 }
 
+// ECMAScript \s includes BOM and excludes NEL.
+fn is_math_whitespace(c: char) -> bool {
+    c == '\u{feff}' || (c != '\u{85}' && c.is_whitespace())
+}
+
 /// Convert LaTeX math source to Unicode plain text.
 pub fn latex_to_unicode(tex: &str) -> String {
     let parsed = LatexParser::new(tex).parse();
@@ -901,9 +882,9 @@ fn collapse_spaces(text: &str) -> String {
     let mut i = 0usize;
     while i < chars.len() {
         let c = chars[i];
-        if c != '\n' && c.is_whitespace() {
+        if c != '\n' && is_math_whitespace(c) {
             let mut j = i;
-            while j < chars.len() && chars[j] != '\n' && chars[j].is_whitespace() {
+            while j < chars.len() && chars[j] != '\n' && is_math_whitespace(chars[j]) {
                 j += 1;
             }
             if j - i >= 2 {
@@ -932,7 +913,7 @@ fn collapse_blank_lines(text: &str) -> String {
     while i < chars.len() {
         if chars[i] == '\n' {
             let mut end = i + 1;
-            while end < chars.len() && chars[end].is_whitespace() {
+            while end < chars.len() && is_math_whitespace(chars[end]) {
                 end += 1;
             }
             // Backtrack to the last newline the greedy `\s*` swallowed.

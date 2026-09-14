@@ -204,6 +204,8 @@ pub struct ModelSelectorOptions {
     pub available_models: Option<Vec<ModelItemModel>>,
     pub configured_providers: Option<Vec<String>>,
     pub header_rows: Option<f64>,
+    pub header: Option<Rc<RefCell<dyn Component>>>,
+    pub get_header_rows: Option<Rc<dyn Fn() -> f64>>,
     pub subtitle: Option<String>,
     pub get_rows: Option<Rc<dyn Fn() -> f64>>,
     pub recent_models: Option<Vec<String>>,
@@ -309,6 +311,8 @@ pub struct ModelSelectorComponent {
     pub responsive_layout_key: String,
     pub viewport: MenuViewportProvider,
     pub header_rows: Option<f64>,
+    pub header: Option<Rc<RefCell<dyn Component>>>,
+    pub get_header_rows: Option<Rc<dyn Fn() -> f64>>,
     pub has_header: bool,
     pub subtitle: Option<String>,
     pub rows_requested: bool,
@@ -374,6 +378,8 @@ impl ModelSelectorComponent {
                 None
             },
             has_header,
+            header: options.header,
+            get_header_rows: options.get_header_rows,
             subtitle: options.subtitle,
             rows_requested: false,
             search_input: Rc::new(RefCell::new(MenuSearchInput::new("Search models".into()))),
@@ -780,7 +786,9 @@ impl ModelSelectorComponent {
             header_help_rows += 1.0;
         }
 
-        let header_rows = if self.header_rows.is_some() {
+        let header_rows = if let Some(rows) = &self.get_header_rows {
+            rows()
+        } else if self.header_rows.is_some() {
             self.header_rows.unwrap_or(2.0)
         } else {
             0.0
@@ -873,6 +881,10 @@ impl Component for ModelSelectorComponent {
                     .unwrap_or_else(|| "All models across supported providers.".into()),
             ),
         });
+        if let Some(header) = &self.header {
+            panel.add_child(header.clone());
+            panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+        }
         if self.should_show_header_help() {
             let help = if self.scoped_model_items.is_empty() {
                 theme().fg(

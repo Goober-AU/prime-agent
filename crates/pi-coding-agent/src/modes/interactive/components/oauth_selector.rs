@@ -12,7 +12,12 @@ use crate::modes::interactive::theme::theme::theme;
 use super::menu_panel::{
     get_menu_list_layout, MenuListLayout, MenuListLayoutOptions, MenuViewportProvider,
 };
-use std::rc::Rc;
+use super::menu_panel::{
+    MenuList, MenuPanel, MenuPanelOptions, MenuRow, MenuRowOptions, MenuSearchInput,
+};
+use pi_tui::components::{spacer::Spacer, truncated_text::TruncatedText};
+use pi_tui::tui::{Component, Focusable};
+use std::{cell::RefCell, rc::Rc};
 
 use pi_tui::tui::Component as _;
 
@@ -70,6 +75,8 @@ pub struct OAuthSelectorOptions {
     pub get_rows: Option<Rc<dyn Fn() -> f64>>,
     pub initial_category: Option<AuthSelectorCategory>,
     pub header_rows: Option<f64>,
+    pub header: Option<Rc<RefCell<dyn Component>>>,
+    pub get_header_rows: Option<Box<dyn Fn() -> f64>>,
     pub title: Option<String>,
     pub subtitle: Option<String>,
     pub search_placeholder: Option<String>,
@@ -135,7 +142,8 @@ pub struct OAuthSelectorComponent {
     pub get_header_rows: Box<dyn Fn() -> f64>,
     pub has_tab_bar: bool,
     pub has_header: bool,
-    pub search_input: pi_tui::components::input::Input,
+    pub search_input: Rc<RefCell<MenuSearchInput>>,
+    header: Option<Rc<RefCell<dyn Component>>>,
     /// Set when the user picked a provider (`onSelectCallback`).
     pub selected_provider: Option<AuthSelectorProvider>,
     /// Set when the user cancelled (`onCancelCallback`).
@@ -176,13 +184,21 @@ impl OAuthSelectorComponent {
                 get_rows: options.get_rows.clone(),
             },
             get_header_rows: {
-                let has_header = options.header_rows.is_some();
+                let has_header = options.header_rows.is_some() || options.header.is_some();
                 let rows = options.header_rows.unwrap_or(TAB_BAR_RESERVED_ROWS);
-                Box::new(move || if has_header { rows } else { 0.0 })
+                options
+                    .get_header_rows
+                    .unwrap_or_else(|| Box::new(move || if has_header { rows } else { 0.0 }))
             },
             has_tab_bar: false,
             has_header: options.header_rows.is_some(),
-            search_input: pi_tui::components::input::Input::new(),
+            search_input: Rc::new(RefCell::new(MenuSearchInput::new(
+                options
+                    .search_placeholder
+                    .clone()
+                    .unwrap_or_else(|| "Search providers".into()),
+            ))),
+            header: options.header,
             selected_provider: None,
             cancelled: false,
             title: options.title.clone().unwrap_or_else(|| {
@@ -268,7 +284,7 @@ impl OAuthSelectorComponent {
             (current + direction + self.categories.len() as i32) % self.categories.len() as i32;
         self.active_category = self.categories[next as usize];
         self.selected_index = 0;
-        self.search_input.set_value(String::new());
+        self.search_input.borrow_mut().set_value("");
         self.filter_providers("");
     }
 
@@ -318,7 +334,7 @@ impl OAuthSelectorComponent {
             self.selected_index
                 .min(self.filtered_providers.len().saturating_sub(1))
         };
-        self.update_layout();
+        self.update_list();
     }
 
     /// `[...providers].sort(...)` - the input array is copied, never reordered in place.
@@ -352,7 +368,7 @@ impl OAuthSelectorComponent {
         let selected = self.filtered_providers.get(self.selected_index).cloned();
         let providers = std::mem::take(&mut self.all_providers);
         self.all_providers = self.sort_providers(&[], &providers);
-        let query = self.search_input.get_value().to_string();
+        let query = self.search_input.borrow().get_value().to_string();
         self.filter_providers(&query);
         if let Some(selected) = selected {
             if let Some(index) = self.filtered_providers.iter().position(|provider| {
@@ -443,12 +459,12 @@ impl OAuthSelectorComponent {
         // Only steal left/right for tabs when the search field is empty, so cursor
         // editing still works while filtering.
         else if self.categories.len() > 1
-            && self.search_input.get_value().is_empty()
+            && self.search_input.borrow().get_value().is_empty()
             && kb.matches(key_data, "tui.editor.cursorLeft")
         {
             self.switch_category(-1);
         } else if self.categories.len() > 1
-            && self.search_input.get_value().is_empty()
+            && self.search_input.borrow().get_value().is_empty()
             && kb.matches(key_data, "tui.editor.cursorRight")
         {
             self.switch_category(1);
@@ -459,8 +475,8 @@ impl OAuthSelectorComponent {
         } else if kb.matches(key_data, "tui.select.cancel") {
             self.cancelled = true;
         } else {
-            self.search_input.handle_input(key_data);
-            let value = self.search_input.get_value().to_string();
+            self.search_input.borrow_mut().handle_input(key_data);
+            let value = self.search_input.borrow().get_value().to_string();
             self.filter_providers(&value);
         }
     }
@@ -538,8 +554,111 @@ impl OAuthSelectorComponent {
     }
 
     /// Port of `getSearchInput()`.
-    pub fn search_input(&self) -> &pi_tui::components::input::Input {
-        &self.search_input
+    pub fn search_input(&self) -> Rc<RefCell<MenuSearchInput>> {
+        self.search_input.clone()
+    }
+}
+
+impl Component for OAuthSelectorComponent {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        self.update_list();
+        let mut panel = MenuPanel::new(MenuPanelOptions {
+            title: self.title.clone(),
+            subtitle: Some(self.subtitle.clone()),
+        });
+        if let Some(header) = &self.header {
+            panel.add_child(header.clone());
+            panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+        }
+        if self.has_tab_bar {
+            panel.add_child(Rc::new(RefCell::new(TruncatedText::new(
+                self.update_tab_bar(),
+                0,
+                0,
+            ))));
+            panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+        }
+        panel.add_full_width_child(self.search_input.clone());
+        panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+        let compact = self.list_layout.compact;
+        let mut list = MenuList::new(Some(Box::new(move || compact)));
+        let (start, end) = self.visible_range;
+        for (index, provider) in self
+            .filtered_providers
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(start)
+        {
+            list.add_row(Rc::new(RefCell::new(MenuRow::new(MenuRowOptions {
+                primary: provider.name.clone(),
+                secondary: Some(
+                    if provider.auth_type == "oauth" {
+                        "subscription"
+                    } else {
+                        "api key"
+                    }
+                    .into(),
+                ),
+                meta: Some(self.format_status_indicator(provider)),
+                selected: index == self.selected_index,
+            }))));
+        }
+        if start > 0 || end < self.filtered_providers.len() {
+            list.add_child(
+                Rc::new(RefCell::new(TruncatedText::new(
+                    theme().fg(
+                        "muted",
+                        &format!(
+                            "  ({}/{})",
+                            self.selected_index + 1,
+                            self.filtered_providers.len()
+                        ),
+                    ),
+                    1,
+                    0,
+                ))),
+                false,
+            );
+        }
+        if self.filtered_providers.is_empty() {
+            let text = if self.all_providers.is_empty() {
+                if self.mode == "login" {
+                    "No providers available"
+                } else {
+                    "No providers logged in. Use /login first."
+                }
+            } else {
+                "No matching providers"
+            };
+            list.add_child(
+                Rc::new(RefCell::new(TruncatedText::new(
+                    theme().fg("muted", text),
+                    1,
+                    0,
+                ))),
+                false,
+            );
+        }
+        panel.add_full_width_child(Rc::new(RefCell::new(list)));
+        panel.render(width)
+    }
+    fn handle_input(&mut self, data: &str) {
+        OAuthSelectorComponent::handle_input(self, data);
+    }
+    fn invalidate(&mut self) {
+        self.search_input.borrow_mut().invalidate();
+    }
+    fn as_focusable(&mut self) -> Option<&mut dyn Focusable> {
+        Some(self)
+    }
+}
+impl Focusable for OAuthSelectorComponent {
+    fn focused(&self) -> bool {
+        self.search_input.borrow().focused()
+    }
+    fn set_focused(&mut self, focused: bool) {
+        self.search_input.borrow_mut().set_focused(focused);
     }
 }
 
@@ -696,6 +815,7 @@ mod tests {
 
     #[test]
     fn api_key_status_indicator_labels_every_source() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
         let status = AuthStatus {
             configured: true,
             source: Some("environment".to_string()),

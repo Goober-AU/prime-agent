@@ -1,0 +1,265 @@
+{
+  "slice": "pr18-completion",
+  "status": "partial",
+  "date": "2026-09-14",
+  "purpose": "User-requested draft PR checkpoint and handoff; not ready to merge.",
+  "base_pr": 18,
+  "base_pr_head": "3344cc9484afc766f8fb4460a8bbe53215a2f752",
+  "files": [
+    {
+      "src": "packages/tui/src/utils.ts",
+      "rust": "crates/pi-tui/src/utils.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/tui/src/latex.ts",
+      "rust": "crates/pi-tui/src/latex.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/tui/src/components/markdown.ts",
+      "rust": "crates/pi-tui/src/components/markdown.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_autocomplete.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_queue.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/tui/src/tui.ts",
+      "rust": "crates/pi-tui/src/tui.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_settings.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/heartbeat-manager.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/heartbeat_manager.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_heartbeats.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/configuration-menu.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/configuration_menu.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/oauth-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/oauth_selector.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/model-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/menu-panel.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/menu_panel.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_configuration.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_history.rs",
+      "status": "partial",
+      "functions_mapped": null,
+      "notes": "Function-by-function counts were not completed. See docs/PR18-HANDOFF.md for implemented behavior, known defects, and pending verification."
+    }
+  ],
+  "build": "pi-coding-agent --lib and pi-tui test targets compile successfully; existing/in-progress Rust warnings remain; no final CLI/release build.",
+  "build_results": [
+    {
+      "name": "handoff-agent-build",
+      "success": true,
+      "warning_diagnostics": 336
+    },
+    {
+      "name": "handoff-tui-build",
+      "success": true,
+      "warning_diagnostics": 11
+    }
+  ],
+  "test_results": [
+    {
+      "target": "native_host",
+      "passed": 17,
+      "failed": 0,
+      "ignored": 0,
+      "mode": "isolated compiled test executable, serial"
+    },
+    {
+      "target": "configuration_menu",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "mode": "isolated compiled test executable, serial"
+    },
+    {
+      "target": "heartbeat_manager",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "mode": "isolated compiled test executable, serial"
+    },
+    {
+      "target": "oauth_selector",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "mode": "isolated compiled test executable, serial"
+    },
+    {
+      "target": "model_selector",
+      "passed": 16,
+      "failed": 0,
+      "ignored": 0,
+      "mode": "isolated compiled test executable, serial"
+    },
+    {
+      "target": "menu_panel",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "mode": "isolated compiled test executable, serial"
+    },
+    {
+      "target": "pi_tui",
+      "passed": 230,
+      "failed": 0,
+      "ignored": 0,
+      "mode": "isolated compiled test executable, serial"
+    },
+    {
+      "target": "pr18_rendering",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "mode": "isolated compiled test executable, serial"
+    }
+  ],
+  "other_checks": {
+    "npm_run_check": "passed explicitly on the final checkpoint; no formatter changes",
+    "rustfmt": "--edition 2021 --check passed on owned Rust files",
+    "git_diff_check": "passed"
+  },
+  "fixtures": {
+    "unicode": "17.0",
+    "widths": 24932,
+    "latex": 19,
+    "markdown": 126,
+    "truncate": 630,
+    "wrap": 12,
+    "strip": 5
+  },
+  "new_dependencies": [
+    {
+      "name": "emojis",
+      "version": "0.9.0",
+      "published": "2026-06-20",
+      "direct": true
+    },
+    {
+      "name": "phf",
+      "version": "0.13.1",
+      "published": "2025-08-23",
+      "direct": false
+    },
+    {
+      "name": "phf_shared",
+      "version": "0.13.1",
+      "published": "2025-08-23",
+      "direct": false
+    },
+    {
+      "name": "siphasher",
+      "version": "1.0.3",
+      "published": "2026-05-03",
+      "direct": false
+    }
+  ],
+  "dependency_release_age": "All four additions were checked against crates.io version metadata on 2026-09-14; all exceed seven days and are not yanked.",
+  "blocked_on": null,
+  "outstanding": "docs/PR18-HANDOFF.md contains the prioritized known defects and family-level checklist. Work paused intentionally for handoff, not an external blocker.",
+  "limitations": [
+    "The 130-row audit reports mentioned by PR #18 are unavailable; no row-by-row completion claim.",
+    "Focused coding-agent tests only (56), not a full 2211-test suite run on this checkpoint.",
+    "No current CLI/release build, native PTY integration smoke, production install, or real-provider validation.",
+    "Runtime history/queue/login race and recovery behaviors require additional tests.",
+    "All source files remain marked partial; test success is not full behavioral parity."
+  ],
+  "local_logs": ".port-env/tmp/pr18/handoff-*.log (private scratch, not committed)",
+  "source_sha256": {
+    "crates/pi-tui/src/utils.rs": "71681e3e212679e16c2ddc79852ad6e9501690745fdc481a029d99574a6e6620",
+    "crates/pi-tui/src/latex.rs": "d78f6df129dbf1ff2fa56c84f09c6044e433836610f58b6ff452116ea58bbf87",
+    "crates/pi-tui/src/components/markdown.rs": "d1ddaa70c718b906a0be9ad87507cf8982f09f2dae05f014689336a1d5e99dd1",
+    "crates/pi-tui/tests/pr18_rendering.rs": "72df5a22390e956574250628880b7f55ca8800a613f3770a2f9fb2281d25393f",
+    "crates/pi-tui/tests/fixtures/pr18_rendering.json": "feab547c42b73a1828645c5da2bfef870bee95720c4b6a6b32926e6b92078734",
+    "crates/pi-tui/tests/fixtures/pr18_rendering.ts": "3a4d229fa0588b553fd7740672dd9c04434c0e2d0292e4b9eee351c267bab360",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs": "1e498fe31e0f7b6206f5392d37b6e702c497088ab9766135ce6d75119ad5ff15",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_autocomplete.rs": "dd0b981bcdff1d836874b9ce21b9325ecfac6735afa3357f82a5f509ccb34cc1",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_queue.rs": "a06ef46bc8f4b5b43efb41d1b45c35e9657e03acc984b4794c0eaed7928c2876",
+    "crates/pi-tui/src/tui.rs": "19b8bbca34a142f2431de317021a7fdcb559a2f1dd6237aa170dba8534070dc5",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_settings.rs": "5cd44d257d17d54df111d37ad19b8d4f9d184c62d1bdb4708b5d2eaa13ea69b8",
+    "crates/pi-coding-agent/src/modes/interactive/components/heartbeat_manager.rs": "bf6ee643ffda399759c7c8bfba63844f44aeb9731759531cbe9544b5d0775238",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_heartbeats.rs": "5bf06e5f3a1a87e4fd582b7f9ece67bda5398ddb22c6ee5c64f0eac9d008f158",
+    "crates/pi-coding-agent/src/modes/interactive/components/configuration_menu.rs": "c9fcced3ff54a729a183f5befa8e80114f2feda005bad6a3523076f2714ca540",
+    "crates/pi-coding-agent/src/modes/interactive/components/oauth_selector.rs": "4df3e28f14e4892e6ab7548df1f55232664ced27458f218b49e9fd251f94e108",
+    "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs": "455cfb36b5d722cf47a91b76bbcb5464b0c815810e88d9cba5d823cac93d1a4f",
+    "crates/pi-coding-agent/src/modes/interactive/components/menu_panel.rs": "7f54ffd90fff52a0596ef19771011852064298af5d3067d4a89c365be92b2892",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_configuration.rs": "751b6091ae1cb28bb00f698bd2dd1d1cba74e37152f019be3a020b7964036547",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_history.rs": "5d5c8c970bbe7fb285ef55a7a41d727ab8d8a5fce40d12e86189e655f0dc8a1a"
+  }
+}

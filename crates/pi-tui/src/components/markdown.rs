@@ -25,7 +25,8 @@ use std::ops::Range as StdRange;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-const STRICT_STRIKETHROUGH_REGEX: &str = "^(~~)(?=[^\\s~])((?:\\\\.|[^\\\\])*?(?:\\\\.|[^\\s~\\\\]))\\1(?=[^~]|$)";
+const STRICT_STRIKETHROUGH_REGEX: &str =
+    "^(~~)(?=[^\\s~])((?:\\\\.|[^\\\\])*?(?:\\\\.|[^\\s~\\\\]))\\1(?=[^~]|$)";
 
 /// Port of `StrictStrikethroughTokenizer.del` regex behaviour: `~~text~~` where the
 /// content does not start or end with whitespace or `~`, and the run after the
@@ -134,7 +135,7 @@ fn match_block_math(src: &str) -> Option<(String, String)> {
                 body.trim().to_string(),
             ));
         }
-        search_from = end + close.len();
+        search_from = end + 1;
     }
     None
 }
@@ -143,7 +144,11 @@ fn match_block_math(src: &str) -> Option<(String, String)> {
 fn match_inline_math(src: &str) -> Option<(String, String)> {
     // /^\$\$([\s\S]+?)\$\$/
     if let Some(body) = src.strip_prefix("$$") {
-        if let Some(end) = body.find("$$") {
+        if let Some(end) = body
+            .char_indices()
+            .nth(1)
+            .and_then(|(start, _)| body[start..].find("$$").map(|end| start + end))
+        {
             if !body[..end].is_empty() {
                 return Some((format!("$${}$$", &body[..end]), body[..end].to_string()));
             }
@@ -151,7 +156,11 @@ fn match_inline_math(src: &str) -> Option<(String, String)> {
     }
     // /^\\\[([\s\S]+?)\\\]/
     if let Some(body) = src.strip_prefix("\\[") {
-        if let Some(end) = body.find("\\]") {
+        if let Some(end) = body
+            .char_indices()
+            .nth(1)
+            .and_then(|(start, _)| body[start..].find("\\]").map(|end| start + end))
+        {
             if !body[..end].is_empty() {
                 return Some((format!("\\[{}\\]", &body[..end]), body[..end].to_string()));
             }
@@ -159,7 +168,11 @@ fn match_inline_math(src: &str) -> Option<(String, String)> {
     }
     // /^\\\(([\s\S]+?)\\\)/
     if let Some(body) = src.strip_prefix("\\(") {
-        if let Some(end) = body.find("\\)") {
+        if let Some(end) = body
+            .char_indices()
+            .nth(1)
+            .and_then(|(start, _)| body[start..].find("\\)").map(|end| start + end))
+        {
             if !body[..end].is_empty() {
                 return Some((format!("\\({}\\)", &body[..end]), body[..end].to_string()));
             }
@@ -185,7 +198,11 @@ fn match_inline_math(src: &str) -> Option<(String, String)> {
                 }
                 if let Some(end_index) = end_index {
                     let after = &body[end_index + 1..];
-                    let next_is_digit = after.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+                    let next_is_digit = after
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_digit())
+                        .unwrap_or(false);
                     if !next_is_digit {
                         let last = inner.chars().last()?;
                         if !last.is_whitespace() && last != '$' {
@@ -251,7 +268,10 @@ fn marker_at(text: &str) -> Option<(usize, usize)> {
     }
     let (number, rest) = digits.split_at(count);
     rest.strip_prefix(MATH_MARKER)?;
-    Some((number.parse::<usize>().ok()?, MATH_MARKER.len_utf8() * 2 + count))
+    Some((
+        number.parse::<usize>().ok()?,
+        MATH_MARKER.len_utf8() * 2 + count,
+    ))
 }
 
 /// How the text before a math opener on its line relates to the block it opens.
@@ -362,11 +382,36 @@ fn skip_code_span(src: &str, index: usize) -> Option<usize> {
 /// `INLINE_MATH_PATTERNS` (markdown.ts:81-86): `$$`, `\[`, `\(`, `$`. Code spans and
 /// fenced code blocks are skipped, because the TS extensions never see them.
 fn extract_math_spans(source: &str) -> (String, Vec<RawMathSpan>) {
+    if !has_math(source) {
+        return (source.to_string(), Vec::new());
+    }
     let mut spans: Vec<RawMathSpan> = Vec::new();
     let mut out = String::with_capacity(source.len());
     let mut index = 0usize;
     let mut fence: Option<(char, usize)> = None;
     let mut line_start = 0usize;
+    // Preserve the enclosing list's content indent when replacing display math.
+    // Pulldown already knows item source ranges, including nested/loose items.
+    let list_indents: Vec<_> = Parser::new(source)
+        .into_offset_iter()
+        .filter_map(|(event, range)| {
+            if !matches!(event, Event::Start(Tag::Item)) {
+                return None;
+            }
+            let start = source[..range.start].rfind('\n').map_or(0, |pos| pos + 1);
+            let item = &source[range.start..range.end];
+            let marker = item
+                .bytes()
+                .take_while(|b| !b.is_ascii_whitespace())
+                .count();
+            let spacing = item[marker..]
+                .bytes()
+                .take_while(|b| *b == b' ' || *b == b'\t')
+                .count();
+            let indent = range.start - start + marker + spacing.clamp(1, 4);
+            Some((range, indent))
+        })
+        .collect();
 
     while index < source.len() {
         let rest = &source[index..];
@@ -381,7 +426,9 @@ fn extract_math_spans(source: &str) -> (String, Vec<RawMathSpan>) {
                 let run = body.chars().take_while(|c| *c == fence_char).count();
                 if run >= 3 {
                     match fence {
-                        Some((open_char, open_run)) if open_char == fence_char && open_run == run => {
+                        Some((open_char, open_run))
+                            if open_char == fence_char && open_run == run =>
+                        {
                             fence = None;
                         }
                         None => fence = Some((fence_char, run)),
@@ -454,7 +501,14 @@ fn extract_math_spans(source: &str) -> (String, Vec<RawMathSpan>) {
             };
             let (raw, math_text, block_ok) = match block_span {
                 Some((raw, math_text)) => (raw, math_text, true),
-                None => match match_inline_math(rest) {
+                None => match match_inline_math(rest).filter(|(raw, _)| {
+                    // Inline extensions run after block lexing and cannot cross
+                    // a paragraph boundary, unlike display-math blocks.
+                    !raw.split('\n')
+                        .skip(1)
+                        .take(raw.split('\n').count().saturating_sub(2))
+                        .any(|line| line.trim_matches([' ', '\t']).is_empty())
+                }) {
                     Some((raw, math_text)) => (raw, math_text, false),
                     None => (String::new(), String::new(), false),
                 },
@@ -471,7 +525,13 @@ fn extract_math_spans(source: &str) -> (String, Vec<RawMathSpan>) {
                 // place it would make pulldown-cmark lex the placeholder as an indented
                 // code block (TUIR-27, wts_place `J_indented_math`).
                 if block_ok && prefix_kind == MathPrefixKind::Indent {
-                    out.truncate(out.len() - line_prefix.len());
+                    let keep = list_indents
+                        .iter()
+                        .rev()
+                        .find(|(range, _)| range.contains(&index))
+                        .map_or(0, |(_, indent)| *indent)
+                        .min(line_prefix.len());
+                    out.truncate(out.len() - line_prefix.len() + keep);
                 }
                 // marked's `blockMathExtension.start` reports the math index to
                 // `block()`, which cuts the pending paragraph there (markdown.ts:59-63):
@@ -484,10 +544,7 @@ fn extract_math_spans(source: &str) -> (String, Vec<RawMathSpan>) {
                     // Plain text before the math: the cut splits the paragraph in two.
                     out.push('\n');
                     out.push('\n');
-                } else if !block_ok
-                    && cut_allowed
-                    && (open == "$$" || open == "\\[")
-                {
+                } else if !block_ok && cut_allowed && (open == "$$" || open == "\\[") {
                     // Same cut, but the paragraph continues: marked keeps both chunks in
                     // one paragraph joined by a newline (wts_mid `M2_midline_inline`
                     // renders `a` and `` `b` c `` on separate lines).
@@ -514,6 +571,20 @@ fn extract_math_spans(source: &str) -> (String, Vec<RawMathSpan>) {
                 // block-marker classification (e.g. the second `- $$y=2$$` item).
                 line_start = index;
                 continue;
+            }
+            if open == "$$" || open == "\\[" {
+                let prefix_kind = math_prefix_kind(&source[line_start..index]);
+                if prefix_kind == MathPrefixKind::PlainText && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                // Marked looks for the next extension start after the first byte
+                // when its block tokenizer rejects an empty delimiter run.
+                if open == "$$" && rest[1..].starts_with("$$") {
+                    out.push('$');
+                    out.push('\n');
+                    index += 1;
+                    continue;
+                }
             }
         }
 
@@ -707,7 +778,9 @@ fn blank_line_runs(source: &str) -> Vec<(usize, usize)> {
         // or optional blanks at the very end of the source (`$` is not multiline).
         loop {
             let mut after_blanks = offset;
-            while after_blanks < bytes.len() && (bytes[after_blanks] == b' ' || bytes[after_blanks] == b'\t') {
+            while after_blanks < bytes.len()
+                && (bytes[after_blanks] == b' ' || bytes[after_blanks] == b'\t')
+            {
                 after_blanks += 1;
             }
             if after_blanks < bytes.len() && bytes[after_blanks] == b'\n' {
@@ -838,9 +911,16 @@ enum FrameKind {
     Root,
     Paragraph,
     Heading(usize),
-    CodeBlock { lang: Option<String>, text: String },
+    CodeBlock {
+        lang: Option<String>,
+        text: String,
+    },
     Item,
-    List { ordered: bool, start: usize, items: Vec<Vec<Token>> },
+    List {
+        ordered: bool,
+        start: usize,
+        items: Vec<Vec<Token>>,
+    },
     Blockquote,
     Table {
         header: Vec<Vec<Token>>,
@@ -857,7 +937,10 @@ enum FrameKind {
     /// NOT `theme.italic`. `Token::Del` already renders that way; pulldown's
     /// `Tag::Strikethrough` previously collapsed into `Em` and so rendered as italics.
     Del,
-    Link { href: String, text: String },
+    Link {
+        href: String,
+        text: String,
+    },
 }
 
 struct Frame {
@@ -924,7 +1007,9 @@ impl TokenBuilder {
                 frame.tokens.pop();
             }
             if !frame.tokens.is_empty() {
-                self.push_token(Token::Paragraph { tokens: frame.tokens });
+                self.push_token(Token::Paragraph {
+                    tokens: frame.tokens,
+                });
             }
         }
         self.push_token(Token::BlockMath(MathToken {
@@ -1034,10 +1119,7 @@ impl TokenBuilder {
                     self.push_token(Token::Link {
                         href,
                         text: text.clone(),
-                        tokens: vec![Token::Text {
-                            text,
-                            tokens: None,
-                        }],
+                        tokens: vec![Token::Text { text, tokens: None }],
                     });
                     index += raw_len;
                     continue;
@@ -1213,7 +1295,9 @@ impl TokenBuilder {
             Tag::Strikethrough => FrameKind::Del,
             Tag::HtmlBlock => FrameKind::Paragraph,
             Tag::FootnoteDefinition(_) => FrameKind::Paragraph,
-            Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => FrameKind::Paragraph,
+            Tag::DefinitionList | Tag::DefinitionListTitle | Tag::DefinitionListDefinition => {
+                FrameKind::Paragraph
+            }
             Tag::MetadataBlock(_) => FrameKind::Paragraph,
         };
         self.stack.push(Frame {
@@ -1248,7 +1332,9 @@ impl TokenBuilder {
                     Some(frame) => frame,
                     None => return,
                 };
-                self.push_token(Token::Paragraph { tokens: frame.tokens });
+                self.push_token(Token::Paragraph {
+                    tokens: frame.tokens,
+                });
                 return;
             }
             _ => {}
@@ -1269,7 +1355,9 @@ impl TokenBuilder {
                 if let Some(token) = self.block_math_from_paragraph(&frame.tokens) {
                     token
                 } else {
-                    Token::Paragraph { tokens: frame.tokens }
+                    Token::Paragraph {
+                        tokens: frame.tokens,
+                    }
                 }
             }
             FrameKind::Heading(depth) => Token::Heading {
@@ -1278,7 +1366,10 @@ impl TokenBuilder {
             },
             FrameKind::CodeBlock { lang, text } => Token::Code {
                 // `marked` reports fenced code content without the trailing newline.
-                text: text.strip_suffix('\n').map(|t| t.to_string()).unwrap_or(text),
+                text: text
+                    .strip_suffix('\n')
+                    .map(|t| t.to_string())
+                    .unwrap_or(text),
                 lang,
             },
             FrameKind::Item => {
@@ -1300,17 +1391,21 @@ impl TokenBuilder {
                 start,
                 items,
             },
-            FrameKind::Blockquote => Token::Blockquote { tokens: frame.tokens },
-            FrameKind::Table {
-                header,
-                rows,
-                raw,
-            } => Token::Table { header, rows, raw },
+            FrameKind::Blockquote => Token::Blockquote {
+                tokens: frame.tokens,
+            },
+            FrameKind::Table { header, rows, raw } => Token::Table { header, rows, raw },
             // Table scaffolding frames are consumed by their own `TagEnd` arms.
             FrameKind::TableHead | FrameKind::TableRow | FrameKind::TableCell => return,
-            FrameKind::Strong => Token::Strong { tokens: frame.tokens },
-            FrameKind::Em => Token::Em { tokens: frame.tokens },
-            FrameKind::Del => Token::Del { tokens: frame.tokens },
+            FrameKind::Strong => Token::Strong {
+                tokens: frame.tokens,
+            },
+            FrameKind::Em => Token::Em {
+                tokens: frame.tokens,
+            },
+            FrameKind::Del => Token::Del {
+                tokens: frame.tokens,
+            },
             FrameKind::Link { href, .. } => {
                 let text = collect_text(&frame.tokens);
                 Token::Link {
@@ -1530,10 +1625,7 @@ fn match_email_autolink(src: &str) -> Option<(String, String)> {
         .bytes()
         .take_while(|b| b.is_ascii_alphanumeric() || b"._+-".contains(b))
         .count();
-    if local == 0
-        || !src.is_char_boundary(local)
-        || !src[local..].starts_with('@')
-    {
+    if local == 0 || !src.is_char_boundary(local) || !src[local..].starts_with('@') {
         return None;
     }
     let domain_start = local + 1;
@@ -1623,7 +1715,10 @@ fn backpedal_once(text: &str) -> &str {
         if advanced == 0 && rest.starts_with('&') {
             // `&(?![a-zA-Z0-9]+;$)` - a lone `&` is kept, an entity terminator is not.
             let tail = &rest[1..];
-            let word = tail.bytes().take_while(|b| b.is_ascii_alphanumeric()).count();
+            let word = tail
+                .bytes()
+                .take_while(|b| b.is_ascii_alphanumeric())
+                .count();
             if !(word > 0 && tail[word..].starts_with(';') && tail[word + 1..].is_empty()) {
                 advanced = 1;
             }
@@ -1715,10 +1810,7 @@ fn inline_tokens(text: &str, use_math: bool) -> Vec<Token> {
             tokens.push(Token::Link {
                 href,
                 text: text.clone(),
-                tokens: vec![Token::Text {
-                    text,
-                    tokens: None,
-                }],
+                tokens: vec![Token::Text { text, tokens: None }],
             });
             index += raw_len;
             continue;
@@ -2002,7 +2094,8 @@ impl Markdown {
                     None => {
                         let visible_len = visible_width(&line_with_margins);
                         let padding_needed = width.saturating_sub(visible_len);
-                        block_lines.push(format!("{line_with_margins}{}", " ".repeat(padding_needed)));
+                        block_lines
+                            .push(format!("{line_with_margins}{}", " ".repeat(padding_needed)));
                     }
                 }
             }
@@ -2058,7 +2151,10 @@ impl Markdown {
             Token::Paragraph { tokens } => {
                 let paragraph_text = self.render_inline_tokens(tokens, style_context);
                 lines.push(paragraph_text);
-                if next_token_type.is_some() && next_token_type != Some("list") && next_token_type != Some("space") {
+                if next_token_type.is_some()
+                    && next_token_type != Some("list")
+                    && next_token_type != Some("space")
+                {
                     lines.push(String::new());
                 }
             }
@@ -2086,7 +2182,14 @@ impl Markdown {
             }
 
             Token::Table { header, rows, raw } => {
-                lines.extend(self.render_table(header, rows, raw, width, next_token_type, style_context));
+                lines.extend(self.render_table(
+                    header,
+                    rows,
+                    raw,
+                    width,
+                    next_token_type,
+                    style_context,
+                ));
             }
 
             Token::Blockquote { tokens } => {
@@ -2098,7 +2201,8 @@ impl Markdown {
                     if quote_style_prefix.is_empty() {
                         return quote_style(line);
                     }
-                    let line_with_reapplied_style = line.replace("\x1b[0m", &format!("\x1b[0m{quote_style_prefix}"));
+                    let line_with_reapplied_style =
+                        line.replace("\x1b[0m", &format!("\x1b[0m{quote_style_prefix}"));
                     quote_style(&line_with_reapplied_style)
                 };
 
@@ -2122,7 +2226,11 @@ impl Markdown {
                     ));
                 }
 
-                while rendered_quote_lines.last().map(|line| line.is_empty()).unwrap_or(false) {
+                while rendered_quote_lines
+                    .last()
+                    .map(|line| line.is_empty())
+                    .unwrap_or(false)
+                {
                     rendered_quote_lines.pop();
                 }
 
@@ -2184,7 +2292,11 @@ impl Markdown {
 }
 
 impl Markdown {
-    fn render_inline_tokens(&mut self, tokens: &[Token], style_context: Option<&InlineStyleContext>) -> String {
+    fn render_inline_tokens(
+        &mut self,
+        tokens: &[Token],
+        style_context: Option<&InlineStyleContext>,
+    ) -> String {
         let mut result = String::new();
         let resolved = match style_context {
             Some(context) => context.clone(),
@@ -2245,11 +2357,7 @@ impl Markdown {
                     result.push_str(&style_prefix);
                 }
 
-                Token::Link {
-                    href,
-                    text,
-                    tokens,
-                } => {
+                Token::Link { href, text, tokens } => {
                     let link_text = self.render_inline_tokens(tokens, Some(&resolved));
                     let styled_link = (self.theme.link)(&(self.theme.underline)(&link_text));
                     if get_capabilities().hyperlinks {
@@ -2342,7 +2450,10 @@ impl Markdown {
                 if is_nested_list {
                     lines.push(first_line);
                 } else {
-                    lines.push(format!("{indent}{}{first_line}", (self.theme.list_bullet)(&bullet)));
+                    lines.push(format!(
+                        "{indent}{}{first_line}",
+                        (self.theme.list_bullet)(&bullet)
+                    ));
                 }
 
                 for line in item_lines.iter().skip(1) {
@@ -2378,7 +2489,10 @@ impl Markdown {
             && tokens.iter().all(|token| {
                 !matches!(
                     token,
-                    Token::List { .. } | Token::Paragraph { .. } | Token::Code { .. } | Token::BlockMath(_)
+                    Token::List { .. }
+                        | Token::Paragraph { .. }
+                        | Token::Code { .. }
+                        | Token::BlockMath(_)
                 )
             });
         if all_inline {
@@ -2398,7 +2512,13 @@ impl Markdown {
                 } => {
                     // Nested list - render with one additional indent level
                     // These lines will have their own indent, so we just add them as-is
-                    lines.extend(self.render_list(*ordered, *start, items, parent_depth + 1, style_context));
+                    lines.extend(self.render_list(
+                        *ordered,
+                        *start,
+                        items,
+                        parent_depth + 1,
+                        style_context,
+                    ));
                 }
                 Token::Text { text, tokens } => {
                     // Text content (may have inline tokens)
@@ -2424,7 +2544,8 @@ impl Markdown {
                 }
                 other => {
                     // Other token types - try to render as inline
-                    let text = self.render_inline_tokens(std::slice::from_ref(other), style_context);
+                    let text =
+                        self.render_inline_tokens(std::slice::from_ref(other), style_context);
                     if !text.is_empty() {
                         lines.push(text);
                     }
@@ -2485,7 +2606,10 @@ impl Markdown {
 
     /// Get the visible width of the longest word in a string.
     fn get_longest_word_width(text: &str, max_width: Option<usize>) -> usize {
-        let words: Vec<&str> = text.split_whitespace().filter(|word| !word.is_empty()).collect();
+        let words: Vec<&str> = text
+            .split_whitespace()
+            .filter(|word| !word.is_empty())
+            .collect();
         let mut longest = 0usize;
         for word in words {
             longest = longest.max(visible_width(word));
@@ -2545,7 +2669,8 @@ impl Markdown {
         for i in 0..num_cols {
             let header_text = self.render_inline_tokens(&header[i], style_context);
             natural_widths[i] = visible_width(&header_text);
-            min_word_widths[i] = Self::get_longest_word_width(&header_text, Some(max_unbroken_word_width)).max(1);
+            min_word_widths[i] =
+                Self::get_longest_word_width(&header_text, Some(max_unbroken_word_width)).max(1);
         }
         for row in rows {
             for (i, cell) in row.iter().enumerate() {
@@ -2654,7 +2779,10 @@ impl Markdown {
         }
 
         let top_border_cells: Vec<String> = column_widths.iter().map(|w| "─".repeat(*w)).collect();
-        lines.push(mark_table_start(&format!("┌─{}─┐", top_border_cells.join("─┬─"))));
+        lines.push(mark_table_start(&format!(
+            "┌─{}─┐",
+            top_border_cells.join("─┬─")
+        )));
 
         let header_cells: Vec<(Vec<String>, String)> = header
             .iter()
@@ -2683,7 +2811,13 @@ impl Markdown {
                         "{text}{}",
                         " ".repeat(column_widths[col_idx].saturating_sub(visible_width(&text)))
                     );
-                    mark_table_cell(&(self.theme.bold)(&padded), 0, col_idx as i64, line_idx as i64, content)
+                    mark_table_cell(
+                        &(self.theme.bold)(&padded),
+                        0,
+                        col_idx as i64,
+                        line_idx as i64,
+                        content,
+                    )
                 })
                 .collect();
             lines.push(format!("│ {} │", row_parts.join(" │ ")));
@@ -2716,8 +2850,17 @@ impl Markdown {
                     .map(|(col_idx, (cell_lines, content))| {
                         let text = cell_lines.get(line_idx).cloned().unwrap_or_default();
                         let width = column_widths.get(col_idx).copied().unwrap_or(1);
-                        let padded = format!("{text}{}", " ".repeat(width.saturating_sub(visible_width(&text))));
-                        mark_table_cell(&padded, (row_index + 1) as i64, col_idx as i64, line_idx as i64, content)
+                        let padded = format!(
+                            "{text}{}",
+                            " ".repeat(width.saturating_sub(visible_width(&text)))
+                        );
+                        mark_table_cell(
+                            &padded,
+                            (row_index + 1) as i64,
+                            col_idx as i64,
+                            line_idx as i64,
+                            content,
+                        )
                     })
                     .collect();
                 lines.push(format!("│ {} │", row_parts.join(" │ ")));
@@ -2728,7 +2871,8 @@ impl Markdown {
             }
         }
 
-        let bottom_border_cells: Vec<String> = column_widths.iter().map(|w| "─".repeat(*w)).collect();
+        let bottom_border_cells: Vec<String> =
+            column_widths.iter().map(|w| "─".repeat(*w)).collect();
         lines.push(mark_table_end(&format!(
             "└─{}─┘",
             bottom_border_cells.join("─┴─")
@@ -2783,7 +2927,10 @@ fn replace_windows_drive(href: &str) -> String {
 
 /// Port of `new URL(target, baseUrl).href` for the subset the renderer needs.
 fn resolve_url(target: &str, base: &str) -> Option<String> {
-    if target.starts_with("http://") || target.starts_with("https://") || target.starts_with("file://") {
+    if target.starts_with("http://")
+        || target.starts_with("https://")
+        || target.starts_with("file://")
+    {
         return Some(target.to_string());
     }
     if target.starts_with("//") {
@@ -2792,7 +2939,10 @@ fn resolve_url(target: &str, base: &str) -> Option<String> {
     }
     if target.starts_with('/') {
         let scheme_end = base.find("://")? + 3;
-        let host_end = base[scheme_end..].find('/').map(|i| scheme_end + i).unwrap_or(base.len());
+        let host_end = base[scheme_end..]
+            .find('/')
+            .map(|i| scheme_end + i)
+            .unwrap_or(base.len());
         return Some(format!("{}{}", &base[..host_end], target));
     }
     let cut = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
@@ -2802,19 +2952,24 @@ fn resolve_url(target: &str, base: &str) -> Option<String> {
 /// Port of `latexToUnicode(text).replace(/\s*\n\s*/g, " ")`.
 fn collapse_math_whitespace(text: &str) -> String {
     let mut result = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\n' {
-            while result.ends_with([' ', '\t']) {
-                result.pop();
-            }
-            result.push(' ');
-            while matches!(chars.peek(), Some(' ') | Some('\t')) {
-                chars.next();
-            }
+    let mut pending = String::new();
+    for ch in text.chars() {
+        if ch == '\u{feff}' || (ch != '\u{85}' && ch.is_whitespace()) {
+            pending.push(ch);
         } else {
+            if pending.contains('\n') {
+                result.push(' ');
+            } else {
+                result.push_str(&pending);
+            }
+            pending.clear();
             result.push(ch);
         }
+    }
+    if pending.contains('\n') {
+        result.push(' ');
+    } else {
+        result.push_str(&pending);
     }
     result
 }
@@ -2934,18 +3089,24 @@ impl Component for Markdown {
         marked_result.extend(empty_lines);
 
         let mut identities: Vec<usize> = std::mem::take(&mut self.table_identities);
-        let (result, regions) = extract_table_cell_selection_regions(&marked_result, &mut |index| {
-            if index >= identities.len() {
-                identities.resize(index + 1, 0);
-                identities[index] = index;
-            }
-            identities[index]
-        });
+        let (result, regions) =
+            extract_table_cell_selection_regions(&marked_result, &mut |index| {
+                if index >= identities.len() {
+                    identities.resize(index + 1, 0);
+                    identities[index] = index;
+                }
+                identities[index]
+            });
         self.table_identities = identities;
         self.selection_regions = regions;
 
         self.cached_text = Some(self.text.clone());
         self.cached_width = Some(width);
+        let result = if result.is_empty() {
+            vec![String::new()]
+        } else {
+            result
+        };
         self.cached_lines = Some(result.clone());
 
         if !result.is_empty() {
@@ -2972,17 +3133,9 @@ impl Component for Markdown {
 
 /// Port of `token.raw` for the block cache key.
 fn raw_of(token: &Token) -> String {
-    match token {
-        Token::Paragraph { tokens } | Token::Heading { tokens, .. } => collect_text(tokens),
-        Token::Code { text, .. } => text.clone(),
-        Token::BlockMath(math) => math.raw.clone(),
-        Token::Html { raw } => raw.clone(),
-        Token::Table { raw, .. } => raw.clone(),
-        Token::Blockquote { tokens } => collect_text(tokens),
-        Token::Hr => "---".to_string(),
-        Token::Space => String::new(),
-        other => collect_text(std::slice::from_ref(other)),
-    }
+    // Preserve every render-affecting property, including nested list text,
+    // heading depth, link destinations and inline formatting.
+    format!("{token:?}")
 }
 
 #[cfg(test)]
@@ -3017,7 +3170,14 @@ mod tests {
     }
 
     fn markdown(text: &str) -> Markdown {
-        Markdown::new(text.to_string(), 0, 0, theme(), None, MarkdownOptions::default())
+        Markdown::new(
+            text.to_string(),
+            0,
+            0,
+            theme(),
+            None,
+            MarkdownOptions::default(),
+        )
     }
 
     #[test]
@@ -3099,8 +3259,14 @@ mod tests {
             match_autolink("https://example.com/x_(y)").unwrap().1,
             "https://example.com/x_(y)"
         );
-        assert_eq!(match_autolink("https://ex.com/a(b").unwrap().1, "https://ex.com/a");
-        assert_eq!(match_autolink("https://ex.com&").unwrap().1, "https://ex.com&");
+        assert_eq!(
+            match_autolink("https://ex.com/a(b").unwrap().1,
+            "https://ex.com/a"
+        );
+        assert_eq!(
+            match_autolink("https://ex.com&").unwrap().1,
+            "https://ex.com&"
+        );
         // Non-matches: a bare `user@example` has no dotted domain and a `2. ` list
         // marker is not a `www.` host (both verified against marked).
         assert_eq!(match_email_autolink("user@example"), None);
@@ -3172,7 +3338,11 @@ mod tests {
                 digits > 0 && line[digits..].starts_with('.')
             })
             .collect();
-        assert_eq!(numbered.len(), 3, "expected 3 numbered items, got {numbered:?}");
+        assert_eq!(
+            numbered.len(),
+            3,
+            "expected 3 numbered items, got {numbered:?}"
+        );
         for (index, prefix) in ["1.", "2.", "3."].iter().enumerate() {
             assert!(
                 numbered[index].starts_with(prefix),
@@ -3290,7 +3460,10 @@ mod tests {
         let render = |text: &str| render_with(&strike_theme, text);
 
         // markdown.test.ts:1036-1045: `~~x~~` is struck.
-        assert_eq!(render("Use ~~strikethrough~~ here"), "Use <DEL>strikethrough</DEL> here");
+        assert_eq!(
+            render("Use ~~strikethrough~~ here"),
+            "Use <DEL>strikethrough</DEL> here"
+        );
         // markdown.test.ts:1048-1057: `~x~` stays literal text, with no strike styling.
         assert_eq!(
             render("Use ~strikethrough~ literally"),
@@ -3335,7 +3508,11 @@ mod tests {
         let mut md = markdown("### Title");
         let lines = md.render(24.0);
         // Level >= 3 repeats the heading style on the `### ` prefix, then pads.
-        assert!(lines[0].starts_with("H<**### **>H<**Title**>"), "{:?}", lines[0]);
+        assert!(
+            lines[0].starts_with("H<**### **>H<**Title**>"),
+            "{:?}",
+            lines[0]
+        );
     }
 
     #[test]
@@ -3412,13 +3589,19 @@ mod tests {
     #[test]
     fn link_prints_url_when_text_differs() {
         let mut md = markdown("[text](https://example.com)");
-        assert_eq!(md.render(40.0)[0], "textURL< (https://example.com)>         ");
+        assert_eq!(
+            md.render(40.0)[0],
+            "textURL< (https://example.com)>         "
+        );
     }
 
     #[test]
     fn link_hides_url_when_text_matches_href() {
         let mut md = markdown("[https://example.com](https://example.com)");
-        assert_eq!(md.render(40.0)[0], "https://example.com                     ");
+        assert_eq!(
+            md.render(40.0)[0],
+            "https://example.com                     "
+        );
     }
 
     #[test]
@@ -3463,7 +3646,9 @@ mod tests {
             theme(),
             None,
             MarkdownOptions {
-                transform: Some(Rc::new(|text: &str, width: usize| format!("{text}-{width}"))),
+                transform: Some(Rc::new(|text: &str, width: usize| {
+                    format!("{text}-{width}")
+                })),
                 base_url: None,
             },
         );
@@ -3479,7 +3664,11 @@ mod tests {
     #[test]
     fn block_math_requires_line_end_so_trailing_text_survives() {
         let mut md = markdown("$$x=2$$. Therefore y=3");
-        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        let lines: Vec<String> = md
+            .render(60.0)
+            .into_iter()
+            .map(|l| l.trim_end().to_string())
+            .collect();
         assert_eq!(
             lines,
             vec!["`x=2`. Therefore y=3".to_string()],
@@ -3488,7 +3677,11 @@ mod tests {
 
         // `then y=3` after the delimiter behaves the same way.
         let mut md = markdown("$$x=2$$ then y=3");
-        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        let lines: Vec<String> = md
+            .render(60.0)
+            .into_iter()
+            .map(|l| l.trim_end().to_string())
+            .collect();
         assert_eq!(lines, vec!["`x=2` then y=3".to_string()]);
     }
 
@@ -3500,7 +3693,11 @@ mod tests {
     fn paren_and_bracket_math_delimiters_are_recognised() {
         // `\(...\)` -> INLINE_MATH_PATTERNS[2] (markdown.ts:84).
         let mut md = markdown("value \\(a+b\\) end");
-        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        let lines: Vec<String> = md
+            .render(60.0)
+            .into_iter()
+            .map(|l| l.trim_end().to_string())
+            .collect();
         assert_eq!(
             lines,
             vec!["value `a+b` end".to_string()],
@@ -3509,7 +3706,11 @@ mod tests {
 
         // `\[...\]` at the end of its own line -> BLOCK_MATH_REGEX (markdown.ts:45).
         let mut md = markdown("\\[a+b\\]\n");
-        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        let lines: Vec<String> = md
+            .render(60.0)
+            .into_iter()
+            .map(|l| l.trim_end().to_string())
+            .collect();
         assert_eq!(
             lines,
             vec!["  a+b".to_string()],
@@ -3523,7 +3724,11 @@ mod tests {
     #[test]
     fn double_backslash_row_separator_survives_in_display_math() {
         let mut md = markdown("$$a=b \\\\ c=d$$");
-        let lines: Vec<String> = md.render(60.0).into_iter().map(|l| l.trim_end().to_string()).collect();
+        let lines: Vec<String> = md
+            .render(60.0)
+            .into_iter()
+            .map(|l| l.trim_end().to_string())
+            .collect();
         assert_eq!(
             lines,
             vec!["  a=b".to_string(), "  c=d".to_string()],

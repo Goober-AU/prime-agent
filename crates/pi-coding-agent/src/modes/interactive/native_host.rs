@@ -9,7 +9,6 @@ use crate::main_entry::InteractiveModeSeamOptions;
 use crate::modes::agent_connection::types as wire;
 use crate::modes::interactive::components::{
     assistant_message::{AssistantMessageComponent, AssistantMessageComponentOptions},
-    thinking_selector::ThinkingSelectorComponent,
     custom_editor::{CustomEditor, CustomEditorOptions},
     extension_editor::{AppKeybindingsManager, ExtensionEditorComponent},
     extension_input::{ExtensionInputComponent, ExtensionInputOptions},
@@ -18,9 +17,8 @@ use crate::modes::interactive::components::{
     model_selector::{
         ModelItemModel, ModelSelectorComponent, ModelSelectorOptions, ScopedModelItem,
     },
-    prime_onboarding_splash::{
-        PrimeOnboardingSplashComponent, PrimeOnboardingSplashOptions,
-    },
+    prime_onboarding_splash::{PrimeOnboardingSplashComponent, PrimeOnboardingSplashOptions},
+    thinking_selector::ThinkingSelectorComponent,
     tool_execution::{ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult},
     user_message::UserMessageComponent,
 };
@@ -34,6 +32,19 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+
+#[path = "native_host_autocomplete.rs"]
+mod native_autocomplete;
+#[path = "native_host_configuration.rs"]
+mod native_configuration;
+#[path = "native_host_heartbeats.rs"]
+mod native_heartbeats;
+#[path = "native_host_history.rs"]
+mod native_history;
+#[path = "native_host_queue.rs"]
+mod native_queue;
+#[path = "native_host_settings.rs"]
+mod native_settings;
 
 pub(crate) async fn run_interactive_mode(
     options: InteractiveModeSeamOptions,
@@ -74,6 +85,7 @@ impl<T: TuiComponent> TuiComponent for SharedComponent<T> {
 }
 
 struct Transcript {
+    history: Option<Box<Transcript>>,
     mode: Rc<RefCell<InteractiveMode>>,
     rows: Vec<Box<dyn TuiComponent>>,
     assistant: Option<Rc<RefCell<AssistantMessageComponent>>>,
@@ -110,11 +122,13 @@ impl Transcript {
     fn panel(&mut self, message: &str) {
         self.rows
             .push(Box::new(pi_tui::components::spacer::Spacer::new(1)));
-        self.rows.push(Box::new(TuiText::new(message.into(), 1, 0, None)));
+        self.rows
+            .push(Box::new(TuiText::new(message.into(), 1, 0, None)));
     }
 
     fn new(mode: Rc<RefCell<InteractiveMode>>) -> Self {
         Self {
+            history: None,
             mode,
             rows: Vec::new(),
             assistant: None,
@@ -123,6 +137,7 @@ impl Transcript {
         }
     }
     fn replace(&mut self, messages: Vec<AgentMessage>) {
+        self.history = None;
         self.rows.clear();
         self.tools.clear();
         self.assistant = None;
@@ -130,6 +145,33 @@ impl Transcript {
         for message in initial_render_messages(messages) {
             self.message(message, false);
         }
+    }
+    fn replace_history(&mut self, messages: Vec<AgentMessage>, total: f64) {
+        let mut history = Self::new(self.mode.clone());
+        if (messages.len() as f64) < total {
+            history.rows.push(Box::new(TuiText::new(theme().fg("dim", &format!("Showing {} of {total} messages. Scroll up or use PageUp to load earlier history.", messages.len())), 1, 0, None)));
+            history
+                .rows
+                .push(Box::new(pi_tui::components::spacer::Spacer::new(1)));
+        }
+        for message in messages {
+            history.message(message, false);
+        }
+        self.history = Some(Box::new(history));
+    }
+    fn all_tools(&self) -> Vec<Rc<RefCell<ToolExecutionComponent>>> {
+        self.tools
+            .values()
+            .cloned()
+            .chain(self.history.iter().flat_map(|h| h.all_tools()))
+            .collect()
+    }
+    fn all_assistants(&self) -> Vec<Rc<RefCell<AssistantMessageComponent>>> {
+        self.assistants
+            .iter()
+            .cloned()
+            .chain(self.history.iter().flat_map(|h| h.all_assistants()))
+            .collect()
     }
     fn message(&mut self, message: AgentMessage, streaming: bool) {
         match message {
@@ -205,7 +247,14 @@ impl Transcript {
             name,
             id,
             args,
-            ToolExecutionOptions::default(),
+            ToolExecutionOptions {
+                show_images: mode
+                    .settings_manager()
+                    .lock()
+                    .ok()
+                    .map(|s| s.get_show_images()),
+                ..Default::default()
+            },
             None,
             &mode.get_current_cwd(),
         );
@@ -247,7 +296,7 @@ impl TuiComponent for Transcript {
     fn render(&mut self, width: f64) -> Vec<String> {
         let mode = self.mode.borrow();
         let mut lines = Vec::new();
-        if self.rows.is_empty() {
+        if self.rows.is_empty() && self.history.as_ref().is_none_or(|h| h.rows.is_empty()) {
             let model = mode.get_current_model_id();
             let cwd = mode.get_current_cwd();
             let hint = mode.start_hint.to_string();
@@ -264,6 +313,11 @@ impl TuiComponent for Transcript {
             lines.extend(header.render(width, None));
         }
         drop(mode);
+        if let Some(history) = &mut self.history {
+            for row in &mut history.rows {
+                lines.extend(row.render(width));
+            }
+        }
         for row in &mut self.rows {
             lines.extend(row.render(width));
         }
@@ -284,8 +338,8 @@ impl TuiComponent for Transcript {
             // The pi-tui `Loader` advances one frame per `DEFAULT_INTERVAL_MS`
             // (crates/pi-tui/src/components/loader.rs:11-12); driving the index from
             // the wall clock reproduces that cadence without a second timer.
-            let frame = ((now_ms() / pi_tui::components::loader::DEFAULT_INTERVAL_MS as f64)
-                .floor() as i64)
+            let frame = ((now_ms() / pi_tui::components::loader::DEFAULT_INTERVAL_MS as f64).floor()
+                as i64)
                 .rem_euclid(frames.len() as i64) as usize;
             lines.push(format!(
                 "{}{}",
@@ -300,6 +354,9 @@ impl TuiComponent for Transcript {
             .collect()
     }
     fn invalidate(&mut self) {
+        if let Some(history) = &mut self.history {
+            history.invalidate();
+        }
         for row in &mut self.rows {
             row.invalidate();
         }
@@ -352,6 +409,7 @@ enum InputAction {
     Interrupt,
     Escape,
     Exit,
+    Heartbeats,
     ToggleTools,
     ToggleThinking,
     ToggleMessages,
@@ -380,13 +438,23 @@ enum HostEvent {
         current: pi_agent_core::types::ThinkingLevel,
         levels: Vec<pi_agent_core::types::ThinkingLevel>,
     },
+    Render,
+    Heartbeats(Vec<wire::AgentConnectionHeartbeat>, bool),
+    HeartbeatUpdated(wire::AgentConnectionHeartbeat, serde_json::Value),
+    CloseHeartbeats,
+    Settings(wire::AgentConnectionState),
+    Setting(native_settings::Change),
     Models(wire::AgentConnectionModelCatalog, Option<String>),
     ModelSelected {
         session_id: String,
         model: wire::AgentConnectionModel,
         result: Result<wire::AgentConnectionState, String>,
     },
-    LoginProviders(Vec<pi_tui::components::select_list::SelectItem>),
+    Configuration(
+        wire::AgentConnectionModelCatalog,
+        &'static str,
+        Option<String>,
+    ),
     BeginLogin(String, bool),
     LoginAuth(String, Option<String>),
     LoginProgress(String),
@@ -531,11 +599,10 @@ fn extension_dialog(
 /// The stash session for this host. `open` resolves the same store state for the
 /// session id, so a stash survives the agents-view handoff and a reopen.
 fn stash_session(mode: &InteractiveMode, session_id: &str) -> PromptStashSession {
-    let store = mode
-        .options
-        .prompt_stash_store
-        .clone()
-        .unwrap_or_else(crate::modes::interactive::prompt_stash_state::shared_prompt_stash_store);
+    let store =
+        mode.options.prompt_stash_store.clone().unwrap_or_else(
+            crate::modes::interactive::prompt_stash_state::shared_prompt_stash_store,
+        );
     PromptStashSession::open(store, session_id)
 }
 
@@ -545,7 +612,8 @@ fn snapshot_editor_prompt_stash(
     editor: &CustomEditor,
 ) -> PromptStashCapture {
     let text = editor.editor().get_text();
-    let images = crate::modes::interactive::prompt_stash_state::stash_images(&mode.pasted_images, &text);
+    let images =
+        crate::modes::interactive::prompt_stash_state::stash_images(&mode.pasted_images, &text);
     // `editor.getPasteSnapshot?.()` (interactive-mode.ts:4344): the pi-tui `Editor`
     // implements it, so the snapshot is always present on this path.
     let paste_snapshot = editor.editor().get_paste_snapshot();
@@ -568,6 +636,7 @@ fn bind_editor_actions(
             "app.clear",
             (|| InputAction::Interrupt) as fn() -> InputAction,
         ),
+        ("app.heartbeats.open", || InputAction::Heartbeats),
         ("app.tools.expand", || InputAction::ToggleTools),
         ("app.thinking.toggle", || InputAction::ToggleThinking),
         ("app.messages.expand", || InputAction::ToggleMessages),
@@ -648,16 +717,18 @@ fn apply_prompt_stash_outcome(
 }
 
 fn editor_theme() -> pi_tui::components::editor::EditorTheme {
-    let source = crate::modes::interactive::theme::theme::get_editor_theme();
     pi_tui::components::editor::EditorTheme {
-        border_color: Rc::new(move |text| (source.border_color)(text)),
-        background_color: source
-            .background_color
-            .map(|color| Rc::new(move |text: &str| color(text)) as Rc<dyn Fn(&str) -> String>),
-        autocomplete_background_color: Some(Rc::new(move |text| {
-            (source.autocomplete_background_color)(text)
+        border_color: Rc::new(|text| theme().fg("borderMuted", text)),
+        background_color: Some(Rc::new(|text| {
+            theme()
+                .get_editor_background_color()
+                .map(|color| color(text))
+                .unwrap_or_else(|| text.into())
         })),
-        command_color: Some(Rc::new(move |text| (source.command_color)(text))),
+        autocomplete_background_color: Some(Rc::new(|text| {
+            (theme().get_popup_background_color())(text)
+        })),
+        command_color: Some(Rc::new(|text| theme().fg("accent", text))),
         select_list: select_theme(),
     }
 }
@@ -738,7 +809,9 @@ async fn run_terminal(
         // A real store, so Ctrl+S and the agents-view handoff keep a draft.
         // TypeScript creates one `ClientPromptStashStore` per process and shares it
         // across chat views (main.ts:1448, 1544).
-        prompt_stash_store: Some(crate::modes::interactive::prompt_stash_state::shared_prompt_stash_store()),
+        prompt_stash_store: Some(
+            crate::modes::interactive::prompt_stash_state::shared_prompt_stash_store(),
+        ),
         prompt_stash_session_id: Some(snapshot.state.session_id.clone()),
     })?;
     controller.apply_connection_state_snapshot(project_state(snapshot.state));
@@ -751,6 +824,8 @@ async fn run_terminal(
     }
     let mode = Rc::new(RefCell::new(controller));
     let transcript = Rc::new(RefCell::new(Transcript::new(mode.clone())));
+    let initial_history = snapshot.history.clone();
+    let initial_history_messages = snapshot.messages.clone();
     transcript.borrow_mut().replace(snapshot.messages);
     if let Some(message) = snapshot.streaming_message {
         transcript.borrow_mut().message(message, true);
@@ -768,6 +843,11 @@ async fn run_terminal(
         },
     )));
     let actions = Rc::new(RefCell::new(Vec::<InputAction>::new()));
+    native_autocomplete::configure(
+        &mut editor.borrow_mut(),
+        mode.clone(),
+        &mode.borrow().get_current_cwd(),
+    );
     {
         let actions = actions.clone();
         editor.borrow_mut().editor_mut().on_submit = Some(Box::new(move |text| {
@@ -777,6 +857,15 @@ async fn run_terminal(
         }));
     }
     bind_editor_actions(&editor, &actions);
+    let mut history_runtime = native_history::HistoryRuntime::new(connection.clone());
+    history_runtime.reset(
+        initial_history,
+        initial_history_messages,
+        &transcript,
+        &editor,
+    )?;
+    let mut queue_runtime =
+        native_queue::QueueRuntime::new(mode.clone(), editor.clone(), connection.clone());
     {
         let actions = actions.clone();
         editor.borrow_mut().on_escape = Some(Box::new(move || {
@@ -812,15 +901,35 @@ async fn run_terminal(
         }
     }
     let input = Rc::new(RefCell::new(Vec::<String>::new()));
+    let viewport_input = Rc::new(Cell::new(false));
+    let history_requested = Rc::new(Cell::new(false));
     {
         let input = input.clone();
-        let fullscreen = mode.borrow().fullscreen_enabled;
+        let mode = mode.clone();
+        let viewport_input = viewport_input.clone();
+        let history_requested = history_requested.clone();
         // Dispatch component input after releasing the TUI borrow: Editor owns
         // the same TUI handle and requests rendering from its input handlers.
         ui.borrow_mut().add_input_listener(Box::new(move |data| {
+            let keys = pi_tui::keybindings::get_keybindings();
+            if keys.matches(data, "tui.viewport.pageUp")
+                || keys.matches(data, "tui.viewport.top")
+                || data.starts_with("\x1b[<64;")
+            {
+                history_requested.set(true);
+            }
             // Keep terminal replies and mouse scrolling in TUI's own handlers.
             if (data.starts_with("\x1b[6;") && data.ends_with('t'))
-                || (fullscreen && pi_tui::mouse::is_mouse_sequence(data))
+                || (mode.borrow().fullscreen_enabled && pi_tui::mouse::is_mouse_sequence(data))
+                || (viewport_input.get()
+                    && [
+                        "tui.viewport.pageUp",
+                        "tui.viewport.pageDown",
+                        "tui.viewport.top",
+                        "tui.viewport.follow",
+                    ]
+                    .iter()
+                    .any(|key| pi_tui::keybindings::get_keybindings().matches(data, key)))
             {
                 return InputListenerResult::default();
             }
@@ -844,19 +953,24 @@ async fn run_terminal(
     ui.borrow_mut().set_focus(Some(editor.clone()));
     ui.borrow_mut().start();
     let guard = TerminalGuard(ui.clone());
-    if mode.borrow().fullscreen_enabled {
-        let dock = Rc::new(RefCell::new(pi_tui::tui::Container::new()));
-        dock.borrow_mut().add_child(editor.clone());
-        dock.borrow_mut()
-            .add_child(Rc::new(RefCell::new(Tray(mode.clone(), editor.clone()))));
+    {
+        let settings = mode.borrow().settings_manager().clone();
+        let settings = settings.lock().map_err(|e| e.to_string())?;
         ui.borrow_mut()
-            .enter_fullscreen(pi_tui::tui::FullscreenOptions {
-                scroll: vec![transcript.clone()],
-                dock,
-                mouse: true,
-                viewport_controls: true,
-            });
+            .set_show_hardware_cursor(settings.get_show_hardware_cursor());
+        ui.borrow_mut()
+            .set_clear_on_shrink(settings.get_clear_on_shrink());
+        editor
+            .borrow_mut()
+            .editor_mut()
+            .set_padding_x(settings.get_editor_padding_x());
+        editor
+            .borrow_mut()
+            .editor_mut()
+            .set_autocomplete_max_visible(settings.get_autocomplete_max_visible());
     }
+    let fullscreen = mode.borrow().fullscreen_enabled;
+    native_settings::fullscreen(fullscreen, &mode, &editor, &ui, &transcript);
     ui.borrow_mut().run_pending_render(now_ms());
     if benchmark {
         mode.borrow_mut().shutdown().await;
@@ -877,13 +991,32 @@ async fn run_terminal(
         submit(&connection, &send, message, true, None);
     }
     let mut last_tick = Instant::now();
+    let mut terminal_progress = false;
     let mut last_loader_tick = Instant::now();
     let mut selector: Option<Rc<RefCell<pi_tui::components::select_list::SelectList>>> = None;
     let mut overlay: Option<pi_tui::tui::OverlayHandle> = None;
     let (selection_send, selection_receive) = mpsc::channel::<Option<String>>();
     let mut models = Vec::<wire::AgentConnectionModel>::new();
     let mut configured_providers = std::collections::HashSet::<String>::new();
+    let mut configuration: Option<Rc<RefCell<crate::modes::interactive::components::configuration_menu::ConfigurationMenuComponent>>> = None;
+    let mut configuration_overlay: Option<pi_tui::tui::OverlayHandle> = None;
     let mut model_selector: Option<Rc<RefCell<ModelSelectorComponent>>> = None;
+    let heartbeat_catalog = Rc::new(RefCell::new(Vec::<wire::AgentConnectionHeartbeat>::new()));
+    let mut heartbeat_manager: Option<
+        Rc<
+            RefCell<
+                crate::modes::interactive::components::heartbeat_manager::HeartbeatManagerComponent,
+            >,
+        >,
+    > = None;
+    let mut heartbeat_refresh_at: Option<Instant> = None;
+    let mut settings_selector: Option<
+        Rc<
+            RefCell<
+                crate::modes::interactive::components::settings_selector::SettingsSelectorComponent,
+            >,
+        >,
+    > = None;
     let mut thinking_selector: Option<Rc<RefCell<ThinkingSelectorComponent>>> = None;
     let model_rows = Rc::new(Cell::new(ui.borrow().terminal_rows() as f64));
     let mut pending_login_model: Option<String> = None;
@@ -945,7 +1078,11 @@ async fn run_terminal(
                 break;
             }
         }
+        viewport_input.set(ui.borrow().is_fullscreen() && !ui.borrow().has_overlay());
         ui.borrow_mut().drain_input();
+        if history_requested.replace(false) {
+            history_runtime.request(&mode.borrow());
+        }
         for data in std::mem::take(&mut *input.borrow_mut()) {
             if let Some(splash) = &onboarding_splash {
                 splash.borrow_mut().handle_input(&data);
@@ -953,6 +1090,8 @@ async fn run_terminal(
                 dialog.component.borrow_mut().handle_input(&data);
             } else if let Some(dialog) = &login_dialog {
                 dialog.borrow_mut().handle_input(&data);
+            } else if let Some(menu) = &configuration {
+                menu.borrow_mut().handle_input(&data);
             } else if let Some(picker) = &model_selector {
                 let mut picker = picker.borrow_mut();
                 picker.handle_input(&data);
@@ -961,10 +1100,15 @@ async fn run_terminal(
                 } else if let Some(model) = picker.selected_model.take() {
                     let _ = selection_send.send(Some(format!("{}/{}", model.provider, model.id)));
                 }
+            } else if let Some(manager) = &heartbeat_manager {
+                manager.borrow_mut().handle_input(&data);
+            } else if let Some(picker) = &settings_selector {
+                picker.borrow_mut().handle_input(&data);
             } else if let Some(picker) = &thinking_selector {
                 picker.borrow_mut().handle_input(&data);
             } else if let Some(selector) = &selector {
                 selector.borrow_mut().handle_input(&data);
+            } else if queue_runtime.handle_input(&data) {
             } else if pi_tui::keybindings::get_keybindings().matches(&data, "app.message.followUp")
             {
                 actions.borrow_mut().push(InputAction::Submit(
@@ -999,13 +1143,17 @@ async fn run_terminal(
                     }
                     continue;
                 }
+                if let Some(handle) = configuration_overlay.take() {
+                    handle.hide();
+                }
+                configuration = None;
                 if let Some(model) = models
                     .iter()
                     .find(|model| format!("{}/{}", model.provider, model.id) == selected)
                 {
                     if !configured_providers.contains(&model.provider) {
-                        let oauth =
-                            pi_ai::utils::oauth::get_oauth_provider(&model.provider).is_some();
+                        let oauth = crate::core::auth_storage::get_oauth_provider(&model.provider)
+                            .is_some();
                         let api_key =
                             crate::core::provider_display_names::built_in_provider_display_names()
                                 .iter()
@@ -1042,6 +1190,11 @@ async fn run_terminal(
                         });
                     });
                 }
+            } else {
+                if let Some(handle) = configuration_overlay.take() {
+                    handle.hide();
+                }
+                configuration = None;
             }
         }
         if let (Some(splash), Some(settled)) = (&onboarding_splash, &onboarding_settled) {
@@ -1074,6 +1227,9 @@ async fn run_terminal(
         for action in std::mem::take(&mut *actions.borrow_mut()) {
             match action {
                 InputAction::Submit(text, follow_up) => {
+                    if queue_runtime.submit(&text, follow_up) {
+                        continue;
+                    }
                     if text.trim().is_empty() {
                         continue;
                     }
@@ -1137,7 +1293,8 @@ async fn run_terminal(
                             let _ = send.send(HostEvent::Completed(result));
                         });
                     } else {
-                        editor.borrow_mut().editor_mut().set_text("");
+                        let draft = mode.borrow_mut().queue_selection.reset();
+                        editor.borrow_mut().editor_mut().set_text(&draft);
                     }
                     if matches!(action, InputAction::Interrupt) {
                         mode.borrow_mut().show_ctrl_c_exit_hint();
@@ -1146,9 +1303,12 @@ async fn run_terminal(
                 InputAction::Exit => {
                     mode.borrow_mut().shutdown_requested = true;
                 }
+                InputAction::Heartbeats => {
+                    submit(&connection, &send, "/heartbeats".into(), false, None)
+                }
                 InputAction::ToggleTools => {
                     mode.borrow_mut().toggle_tool_output_expansion();
-                    for tool in transcript.borrow().tools.values() {
+                    for tool in transcript.borrow().all_tools() {
                         tool.borrow_mut()
                             .set_expanded(mode.borrow().tool_output_expanded);
                     }
@@ -1156,7 +1316,11 @@ async fn run_terminal(
                 InputAction::ToggleThinking => {
                     let mut mode = mode.borrow_mut();
                     mode.hide_thinking_block = !mode.hide_thinking_block;
-                    for assistant in &transcript.borrow().assistants {
+                    mode.settings_manager()
+                        .lock()
+                        .map_err(|e| e.to_string())?
+                        .set_hide_thinking_block(mode.hide_thinking_block);
+                    for assistant in transcript.borrow().all_assistants() {
                         assistant
                             .borrow_mut()
                             .set_hide_thinking_block(mode.hide_thinking_block);
@@ -1164,7 +1328,7 @@ async fn run_terminal(
                 }
                 InputAction::ToggleMessages => {
                     mode.borrow_mut().toggle_agent_message_expansion();
-                    for assistant in &transcript.borrow().assistants {
+                    for assistant in transcript.borrow().all_assistants() {
                         assistant
                             .borrow_mut()
                             .set_expanded(mode.borrow().agent_messages_expanded);
@@ -1191,8 +1355,7 @@ async fn run_terminal(
                         handle.hide();
                     }
                     thinking_selector = None;
-                    let (connection, send, mode) =
-                        (connection.clone(), send.clone(), mode.clone());
+                    let (connection, send, mode) = (connection.clone(), send.clone(), mode.clone());
                     tokio::spawn(async move {
                         let result = match connection.set_thinking_level(level).await {
                             Ok(()) => {
@@ -1230,6 +1393,9 @@ async fn run_terminal(
                     mode.borrow_mut().shutdown_requested = true;
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SessionEvent { event }) => {
+                    if event.type_name() == "session_action_update" {
+                        queue_runtime.observe_queue_change();
+                    }
                     apply_event(&mode, &transcript, event)
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SessionReplaced {
@@ -1262,15 +1428,22 @@ async fn run_terminal(
                         );
                     }
                     current_session_id = state.session_id.clone();
+                    queue_runtime.reset_session(current_session_id.clone());
                     mode.borrow_mut()
                         .apply_connection_state_snapshot(project_state(state));
-                    transcript.borrow_mut().replace(messages);
+                    history_runtime.reset(None, messages, &transcript, &editor)?;
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SessionResynced { snapshot }) => {
                     current_session_id = snapshot.state.session_id.clone();
+                    queue_runtime.reset_session(current_session_id.clone());
                     mode.borrow_mut()
                         .apply_connection_state_snapshot(project_state(snapshot.state));
-                    transcript.borrow_mut().replace(snapshot.messages);
+                    history_runtime.reset(
+                        snapshot.history,
+                        snapshot.messages,
+                        &transcript,
+                        &editor,
+                    )?;
                     if let Some(message) = snapshot.streaming_message {
                         transcript.borrow_mut().message(message, true);
                     }
@@ -1316,7 +1489,7 @@ async fn run_terminal(
                     "setHiddenThinkingLabel" => {
                         mode.borrow_mut()
                             .set_hidden_thinking_label(optional_string(&request.payload, "label"));
-                        for assistant in &transcript.borrow().assistants {
+                        for assistant in transcript.borrow().all_assistants() {
                             assistant
                                 .borrow_mut()
                                 .set_hidden_thinking_label(&mode.borrow().hidden_thinking_label);
@@ -1336,6 +1509,15 @@ async fn run_terminal(
                 HostEvent::Connection(wire::AgentConnectionEvent::SessionStatus { recap }) => {
                     mode.borrow_mut().session_recap = recap;
                     mode.borrow_mut().render_recap();
+                }
+                HostEvent::Connection(wire::AgentConnectionEvent::HeartbeatsChanged) => {
+                    let connection = connection.clone();
+                    let send = send.clone();
+                    tokio::spawn(async move {
+                        if let Ok(catalog) = connection.list_heartbeats().await {
+                            let _ = send.send(HostEvent::Heartbeats(catalog, false));
+                        }
+                    });
                 }
                 HostEvent::Connection(_) => {}
                 HostEvent::ModelSelected {
@@ -1365,10 +1547,138 @@ async fn run_terminal(
                     match connection.get_state().await {
                         Ok(state) => {
                             current_session_id = state.session_id.clone();
+                            if mode
+                                .borrow()
+                                .connection_state
+                                .as_ref()
+                                .is_some_and(|previous| previous.session_id != current_session_id)
+                            {
+                                queue_runtime.reset_session(current_session_id.clone());
+                            }
                             mode.borrow_mut()
                                 .apply_connection_state_snapshot(project_state(state));
                         }
                         Err(error) => mode.borrow_mut().show_error(&error),
+                    }
+                }
+                HostEvent::Render => {}
+                HostEvent::Heartbeats(catalog, open) => {
+                    native_heartbeats::apply_catalog(&mut mode.borrow_mut(), &catalog);
+                    *heartbeat_catalog.borrow_mut() = catalog;
+                    if open {
+                        if heartbeat_manager.is_some() {
+                            if let Some(handle) = &overlay {
+                                handle.focus();
+                            }
+                        } else {
+                            let manager = Rc::new(RefCell::new(native_heartbeats::create(
+                                mode.clone(),
+                                heartbeat_catalog.clone(),
+                                model_rows.clone(),
+                                send.clone(),
+                                connection.clone(),
+                            )));
+                            if let Some(handle) = overlay.take() {
+                                handle.hide();
+                            }
+                            overlay = Some(ui.borrow_mut().show_overlay(
+                                manager.clone(),
+                                pi_tui::tui::OverlayOptions {
+                                    width: Some(pi_tui::tui::SizeValue::Percent("100%".into())),
+                                    max_height: Some(pi_tui::tui::SizeValue::Percent(
+                                        "100%".into(),
+                                    )),
+                                    suspend_fullscreen_mouse: true,
+                                    ..Default::default()
+                                },
+                            ));
+                            heartbeat_manager = Some(manager);
+                        }
+                    }
+                    if heartbeat_manager.is_some() {
+                        if let Some(delay) = native_heartbeats::refresh_delay(
+                            &native_heartbeats::scoped(&mode.borrow(), &heartbeat_catalog.borrow()),
+                        ) {
+                            let next = Instant::now() + delay;
+                            heartbeat_refresh_at =
+                                Some(heartbeat_refresh_at.map_or(next, |old| old.min(next)));
+                        } else {
+                            heartbeat_refresh_at = None;
+                        }
+                    }
+                }
+                HostEvent::HeartbeatUpdated(heartbeat, job) => {
+                    let id = job["id"].as_str().unwrap_or_default();
+                    let mut catalog = heartbeat_catalog.borrow_mut();
+                    catalog.retain(|h| h.job["id"].as_str() != Some(id));
+                    if job["status"] == "active" || job["status"] == "paused" {
+                        catalog.push(wire::AgentConnectionHeartbeat {
+                            job: job.clone(),
+                            ..heartbeat
+                        });
+                    }
+                    let mut controller = mode.borrow_mut();
+                    if job["source"] == "heartbeat"
+                        && controller
+                            .connection_state
+                            .as_ref()
+                            .and_then(|s| s.active_session_id.as_deref())
+                            == job["activeSessionId"].as_str()
+                    {
+                        let heartbeat = if job["status"] == "active" || job["status"] == "paused" {
+                            project_heartbeat(job)
+                        } else {
+                            None
+                        };
+                        controller.patch_connection_state(|s| s.heartbeat = heartbeat);
+                    }
+                    native_heartbeats::apply_catalog(&mut controller, &catalog);
+                }
+                HostEvent::CloseHeartbeats => {
+                    heartbeat_manager = None;
+                    heartbeat_refresh_at = None;
+                    if let Some(handle) = overlay.take() {
+                        handle.hide();
+                    }
+                    ui.borrow_mut().set_focus(Some(editor.clone()));
+                }
+                HostEvent::Settings(state) => {
+                    match native_settings::create(&mode.borrow(), &state, &send) {
+                        Ok(picker) => {
+                            if let Some(handle) = overlay.take() {
+                                handle.hide();
+                            }
+                            let picker = Rc::new(RefCell::new(picker));
+                            overlay = Some(
+                                ui.borrow_mut()
+                                    .show_overlay(picker.clone(), Default::default()),
+                            );
+                            settings_selector = Some(picker);
+                        }
+                        Err(error) => {
+                            let _ = send.send(HostEvent::Warning(error));
+                        }
+                    }
+                }
+                HostEvent::Setting(native_settings::Change::Close) => {
+                    if let Some(handle) = overlay.take() {
+                        handle.hide();
+                    }
+                    settings_selector = None;
+                    ui.borrow_mut().set_focus(Some(editor.clone()));
+                }
+                HostEvent::Setting(change) => {
+                    if let Err(error) = native_settings::apply(
+                        change,
+                        &mode,
+                        &editor,
+                        &ui,
+                        &transcript,
+                        &connection,
+                    )
+                    .await
+                    {
+                        mode.borrow_mut().show_error(&error);
                     }
                 }
                 HostEvent::Status(status) => mode.borrow_mut().show_status(&status, "dim"),
@@ -1413,13 +1723,34 @@ async fn run_terminal(
                     ));
                     thinking_selector = Some(picker);
                 }
-                HostEvent::LoginProviders(items) => {
-                    let list = make_selector(items, selection_send.clone());
-                    overlay = Some(
-                        ui.borrow_mut()
-                            .show_overlay(list.clone(), Default::default()),
-                    );
-                    selector = Some(list);
+                HostEvent::Configuration(catalog, tab, search) => {
+                    models = catalog.models;
+                    configured_providers = catalog.configured_providers.into_iter().collect();
+                    let menu = native_configuration::create(
+                        &mode.borrow(),
+                        ui.clone(),
+                        tab,
+                        &models,
+                        &configured_providers,
+                        search,
+                        model_rows.clone(),
+                        selection_send.clone(),
+                        send.clone(),
+                    )?;
+                    if let Some(handle) = configuration_overlay.take() {
+                        handle.hide();
+                    }
+                    let menu = Rc::new(RefCell::new(menu));
+                    configuration_overlay = Some(ui.borrow_mut().show_overlay(
+                        menu.clone(),
+                        pi_tui::tui::OverlayOptions {
+                            width: Some(pi_tui::tui::SizeValue::Number(96.0)),
+                            max_height: Some(pi_tui::tui::SizeValue::Percent("100%".into())),
+                            suspend_fullscreen_mouse: true,
+                            ..Default::default()
+                        },
+                    ));
+                    configuration = Some(menu);
                 }
                 HostEvent::BeginLogin(provider, oauth) => {
                     let tx = send.clone();
@@ -1493,11 +1824,16 @@ async fn run_terminal(
                                     .map_err(|e| e.to_string())?
                                     .refresh();
                             }
-                            let command = pending_login_model
-                                .take()
-                                .map(|key| format!("/model {key}"))
-                                .unwrap_or_else(|| "/model".into());
-                            submit(&connection, &send, command, false, None);
+                            if let Some(key) = pending_login_model.take() {
+                                submit(&connection, &send, format!("/model {key}"), false, None);
+                            } else if let Some(menu) = &configuration {
+                                menu.borrow_mut().refresh_authentication();
+                                if let Some(handle) = &configuration_overlay {
+                                    handle.focus();
+                                }
+                            } else {
+                                submit(&connection, &send, "/model".into(), false, None);
+                            }
                         }
                         Err(error) => {
                             pending_login_model = None;
@@ -1524,55 +1860,18 @@ async fn run_terminal(
                         let _ =
                             selection_send.send(Some(format!("{}/{}", model.provider, model.id)));
                     } else {
-                        let current = mode.borrow().get_current_model().cloned();
-                        let configured = configured_providers.iter().cloned().collect::<Vec<_>>();
-                        if let Some(picker) = &model_selector {
-                            picker.borrow_mut().update_state(
-                                current.as_ref().map(model_item),
-                                Some(models.iter().map(model_item).collect()),
-                                Some(configured),
-                            );
-                        } else {
-                            let scoped = mode
-                                .borrow()
-                                .get_scoped_model_state()
-                                .into_iter()
-                                .map(|entry| ScopedModelItem {
-                                    model: model_item(&entry.model),
-                                    thinking_level: None,
-                                })
-                                .collect();
-                            let recent = mode
-                                .borrow()
-                                .settings_manager()
-                                .lock()
-                                .map_err(|error| error.to_string())?
-                                .get_recent_models();
-                            let picker = Rc::new(RefCell::new(make_model_selector(
-                                current.as_ref(),
-                                scoped,
-                                &models,
-                                configured,
-                                recent,
-                                search,
-                                model_rows.clone(),
-                            )));
-                            if let Some(handle) = overlay.take() {
-                                handle.hide();
-                            }
-                            selector = None;
-                            overlay = Some(ui.borrow_mut().show_overlay(
-                                picker.clone(),
-                                pi_tui::tui::OverlayOptions {
-                                    width: Some(pi_tui::tui::SizeValue::Number(96.0)),
-                                    max_height: Some(pi_tui::tui::SizeValue::Percent(
-                                        "100%".into(),
-                                    )),
-                                    ..Default::default()
-                                },
-                            ));
-                            model_selector = Some(picker);
-                        }
+                        let _ = send.send(HostEvent::Configuration(
+                            wire::AgentConnectionModelCatalog {
+                                models: models.clone(),
+                                configured_providers: configured_providers
+                                    .iter()
+                                    .cloned()
+                                    .collect(),
+                                ..Default::default()
+                            },
+                            "models",
+                            search,
+                        ));
                     }
                 }
             }
@@ -1591,7 +1890,11 @@ async fn run_terminal(
         }
         if extension.is_none()
             && login_dialog.is_none()
+            && heartbeat_manager.is_none()
+            && settings_selector.is_none()
+            && thinking_selector.is_none()
             && selector.is_none()
+            && configuration.is_none()
             && model_selector.is_none()
         {
             if let Some(request) = extension_queue.pop_front() {
@@ -1609,10 +1912,34 @@ async fn run_terminal(
                 ui.borrow_mut().request_render();
             }
         }
+        if let Some(manager) = &heartbeat_manager {
+            manager.borrow_mut().poll_action();
+        }
+        if heartbeat_refresh_at.is_some_and(|at| Instant::now() >= at) {
+            heartbeat_refresh_at = Some(Instant::now() + Duration::from_secs(5));
+            let connection = connection.clone();
+            let send = send.clone();
+            tokio::spawn(async move {
+                if let Ok(catalog) = connection.list_heartbeats().await {
+                    let _ = send.send(HostEvent::Heartbeats(catalog, false));
+                }
+            });
+        }
         if mode.borrow().shutdown_requested {
             break;
         }
         if last_tick.elapsed() >= Duration::from_millis(250) {
+            let progress = mode.borrow().should_show_working_loader()
+                && mode
+                    .borrow()
+                    .settings_manager()
+                    .lock()
+                    .map(|s| s.get_show_terminal_progress())
+                    .unwrap_or(false);
+            if progress != terminal_progress {
+                ui.borrow_mut().terminal.set_progress(progress);
+                terminal_progress = progress;
+            }
             mode.borrow_mut().tick_working_pulse();
             ui.borrow_mut().request_render();
             last_tick = Instant::now();
@@ -1628,9 +1955,12 @@ async fn run_terminal(
         // `showCtrlCExitHint`'s 2 s timer has no Rust counterpart, so the host
         // expires the hint on its own 16 ms cadence (interactive-mode.ts:7018-7025).
         mode.borrow_mut().expire_ctrl_c_exit_hint();
+        history_runtime.poll(&mode, &transcript, &ui);
+        queue_runtime.poll();
         let rows = ui.borrow().terminal_rows();
         model_rows.set(rows as f64);
         editor.borrow_mut().editor_mut().set_terminal_rows(rows);
+        editor.borrow_mut().editor_mut().poll_autocomplete();
         ui.borrow_mut().run_pending_render(now_ms());
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
@@ -1689,41 +2019,24 @@ fn submit(
         let dispatch = classify_submission(&text);
         // `/login` keeps its dedicated provider picker (interactive-mode.ts:4952-4956).
         let result = match dispatch {
-            SlashDispatch::Builtin {
-                name,
-                args,
-                raw,
-            } if name == "login" && args.is_empty() => {
-                let mut items = Vec::new();
-                for provider in pi_ai::utils::oauth::get_oauth_providers() {
-                    items.push(pi_tui::components::select_list::SelectItem {
-                        value: format!("login:oauth:{}", provider.id),
-                        label: provider.name,
-                        description: Some("Subscription / OAuth".into()),
-                        ..Default::default()
-                    });
+            SlashDispatch::Builtin { name, args, raw } if name == "login" && args.is_empty() => {
+                match connection.get_model_catalog().await {
+                    Ok(catalog) => {
+                        let _ = send.send(HostEvent::Configuration(catalog, "providers", None));
+                    }
+                    Err(error) => {
+                        let _ = send.send(HostEvent::Warning(error));
+                    }
                 }
-                for (id, name) in crate::core::provider_display_names::built_in_provider_display_names()
-                {
-                    items.push(pi_tui::components::select_list::SelectItem {
-                        value: format!("login:api:{id}"),
-                        label: name.to_string(),
-                        description: Some("API key".into()),
-                        ..Default::default()
-                    });
-                }
-                let _ = send.send(HostEvent::LoginProviders(items));
                 Ok(())
             }
-            SlashDispatch::Builtin {
-                name,
-                args,
-                raw,
-            } => {
+            SlashDispatch::Builtin { name, args, raw } => {
                 // `if (commandName === "login")` with an argument logs that
                 // provider in directly (interactive-mode.ts:4952-4956).
                 if name == "login" {
-                    let _ = send.send(HostEvent::BeginLogin(args.trim().into(), false));
+                    let provider = args.trim();
+                    let oauth = crate::core::auth_storage::get_oauth_provider(provider).is_some();
+                    let _ = send.send(HostEvent::BeginLogin(provider.into(), oauth));
                     Ok(())
                 } else {
                     run_builtin_command(&connection, &send, &raw, &name, &args)
@@ -1802,7 +2115,8 @@ enum SlashDispatch {
 /// names and aliases, which is what routes `/clear`, `/usage`, `/thinking`,
 /// `/rename`, and `/side` to their canonical commands.
 fn classify_submission(text: &str) -> SlashDispatch {
-    if let Some(command) = crate::core::slash_commands::resolve_leading_builtin_slash_command(text) {
+    if let Some(command) = crate::core::slash_commands::resolve_leading_builtin_slash_command(text)
+    {
         return SlashDispatch::Builtin {
             name: command.name,
             args: command.args,
@@ -2101,6 +2415,28 @@ async fn run_builtin_command(
     args: &str,
 ) -> Result<CommandOutput, String> {
     match name {
+        "mcp" if args.trim().is_empty() => {
+            let _ = send.send(HostEvent::Configuration(
+                connection.get_model_catalog().await?,
+                "mcp-connections",
+                None,
+            ));
+            Ok(CommandOutput::Nothing)
+        }
+        "settings" => {
+            let _ = send.send(HostEvent::Settings(connection.get_state().await?));
+            Ok(CommandOutput::Nothing)
+        }
+        "fullscreen" => {
+            let _ = send.send(HostEvent::Setting(native_settings::Change::Fullscreen(
+                !crate::core::settings_manager::SettingsManager::create(
+                    &connection.get_state().await?.cwd,
+                    None,
+                )
+                .get_fullscreen(),
+            )));
+            Ok(CommandOutput::Nothing)
+        }
         // `/model` keeps its existing search behaviour exactly.
         "model" => {
             let search = (!args.is_empty()).then(|| args.to_string());
@@ -2221,20 +2557,13 @@ async fn run_builtin_command(
         // `commandName === "heartbeat"` (interactive-mode.ts:4914-4918).
         "heartbeat" => heartbeat_command(connection, text).await,
         // `commandName === "heartbeats"` (interactive-mode.ts:4919-4923).
-        "heartbeats" => connection.list_heartbeats().await.map(|heartbeats| {
-            if heartbeats.is_empty() {
-                return CommandOutput::Panel("No heartbeats.".to_string());
-            }
-            let lines: Vec<String> = heartbeats
-                .iter()
-                .map(|heartbeat| {
-                    crate::core::cron_jobs::format_agent_cron_job(
-                        &serde_json::from_value(heartbeat.job.clone()).unwrap_or_default(),
-                    )
-                })
-                .collect();
-            CommandOutput::Panel(lines.join("\n"))
-        }),
+        "heartbeats" => {
+            let _ = send.send(HostEvent::Heartbeats(
+                connection.list_heartbeats().await?,
+                true,
+            ));
+            Ok(CommandOutput::Nothing)
+        }
         // `commandName === "export"` (interactive-mode.ts:4854-4858, 9210-9225).
         "export" => {
             let output_path = path_command_argument(text.trim(), "/export");
@@ -2247,14 +2576,15 @@ async fn run_builtin_command(
             } else {
                 connection.export_to_html(output_path.as_deref()).await
             };
-            exported.map(|file_path| {
-                CommandOutput::Status(format!("Session exported to: {file_path}"))
-            })
+            exported
+                .map(|file_path| CommandOutput::Status(format!("Session exported to: {file_path}")))
         }
         // `commandName === "import"` (interactive-mode.ts:4859-4863, 9255-9270).
         "import" => {
             let Some(input_path) = path_command_argument(text.trim(), "/import") else {
-                return Ok(CommandOutput::Warning("Usage: /import <path.jsonl>".to_string()));
+                return Ok(CommandOutput::Warning(
+                    "Usage: /import <path.jsonl>".to_string(),
+                ));
             };
             let cancelled = connection.import_from_jsonl(&input_path, None).await?;
             if cancelled {
@@ -2354,16 +2684,14 @@ async fn run_builtin_command(
                 Ok(parsed) => parsed,
                 Err(error) => return Ok(CommandOutput::Warning(error)),
             };
-            if parsed.prompt.is_some() {
-                return Ok(CommandOutput::Warning(
-                    "Usage: /new [--name <name>] [-- <prompt>]".to_string(),
-                ));
-            }
             if connection.new_session(None).await? {
                 return Ok(CommandOutput::Nothing);
             }
             if let Some(name) = parsed.name {
                 connection.set_session_name(&name).await?;
+            }
+            if let Some(prompt) = parsed.prompt {
+                submit(connection, send, prompt, false, None);
             }
             Ok(CommandOutput::Status("New session started".to_string()))
         }
@@ -2430,6 +2758,24 @@ fn optional_string(value: &serde_json::Value, key: &str) -> Option<String> {
 fn number(value: &serde_json::Value, key: &str) -> Option<f64> {
     value.get(key).and_then(|value| value.as_f64())
 }
+fn project_heartbeat(value: serde_json::Value) -> Option<local::AgentCronJob> {
+    let job: crate::core::cron_jobs::AgentCronJob = serde_json::from_value(value).ok()?;
+    Some(local::AgentCronJob {
+        id: job.id,
+        active_session_id: job.active_session_id,
+        prompt: job.prompt,
+        status: job.status,
+        delivery_mode: job.delivery_mode,
+        last_run_at: job.last_run_at,
+        next_run_at: job.next_run_at,
+        run_count: job.run_count,
+        last_error: job.last_error,
+        source: job.source,
+        schedule_expression: job.schedule.expression,
+        schedule_interval_ms: job.schedule.interval_ms,
+    })
+}
+
 fn project_state(state: wire::AgentConnectionState) -> local::AgentConnectionState {
     let actions = &state.session_actions;
     let texts = |key| {
@@ -2473,7 +2819,7 @@ fn project_state(state: wire::AgentConnectionState) -> local::AgentConnectionSta
         },
         compaction_count: state.compaction_count,
         goal: serde_json::from_value(state.goal).unwrap_or_else(|_| empty_goal_state()),
-        heartbeat: None,
+        heartbeat: state.heartbeat.flatten().and_then(project_heartbeat),
         scoped_models: state
             .scoped_models
             .into_iter()
@@ -2500,6 +2846,31 @@ fn apply_event(
     }
     .unwrap_or_default();
     match event.type_name() {
+        "session_action_update" => {
+            if let Some(actions) = value.get("actions") {
+                let strings = |key| {
+                    actions
+                        .get(key)
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|value| {
+                            value
+                                .as_str()
+                                .map(str::to_string)
+                                .or_else(|| optional_string(value, "text"))
+                        })
+                        .collect::<Vec<_>>()
+                };
+                mode.borrow_mut().patch_connection_state(|state| {
+                    state.session_actions.steering = strings("steering");
+                    state.session_actions.follow_ups = strings("followUps");
+                    state.session_actions.queued_count =
+                        number(actions, "queuedCount").unwrap_or(0.0) as usize;
+                    state.session_actions.active = optional_string(actions, "active");
+                });
+            }
+        }
         "agent_start" => {
             let mut mode = mode.borrow_mut();
             mode.patch_connection_state(|s| s.is_streaming = true);
@@ -2811,11 +3182,39 @@ mod tests {
     #[test]
     fn every_dispatched_builtin_is_a_registry_name() {
         for name in [
-            "btw", "changelog", "clone", "copy", "context", "debug", "effort", "export", "fast",
-            "fork", "fullscreen", "heartbeat", "heartbeats", "hotkeys", "import", "login",
-            "logout", "logs", "mcp", "model", "name", "new", "reload", "resume",
-            "rlm-max-depth", "scoped-models", "session", "settings", "share", "system-prompt",
-            "traces", "tree", "update",
+            "btw",
+            "changelog",
+            "clone",
+            "copy",
+            "context",
+            "debug",
+            "effort",
+            "export",
+            "fast",
+            "fork",
+            "fullscreen",
+            "heartbeat",
+            "heartbeats",
+            "hotkeys",
+            "import",
+            "login",
+            "logout",
+            "logs",
+            "mcp",
+            "model",
+            "name",
+            "new",
+            "reload",
+            "resume",
+            "rlm-max-depth",
+            "scoped-models",
+            "session",
+            "settings",
+            "share",
+            "system-prompt",
+            "traces",
+            "tree",
+            "update",
         ] {
             match classify_submission(&format!("/{name}")) {
                 SlashDispatch::Builtin { name: resolved, .. } => assert_eq!(resolved, name),
@@ -2829,8 +3228,7 @@ mod tests {
     #[test]
     fn available_thinking_levels_drops_off_only_models() {
         let mut state = wire::AgentConnectionState::default();
-        state.available_thinking_levels =
-            vec![pi_agent_core::types::ThinkingLevel::Off];
+        state.available_thinking_levels = vec![pi_agent_core::types::ThinkingLevel::Off];
         assert!(available_thinking_levels(&state).is_empty());
 
         state.available_thinking_levels = vec![
@@ -2858,14 +3256,67 @@ mod tests {
         assert_eq!(model_command_search("tell me about /model"), None);
     }
 
+    #[test]
+    fn settings_search_reaches_the_real_change_and_cancel_callbacks() {
+        let mode = stash_mode("settings-host");
+        let (send, receive) = mpsc::channel();
+        let mut picker =
+            native_settings::create(&mode, &wire::AgentConnectionState::default(), &send).unwrap();
+        assert!(picker.render(80.0).join("\n").contains("Auto-compact"));
+        for key in "padding".chars() {
+            picker.handle_input(&key.to_string());
+        }
+        assert!(picker.render(80.0).join("\n").contains("Editor padding"));
+        picker.handle_input("\r");
+        assert!(matches!(
+            receive.try_recv().unwrap(),
+            HostEvent::Setting(native_settings::Change::EditorPaddingX(1.0))
+        ));
+        picker.handle_input("\u{1b}");
+        assert!(matches!(
+            receive.try_recv().unwrap(),
+            HostEvent::Setting(native_settings::Change::Close)
+        ));
+    }
+
+    #[test]
+    fn heartbeat_catalog_scopes_the_wire_jobs_and_keeps_display_details() {
+        let mut mode = stash_mode("heartbeat-host");
+        mode.apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "session".into(),
+            active_session_id: Some("active".into()),
+            ..Default::default()
+        });
+        let catalog: Vec<wire::AgentConnectionHeartbeat> = ["active", "unrelated"]
+            .iter()
+            .enumerate()
+            .map(|(i, active)| {
+                let job = crate::core::cron_jobs::AgentCronJob {
+                    id: format!("job-{i}"),
+                    active_session_id: (*active).into(),
+                    prompt: "scheduled work".into(),
+                    ..Default::default()
+                };
+                wire::AgentConnectionHeartbeat {
+                    job: serde_json::to_value(job).unwrap(),
+                    session_name: Some("named session".into()),
+                    ..Default::default()
+                }
+            })
+            .collect();
+        native_heartbeats::apply_catalog(&mut mode, &catalog);
+        let scoped = native_heartbeats::scoped(&mode, &catalog);
+        assert_eq!(scoped, vec![catalog[0].clone()]);
+    }
+
     /// A mode with no connection, enough for the Ctrl+S dispatch chain.
     fn stash_mode(session_id: &str) -> InteractiveMode {
         crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
         crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
         let services = local::InteractiveModeUiServices {
-            settings_manager: Arc::new(std::sync::Mutex::new(
-                local::SettingsManager::in_memory(serde_json::Map::new()),
-            )),
+            settings_manager: Arc::new(std::sync::Mutex::new(local::SettingsManager::in_memory(
+                serde_json::Map::new(),
+            ))),
             model_registry: Arc::new(std::sync::Mutex::new(local::ModelRegistry::in_memory())),
             get_initial_cwd: Box::new(|| "/initial".to_string()),
             get_initial_session_name: Box::new(|| Some("initial".to_string())),
@@ -2986,7 +3437,11 @@ mod tests {
         );
 
         handle_prompt_stash_action(&mode, &editor, session_id);
-        assert_eq!(editor.borrow().editor().get_text(), "", "stash clears the editor");
+        assert_eq!(
+            editor.borrow().editor().get_text(),
+            "",
+            "stash clears the editor"
+        );
 
         let session = crate::modes::interactive::prompt_stash_state::PromptStashSession::open(
             crate::modes::interactive::prompt_stash_state::shared_prompt_stash_store(),
@@ -2996,7 +3451,10 @@ mod tests {
         assert_eq!(stored.text, "[paste #1 +12 lines]");
         assert_eq!(stored.expanded_text.as_deref(), Some(pasted.as_str()));
         assert_eq!(
-            stored.paste_snapshot.as_ref().map(|snapshot| snapshot.paste_counter),
+            stored
+                .paste_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.paste_counter),
             Some(1)
         );
 
@@ -3067,10 +3525,12 @@ mod tests {
 
         let store = crate::modes::interactive::prompt_stash_state::shared_prompt_stash_store();
         let session = crate::modes::interactive::prompt_stash_state::PromptStashSession::open(
-            store,
-            session_id,
+            store, session_id,
         );
-        assert!(session.restore_on_open_pending(), "handoff marks restoreOnOpen");
+        assert!(
+            session.restore_on_open_pending(),
+            "handoff marks restoreOnOpen"
+        );
 
         // The reopened view restores the draft into its own empty editor.
         let reopened_editor = Rc::new(RefCell::new(CustomEditor::new(
@@ -3081,9 +3541,9 @@ mod tests {
             editor_theme(),
             CustomEditorOptions::default(),
         )));
-        let restored =
-            session.restore_prompt_stash_if_editor_empty(None, "", true)
-                .expect("the auto-stash restores");
+        let restored = session
+            .restore_prompt_stash_if_editor_empty(None, "", true)
+            .expect("the auto-stash restores");
         apply_prompt_stash_outcome(&mode, &reopened_editor, &restored);
         assert_eq!(
             reopened_editor.borrow().editor().get_text(),

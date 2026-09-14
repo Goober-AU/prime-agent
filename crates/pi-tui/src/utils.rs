@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use unicode_general_category::{get_general_category, GeneralCategory};
+use unicode_segmentation::UnicodeSegmentation;
 
 // ---------------------------------------------------------------------------
 // Grapheme segmentation (Intl.Segmenter replacement)
@@ -179,94 +180,6 @@ fn is_surrogate(_c: char) -> bool {
     false
 }
 
-/// Characters that render with emoji presentation (approximation of `\p{RGI_Emoji}`).
-fn has_emoji_presentation(c: char) -> bool {
-    const RANGES: &[(u32, u32)] = &[
-        (0x231a, 0x231b),
-        (0x23e9, 0x23ec),
-        (0x23f0, 0x23f0),
-        (0x23f3, 0x23f3),
-        (0x25fd, 0x25fe),
-        (0x2614, 0x2615),
-        (0x2648, 0x2653),
-        (0x267f, 0x267f),
-        (0x2693, 0x2693),
-        (0x26a1, 0x26a1),
-        (0x26aa, 0x26ab),
-        (0x26bd, 0x26be),
-        (0x26c4, 0x26c5),
-        (0x26ce, 0x26ce),
-        (0x26d4, 0x26d4),
-        (0x26ea, 0x26ea),
-        (0x26f2, 0x26f3),
-        (0x26f5, 0x26f5),
-        (0x26fa, 0x26fa),
-        (0x26fd, 0x26fd),
-        (0x2705, 0x2705),
-        (0x270a, 0x270b),
-        (0x2728, 0x2728),
-        (0x274c, 0x274c),
-        (0x274e, 0x274e),
-        (0x2753, 0x2755),
-        (0x2757, 0x2757),
-        (0x2795, 0x2797),
-        (0x27b0, 0x27b0),
-        (0x27bf, 0x27bf),
-        (0x2b1b, 0x2b1c),
-        (0x2b50, 0x2b50),
-        (0x2b55, 0x2b55),
-        (0x1f004, 0x1f004),
-        (0x1f0cf, 0x1f0cf),
-        (0x1f18e, 0x1f18e),
-        (0x1f191, 0x1f19a),
-        (0x1f1e6, 0x1f1ff),
-        (0x1f201, 0x1f201),
-        (0x1f21a, 0x1f21a),
-        (0x1f22f, 0x1f22f),
-        (0x1f232, 0x1f23a),
-        (0x1f250, 0x1f251),
-        (0x1f300, 0x1f320),
-        (0x1f32d, 0x1f335),
-        (0x1f337, 0x1f37c),
-        (0x1f37e, 0x1f393),
-        (0x1f3a0, 0x1f3ca),
-        (0x1f3cf, 0x1f3d3),
-        (0x1f3e0, 0x1f3f0),
-        (0x1f3f4, 0x1f3f4),
-        (0x1f3f8, 0x1f43e),
-        (0x1f440, 0x1f440),
-        (0x1f442, 0x1f4fc),
-        (0x1f4ff, 0x1f53d),
-        (0x1f54b, 0x1f54e),
-        (0x1f550, 0x1f567),
-        (0x1f57a, 0x1f57a),
-        (0x1f595, 0x1f596),
-        (0x1f5a4, 0x1f5a4),
-        (0x1f5fb, 0x1f64f),
-        (0x1f680, 0x1f6c5),
-        (0x1f6cc, 0x1f6cc),
-        (0x1f6d0, 0x1f6d2),
-        (0x1f6d5, 0x1f6d7),
-        (0x1f6eb, 0x1f6ec),
-        (0x1f6f4, 0x1f6fc),
-        (0x1f7e0, 0x1f7eb),
-        (0x1f90c, 0x1f93a),
-        (0x1f93c, 0x1f945),
-        (0x1f947, 0x1f978),
-        (0x1f97a, 0x1f9cb),
-        (0x1f9cd, 0x1f9ff),
-        (0x1fa70, 0x1fa74),
-        (0x1fa78, 0x1fa7a),
-        (0x1fa80, 0x1fa86),
-        (0x1fa90, 0x1faa8),
-        (0x1fab0, 0x1fab6),
-        (0x1fac0, 0x1fac2),
-        (0x1fad0, 0x1fad6),
-    ];
-    let cp = c as u32;
-    RANGES.iter().any(|(lo, hi)| cp >= *lo && cp <= *hi)
-}
-
 /// Check if a grapheme cluster could possibly be an RGI emoji (fast pre-filter).
 fn could_be_emoji(segment: &str) -> bool {
     let cp = segment.chars().next().map(|c| c as u32).unwrap_or(0);
@@ -278,119 +191,11 @@ fn could_be_emoji(segment: &str) -> bool {
         || segment.chars().count() > 2
 }
 
-/// `\p{RGI_Emoji}` - a cluster that renders two cells wide.
-///
-/// TS tests the whole cluster against the strict `/^\p{RGI_Emoji}$/v` set
-/// (packages/tui/src/utils.ts:34,163). Rust has no RGI_Emoji property, so the
-/// UTS #51 grammar that defines the set is reconstructed here, replacing the old
-/// "cluster contains VS16 / a skin tone / U+20E3 anywhere" test that widened any
-/// such cluster (`"1" + VS16` and `"\u2764" + tone` are not RGI).
-///
-/// Measured against Node 24 on 5,558,886 real grapheme clusters (`Intl.Segmenter`
-/// clusters of every code point and of the flag/keycap/ZWJ/tag families), the old
-/// test disagreed with TS on 1,852,006 clusters; this one disagrees on 47
-/// (0.0008%), all "one column too wide" on `<base> U+FE0F ZWJ <emoji>` shapes
-/// whose base is Extended_Pictographic but not Emoji_Presentation, and none
-/// narrower than TS. The remaining 71 `UNDER` cases recorded in the audit are
-/// code points the port's own Emoji_Presentation table (`has_emoji_presentation`)
-/// still lacks, not this rule.
+/// Match the fully qualified Unicode 17 RGI set used by the TypeScript regex.
 fn is_rgi_emoji(segment: &str) -> bool {
-    let chars: Vec<char> = segment.chars().collect();
-    if chars.is_empty() {
-        return false;
-    }
-    // RGI_Emoji = Emoji_Presentation singles | flag | keycap | tag |
-    // modifier | basic (VS16) | ZWJ sequences (UTS #51 RGI_Emoji macro).
-    if chars.len() == 1 {
-        return has_emoji_presentation(chars[0]);
-    }
-    let regional_indicator = |c: char| ('\u{1f1e6}'..='\u{1f1ff}').contains(&c);
-    if chars.len() == 2 && regional_indicator(chars[0]) && regional_indicator(chars[1]) {
-        return true;
-    }
-    let keycap_base = |c: char| matches!(c, '#' | '*' | '0'..='9');
-    if chars.len() == 3 && chars[1] == '\u{fe0f}' && chars[2] == '\u{20e3}' {
-        return keycap_base(chars[0]);
-    }
-    if chars[0] == '\u{1f3f4}' && chars.last() == Some(&'\u{e007f}') && chars.len() >= 4 {
-        return true;
-    }
-    let skin_tone = |c: char| ('\u{1f3fb}'..='\u{1f3ff}').contains(&c);
-    if chars.len() == 2 && skin_tone(chars[1]) && in_ranges(MODIFIER_BASE_RANGES, chars[0]) {
-        return true;
-    }
-    if chars
-        .windows(2)
-        .any(|pair| pair[1] == '\u{fe0f}' && in_ranges(VS16_BASE_RANGES, pair[0]))
-    {
-        return true;
-    }
-    // ZWJ sequence: the participants must carry emoji presentation and at least
-    // one of them must be an RGI base (not a lone VS16/modifier).
-    if chars.contains(&'\u{200d}') {
-        let participants: Vec<char> = chars.iter().copied().filter(|c| *c != '\u{200d}').collect();
-        let is_base = |c: char| has_emoji_presentation(c) && !is_emoji_modifier(c);
-        return participants.iter().any(|c| is_base(*c))
-            && participants
-                .iter()
-                .all(|c| has_emoji_presentation(*c) || is_emoji_modifier(*c));
-    }
-    false
+    // Lookup also accepts unqualified variants; only the canonical spelling is RGI.
+    emojis::get(segment).is_some_and(|emoji| emoji.as_str() == segment)
 }
-
-/// Linear range-table membership, matching `has_emoji_presentation`'s scan.
-fn in_ranges(ranges: &[(u32, u32)], c: char) -> bool {
-    let cp = c as u32;
-    ranges.iter().any(|(lo, hi)| cp >= *lo && cp <= *hi)
-}
-
-/// `<X> U+FE0F` is RGI exactly for these bases (Node 24 `\p{RGI_Emoji}`).
-const VS16_BASE_RANGES: &[(u32, u32)] = &[
-    (0xa9, 0xa9), (0xae, 0xae), (0x203c, 0x203c), (0x2049, 0x2049),
-    (0x2122, 0x2122), (0x2139, 0x2139), (0x2194, 0x2199), (0x21a9, 0x21aa),
-    (0x2328, 0x2328), (0x23cf, 0x23cf), (0x23ed, 0x23ef), (0x23f1, 0x23f2),
-    (0x23f8, 0x23fa), (0x24c2, 0x24c2), (0x25aa, 0x25ab), (0x25b6, 0x25b6),
-    (0x25c0, 0x25c0), (0x25fb, 0x25fc), (0x2600, 0x2604), (0x260e, 0x260e),
-    (0x2611, 0x2611), (0x2618, 0x2618), (0x261d, 0x261d), (0x2620, 0x2620),
-    (0x2622, 0x2623), (0x2626, 0x2626), (0x262a, 0x262a), (0x262e, 0x262f),
-    (0x2638, 0x263a), (0x2640, 0x2640), (0x2642, 0x2642), (0x265f, 0x2660),
-    (0x2663, 0x2663), (0x2665, 0x2666), (0x2668, 0x2668), (0x267b, 0x267b),
-    (0x267e, 0x267e), (0x2692, 0x2692), (0x2694, 0x2697), (0x2699, 0x2699),
-    (0x269b, 0x269c), (0x26a0, 0x26a0), (0x26a7, 0x26a7), (0x26b0, 0x26b1),
-    (0x26c8, 0x26c8), (0x26cf, 0x26cf), (0x26d1, 0x26d1), (0x26d3, 0x26d3),
-    (0x26e9, 0x26e9), (0x26f0, 0x26f1), (0x26f4, 0x26f4), (0x26f7, 0x26f9),
-    (0x2702, 0x2702), (0x2708, 0x2709), (0x270c, 0x270d), (0x270f, 0x270f),
-    (0x2712, 0x2712), (0x2714, 0x2714), (0x2716, 0x2716), (0x271d, 0x271d),
-    (0x2721, 0x2721), (0x2733, 0x2734), (0x2744, 0x2744), (0x2747, 0x2747),
-    (0x2763, 0x2764), (0x27a1, 0x27a1), (0x2934, 0x2935), (0x2b05, 0x2b07),
-    (0x3030, 0x3030), (0x303d, 0x303d), (0x3297, 0x3297), (0x3299, 0x3299),
-    (0x1f170, 0x1f171), (0x1f17e, 0x1f17f), (0x1f202, 0x1f202), (0x1f237, 0x1f237),
-    (0x1f321, 0x1f321), (0x1f324, 0x1f32c), (0x1f336, 0x1f336), (0x1f37d, 0x1f37d),
-    (0x1f396, 0x1f397), (0x1f399, 0x1f39b), (0x1f39e, 0x1f39f), (0x1f3cb, 0x1f3ce),
-    (0x1f3d4, 0x1f3df), (0x1f3f3, 0x1f3f3), (0x1f3f5, 0x1f3f5), (0x1f3f7, 0x1f3f7),
-    (0x1f43f, 0x1f43f), (0x1f441, 0x1f441), (0x1f4fd, 0x1f4fd), (0x1f549, 0x1f54a),
-    (0x1f56f, 0x1f570), (0x1f573, 0x1f579), (0x1f587, 0x1f587), (0x1f58a, 0x1f58d),
-    (0x1f590, 0x1f590), (0x1f5a5, 0x1f5a5), (0x1f5a8, 0x1f5a8), (0x1f5b1, 0x1f5b2),
-    (0x1f5bc, 0x1f5bc), (0x1f5c2, 0x1f5c4), (0x1f5d1, 0x1f5d3), (0x1f5dc, 0x1f5de),
-    (0x1f5e1, 0x1f5e1), (0x1f5e3, 0x1f5e3), (0x1f5e8, 0x1f5e8), (0x1f5ef, 0x1f5ef),
-    (0x1f5f3, 0x1f5f3), (0x1f5fa, 0x1f5fa), (0x1f6cb, 0x1f6cb), (0x1f6cd, 0x1f6cf),
-    (0x1f6e0, 0x1f6e5), (0x1f6e9, 0x1f6e9), (0x1f6f0, 0x1f6f0), (0x1f6f3, 0x1f6f3),
-];
-
-/// `<X> <emoji modifier>` is RGI exactly for these bases (`Emoji_Modifier_Base`).
-const MODIFIER_BASE_RANGES: &[(u32, u32)] = &[
-    (0x261d, 0x261d), (0x26f9, 0x26f9), (0x270a, 0x270d), (0x1f385, 0x1f385),
-    (0x1f3c2, 0x1f3c4), (0x1f3c7, 0x1f3c7), (0x1f3ca, 0x1f3cc), (0x1f442, 0x1f443),
-    (0x1f446, 0x1f450), (0x1f466, 0x1f469), (0x1f46b, 0x1f478), (0x1f47c, 0x1f47c),
-    (0x1f481, 0x1f483), (0x1f485, 0x1f487), (0x1f48f, 0x1f48f), (0x1f491, 0x1f491),
-    (0x1f4aa, 0x1f4aa), (0x1f574, 0x1f575), (0x1f57a, 0x1f57a), (0x1f590, 0x1f590),
-    (0x1f595, 0x1f596), (0x1f645, 0x1f647), (0x1f64b, 0x1f64f), (0x1f6a3, 0x1f6a3),
-    (0x1f6b4, 0x1f6b6), (0x1f6c0, 0x1f6c0), (0x1f6cc, 0x1f6cc), (0x1f90c, 0x1f90c),
-    (0x1f90f, 0x1f90f), (0x1f918, 0x1f91f), (0x1f926, 0x1f926), (0x1f930, 0x1f939),
-    (0x1f93c, 0x1f93e), (0x1f977, 0x1f977), (0x1f9b5, 0x1f9b6), (0x1f9b8, 0x1f9b9),
-    (0x1f9bb, 0x1f9bb), (0x1f9cd, 0x1f9cf), (0x1f9d1, 0x1f9dd), (0x1fac3, 0x1fac5),
-    (0x1faf0, 0x1faf8),
-];
 
 const WIDTH_CACHE_SIZE: usize = 512;
 
@@ -416,7 +221,7 @@ fn grapheme_width(segment: &str) -> usize {
     }
 
     // Get base visible codepoint
-    let base: String = {
+    let base = {
         let mut start = 0usize;
         for (i, c) in segment.char_indices() {
             if is_leading_non_printing(c) {
@@ -425,7 +230,7 @@ fn grapheme_width(segment: &str) -> usize {
                 break;
             }
         }
-        segment[start..].to_string()
+        &segment[start..]
     };
     let cp = match base.chars().next() {
         Some(c) => c as u32,
@@ -465,12 +270,9 @@ pub fn visible_width(s: &str) -> usize {
         return s.len();
     }
 
-    if let Some(cached) = WIDTH_CACHE.with(|c| {
-        c.borrow()
-            .iter()
-            .find(|(k, _)| k == s)
-            .map(|(_, v)| *v)
-    }) {
+    if let Some(cached) =
+        WIDTH_CACHE.with(|c| c.borrow().iter().find(|(k, _)| k == s).map(|(_, v)| *v))
+    {
         return cached;
     }
 
@@ -495,7 +297,7 @@ pub fn visible_width(s: &str) -> usize {
     }
 
     let mut width = 0usize;
-    for segment in graphemes(&clean) {
+    for segment in UnicodeSegmentation::graphemes(clean.as_str(), true) {
         width += grapheme_width(&segment);
     }
 
@@ -544,7 +346,7 @@ pub fn visible_content_span(line: &str, max_width: f64) -> Option<(usize, usize)
             text_end += line[text_end..].chars().next().unwrap().len_utf8();
         }
 
-        for segment in graphemes(&line[i..text_end]) {
+        for segment in UnicodeSegmentation::graphemes(&line[i..text_end], true) {
             let width = grapheme_width(&segment);
             let segment_start = current_col;
             let segment_end = current_col + width;
@@ -718,10 +520,24 @@ fn cache_control_string_ends(s: &str, from: usize, ends: &mut ControlStringEnds)
             if next_bel != -1 && (next_st == -1 || next_bel < next_st) {
                 ends.insert(idx, Some(next_bel as usize + 1));
             } else {
-                ends.insert(idx, if next_st == -1 { None } else { Some(next_st as usize + 2) });
+                ends.insert(
+                    idx,
+                    if next_st == -1 {
+                        None
+                    } else {
+                        Some(next_st as usize + 2)
+                    },
+                );
             }
         } else if next == Some(b'P') || next == Some(b'^') || next == Some(b'X') {
-            ends.insert(idx, if next_st == -1 { None } else { Some(next_st as usize + 2) });
+            ends.insert(
+                idx,
+                if next_st == -1 {
+                    None
+                } else {
+                    Some(next_st as usize + 2)
+                },
+            );
         }
         i -= 1;
     }
@@ -1216,7 +1032,10 @@ fn wrap_single_line(line: &str, width: usize) -> Vec<String> {
     if wrapped.is_empty() {
         vec![String::new()]
     } else {
-        wrapped.into_iter().map(|line| line.trim_end().to_string()).collect()
+        wrapped
+            .into_iter()
+            .map(|line| line.trim_end().to_string())
+            .collect()
     }
 }
 
@@ -1292,7 +1111,13 @@ pub fn strip_ansi(s: &str) -> String {
                     if plain_start < idx {
                         result.push(input[plain_start..idx].to_string());
                     }
-                    plain_start = idx + 2;
+                    // JS removes one UTF-16 code unit after ESC. A split surrogate
+                    // becomes U+FFFD at the UTF-8 boundary; never slice a Rust char.
+                    let next_char = input[idx + 1..].chars().next().unwrap();
+                    if next_char.len_utf16() == 2 {
+                        result.push("\u{fffd}".to_string());
+                    }
+                    plain_start = idx + 1 + next_char.len_utf8();
                 }
             }
         }
@@ -1440,7 +1265,11 @@ fn break_long_word(word: &str, width: usize, tracker: &mut AnsiCodeTracker) -> V
 }
 
 /// Apply background color to a line, padding to full width.
-pub fn apply_background_to_line(line: &str, width: usize, bg_fn: &dyn Fn(&str) -> String) -> String {
+pub fn apply_background_to_line(
+    line: &str,
+    width: usize,
+    bg_fn: &dyn Fn(&str) -> String,
+) -> String {
     let visible_len = visible_width(line);
     let padding_needed = width.saturating_sub(visible_len);
     let padding = " ".repeat(padding_needed);
@@ -1469,7 +1298,7 @@ fn truncate_fragment_to_width(text: &str, max_width: f64) -> (String, usize) {
     if !has_ansi && !has_tabs {
         let mut result = String::new();
         let mut width = 0usize;
-        for segment in graphemes(text) {
+        for segment in UnicodeSegmentation::graphemes(text, true) {
             let w = grapheme_width(&segment);
             if width + w > max_width {
                 break;
@@ -1515,7 +1344,7 @@ fn truncate_fragment_to_width(text: &str, max_width: f64) -> (String, usize) {
             end += text[end..].chars().next().unwrap().len_utf8();
         }
 
-        for segment in graphemes(&text[i..end]) {
+        for segment in UnicodeSegmentation::graphemes(&text[i..end], true) {
             let w = grapheme_width(&segment);
             if width + w > max_width {
                 return (result, width);
@@ -1576,7 +1405,11 @@ pub fn truncate_to_width(text: &str, max_width: f64, ellipsis: &str, pad: bool) 
     let max_width = max_width as usize;
 
     if text.is_empty() {
-        return if pad { " ".repeat(max_width) } else { String::new() };
+        return if pad {
+            " ".repeat(max_width)
+        } else {
+            String::new()
+        };
     }
 
     let ellipsis_width = visible_width(ellipsis);
@@ -1592,7 +1425,11 @@ pub fn truncate_to_width(text: &str, max_width: f64, ellipsis: &str, pad: bool) 
 
         let (clipped_text, clipped_width) = truncate_fragment_to_width(ellipsis, max_width as f64);
         if clipped_width == 0 {
-            return if pad { " ".repeat(max_width) } else { String::new() };
+            return if pad {
+                " ".repeat(max_width)
+            } else {
+                String::new()
+            };
         }
         return finalize_truncated_result("", 0, &clipped_text, clipped_width, max_width, pad);
     }
@@ -1607,7 +1444,14 @@ pub fn truncate_to_width(text: &str, max_width: f64, ellipsis: &str, pad: bool) 
         }
         let target_width = max_width - ellipsis_width;
         let prefix: String = text.chars().take(target_width).collect();
-        return finalize_truncated_result(&prefix, target_width, ellipsis, ellipsis_width, max_width, pad);
+        return finalize_truncated_result(
+            &prefix,
+            target_width,
+            ellipsis,
+            ellipsis_width,
+            max_width,
+            pad,
+        );
     }
 
     let target_width = max_width - ellipsis_width;
@@ -1621,7 +1465,7 @@ pub fn truncate_to_width(text: &str, max_width: f64, ellipsis: &str, pad: bool) 
     let has_tabs = text.contains('\t');
 
     if !has_ansi && !has_tabs {
-        for segment in graphemes(text) {
+        for segment in UnicodeSegmentation::graphemes(text, true) {
             let width = grapheme_width(&segment);
             if keep_contiguous_prefix && kept_width + width <= target_width {
                 result.push_str(&segment);
@@ -1674,7 +1518,7 @@ pub fn truncate_to_width(text: &str, max_width: f64, ellipsis: &str, pad: bool) 
                 end += text[end..].chars().next().unwrap().len_utf8();
             }
 
-            for segment in graphemes(&text[i..end]) {
+            for segment in UnicodeSegmentation::graphemes(&text[i..end], true) {
                 let width = grapheme_width(&segment);
                 if keep_contiguous_prefix && kept_width + width <= target_width {
                     if !pending_ansi.is_empty() {
@@ -1714,7 +1558,14 @@ pub fn truncate_to_width(text: &str, max_width: f64, ellipsis: &str, pad: bool) 
         };
     }
 
-    finalize_truncated_result(&result, kept_width, ellipsis, ellipsis_width, max_width, pad)
+    finalize_truncated_result(
+        &result,
+        kept_width,
+        ellipsis,
+        ellipsis_width,
+        max_width,
+        pad,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1765,7 +1616,7 @@ pub fn slice_with_width(line: &str, start_col: usize, length: usize, strict: boo
             text_end += line[text_end..].chars().next().unwrap().len_utf8();
         }
 
-        for segment in graphemes(&line[i..text_end]) {
+        for segment in UnicodeSegmentation::graphemes(&line[i..text_end], true) {
             let w = grapheme_width(&segment);
             let in_range = current_col >= start_col && current_col < end_col;
             let fits = !strict || current_col + w <= end_col;
@@ -1814,7 +1665,7 @@ pub fn hyperlink_at_column(line: &str, column: i64) -> Option<String> {
         while text_end < line.len() && extractor.get(line, text_end).is_none() {
             text_end += line[text_end..].chars().next().unwrap().len_utf8();
         }
-        for segment in graphemes(&line[i..text_end]) {
+        for segment in UnicodeSegmentation::graphemes(&line[i..text_end], true) {
             let w = grapheme_width(&segment);
             if (column as usize) < current_col + w {
                 return active_url;
@@ -1946,7 +1797,7 @@ pub fn extract_segments(
             text_end += line[text_end..].chars().next().unwrap().len_utf8();
         }
 
-        for segment in graphemes(&line[i..text_end]) {
+        for segment in UnicodeSegmentation::graphemes(&line[i..text_end], true) {
             let w = grapheme_width(&segment);
 
             if current_col < before_end {
@@ -1960,7 +1811,9 @@ pub fn extract_segments(
                 let fits = !strict_after || current_col + w <= after_end;
                 if fits {
                     if !after_started {
-                        after.push_str(&POOLED_STYLE_TRACKER.with(|t| t.borrow().get_active_codes()));
+                        after.push_str(
+                            &POOLED_STYLE_TRACKER.with(|t| t.borrow().get_active_codes()),
+                        );
                         after_started = true;
                     }
                     after.push_str(&segment);
@@ -2010,53 +1863,95 @@ mod tests {
             // JS-only member of `\s`: Rust's `char::is_whitespace` says false.
             "\u{feff}",
         ] {
-            assert!(is_whitespace_char(ch), "{ch:?} must be whitespace under JS \\s");
+            assert!(
+                is_whitespace_char(ch),
+                "{ch:?} must be whitespace under JS \\s"
+            );
         }
         for ch in [
             // NEL: Rust's `char::is_whitespace` says true, JS `\s` says false.
-            "\u{0085}", "\u{180e}", "\u{200b}", "a", "", "\u{1f600}",
+            "\u{0085}",
+            "\u{180e}",
+            "\u{200b}",
+            "a",
+            "",
+            "\u{1f600}",
         ] {
-            assert!(!is_whitespace_char(ch), "{ch:?} must NOT be whitespace under JS \\s");
+            assert!(
+                !is_whitespace_char(ch),
+                "{ch:?} must NOT be whitespace under JS \\s"
+            );
         }
     }
 
     /// `is_rgi_emoji` must mirror the strict `/^\p{RGI_Emoji}$/v` test
     /// (packages/tui/src/utils.ts:34,163). Every expectation below was read off
-    /// Node 24 in the same session that produced the sub-tables. The clusters on
+    /// Node 25 with Unicode 17. The clusters on
     /// the first list were accepted by the previous "any VS16 / skin tone / keycap"
     /// test and are NOT RGI, so they widened the string by one column.
     #[test]
     fn is_rgi_emoji_matches_the_strict_unicode_set() {
         // RGI: single emoji presentation, VS16 basic, keycap, flag, ZWJ, tag, tone.
         for seg in [
-            "\u{2705}", "\u{1f44d}", "\u{2764}\u{fe0f}", "\u{2139}\u{fe0f}",
-            "1\u{fe0f}\u{20e3}", "#\u{fe0f}\u{20e3}", "\u{1f1fa}\u{1f1f8}",
-            "\u{1f469}\u{200d}\u{1f4bb}", "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
+            "\u{2705}",
+            "\u{1f44d}",
+            "\u{2764}\u{fe0f}",
+            "\u{2139}\u{fe0f}",
+            "1\u{fe0f}\u{20e3}",
+            "#\u{fe0f}\u{20e3}",
+            "\u{1f1fa}\u{1f1f8}",
+            "\u{1f469}\u{200d}\u{1f4bb}",
+            "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}",
             "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}",
-            "\u{1f44d}\u{1f3fb}", "\u{270a}\u{1f3fd}", "\u{261d}\u{fe0f}\u{1f3fb}",
+            "\u{1f44d}\u{1f3fb}",
+            "\u{270a}\u{1f3fd}",
+            "\u{261d}\u{1f3fb}",
         ] {
             assert!(is_rgi_emoji(seg), "{seg:?} is RGI under \\p{{RGI_Emoji}}");
         }
         // NOT RGI, but the previous rule accepted them.
         for seg in [
-            "1\u{fe0f}",                  // bare VS16 after a non-emoji character
-            "1\u{20e3}", "#\u{20e3}",    // keycap without VS16
-            "\u{2764}\u{1f3fb}",         // modifier after a non-Modifier_Base
-            "\u{2764}",                   // text presentation without VS16
-            "\u{20e3}", "\u{fe0f}",        // lone keycap mark / VS16
-            "A\u{fe0f}",                  // VS16 after a non-Emoji base
+            "\u{261d}\u{fe0f}\u{1f3fb}", // extra VS16 before a modifier
+            "\u{1f1e6}\u{1f1e6}",        // unassigned flag
+            "1\u{fe0f}",                 // bare VS16 after a non-emoji character
+            "1\u{20e3}",
+            "#\u{20e3}",         // keycap without VS16
+            "\u{2764}\u{1f3fb}", // modifier after a non-Modifier_Base
+            "\u{2764}",          // text presentation without VS16
+            "\u{20e3}",
+            "\u{fe0f}",  // lone keycap mark / VS16
+            "A\u{fe0f}", // VS16 after a non-Emoji base
         ] {
-            assert!(!is_rgi_emoji(seg), "{seg:?} is NOT RGI under \\p{{RGI_Emoji}}");
+            assert!(
+                !is_rgi_emoji(seg),
+                "{seg:?} is NOT RGI under \\p{{RGI_Emoji}}"
+            );
         }
         // A lone regional indicator is not RGI, but both sides return 2 columns
         // for it before the RGI test (utils.ts:177 / utils.rs regional-indicator
         // branch), so it is excluded from the lists above.
         // Wide (2 columns) exactly where TS's graphemeWidth returns 2.
-        assert_eq!(visible_width("1\u{fe0f}"), 1, "wrong VS16 widens the string");
+        assert_eq!(
+            visible_width("1\u{fe0f}"),
+            1,
+            "wrong VS16 widens the string"
+        );
         assert_eq!(visible_width("1\u{20e3}"), 1, "bare keycap is one column");
-        assert_eq!(visible_width("\u{2764}\u{1f3fb}"), 1, "wrong modifier widens the string");
-        assert_eq!(visible_width("\u{2764}\u{fe0f}"), 2, "VS16 heart is two columns");
-        assert_eq!(visible_width("1\u{fe0f}\u{20e3}"), 2, "keycap is two columns");
+        assert_eq!(
+            visible_width("\u{2764}\u{1f3fb}"),
+            1,
+            "wrong modifier widens the string"
+        );
+        assert_eq!(
+            visible_width("\u{2764}\u{fe0f}"),
+            2,
+            "VS16 heart is two columns"
+        );
+        assert_eq!(
+            visible_width("1\u{fe0f}\u{20e3}"),
+            2,
+            "keycap is two columns"
+        );
         assert_eq!(
             visible_width("\u{1f469}\u{200d}\u{1f4bb}"),
             2,
@@ -2075,7 +1970,10 @@ mod tests {
     fn visible_width_strips_ansi_and_tabs() {
         assert_eq!(visible_width("\x1b[31mred\x1b[0m"), 3);
         assert_eq!(visible_width("a\tb"), 5);
-        assert_eq!(visible_width("\x1b]8;;https://x.test\x07link\x1b]8;;\x07"), 4);
+        assert_eq!(
+            visible_width("\x1b]8;;https://x.test\x07link\x1b]8;;\x07"),
+            4
+        );
     }
 
     #[test]

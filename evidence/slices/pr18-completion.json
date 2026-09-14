@@ -1,0 +1,29 @@
+{
+  "slice": "pr18-completion",
+  "files": [
+    "Cargo.lock",
+    "crates/pi-tui/Cargo.toml",
+    "crates/pi-tui/src/utils.rs",
+    "crates/pi-tui/src/latex.rs",
+    "crates/pi-tui/src/components/markdown.rs",
+    "crates/pi-tui/tests/pr18_rendering.rs",
+    "crates/pi-tui/tests/fixtures/pr18_rendering.json",
+    "crates/pi-tui/tests/fixtures/pr18_rendering.ts",
+    "evidence/slices/pr18-completion.json",
+    "evidence/status/pr18-completion.json",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_autocomplete.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_queue.rs",
+    "crates/pi-tui/src/tui.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_settings.rs",
+    "crates/pi-coding-agent/src/modes/interactive/components/heartbeat_manager.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_heartbeats.rs",
+    "crates/pi-coding-agent/src/modes/interactive/components/configuration_menu.rs",
+    "crates/pi-coding-agent/src/modes/interactive/components/oauth_selector.rs",
+    "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs",
+    "crates/pi-coding-agent/src/modes/interactive/components/menu_panel.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_configuration.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_history.rs",
+    "docs/PR18-HANDOFF.md"
+  ]
+}

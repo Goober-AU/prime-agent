@@ -73,6 +73,8 @@ pub struct HeartbeatManagerComponent {
     focused: bool,
     /// `void this.confirmSelection()` - the async action runs on the caller's
     /// executor. The port records the pending action so `handle_input` stays sync.
+    pending_future:
+        Option<std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>>>>>,
     pub pending_action: Option<(AgentConnectionHeartbeat, AgentHeartbeatManagementAction)>,
 }
 
@@ -86,6 +88,7 @@ impl HeartbeatManagerComponent {
             error: None,
             focused: false,
             pending_action: None,
+            pending_future: None,
         }
     }
 
@@ -456,6 +459,35 @@ impl HeartbeatManagerComponent {
         (self.options.request_render)();
     }
 
+    // The owner ticks the callback future without keeping a RefCell borrow
+    // across await, so streaming, cancellation and terminal resize still run.
+    pub(crate) fn poll_action(&mut self) {
+        if self.pending_future.is_none() {
+            if let Some((heartbeat, action)) = self.pending_action.take() {
+                self.busy = true;
+                self.error = None;
+                self.pending_future = Some((self.options.on_action)(heartbeat, action));
+                (self.options.request_render)();
+            }
+        }
+        let result = self.pending_future.as_mut().and_then(|future| {
+            let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+            match future.as_mut().poll(&mut context) {
+                std::task::Poll::Ready(result) => Some(result),
+                std::task::Poll::Pending => None,
+            }
+        });
+        if let Some(result) = result {
+            self.pending_future = None;
+            match result {
+                Ok(()) => self.mode = HeartbeatManagerMode::List,
+                Err(error) => self.error = Some(error),
+            }
+            self.busy = false;
+            (self.options.request_render)();
+        }
+    }
+
     fn available_actions(
         &self,
         heartbeat: Option<&AgentConnectionHeartbeat>,
@@ -740,4 +772,50 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[cfg(test)]
+mod pr18_tests {
+    use super::*;
+    #[test]
+    fn owner_tick_runs_one_action_and_preserves_failure_for_retry() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        let job = AgentCronJob {
+            id: "h".into(),
+            status: "active".into(),
+            ..Default::default()
+        };
+        let calls = Rc::new(std::cell::Cell::new(0));
+        let called = calls.clone();
+        let mut component = HeartbeatManagerComponent::new(HeartbeatManagerOptions {
+            get_heartbeats: Box::new(move || {
+                vec![AgentConnectionHeartbeat {
+                    job: serde_json::to_value(&job).unwrap(),
+                    ..Default::default()
+                }]
+            }),
+            get_rows: Rc::new(|| 24.0),
+            on_action: Box::new(move |_, action| {
+                assert_eq!(action, "pause");
+                called.set(called.get() + 1);
+                Box::pin(async { Err("provider unavailable".into()) })
+            }),
+            on_close: Box::new(|| {}),
+            request_render: Box::new(|| {}),
+        });
+        component.render(80.0);
+        component.handle_input("\r");
+        component.handle_input("\r");
+        component.poll_action();
+        assert_eq!(calls.get(), 1);
+        assert!(component
+            .render(80.0)
+            .join("\n")
+            .contains("provider unavailable"));
+        component.poll_action();
+        assert_eq!(calls.get(), 1);
+        component.handle_input("\r");
+        component.poll_action();
+        assert_eq!(calls.get(), 2);
+    }
 }
