@@ -948,6 +948,160 @@ mod tests {
         assert_eq!(*updates.borrow(), 1);
     }
 
+    /// DEFECT B. `update_models` must reach the REAL model body and replace the
+    /// rendered list, not merely bump a counter.
+    ///
+    /// The audit pin was that `update_models` had only a test caller
+    /// (configuration_menu.rs:947 at the audited HEAD) while the TypeScript calls
+    /// `menu.updateModels(this.getCurrentModel(), models,
+    /// this.connectionConfiguredProviders)` after login and after selecting a
+    /// model (interactive-mode.ts:8368, :8396-8400, :8433-8437). A counter-only
+    /// test cannot tell the real body from a stub, so this test drives the real
+    /// `ConfigurationMenuComponent::new` (real `ModelSelectorComponent` inside)
+    /// and asserts the RENDERED catalog changed.
+    #[test]
+    fn update_models_replaces_the_catalog_the_real_menu_renders() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let model = |provider: &str, id: &str| {
+            Model::new(id, id, "openai-completions", provider, "http://127.0.0.1")
+        };
+        let mut menu = ConfigurationMenuComponent::new(ConfigurationMenuOptions {
+            initial_tab: "models",
+            tui: tui(),
+            auth_storage: Rc::new(RefCell::new(auth_storage())),
+            model_registry: Rc::new(RefCell::new(model_registry())),
+            provider_options: Vec::new(),
+            current_model: None,
+            scoped_models: vec![],
+            available_models: vec![model("stale-provider", "stale-model")],
+            configured_providers: Default::default(),
+            recent_models: None,
+            initial_model_search: None,
+            get_rows: Some(Box::new(|| 24.0)),
+            request_render: Box::new(|| {}),
+            on_select_provider: Box::new(|_| {}),
+            on_select_model: Box::new(|_| {}),
+            on_select_mcp_connection: Box::new(|_| {}),
+            on_cancel: Box::new(|| {}),
+        });
+        menu.set_focused(true);
+
+        let before = menu.render(80.0).join("\n");
+        assert!(
+            before.contains("stale-model"),
+            "precondition: the constructor catalog renders, got: {before}"
+        );
+        assert!(
+            !before.contains("fresh-model"),
+            "precondition: the refreshed model must be absent before the update"
+        );
+
+        menu.update_models(
+            None,
+            Some(&[model("fresh-provider", "fresh-model")]),
+            Some(&std::collections::HashSet::from([
+                "fresh-provider".to_string()
+            ])),
+        );
+
+        let after = menu.render(80.0).join("\n");
+        assert!(
+            after.contains("fresh-model"),
+            "update_models must replace the catalog the menu renders, got: {after}"
+        );
+        assert!(
+            !after.contains("stale-model"),
+            "the superseded catalog must be gone, got: {after}"
+        );
+    }
+
+    /// DEFECT 2 on the real menu: `refreshAuthentication` + `updateModels` must
+    /// leave the newly authenticated model visible AND the model body's
+    /// configured-provider set updated, so the selection path can accept it.
+    ///
+    /// `menu.refreshAuthentication(); menu.updateModels(this.getCurrentModel(),
+    /// this.getCachedModelCandidates(), this.connectionConfiguredProviders)`
+    /// (interactive-mode.ts:8381, :8396-8400).
+    #[test]
+    fn the_real_menu_shows_the_newly_authenticated_model_after_login_refresh() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let model = |provider: &str, id: &str| {
+            Model::new(id, id, "openai-completions", provider, "http://127.0.0.1")
+        };
+        let mut menu = ConfigurationMenuComponent::new(ConfigurationMenuOptions {
+            initial_tab: "providers",
+            tui: tui(),
+            auth_storage: Rc::new(RefCell::new(auth_storage())),
+            model_registry: Rc::new(RefCell::new(model_registry())),
+            provider_options: Vec::new(),
+            current_model: None,
+            scoped_models: vec![],
+            available_models: Vec::new(),
+            configured_providers: Default::default(),
+            recent_models: None,
+            initial_model_search: None,
+            get_rows: Some(Box::new(|| 24.0)),
+            request_render: Box::new(|| {}),
+            on_select_provider: Box::new(|_| {}),
+            on_select_model: Box::new(|_| {}),
+            on_select_mcp_connection: Box::new(|_| {}),
+            on_cancel: Box::new(|| {}),
+        });
+        menu.set_focused(true);
+
+        // The post-login refresh the host performs.
+        menu.refresh_authentication();
+        menu.update_models(
+            None,
+            Some(&[model("my-proxy", "proxy-model")]),
+            Some(&std::collections::HashSet::from(["my-proxy".to_string()])),
+        );
+        menu.set_active_tab("models");
+
+        assert_eq!(menu.get_active_tab(), "models");
+        let rendered = menu.render(80.0).join("\n");
+        assert!(
+            rendered.contains("proxy-model"),
+            "the newly authenticated model must render in the Models tab: {rendered}"
+        );
+        // The model body renders "sign in" for an unconfigured provider and
+        // "current" for a configured one (model_selector.rs:913-922), so the
+        // configured set that `update_models` forwarded is observable here.
+        assert!(
+            !rendered.contains("sign in"),
+            "a configured provider must not ask for sign-in: {rendered}"
+        );
+
+        // Control: without the refreshed configured set the same model asks for sign-in.
+        let mut unconfigured = ConfigurationMenuComponent::new(ConfigurationMenuOptions {
+            initial_tab: "models",
+            tui: tui(),
+            auth_storage: Rc::new(RefCell::new(auth_storage())),
+            model_registry: Rc::new(RefCell::new(model_registry())),
+            provider_options: Vec::new(),
+            current_model: None,
+            scoped_models: vec![],
+            available_models: vec![model("my-proxy", "proxy-model")],
+            configured_providers: Default::default(),
+            recent_models: None,
+            initial_model_search: None,
+            get_rows: Some(Box::new(|| 24.0)),
+            request_render: Box::new(|| {}),
+            on_select_provider: Box::new(|_| {}),
+            on_select_model: Box::new(|_| {}),
+            on_select_mcp_connection: Box::new(|_| {}),
+            on_cancel: Box::new(|| {}),
+        });
+        unconfigured.set_focused(true);
+        let control = unconfigured.render(80.0).join("\n");
+        assert!(
+            control.contains("sign in"),
+            "control: an unconfigured provider must ask for sign-in: {control}"
+        );
+    }
+
     #[test]
     fn the_search_value_comes_from_the_tab_body() {
         let (mut menu, _, _) = menu("providers");

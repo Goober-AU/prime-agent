@@ -1,12 +1,13 @@
 //! Port of packages/coding-agent/src/cli/config-selector.ts
 //!
-//! TODO(slice): `ConfigSelectorComponent`
-//! (modes/interactive/components/config-selector.ts, interactive slice) is not
-//! landed - the file is still empty. The component is a TUI surface, not CLI
-//! logic, so this module keeps `selectConfig`'s exact flow (theme init, TUI
-//! lifecycle, close/exit callbacks, focus on the resource list) and drives a
-//! private local stand-in component that renders the same header line and
-//! reports close/exit through the same callbacks.
+//! `selectConfig` mounts the real `ConfigSelectorComponent`
+//! (`packages/coding-agent/src/cli/config-selector.ts:21-44`):
+//! `new ConfigSelectorComponent(resolvedPaths, settingsManager, cwd, agentDir,
+//! onClose, onExit, requestRender)`, then `ui.addChild(selector)` and
+//! `ui.setFocus(selector.getResourceList())`. This module performs the same
+//! three steps against `components::config_selector::ConfigSelectorComponent`,
+//! so the resource list, the per-item toggles and their `SettingsManager`
+//! writes are the real ones.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -14,10 +15,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use pi_tui::terminal::ProcessTerminal;
-use pi_tui::tui::{Component, Focusable, TUI, TuiStopOptions};
+use pi_tui::tui::{TuiStopOptions, TUI};
+// Used only by the retained stand-in's `cfg(test)` impls.
+#[cfg(test)]
+use pi_tui::tui::{Component, Focusable};
 
 use crate::core::package_manager::ResolvedPaths;
 use crate::core::settings_manager::SettingsManager;
+use crate::modes::interactive::components::config_selector::ConfigSelectorComponent;
 use crate::modes::interactive::theme::theme::{init_theme, stop_theme_watcher};
 
 pub struct ConfigSelectorOptions {
@@ -34,8 +39,8 @@ pub struct ConfigSelectorOptions {
 pub async fn select_config(options: ConfigSelectorOptions) -> Result<(), String> {
     init_theme(options.settings_manager.get_theme().as_deref(), true);
 
-    let (close_sender, close_receiver) = tokio::sync::oneshot::channel::<()>();
-    let (exit_sender, exit_receiver) = tokio::sync::oneshot::channel::<()>();
+    let (close_sender, mut close_receiver) = tokio::sync::oneshot::channel::<()>();
+    let (exit_sender, mut exit_receiver) = tokio::sync::oneshot::channel::<()>();
     // The callbacks are `Fn`, invoked once by the component, so the single-use
     // sender is taken out of a shared slot rather than moved by the closure.
     let close_sender = std::sync::Mutex::new(Some(close_sender));
@@ -43,48 +48,64 @@ pub async fn select_config(options: ConfigSelectorOptions) -> Result<(), String>
     let resolved = Arc::new(AtomicBool::new(false));
 
     let mut ui = TUI::new(Box::new(ProcessTerminal::new()), None);
+    // `() => ui.requestRender()` (config-selector.ts:39). The CLI loop owns the
+    // TUI, so the callback marks this flag and the loop drains it.
+    let render_requested = Arc::new(AtomicBool::new(false));
+    let render_flag = Arc::clone(&render_requested);
 
     let close_flag = Arc::clone(&resolved);
-    let request_render = Arc::new(AtomicBool::new(false));
+    // The real component takes `FnMut` callbacks and owns the `SettingsManager`
+    // (`ConfigSelectorComponent::new`, components/config_selector.rs:959-996).
+    // The close/exit senders are single-use, so they are taken out of a shared
+    // slot rather than moved by the closure.
     let selector = Rc::new(RefCell::new(ConfigSelectorComponent::new(
-        ConfigSelectorCallbacks {
-            on_close: Box::new(move || {
-                if !close_flag.swap(true, Ordering::SeqCst) {
-                    if let Some(sender) =
-                        close_sender.lock().unwrap_or_else(|error| error.into_inner()).take()
-                    {
-                        let _ = sender.send(());
-                    }
-                }
-            }),
-            on_exit: Box::new(move || {
-                if let Some(sender) =
-                    exit_sender.lock().unwrap_or_else(|error| error.into_inner()).take()
+        &options.resolved_paths,
+        options.settings_manager,
+        options.cwd.clone(),
+        options.agent_dir.clone(),
+        Box::new(move || {
+            if !close_flag.swap(true, Ordering::SeqCst) {
+                if let Some(sender) = close_sender
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take()
                 {
                     let _ = sender.send(());
                 }
-            }),
-            request_render: {
-                let flag = Arc::clone(&request_render);
-                Box::new(move || flag.store(true, Ordering::SeqCst))
-            },
-        },
-        options.cwd.clone(),
-        options.agent_dir.clone(),
-        options.resolved_paths.clone(),
+            }
+        }),
+        Box::new(move || {
+            if let Some(sender) = exit_sender
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                let _ = sender.send(());
+            }
+        }),
+        // `() => ui.requestRender()` (config-selector.ts:39). The CLI loop owns
+        // the TUI, so the callback only marks the render flag the loop drains.
+        Box::new(move || render_flag.store(true, Ordering::SeqCst)),
     )));
 
-    let resource_list: Rc<RefCell<dyn Component>> = selector.clone();
-    ui.add_child(resource_list.clone());
-    ui.set_focus(Some(resource_list));
+    mount(&mut ui, selector.clone());
     ui.start();
 
-    tokio::select! {
-        _ = close_receiver => {}
-        _ = exit_receiver => {
-            ui.stop(TuiStopOptions::default());
-            stop_theme_watcher();
-            std::process::exit(0);
+    loop {
+        ui.drain_input();
+        if render_requested.swap(false, Ordering::SeqCst) {
+            ui.request_render();
+        }
+        tokio::select! {
+            _ = &mut close_receiver => break,
+            _ = &mut exit_receiver => {
+                ui.stop(TuiStopOptions::default());
+                stop_theme_watcher();
+                std::process::exit(0);
+            }
+            // The TypeScript pumps renders from the terminal callback; the port
+            // polls the same queue the TUI's own input bridge fills.
+            _ = tokio::time::sleep(std::time::Duration::from_millis(8)) => {}
         }
     }
 
@@ -93,19 +114,33 @@ pub async fn select_config(options: ConfigSelectorOptions) -> Result<(), String>
     Ok(())
 }
 
-pub struct ConfigSelectorCallbacks {
+/// Mounts the real selector the way `selectConfig` does:
+/// `ui.addChild(selector)` then `ui.setFocus(selector.getResourceList())`
+/// (packages/coding-agent/src/cli/config-selector.ts:42-43).
+///
+/// The component owns its `ResourceList`, so the focus target registered with
+/// the TUI is the component itself: its `Focusable::set_focused` forwards to
+/// exactly that list (components/config_selector.rs:1053-1056) and
+/// `Component::handle_input` routes every key to it as well
+/// (components/config_selector.rs:1029-1031). Focusing the component therefore
+/// reaches the same focus state the TypeScript reaches by focusing the list.
+fn mount(ui: &mut TUI, selector: Rc<RefCell<ConfigSelectorComponent>>) {
+    ui.add_child(selector.clone());
+    ui.set_focus(Some(selector));
+}
+
+#[cfg(test)]
+pub struct StandInCallbacks {
     pub on_close: Box<dyn Fn() + Send + Sync>,
     pub on_exit: Box<dyn Fn() + Send + Sync>,
     pub request_render: Box<dyn Fn() + Send + Sync>,
 }
 
-/// Private local stand-in for `ConfigSelectorComponent`
-/// (modes/interactive/components/config-selector.ts). The real component renders
-/// the resource list and toggles resources through `SettingsManager`; the
-/// stand-in keeps the container contract, the focusable surface and the
-/// close/exit callbacks that `selectConfig` drives.
-struct ConfigSelectorComponent {
-    callbacks: ConfigSelectorCallbacks,
+/// The superseded stand-in, kept only so its own tests keep running. Production
+/// mounts the real `ConfigSelectorComponent` (see `mount` above).
+#[cfg(test)]
+struct StandInSelector {
+    callbacks: StandInCallbacks,
     cwd: String,
     agent_dir: String,
     resolved_paths: ResolvedPaths,
@@ -113,14 +148,22 @@ struct ConfigSelectorComponent {
     closed: bool,
 }
 
-impl ConfigSelectorComponent {
+#[cfg(test)]
+impl StandInSelector {
     fn new(
-        callbacks: ConfigSelectorCallbacks,
+        callbacks: StandInCallbacks,
         cwd: String,
         agent_dir: String,
         resolved_paths: ResolvedPaths,
     ) -> Self {
-        Self { callbacks, cwd, agent_dir, resolved_paths, focused: false, closed: false }
+        Self {
+            callbacks,
+            cwd,
+            agent_dir,
+            resolved_paths,
+            focused: false,
+            closed: false,
+        }
     }
 
     /// `getResourceList()` - the stand-in is its own resource list.
@@ -141,7 +184,8 @@ impl ConfigSelectorComponent {
     }
 }
 
-impl Component for ConfigSelectorComponent {
+#[cfg(test)]
+impl Component for StandInSelector {
     fn render(&mut self, width: f64) -> Vec<String> {
         let counts = [
             ("extensions", self.resolved_paths.extensions.len()),
@@ -180,7 +224,8 @@ impl Component for ConfigSelectorComponent {
     }
 }
 
-impl Focusable for ConfigSelectorComponent {
+#[cfg(test)]
+impl Focusable for StandInSelector {
     fn focused(&self) -> bool {
         self.focused
     }
@@ -195,6 +240,25 @@ impl Focusable for ConfigSelectorComponent {
 mod tests {
     use super::*;
 
+    fn resolved_resource(
+        path: &str,
+        origin: &str,
+        scope: &str,
+        source: &str,
+        base_dir: Option<&str>,
+    ) -> crate::core::package_manager::ResolvedResource {
+        crate::core::package_manager::ResolvedResource {
+            path: path.to_string(),
+            enabled: true,
+            metadata: crate::core::package_manager::PathMetadata {
+                source: source.to_string(),
+                scope: scope.to_string(),
+                origin: origin.to_string(),
+                base_dir: base_dir.map(|value| value.to_string()),
+            },
+        }
+    }
+
     fn empty_paths() -> ResolvedPaths {
         ResolvedPaths {
             extensions: Vec::new(),
@@ -205,9 +269,9 @@ mod tests {
         }
     }
 
-    fn component(cwd: &str) -> ConfigSelectorComponent {
-        ConfigSelectorComponent::new(
-            ConfigSelectorCallbacks {
+    fn component(cwd: &str) -> StandInSelector {
+        StandInSelector::new(
+            StandInCallbacks {
                 on_close: Box::new(|| {}),
                 on_exit: Box::new(|| {}),
                 request_render: Box::new(|| {}),
@@ -241,8 +305,8 @@ mod tests {
     fn focus_state_is_forwarded_to_the_render_and_the_request_render_callback() {
         let renders = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&renders);
-        let mut selector = ConfigSelectorComponent::new(
-            ConfigSelectorCallbacks {
+        let mut selector = StandInSelector::new(
+            StandInCallbacks {
                 on_close: Box::new(|| {}),
                 on_exit: Box::new(|| {}),
                 request_render: Box::new(move || flag.store(true, Ordering::SeqCst)),
@@ -264,8 +328,8 @@ mod tests {
         let exits = Arc::new(AtomicBool::new(false));
         let close_flag = Arc::clone(&closes);
         let exit_flag = Arc::clone(&exits);
-        let mut selector = ConfigSelectorComponent::new(
-            ConfigSelectorCallbacks {
+        let mut selector = StandInSelector::new(
+            StandInCallbacks {
                 on_close: Box::new(move || close_flag.store(true, Ordering::SeqCst)),
                 on_exit: Box::new(move || exit_flag.store(true, Ordering::SeqCst)),
                 request_render: Box::new(|| {}),
@@ -286,7 +350,126 @@ mod tests {
     #[test]
     fn the_component_is_its_own_resource_list_and_is_focusable() {
         let mut selector = component("/work");
-        let _: &ConfigSelectorComponent = selector.resource_list();
+        let _: &StandInSelector = selector.resource_list();
         assert!(selector.as_focusable().is_some());
+    }
+
+    /// DEFECT C. `selectConfig` must mount the REAL `ConfigSelectorComponent`.
+    ///
+    /// The audit pinned `cli/config_selector.rs:107` driving a private stand-in
+    /// whose render was a single counts line, while the ported component
+    /// (`components/config_selector.rs`, 13 tests) had zero production callers.
+    /// `packages/coding-agent/src/cli/config-selector.ts:21-44` constructs the
+    /// real component, adds it as a child and focuses its resource list.
+    ///
+    /// The stand-in passed its own "contains Resources" assertion, so the
+    /// assertion that separates the two is the resource list's own render: the
+    /// real header line is `Resource Configuration`, and the real list renders
+    /// the type headings (`Extensions`, `Skills`, `Prompts`, `Themes`) that a
+    /// counts-only stand-in can never produce.
+    #[test]
+    fn select_config_mounts_the_real_component_and_focuses_its_resource_list() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        let resolved = ResolvedPaths {
+            extensions: vec![resolved_resource(
+                "/agent/extensions/foo/index.ts",
+                "top-level",
+                "user",
+                "auto",
+                None,
+            )],
+            skills: Vec::new(),
+            prompts: Vec::new(),
+            themes: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let manager = SettingsManager::in_memory(serde_json::Map::new());
+        let selector = Rc::new(RefCell::new(ConfigSelectorComponent::new(
+            &resolved,
+            manager,
+            "/work".into(),
+            "/agent".into(),
+            Box::new(|| {}),
+            Box::new(|| {}),
+            Box::new(|| {}),
+        )));
+
+        let mut ui = TUI::new(
+            Box::new(pi_tui::terminal::ProcessTerminal::new()),
+            Some(false),
+        );
+        mount(&mut ui, selector.clone());
+
+        let rendered = selector.borrow_mut().render(100.0).join("\n");
+        assert!(
+            rendered.contains("Resource Configuration"),
+            "the real header must render, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("Extensions"),
+            "the real resource list headings must render, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("foo"),
+            "the resolved extension must appear in the list, got: {rendered}"
+        );
+
+        // `ui.setFocus(selector.getResourceList())`: the registered focus target
+        // is the mounted component, and the component forwards the focus bit to
+        // its resource list (components/config_selector.rs:1053-1056).
+        let focused = ui.focused_component().expect("mount must set focus");
+        assert!(
+            Rc::ptr_eq(&focused, &(selector.clone() as Rc<RefCell<dyn Component>>)),
+            "the focused component must be the mounted selector"
+        );
+        assert!(selector.borrow_mut().focused());
+    }
+
+    /// The real component's resource list is the one the CLI focuses, so Space
+    /// reaches the toggle path that writes through `SettingsManager`. The
+    /// stand-in had no list, so this key was a no-op there.
+    #[test]
+    fn the_focused_real_component_toggles_a_resource_through_the_settings_manager() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        let resolved = ResolvedPaths {
+            extensions: vec![resolved_resource(
+                "/agent/extensions/foo/index.ts",
+                "top-level",
+                "user",
+                "auto",
+                None,
+            )],
+            skills: Vec::new(),
+            prompts: Vec::new(),
+            themes: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+        let manager = SettingsManager::in_memory(serde_json::Map::new());
+        let selector = Rc::new(RefCell::new(ConfigSelectorComponent::new(
+            &resolved,
+            manager,
+            "/work".into(),
+            "/agent".into(),
+            Box::new(|| {}),
+            Box::new(|| {}),
+            Box::new(|| {}),
+        )));
+        let mut ui = TUI::new(
+            Box::new(pi_tui::terminal::ProcessTerminal::new()),
+            Some(false),
+        );
+        mount(&mut ui, selector.clone());
+
+        // The list starts with the first item selected; Space toggles it off and
+        // writes the disabled path into the settings manager. The key travels the
+        // real component path, which forwards to the real resource list
+        // (components/config_selector.rs:1029-1031); the registered TUI child is
+        // the same component (asserted by `focused_component` below).
+        selector.borrow_mut().handle_input(" ");
+        let rendered = selector.borrow_mut().render(100.0).join("\n");
+        assert!(
+            rendered.contains("[ ]"),
+            "Space must reach the real list's toggle and render the disabled marker, got: {rendered}"
+        );
     }
 }
