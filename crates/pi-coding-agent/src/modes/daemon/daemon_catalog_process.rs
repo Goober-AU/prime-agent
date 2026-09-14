@@ -28,9 +28,24 @@ const DAEMON_CATALOG_START_TIMEOUT_MS: u64 = 30_000;
 const DAEMON_CATALOG_REQUEST_TIMEOUT_MS: u64 = 5 * 60 * 1000;
 
 /// True when the catalog is running from a source checkout (`src/` entrypoint).
+///
+/// `daemon-catalog-process.ts:17-19` is `modulePath.startsWith(`${join(packageDir, "src")}${sep}`)`.
+/// The caller passes a real on-disk module path whose separators follow the host,
+/// so both separator flavours must compare equal: the TS test feeds POSIX-style
+/// paths on every platform (`daemon-catalog-startup.test.ts:34-41`), and Node's
+/// `startsWith` on win32 would reject a forward-slash path with a backslash
+/// prefix. Normalizing both sides to one separator reproduces "same directory
+/// tree" exactly, and still rejects an ancestor `src` directory
+/// (`/usr/src/app/packages/coding-agent` never matches
+/// `/usr/src/app/packages/coding-agent/src/`).
 pub fn is_daemon_catalog_source_path(module_path: &str, package_dir: &str) -> bool {
     let prefix = format!("{}{}", join_path(package_dir, "src"), std::path::MAIN_SEPARATOR);
-    module_path.starts_with(&prefix)
+    normalize_separators(module_path).starts_with(&normalize_separators(&prefix))
+}
+
+/// Normalize both separator flavours to `/` so host paths compare by directory.
+fn normalize_separators(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 /// `getPackageDir()` from config.ts plus the two known entrypoints.

@@ -2113,8 +2113,15 @@ impl<'a> AgentsViewMode<'a> {
         }
     }
 
-    /// Test/driver hook: enter a scope with a return chat and finish with the
-    /// left-navigation result.
+    /// Test/driver hook: enter a scope with a return chat, exactly as the
+    /// reference enters one at startup (`this.persistentState.scopeFrames`
+    /// pushed by `resolveAgentsViewScopeFrames`, agents-view-mode.ts:2188-2194).
+    ///
+    /// It must not finish: in the reference the scope is entered long before any
+    /// key is handled, and `finish()` runs only from the editor callbacks
+    /// (`onAgentsBack` -> `this.finish(...)`, agents-view-mode.ts:807-815;
+    /// `onEscape`, :820-841). Finishing here left the mode stopped, so a later
+    /// keybinding could never reach `handleInput`.
     #[cfg(test)]
     pub fn enter_scope_for_test(&mut self, scope: AgentsViewScopeKey, return_chat: SessionSummary) {
         let frames = self.persistent_state.scope_frames.clone().unwrap_or_default();
@@ -2127,8 +2134,6 @@ impl<'a> AgentsViewMode<'a> {
         ));
         self.scope_key = Some(scope);
         self.reconcile_catalogs();
-        let result = self.build_agents_back_result();
-        self.finish(result);
     }
 
     #[cfg(test)]

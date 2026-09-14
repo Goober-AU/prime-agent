@@ -3642,7 +3642,17 @@ mod tests {
             pinned: false,
         };
         let project = manager.get_git_install_path(&source, SOURCE_SCOPE_PROJECT);
-        assert!(project.ends_with("git/github.com/user/repo"));
+        // `getGitInstallPath` is `join(this.cwd, CONFIG_DIR_NAME, "git", source.host, source.path)`
+        // (package-manager.ts:1868), i.e. `node:path.join`. On win32 Node returns a
+        // backslash path for every segment:
+        //   node -e "console.log(require('path').join('C:\\cwd','.prime','git','github.com','user/repo'))"
+        //   -> C:\cwd\.prime\git\github.com\user\repo
+        // so the exact string "git/github.com/user/repo" is not what the TypeScript
+        // produces on this host. The TypeScript suite compares these paths through
+        // `normalizeForMatch` (test/package-manager.test.ts:11-17), which folds both
+        // separators to "/", so assert the same directory shape the TypeScript
+        // asserts instead of a byte-exact win32 string.
+        assert!(to_posix_path(&project).ends_with("git/github.com/user/repo"));
         let user = manager.get_git_install_path(&source, SOURCE_SCOPE_USER);
         assert!(user.starts_with(&agent));
         assert_eq!(manager.get_git_install_root(SOURCE_SCOPE_TEMPORARY), None);

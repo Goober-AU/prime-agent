@@ -1582,7 +1582,18 @@ mod tests {
         let mut component = IPythonCellComponent::new(cell);
         let text = plain(&component.render(80.0));
         assert!(text.contains("src/a.py"));
-        assert!(text.contains("+1 b") || text.contains("-1 a"));
+        // The rendered row is `gutter + content`, and the gutter puts the line
+        // number BEFORE the marker: diff.ts:253
+        //   `const gutter = ` ${lineNum} ${prefix === " " ? " " : prefix} `;`
+        // so "+1 b" renders as " 1 + b". The TypeScript test asserts exactly that
+        // shape: ipython-cell-diff.test.ts:62-63 expects `/11 - .*gamma/` and
+        // `/11 \+ .*GAMMA/`, and its `changedRow` helper selects rows by
+        // `stripAnsi(line).startsWith(` 1 ${prefix} `)` (:29-33). "+1 b" is the
+        // unified-diff STRING form produced by generateDiffString
+        // (edit-diff.ts:287, `output.push(`+${lineNum} ${line}`)`), which the cell
+        // never shows raw; asserting it here was the wrong shape.
+        assert!(text.contains(" 1 + b"), "expected the added row in:\n{text}");
+        assert!(text.contains(" 1 - a"), "expected the removed row in:\n{text}");
     }
 
     #[test]

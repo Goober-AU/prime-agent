@@ -970,13 +970,39 @@ pub struct AgentTraceCatchUpResult {
     pub results: Vec<(String, AgentTraceUploadResult)>,
 }
 
-/// `getAgentDir()` from config.ts (other slice).
+/// `getAgentDir()` (config.ts:523-529): `ENV_AGENT_DIR` wins, otherwise
+/// `join(homedir(), CONFIG_DIR_NAME)`. The outbox lives under this directory, so
+/// a test that points `PRIME_AGENT_CODING_AGENT_DIR` at its temp dir must see
+/// only its own entries (the real outbox in `~/.prime/agent` would otherwise be
+/// scanned too, and its missing session files counted as prunes).
 fn get_agent_dir() -> String {
+    if let Ok(env_dir) = std::env::var(crate::config::env_agent_dir()) {
+        if !env_dir.is_empty() {
+            return expand_tilde_path(&env_dir);
+        }
+    }
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     home.join(".prime")
         .join("agent")
         .to_string_lossy()
         .to_string()
+}
+
+/// `expandTildePath` (config.ts): `~` and `~/` expand to the home directory.
+fn expand_tilde_path(path: &str) -> String {
+    if path == "~" {
+        return dirs::home_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+    }
+    if let Some(rest) = path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+        return Path::new(&dirs::home_dir().unwrap_or_default().to_string_lossy().to_string())
+            .join(rest)
+            .to_string_lossy()
+            .to_string();
+    }
+    path.to_string()
 }
 
 fn get_agent_trace_outbox_dir() -> String {
@@ -2388,6 +2414,14 @@ mod tests {
     #[tokio::test]
     async fn catch_up_prunes_missing_sessions_and_counts_ledgers() {
         let dir = tempfile::tempdir().unwrap();
+        // `agent-traces.test.ts:138-141` points `ENV_AGENT_DIR` at a fresh temp dir
+        // before every trace test (`process.env[ENV_AGENT_DIR] = tempDir`), and
+        // restores it in `afterEach` (:152-159). The outbox lives under that
+        // directory, so without the same isolation this test also scans whatever
+        // entries an earlier test in this binary left behind and counts their
+        // missing session files as prunes.
+        let previous_agent_dir = std::env::var(crate::config::env_agent_dir()).ok();
+        std::env::set_var(crate::config::env_agent_dir(), dir.path().to_string_lossy().to_string());
         let missing = dir.path().join("gone.jsonl").to_string_lossy().to_string();
         assert!(mark_agent_trace_outbox_pending_sync(&missing, None));
         let ledger = dir.path().join("edges.jsonl");
@@ -2403,6 +2437,10 @@ mod tests {
         assert_eq!(catch_up.pruned, 1);
         assert_eq!(catch_up.semantic_edge_ledgers_pending, 1);
         assert!(catch_up.results.is_empty());
+        match previous_agent_dir {
+            Some(value) => std::env::set_var(crate::config::env_agent_dir(), value),
+            None => std::env::remove_var(crate::config::env_agent_dir()),
+        }
     }
 
     #[tokio::test]
