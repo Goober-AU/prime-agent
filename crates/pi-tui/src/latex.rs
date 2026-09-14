@@ -1,5 +1,7 @@
 //! Port of packages/tui/src/latex.ts.
 
+use unicode_general_category::{get_general_category, GeneralCategory};
+
 const SYMBOLS: &[(&str, &str)] = &[
     ("alpha", "α"),
     ("beta", "β"),
@@ -361,6 +363,13 @@ const SUPERSCRIPTS: &[(&str, &str)] = &[
     ("U", "ᵁ"),
     ("V", "ⱽ"),
     ("W", "ᵂ"),
+    ("β", "ᵝ"),
+    ("γ", "ᵞ"),
+    ("δ", "ᵟ"),
+    ("θ", "ᶿ"),
+    ("ϕ", "ᵠ"),
+    ("φ", "ᵠ"),
+    ("χ", "ᵡ"),
 ];
 
 const SUBSCRIPTS: &[(&str, &str)] = &[
@@ -397,6 +406,12 @@ const SUBSCRIPTS: &[(&str, &str)] = &[
     ("u", "ᵤ"),
     ("v", "ᵥ"),
     ("x", "ₓ"),
+    ("β", "ᵦ"),
+    ("γ", "ᵧ"),
+    ("ρ", "ᵨ"),
+    ("ϕ", "ᵩ"),
+    ("φ", "ᵩ"),
+    ("χ", "ᵪ"),
 ];
 
 const COMMON_FRACTIONS: &[(&str, &str)] = &[
@@ -572,17 +587,33 @@ fn map_script(text: &str, table: &[(&str, &str)]) -> Option<String> {
 }
 
 /// True when a fraction/sqrt operand reads unambiguously without parentheses.
+///
+/// Port of `isSimpleOperand` (packages/tui/src/latex.ts:572-574):
+/// `[...text].length === 1 || /^[\p{L}\p{N}\p{M}]+$/u.test(text)`. The general
+/// categories - not `char::is_alphanumeric`, which is `L*`/`N*` only - are what make
+/// a combining mark a simple operand, so `\frac{\vec{v}}{2}` renders `v⃗/2` and not
+/// `(v⃗)/2` (markdown-latex.test.ts:86-88).
 fn is_simple_operand(text: &str) -> bool {
-    let count = text.chars().count();
-    if count == 1 {
+    if text.chars().count() == 1 {
         return true;
     }
-    !text.is_empty() && text.chars().all(|c| c.is_alphanumeric() || is_combining(c))
-}
-
-fn is_combining(c: char) -> bool {
-    let cp = c as u32;
-    (0x0300..=0x036f).contains(&cp)
+    !text.is_empty()
+        && text.chars().all(|c| {
+            matches!(
+                get_general_category(c),
+                GeneralCategory::UppercaseLetter
+                    | GeneralCategory::LowercaseLetter
+                    | GeneralCategory::TitlecaseLetter
+                    | GeneralCategory::ModifierLetter
+                    | GeneralCategory::OtherLetter
+                    | GeneralCategory::DecimalNumber
+                    | GeneralCategory::LetterNumber
+                    | GeneralCategory::OtherNumber
+                    | GeneralCategory::NonspacingMark
+                    | GeneralCategory::SpacingMark
+                    | GeneralCategory::EnclosingMark
+            )
+        })
 }
 
 fn parenthesize(text: &str) -> String {
@@ -890,19 +921,24 @@ fn collapse_spaces(text: &str) -> String {
 }
 
 /// Port of `.replace(/\n\s*\n/g, "\n")`.
+///
+/// `\s` includes `\n`, so the middle run is greedy and then backtracks to its last
+/// newline: three consecutive newlines are a single match, and `a\n\n b` matches with
+/// an empty middle run (`\s*` gives up the space) so the space survives the collapse.
 fn collapse_blank_lines(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut i = 0usize;
     while i < chars.len() {
         if chars[i] == '\n' {
-            let mut j = i + 1;
-            while j < chars.len() && chars[j].is_whitespace() && chars[j] != '\n' {
-                j += 1;
+            let mut end = i + 1;
+            while end < chars.len() && chars[end].is_whitespace() {
+                end += 1;
             }
-            if j < chars.len() && chars[j] == '\n' {
+            // Backtrack to the last newline the greedy `\s*` swallowed.
+            if let Some(close) = chars[i + 1..end].iter().rposition(|c| *c == '\n') {
                 out.push('\n');
-                i = j + 1;
+                i = i + 1 + close + 1;
                 continue;
             }
         }
@@ -929,6 +965,42 @@ mod tests {
         assert_eq!(latex_to_unicode(r"x_\theta"), "x_\u{3b8}");
     }
 
+    /// `SUPERSCRIPTS` / `SUBSCRIPTS` carry 7 Greek forms each in the TS
+    /// (packages/tui/src/latex.ts:375-381, 418-423).
+    #[test]
+    fn greek_letters_use_super_and_subscript_forms() {
+        assert_eq!(latex_to_unicode(r"x^\beta"), "x\u{1d5d}");
+        assert_eq!(latex_to_unicode(r"x^\gamma"), "x\u{1d5e}");
+        assert_eq!(latex_to_unicode(r"x^\delta"), "x\u{1d5f}");
+        assert_eq!(latex_to_unicode(r"x^\theta"), "x\u{1dbf}");
+        assert_eq!(latex_to_unicode(r"x_\beta"), "x\u{1d66}");
+        assert_eq!(latex_to_unicode(r"x_\gamma"), "x\u{1d67}");
+        assert_eq!(latex_to_unicode(r"x_\rho"), "x\u{1d68}");
+        assert_eq!(latex_to_unicode(r"x_\chi"), "x\u{1d6a}");
+    }
+
+    /// `isSimpleOperand` is `/^[\p{L}\p{N}\p{M}]+$/u` (latex.ts:572-574), so a
+    /// combining mark counts as a simple operand and the parentheses are dropped
+    /// (markdown-latex.test.ts:86-88).
+    #[test]
+    fn accented_operand_skips_parentheses() {
+        assert_eq!(latex_to_unicode(r"\frac{\vec{v}}{2}"), "v\u{20d7}/2");
+        assert_eq!(latex_to_unicode(r"\frac{\hat{x}}{2}"), "x\u{302}/2");
+        // A non-mark, non-letter still needs parentheses.
+        assert_eq!(latex_to_unicode(r"\frac{-1}{2}"), "(-1)/2");
+    }
+
+    /// `latexToUnicode` ends with `.replace(/\n\s*\n/g, "\n")` (latex.ts:833), and
+    /// `\s` includes `\n`, so three newlines collapse to one.
+    #[test]
+    fn three_newlines_collapse_to_one() {
+        assert_eq!(latex_to_unicode("a\n\n\nb"), "a\nb");
+        // `\s*` is greedy then backtracks, so the space survives in `a\n\n b`.
+        assert_eq!(latex_to_unicode("a\n\n b"), "a\n b");
+        assert_eq!(latex_to_unicode("a\n \n\n b"), "a\n b");
+        assert_eq!(latex_to_unicode("a\nb"), "a\nb");
+    }
+
     #[test]
     fn fractions_and_sqrt_degrade_to_linear() {
         assert_eq!(latex_to_unicode(r"\frac{a}{b}"), "a/b");
@@ -946,6 +1018,5 @@ mod tests {
     #[test]
     fn double_backslash_becomes_newline_and_collapses_blanks() {
         assert_eq!(latex_to_unicode(r"a \\ b"), "a \n b");
-        assert_eq!(latex_to_unicode("a\n\n\nb"), "a\n\nb");
     }
 }

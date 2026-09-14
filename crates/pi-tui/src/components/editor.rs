@@ -1,6 +1,6 @@
 //! Port of packages/tui/src/components/editor.ts
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::components::select_list::{
@@ -11,6 +11,7 @@ use crate::keybindings::{get_keybindings, KeybindingsManager};
 use crate::keys::{decode_printable_key, matches_key};
 use crate::kill_ring::KillRing;
 use crate::slash_command_context::{get_slash_command_context, SlashCommandContext};
+use crate::terminal::Terminal;
 use crate::tui::{Component, Focusable, OverlayHandle, OverlayOptions, SizeValue, TUI, CURSOR_MARKER};
 use crate::undo_stack::UndoStack;
 use crate::utils::{graphemes, is_punctuation_char, is_whitespace_char, truncate_to_width, visible_width};
@@ -473,7 +474,15 @@ pub struct Editor {
     autocomplete_start_token: u64,
     autocomplete_request_id: u64,
     autocomplete_overlay: Option<OverlayHandle>,
-    autocomplete_overlay_visible: Option<Rc<std::cell::Cell<bool>>>,
+    /// Backs the overlay's `visible` predicate:
+    /// `() => this.focused && this.autocompleteState !== null`
+    /// (packages/tui/src/components/editor.ts:2353). The `TUI` evaluates the
+    /// predicate on every frame, so the editor cannot pass `&self`; this cell is
+    /// the shared truth it reads.
+    autocomplete_visibility: Rc<Cell<bool>>,
+    /// Buffer the overlay component returns from `render`. The editor fills it
+    /// during its own render pass; see [`EditorOverlayComponent`].
+    autocomplete_overlay_lines: Rc<RefCell<Vec<String>>>,
     pending_autocomplete: Option<PendingAutocomplete>,
     autocomplete_anchor_marker: String,
 
@@ -554,7 +563,8 @@ impl Editor {
             autocomplete_start_token: 0,
             autocomplete_request_id: 0,
             autocomplete_overlay: None,
-            autocomplete_overlay_visible: None,
+            autocomplete_visibility: Rc::new(Cell::new(false)),
+            autocomplete_overlay_lines: Rc::new(RefCell::new(Vec::new())),
             pending_autocomplete: None,
             autocomplete_anchor_marker: format!("\x1b_pi:autocomplete:{}\x07", next_autocomplete_anchor_id()),
             pastes: Vec::new(),
@@ -799,6 +809,14 @@ impl Editor {
         } else {
             String::new()
         }
+    }
+
+    /// Keep the overlay's `visible` predicate in sync with
+    /// `this.focused && this.autocompleteState !== null`
+    /// (packages/tui/src/components/editor.ts:2353).
+    fn sync_autocomplete_visibility(&self) {
+        self.autocomplete_visibility
+            .set(self.focused && self.autocomplete_state.is_some());
     }
 
     fn render_autocomplete_overlay(&mut self, width: usize) -> Vec<String> {
@@ -2767,16 +2785,20 @@ impl Editor {
         self.autocomplete_list = Some(list);
 
         self.autocomplete_state = Some(state);
+        self.sync_autocomplete_visibility();
         if self.autocomplete_overlay.is_none() {
             let anchor = self.autocomplete_anchor_marker.clone();
+            let visible_state = Rc::clone(&self.autocomplete_visibility);
             let overlay = self.tui.borrow_mut().show_overlay(
-                std::rc::Rc::new(std::cell::RefCell::new(EditorOverlayComponent)) as std::rc::Rc<std::cell::RefCell<dyn Component>>,
+                Rc::new(RefCell::new(EditorOverlayComponent {
+                    lines: Rc::clone(&self.autocomplete_overlay_lines),
+                })) as Rc<RefCell<dyn Component>>,
                 OverlayOptions {
                     width: Some(SizeValue::Percent("100%".to_string())),
                     above_marker: Some(anchor),
                     offset_y: Some(-1),
                     non_capturing: true,
-                    visible: None,
+                    visible: Some(Rc::new(move |_columns, _rows| visible_state.get())),
                     ..OverlayOptions::default()
                 },
             );
@@ -2795,8 +2817,9 @@ impl Editor {
             overlay.hide();
         }
         self.autocomplete_overlay = None;
-        self.autocomplete_overlay_visible = None;
         self.autocomplete_state = None;
+        self.sync_autocomplete_visibility();
+        self.autocomplete_overlay_lines.borrow_mut().clear();
         self.autocomplete_list = None;
         self.autocomplete_prefix = String::new();
         self.autocomplete_kind = None;
@@ -2851,14 +2874,27 @@ fn matches_symbol_context_end(text: &str) -> bool {
     matches_symbol_context(text)
 }
 
-/// Port of `autocompleteOverlayComponent`: renders the autocomplete dropdown.
-struct EditorOverlayComponent;
+/// Port of `autocompleteOverlayComponent`.
+///
+/// The TypeScript component closes over the editor instance
+/// (packages/tui/src/components/editor.ts:287-290) and calls
+/// `renderAutocompleteOverlay` from its own `render`. Rust cannot alias the
+/// owning editor, so the editor paints the dropdown into this shared buffer from
+/// its render pass and the overlay component returns that buffer. The buffer is
+/// only ever produced by `Editor::render_autocomplete_overlay`, so the overlay
+/// and the editor cannot diverge.
+struct EditorOverlayComponent {
+    lines: Rc<RefCell<Vec<String>>>,
+}
 
 impl Component for EditorOverlayComponent {
     fn render(&mut self, _width: f64) -> Vec<String> {
-        Vec::new()
+        self.lines.borrow().clone()
     }
 
+    /// Port of `invalidate: () => this.autocompleteList?.invalidate()`
+    /// (packages/tui/src/components/editor.ts:289): `SelectList::invalidate` is
+    /// a no-op, and the editor refills `lines` on every render pass.
     fn invalidate(&mut self) {}
 }
 
@@ -2878,10 +2914,20 @@ impl Focusable for Editor {
 
     fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+        self.sync_autocomplete_visibility();
     }
 }
 
 impl Component for Editor {
+    /// `isFocusable(component)` gate (`packages/tui/src/tui.ts:418-421`): without
+    /// this override `TUI::set_focus` finds no `Focusable` and the editor's
+    /// `focused` flag is never set, so focus-dependent behaviour (the autocomplete
+    /// overlay's `visible` predicate, the anchor marker, the hardware cursor)
+    /// silently stays off.
+    fn as_focusable(&mut self) -> Option<&mut dyn super::super::tui::Focusable> {
+        Some(self)
+    }
+
     fn render(&mut self, width: f64) -> Vec<String> {
         let width = width.max(0.0).floor() as usize;
         let metrics = self.get_render_metrics(width);
@@ -3083,6 +3129,15 @@ impl Component for Editor {
             };
             result.push(render_surface_line(&truncate_to_width(&line, width as f64, "", false)));
         }
+
+        // The TypeScript overlay component renders itself by calling back into
+        // the editor (`packages/tui/src/components/editor.ts:287-290`). Rust
+        // cannot alias the owner, so the editor paints the same lines into the
+        // overlay's buffer here, before `TUI::composite_overlays` reads it. The
+        // composite pass always runs after the container (and therefore this
+        // editor) has rendered (`crates/pi-tui/src/tui.rs:2168-2172`).
+        let overlay_lines = self.render_autocomplete_overlay(width);
+        *self.autocomplete_overlay_lines.borrow_mut() = overlay_lines;
 
         result
     }
@@ -3658,6 +3713,185 @@ mod tests {
         cjk.set_cursor_col(4);
         cjk.jump_to_char("x", true);
         assert_eq!(cjk.get_cursor(), (0, 6));
+    }
+
+    /// Test provider that answers every request with fixed slash-command items.
+    struct FixedAutocompleteProvider {
+        items: Vec<SelectItem>,
+        prefix: String,
+        kind: Option<String>,
+    }
+
+    impl EditorAutocompleteProvider for FixedAutocompleteProvider {
+        fn get_suggestions(
+            &mut self,
+            _lines: &[String],
+            _cursor_line: usize,
+            _cursor_col: usize,
+            _force: bool,
+        ) -> Option<AutocompleteSuggestions> {
+            Some(AutocompleteSuggestions {
+                items: self.items.clone(),
+                prefix: self.prefix.clone(),
+                kind: self.kind.clone(),
+            })
+        }
+
+        fn apply_completion(
+            &mut self,
+            lines: &[String],
+            cursor_line: usize,
+            _cursor_col: usize,
+            item: &SelectItem,
+            _prefix: &str,
+        ) -> ApplyCompletionResult {
+            let mut next = lines.to_vec();
+            next[cursor_line] = item.value.clone();
+            ApplyCompletionResult {
+                lines: next,
+                cursor_line,
+                cursor_col: item.value.len(),
+            }
+        }
+    }
+
+    fn item(value: &str) -> SelectItem {
+        SelectItem {
+            value: value.to_string(),
+            label: value.to_string(),
+            description: None,
+            argument_hint: None,
+            source_tag: None,
+            takes_argument: None,
+        }
+    }
+
+    /// A focused editor with a provider and two suggestions already applied.
+    fn editor_with_autocomplete_with_terminal<T: Terminal + 'static>(
+        terminal: T,
+    ) -> (Rc<RefCell<TUI>>, Rc<RefCell<Editor>>) {
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(terminal), Some(false))));
+        // The dropdown composites ABOVE the cursor row and is truncated to the rows
+        // available there (`above_marker` handling: `TUI::composite_overlays`,
+        // packages/tui/src/tui.ts:1265-1274). In the real app the editor sits under a
+        // transcript, so give the test the same headroom instead of one blank row.
+        ui.borrow_mut()
+            .add_child(Rc::new(RefCell::new(crate::components::text::Text::new(
+                "transcript\nline\nline\nline\nline\nline\nline\nline\nline\nline".to_string(),
+                0,
+                0,
+                None,
+            ))));
+        let editor = Rc::new(RefCell::new(Editor::new(
+            ui.clone(),
+            test_theme(),
+            EditorOptions::default(),
+        )));
+        ui.borrow_mut().add_child(editor.clone());
+        ui.borrow_mut().set_focus(Some(editor.clone()));
+        {
+            let mut editor = editor.borrow_mut();
+            editor.set_autocomplete_provider(Rc::new(RefCell::new(FixedAutocompleteProvider {
+                items: vec![item("help"), item("hotkeys")],
+                prefix: "/".to_string(),
+                kind: Some("slash-command".to_string()),
+            })));
+            editor.request_autocomplete(false, true);
+        }
+        (ui, editor)
+    }
+
+    /// Records everything the TUI paints so a test can assert on the frame.
+    #[derive(Clone)]
+    struct RecordingTerminal {
+        written: Rc<RefCell<String>>,
+    }
+
+    impl Terminal for RecordingTerminal {
+        fn start(&mut self, _on_input: Box<dyn Fn(String)>, _on_resize: Box<dyn Fn()>) {}
+
+        fn stop(&mut self, _options: crate::terminal::TerminalStopOptions) {}
+
+        fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {}
+
+        fn write(&mut self, data: &str) {
+            self.written.borrow_mut().push_str(data);
+        }
+
+        fn columns(&self) -> usize {
+            40
+        }
+
+        fn rows(&self) -> usize {
+            12
+        }
+
+        fn kitty_protocol_active(&self) -> bool {
+            false
+        }
+
+        fn move_by(&mut self, _lines: i64) {}
+        fn hide_cursor(&mut self) {}
+        fn show_cursor(&mut self) {}
+        fn clear_line(&mut self) {}
+        fn clear_from_cursor(&mut self) {}
+        fn clear_screen(&mut self) {}
+        fn enter_alt_screen(&mut self) {}
+        fn leave_alt_screen(&mut self) {}
+        fn alt_screen_active(&self) -> bool {
+            false
+        }
+        fn set_mouse_tracking(&mut self, _enabled: bool) {}
+        fn mouse_tracking_active(&self) -> bool {
+            false
+        }
+        fn set_title(&mut self, _title: &str) {}
+        fn set_progress(&mut self, _active: bool) {}
+    }
+
+    /// Teeth: reverting `EditorOverlayComponent::render` to `Vec::new()` (or
+    /// dropping the editor-side buffer fill added in `Editor::render`) makes this
+    /// fail with a frame that never mentions the suggestions.
+    #[test]
+    fn autocomplete_overlay_paints_the_suggestion_list() {
+        let written = Rc::new(RefCell::new(String::new()));
+        let (ui, editor) = editor_with_autocomplete_with_terminal(RecordingTerminal {
+            written: Rc::clone(&written),
+        });
+        assert!(editor.borrow().is_showing_autocomplete());
+
+        ui.borrow_mut().do_render();
+        let frame = String::from_utf8_lossy(&written.borrow().clone().into_bytes()).to_string();
+        assert!(
+            frame.contains("help"),
+            "the dropdown must paint the suggestion rows, frame={frame:?}"
+        );
+        assert!(frame.contains("hotkeys"));
+    }
+
+    /// Teeth: `visible: None` (the pre-fix state) keeps the overlay painted after
+    /// focus leaves; `focused() && autocompleteState !== null` hides it
+    /// (packages/tui/src/components/editor.ts:2353).
+    #[test]
+    fn autocomplete_overlay_hides_when_focus_leaves() {
+        let written = Rc::new(RefCell::new(String::new()));
+        let (ui, editor) = editor_with_autocomplete_with_terminal(RecordingTerminal {
+            written: Rc::clone(&written),
+        });
+        ui.borrow_mut().do_render();
+        assert!(written.borrow().contains("help"));
+
+        written.borrow_mut().clear();
+        editor.borrow_mut().set_focused(false);
+        ui.borrow_mut().do_render();
+        assert!(
+            !written.borrow().contains("help"),
+            "an unfocused editor must not paint the dropdown"
+        );
+        assert!(
+            editor.borrow().is_showing_autocomplete(),
+            "focus alone clears nothing"
+        );
     }
 
     /// Shared theme builder for the editor tests.

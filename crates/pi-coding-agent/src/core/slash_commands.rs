@@ -538,6 +538,21 @@ pub fn builtin_slash_command_takes_argument(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// `parseSlashCommand` + `resolveBuiltinSlashCommandName` for a submitted line
+/// (interactive-mode.ts:4784-4786): `/name args` resolves its alias and reports
+/// the canonical name, the original name, and the trimmed arguments.
+///
+/// Returns `None` when the line is not a slash command at all, or when the name
+/// is neither a built-in nor an alias, so free text and extension commands keep
+/// reaching the model.
+pub fn resolve_leading_builtin_slash_command(text: &str) -> Option<ResolvedSlashCommand> {
+    let parsed = parse_slash_command(text)?;
+    if !is_builtin_slash_command_name(&parsed.name) {
+        return None;
+    }
+    Some(resolve_slash_command(&parsed))
+}
+
 /// `resolveSlashCommand`.
 pub fn resolve_slash_command(command: &ParsedSlashCommand) -> ResolvedSlashCommand {
     let name = resolve_builtin_slash_command_name(&command.name);

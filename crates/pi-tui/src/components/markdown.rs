@@ -21,6 +21,8 @@ use crate::terminal_image::{get_capabilities, hyperlink, is_image_line};
 use crate::tui::Component;
 use crate::utils::{apply_background_to_line, strip_ansi, visible_width, wrap_text_with_ansi};
 
+use std::ops::Range as StdRange;
+
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 const STRICT_STRIKETHROUGH_REGEX: &str = "^(~~)(?=[^\\s~])((?:\\\\.|[^\\\\])*?(?:\\\\.|[^\\s~\\\\]))\\1(?=[^~]|$)";
@@ -535,6 +537,27 @@ fn extract_math_spans(source: &str) -> (String, Vec<RawMathSpan>) {
     (out, spans)
 }
 
+/// Port of marked's `text.replace(/\r\n|\r/g, "\n")` line-ending normalisation
+/// (marked.esm.js:2233, applied at the head of `Lexer.lex`, :25991).
+fn normalize_line_endings(text: &str) -> String {
+    if !text.contains('\r') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\r' {
+            if chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            out.push('\n');
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// Port of `pickMarkdownParser`.
 fn has_math(text: &str) -> bool {
     text.contains('$') || text.contains("\\(") || text.contains("\\[")
@@ -630,22 +653,126 @@ pub struct LexResult {
 }
 
 /// Port of `pickMarkdownParser(...).lexer(text)`.
+/// Top-level block source range, as `pulldown-cmark`'s offset iterator reports it.
+type BlockRange = (usize, usize);
+
 pub fn lex(text: &str) -> LexResult {
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
-    options.insert(Options::ENABLE_STRIKETHROUGH);
+    // ENABLE_STRIKETHROUGH is deliberately NOT set. pulldown-cmark's rule accepts a
+    // single `~` run, while marked's `StrictStrikethroughTokenizer` - the pinned TS
+    // behaviour (markdown.ts:14-31) - requires `~~` and rejects whitespace/`~` at the
+    // edges; `markdown.test.ts:1048-1057` asserts `Use ~strikethrough~ literally`
+    // stays literal text. pulldown claims the run before `TokenBuilder::text` could
+    // call `strict_strikethrough` on it, so the run must reach `text()` as plain text
+    // and be split there instead.
     let use_math = has_math(text);
     // Marked's math tokenizers run on the raw source; pulldown-cmark lexes
     // escape-processed text, so math spans are lifted out first (TUIR-21).
     let (lex_source, math_spans) = extract_math_spans(text);
     let parser = Parser::new_ext(&lex_source, options);
     let mut builder = TokenBuilder::new(use_math, math_spans);
-    for event in parser {
-        builder.handle(event);
+    // Block ranges are read from the offset iterator: each top-level block is the
+    // outermost `Start`/`End` pair, which is what `block_ranges` records so the
+    // blank-line pass can tell a between-blocks run from one inside a block.
+    for (event, range) in parser.into_offset_iter() {
+        builder.handle_at(event, range);
     }
-    let mut result = builder.finish(text);
+    let (mut result, block_ranges) = builder.finish(text);
+    // marked's block loop checks its `space` tokenizer first on every iteration
+    // (marked.esm.js:26185), so a blank-line run between two top-level blocks becomes a
+    // `space` token that renders one empty line (markdown.ts:553-555). pulldown-cmark
+    // has no such event, so the runs are recovered from the source. Offsets are taken
+    // over `lex_source`, the same text pulldown lexes: a math span that already
+    // contains blank lines is a placeholder there, matching the extensions claiming it
+    // before marked's block loop could.
+    insert_space_tokens(&mut result.tokens, &lex_source, &block_ranges);
     fill_table_raw(&mut result.tokens, text);
     result
+}
+
+/// Runs of whitespace-only lines, as `(start, len)`, matching marked's `newline`
+/// tokenizer rule `/^(?:[ \t]*(?:\n|$))+/` (marked.esm.js:2808). A run of exactly one
+/// character is not a `space` token: marked appends it to the previous token's raw
+/// (`r.raw.length === 1 && o !== undefined ? o.raw += "\n"`, marked.esm.js:26185),
+/// which is why `"para\n"` lexes to `[paragraph]` while `"para\n\n"` also yields
+/// `[paragraph, space]`.
+fn blank_line_runs(source: &str) -> Vec<(usize, usize)> {
+    let bytes = source.as_bytes();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut offset = 0usize;
+    while offset < bytes.len() {
+        let start = offset;
+        // `(?:[ \t]*(?:\n|$))+`: one repetition is optional blanks plus a newline,
+        // or optional blanks at the very end of the source (`$` is not multiline).
+        loop {
+            let mut after_blanks = offset;
+            while after_blanks < bytes.len() && (bytes[after_blanks] == b' ' || bytes[after_blanks] == b'\t') {
+                after_blanks += 1;
+            }
+            if after_blanks < bytes.len() && bytes[after_blanks] == b'\n' {
+                offset = after_blanks + 1;
+                continue;
+            }
+            if after_blanks == bytes.len() {
+                offset = after_blanks;
+                break;
+            }
+            break;
+        }
+        if offset == start {
+            // No match at this offset; the regex is unanchored, so advance one byte.
+            offset = start + 1;
+            continue;
+        }
+        // A one-byte match is not a `space` token (marked appends it to the previous
+        // token's raw), so only longer runs are kept.
+        if offset - start > 1 {
+            runs.push((start, offset - start));
+        }
+    }
+    runs
+}
+
+/// Insert a `Token::Space` for every top-level blank-line run, in source order.
+///
+/// `blocks[i]` is the `(start, end)` source range of the top-level block that produced
+/// token `i`; a run is placed after every block that starts before it. A run inside a
+/// top-level block (a loose list, an indented code block) belongs to that block and is
+/// left to it, exactly as marked's recursive `blockTokens` call for that block does
+/// (marked.esm.js:26185).
+fn insert_space_tokens(tokens: &mut Vec<Token>, source: &str, blocks: &[BlockRange]) {
+    // A run belongs to a block when it starts before that block's last line of
+    // content: a loose list (`- a\n\n- b`) owns its blank line, and marked's recursive
+    // `blockTokens` for the list turns it into per-item spacing rather than a `space`
+    // token (marked.esm.js:26185). A run that starts at or after the block's content
+    // end follows the block instead, which is the `space` token marked emits - its list
+    // tokenizer stops at the last item's line, leaving the trailing newline to the
+    // `newline` tokenizer (`"- a\n- b\n\npara"` -> `[list, space("\n\n"), paragraph]`).
+    let runs: Vec<(usize, usize)> = blank_line_runs(source)
+        .into_iter()
+        .filter(|(start, _)| {
+            !blocks.iter().any(|(block_start, block_end)| {
+                let slice = &source[*block_start..*block_end];
+                let content_end = *block_start + slice.trim_end().len();
+                *block_start <= *start && content_end > *start
+            })
+        })
+        .collect();
+    if runs.is_empty() {
+        return;
+    }
+    let mut insertions: Vec<(usize, Token)> = Vec::new();
+    for (start, _) in runs {
+        let index = blocks
+            .iter()
+            .take_while(|(block_start, _)| *block_start < start)
+            .count();
+        insertions.push((index, Token::Space));
+    }
+    for (index, token) in insertions.into_iter().rev() {
+        tokens.insert(index.min(tokens.len()), token);
+    }
 }
 
 /// Port of `token.raw` for tables. `marked` exposes the matched source text;
@@ -740,6 +867,10 @@ struct Frame {
 
 struct TokenBuilder {
     stack: Vec<Frame>,
+    /// Source range of each top-level block, in document order.
+    block_ranges: Vec<BlockRange>,
+    block_start: usize,
+    depth: usize,
     use_math: bool,
     /// Math spans lifted from the raw source, indexed by the placeholder number
     /// that stands in for them in the lexed text.
@@ -756,6 +887,9 @@ impl TokenBuilder {
                 kind: FrameKind::Root,
                 tokens: Vec::new(),
             }],
+            block_ranges: Vec::new(),
+            block_start: 0,
+            depth: 0,
             use_math,
             math_spans,
             after_block_math: false,
@@ -862,6 +996,53 @@ impl TokenBuilder {
                     }
                 }
             }
+            // `StrictStrikethroughTokenizer.del` (markdown.ts:16-31): pulldown-cmark's
+            // own strikethrough rule is not enabled in `lex`, so the `~~` run reaches
+            // here as ordinary text and marked's stricter rule is applied directly.
+            // marked checks `del` before `url` (marked.esm.js:28659).
+            if !matched && rest.starts_with("~~") {
+                if let Some((inner, _raw)) = strict_strikethrough(rest) {
+                    let preceding = std::mem::take(&mut pending);
+                    if !preceding.is_empty() {
+                        self.push_token(Token::Text {
+                            text: preceding,
+                            tokens: None,
+                        });
+                    }
+                    let inner_tokens = inline_tokens(&inner, self.use_math);
+                    self.push_token(Token::Del {
+                        tokens: inner_tokens,
+                    });
+                    index += 4 + inner.len();
+                    continue;
+                }
+            }
+            // marked's GFM `url` rule runs before its `inlineText` rule
+            // (marked.esm.js:28659: extensions -> escape -> tag -> link -> reflink ->
+            // emStrong -> codespan -> br -> del -> autolink -> url -> text), so an
+            // `https://` / `www.` host or an email is a link token in every plain-text
+            // position, including inside emphasis and link labels.
+            if !matched {
+                if let Some((href, text, raw_len)) = self.autolink_at(rest) {
+                    let preceding = std::mem::take(&mut pending);
+                    if !preceding.is_empty() {
+                        self.push_token(Token::Text {
+                            text: preceding,
+                            tokens: None,
+                        });
+                    }
+                    self.push_token(Token::Link {
+                        href,
+                        text: text.clone(),
+                        tokens: vec![Token::Text {
+                            text,
+                            tokens: None,
+                        }],
+                    });
+                    index += raw_len;
+                    continue;
+                }
+            }
             if matched {
                 continue;
             }
@@ -870,6 +1051,26 @@ impl TokenBuilder {
             index += ch.len_utf8();
         }
         flush_text(&mut pending, &mut |token| self.push_token(token));
+    }
+
+    /// Bare-URL / email autolink at `rest` (marked's GFM `url` rule). `None` when
+    /// `rest` does not start one, or when the current frame is inside a link
+    /// (`!this.state.inLink`, marked.esm.js:28659).
+    fn autolink_at(&self, rest: &str) -> Option<(String, String, usize)> {
+        if self
+            .stack
+            .iter()
+            .any(|frame| matches!(frame.kind, FrameKind::Link { .. }))
+        {
+            return None;
+        }
+        if let Some((href, text)) = match_autolink(rest) {
+            return Some((href, text.clone(), text.len()));
+        }
+        match_email_autolink(rest).map(|(href, text)| {
+            let len = text.len();
+            (href, text, len)
+        })
     }
 
     /// Put the original math source back where a placeholder landed in verbatim text
@@ -905,6 +1106,27 @@ impl TokenBuilder {
         if let Some(frame) = self.stack.last_mut() {
             frame.tokens.push(token);
         }
+    }
+
+    /// Handle one event together with its source range, recording the top-level
+    /// block ranges `insert_space_tokens` needs.
+    fn handle_at(&mut self, event: Event<'_>, range: StdRange<usize>) {
+        match &event {
+            Event::Start(_) => {
+                if self.depth == 0 {
+                    self.block_start = range.start;
+                }
+                self.depth += 1;
+            }
+            Event::End(_) => {
+                self.depth = self.depth.saturating_sub(1);
+                if self.depth == 0 {
+                    self.block_ranges.push((self.block_start, range.end));
+                }
+            }
+            _ => {}
+        }
+        self.handle(event);
     }
 
     fn handle(&mut self, event: Event<'_>) {
@@ -983,6 +1205,11 @@ impl TokenBuilder {
                 href: dest_url.to_string(),
                 text: String::new(),
             },
+            // pulldown-cmark's strikethrough rule accepts a single `~` run, marked's
+            // `StrictStrikethroughTokenizer` and GFM require `~~` (markdown.ts:14-31,
+            // markdown.test.ts:1048-1057). pulldown consumes the run before
+            // `TokenBuilder::text` can reject it, so the frame records the run's length
+            // and `end()` discards the pair when it is not two tildes.
             Tag::Strikethrough => FrameKind::Del,
             Tag::HtmlBlock => FrameKind::Paragraph,
             Tag::FootnoteDefinition(_) => FrameKind::Paragraph,
@@ -1138,17 +1365,6 @@ impl TokenBuilder {
         let mut index = 0usize;
         while index < text.len() {
             let rest = &text[index..];
-            if rest.starts_with("~~") {
-                if let Some((inner, _raw)) = strict_strikethrough(rest) {
-                    flush_text(&mut pending, &mut |token| self.push_token(token));
-                    let inner_tokens = inline_tokens(&inner, self.use_math);
-                    self.push_token(Token::Del {
-                        tokens: inner_tokens,
-                    });
-                    index += 4 + inner.len();
-                    continue;
-                }
-            }
             if self.use_math && (rest.starts_with('$') || rest.starts_with('\\')) {
                 if let Some((raw, math_text)) = match_inline_math(rest) {
                     flush_text(&mut pending, &mut |token| self.push_token(token));
@@ -1168,12 +1384,13 @@ impl TokenBuilder {
         flush_text(&mut pending, &mut |token| self.push_token(token));
     }
 
-    fn finish(mut self, text: &str) -> LexResult {
+    fn finish(mut self, text: &str) -> (LexResult, Vec<BlockRange>) {
         while self.stack.len() > 1 {
             self.end(TagEnd::Paragraph);
         }
         let frame = self.stack.pop().unwrap();
         let tokens = frame.tokens;
+        let blocks = self.block_ranges;
         // Port of `Object.keys(tokens.links).length === 0`: link reference
         // definitions disable per-block caching.
         let mut links: Vec<String> = Vec::new();
@@ -1187,7 +1404,7 @@ impl TokenBuilder {
                 }
             }
         }
-        LexResult { tokens, links }
+        (LexResult { tokens, links }, blocks)
     }
 }
 
@@ -1201,6 +1418,229 @@ fn cells_from_row(tokens: &[Token]) -> Vec<Vec<Token>> {
             other => vec![other.clone()],
         })
         .collect()
+}
+
+/// Port of marked's GFM `url` inline rule (`Q.url`, marked.esm.js:24802 and its
+/// regex `/^((?:protocol):\/\/|www\.)(?:[a-zA-Z0-9\-]+\.?)+[^\s<]*|^email/`
+/// with `protocol=/[hH][tT][tT][pP][sS]?|[fF][tT][pP]/` and
+/// `email=/[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/`)
+/// plus the `_backpedal` cleanup marked applies to the match
+/// (`J._backpedal` = `/(?:[^?!.,:;*_'"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'"~)]+(?!$))+/`).
+///
+/// marked tokenizes bare URLs, `www.` hosts and emails into `link` tokens
+/// (markdown.test.ts:1065-1087, 1144-1156); pulldown-cmark has no GFM autolink and
+/// `ENABLE_GFM` covers only blockquote tags, so the rule is ported here.
+///
+/// Returns `(href, text)` exactly as marked's `url()` builds them: `www.` hosts gain
+/// an `http://` scheme, emails a `mailto:` prefix, and a scheme URL keeps its own
+/// text. The renderer's `text == href` comparison (markdown.ts:632-636) then prints
+/// the parenthesised target only for the `www.` case, matching the TS output.
+fn match_autolink(src: &str) -> Option<(String, String)> {
+    let scheme_len = scheme_prefix_len(src)?;
+    let rest = &src[scheme_len..];
+    let mut body_len = 0usize;
+    let mut labels = 0usize;
+    // `(?:[a-zA-Z0-9\-]+\.?)+` needs at least one label ...
+    loop {
+        let label = rest[body_len..]
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
+            .count();
+        if label == 0 {
+            break;
+        }
+        body_len += label;
+        labels += 1;
+        if rest[body_len..].starts_with('.') {
+            body_len += 1;
+        }
+        if rest[body_len..].starts_with('.') {
+            // `\.?` allows only one trailing dot per label.
+            break;
+        }
+    }
+    if labels == 0 {
+        return None;
+    }
+    // ... then `[^\s<]*` takes the rest of the token.
+    body_len += rest[body_len..]
+        .bytes()
+        .take_while(|b| *b != b' ' && *b != b'\t' && *b != b'\n' && *b != b'<')
+        .count();
+    let matched = &src[..scheme_len + body_len];
+    let matched = backpedal(matched);
+    if matched.is_empty() {
+        return None;
+    }
+    let href = if scheme_len == WWW_SCHEME_LEN {
+        format!("http://{matched}")
+    } else {
+        matched.to_string()
+    };
+    Some((href, matched.to_string()))
+}
+
+/// `www.` is not a scheme, but marked's rule treats it as one and prefixes `http://`.
+const WWW_SCHEME_LEN: usize = 4;
+
+/// Match `(?:[hH][tT][tT][pP][sS]?|[fF][tT][pP]):\/\/` or `www.` at the start.
+/// Returns the length of that prefix.
+fn scheme_prefix_len(src: &str) -> Option<usize> {
+    let bytes = src.as_bytes();
+    let http = |b: &[u8], offset: usize| {
+        b.len() >= offset + 4
+            && (b[offset] | 0x20) == b'h'
+            && (b[offset + 1] | 0x20) == b't'
+            && (b[offset + 2] | 0x20) == b't'
+            && (b[offset + 3] | 0x20) == b'p'
+    };
+    if http(bytes, 0) {
+        let mut len = 4;
+        if bytes.len() > 4 && (bytes[4] | 0x20) == b's' {
+            len = 5;
+        }
+        if bytes.len() >= len + 3 && &bytes[len..len + 3] == b"://" {
+            return Some(len + 3);
+        }
+    }
+    if bytes.len() >= 6
+        && (bytes[0] | 0x20) == b'f'
+        && (bytes[1] | 0x20) == b't'
+        && (bytes[2] | 0x20) == b'p'
+        && &bytes[3..6] == b"://"
+    {
+        return Some(6);
+    }
+    // `www.` is pure ASCII, so a byte-length guard plus `is_char_boundary` keeps the
+    // slice safe for a multi-byte character at the same offset (the math placeholder
+    // is U+E000, three bytes long).
+    if bytes.len() >= WWW_SCHEME_LEN
+        && src.is_char_boundary(WWW_SCHEME_LEN)
+        && src[..WWW_SCHEME_LEN].eq_ignore_ascii_case("www.")
+    {
+        return Some(WWW_SCHEME_LEN);
+    }
+    None
+}
+
+/// Match `/email` (`[A-Za-z0-9._+-]+(@)[a-zA-Z0-9-_]+(?:\.[a-zA-Z0-9-_]*[a-zA-Z0-9])+(?![-_])/`)
+/// at the start of `src`. Returns `(href, text)` with marked's `mailto:` scheme.
+fn match_email_autolink(src: &str) -> Option<(String, String)> {
+    let local = src
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || b"._+-".contains(b))
+        .count();
+    if local == 0
+        || !src.is_char_boundary(local)
+        || !src[local..].starts_with('@')
+    {
+        return None;
+    }
+    let domain_start = local + 1;
+    let first = src[domain_start..]
+        .bytes()
+        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+        .count();
+    if first == 0 {
+        return None;
+    }
+    let mut end = domain_start + first;
+    let mut dots = 0usize;
+    loop {
+        if !src[end..].starts_with('.') {
+            break;
+        }
+        let label_start = end + 1;
+        // `[a-zA-Z0-9-_]*[a-zA-Z0-9]` - a label must end in an alphanumeric.
+        let span = src[label_start..]
+            .bytes()
+            .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+            .count();
+        let trailing = src[label_start..label_start + span]
+            .bytes()
+            .rev()
+            .take_while(|b| *b == b'-' || *b == b'_')
+            .count();
+        if span - trailing == 0 {
+            break;
+        }
+        end = label_start + span - trailing;
+        dots += 1;
+    }
+    if dots == 0 {
+        return None;
+    }
+    // `(?![-_])`
+    if src[end..].starts_with('-') || src[end..].starts_with('_') {
+        return None;
+    }
+    let matched = backpedal(&src[..end]);
+    if matched.is_empty() {
+        return None;
+    }
+    Some((format!("mailto:{matched}"), matched.to_string()))
+}
+
+/// Port of marked's `_backpedal` cleanup: strip the trailing punctuation the URL
+/// regexes greedily swallow, keep balanced `(...)` groups, and keep a trailing `&`
+/// unless it closes an HTML entity (`&(?![a-zA-Z0-9]+;$)`).
+fn backpedal(text: &str) -> &str {
+    let mut current = text;
+    loop {
+        let trimmed = backpedal_once(current);
+        if trimmed.len() == current.len() {
+            return trimmed;
+        }
+        current = trimmed;
+    }
+}
+
+/// One greedy pass of `_backpedal` from offset 0. The regex is an alternation, so
+/// the scan tries each branch at the current offset and advances by the longest one:
+/// a plain run, a balanced `(...)` group, a non-entity `&`, then a punctuation run
+/// that is not the end of the string.
+fn backpedal_once(text: &str) -> &str {
+    const PUNCT: &str = "?!.,:;*_'\"~)";
+    let mut offset = 0usize;
+    while offset < text.len() {
+        let rest = &text[offset..];
+        let mut advanced = 0usize;
+        // `[^?!.,:;*_'\"~()&]+`
+        for ch in rest.chars() {
+            if PUNCT.contains(ch) || ch == '(' || ch == '&' {
+                break;
+            }
+            advanced += ch.len_utf8();
+        }
+        if advanced == 0 {
+            // `\([^)]*\)`
+            if rest.starts_with('(') {
+                if let Some(close) = rest.find(')') {
+                    advanced = close + 1;
+                }
+            }
+        }
+        if advanced == 0 && rest.starts_with('&') {
+            // `&(?![a-zA-Z0-9]+;$)` - a lone `&` is kept, an entity terminator is not.
+            let tail = &rest[1..];
+            let word = tail.bytes().take_while(|b| b.is_ascii_alphanumeric()).count();
+            if !(word > 0 && tail[word..].starts_with(';') && tail[word + 1..].is_empty()) {
+                advanced = 1;
+            }
+        }
+        if advanced == 0 {
+            // `[?!.,:;*_'\"~)]+(?!$)`
+            let run = rest.chars().take_while(|ch| PUNCT.contains(*ch)).count();
+            if run > 0 && run < rest.chars().count() {
+                advanced = rest.chars().take(run).map(char::len_utf8).sum();
+            }
+        }
+        if advanced == 0 {
+            break;
+        }
+        offset += advanced;
+    }
+    &text[..offset]
 }
 
 fn flush_text(pending: &mut String, push: &mut impl FnMut(Token)) {
@@ -1250,6 +1690,38 @@ fn inline_tokens(text: &str, use_math: bool) -> Vec<Token> {
                 index += raw.len();
                 continue;
             }
+        }
+        // Same GFM `url` rule as `TokenBuilder::text`, applied to strikethrough
+        // content: marked lexes `del` content with `this.lexer.inlineTokens(text)`
+        // (markdown.ts:28), which runs the full inline tokenizer.
+        if let Some((href, text, raw_len)) = match_autolink(rest)
+            .map(|(href, text)| {
+                let len = text.len();
+                (href, text, len)
+            })
+            .or_else(|| {
+                match_email_autolink(rest).map(|(href, text)| {
+                    let len = text.len();
+                    (href, text, len)
+                })
+            })
+        {
+            if !pending.is_empty() {
+                tokens.push(Token::Text {
+                    text: std::mem::take(&mut pending),
+                    tokens: None,
+                });
+            }
+            tokens.push(Token::Link {
+                href,
+                text: text.clone(),
+                tokens: vec![Token::Text {
+                    text,
+                    tokens: None,
+                }],
+            });
+            index += raw_len;
+            continue;
         }
         let ch = rest.chars().next().unwrap();
         pending.push(ch);
@@ -2373,7 +2845,13 @@ impl Component for Markdown {
             return result;
         }
 
-        let normalized_text = text.replace('\t', "   ");
+        // `marked` normalises line endings before its block tokenizers run
+        // (`lex(e){e=e.replace(m.carriageReturn,"\n")}`, marked.esm.js:25991 with
+        // `carriageReturn:/\r\n|\r/g` at :2233), so a CRLF document reaches the
+        // extensions as LF. Without this the `[ \t]*(?:\n|$)` tail of BLOCK_MATH_REGEX
+        // (markdown.ts:45) never sees its `\n` after `\]` and display math lexes as
+        // inline math instead (markdown-latex.test.ts:110-113).
+        let normalized_text = normalize_line_endings(&text.replace('\t', "   "));
 
         // Parse markdown to HTML-like tokens
         let lexed = lex(&normalized_text);
@@ -2389,17 +2867,25 @@ impl Component for Markdown {
         // once a block is no longer last, its raw text is final.
         let mut next_cache: HashMap<String, Vec<String>> = HashMap::new();
         let mut content_lines: Vec<String> = Vec::new();
+        // `marked` exposes the matched source text as `token.raw`, so the TS key
+        // (markdown.ts:271) carries the block's own bytes: a list's raw starts with
+        // its `1. ` / `2. ` marker (verified with `marked.lexer`). The port derives
+        // `raw_of` from the token tree instead, where a list's start number is not
+        // recoverable from its items, so two same-shaped blocks collided and the
+        // second was served the first's lines. The block index restores the missing
+        // identity; it is stable while text is appended, so unchanged blocks still hit.
         for i in 0..tokens.len() {
             let token = tokens[i].clone();
             let next_token_type = tokens.get(i + 1).map(|t| t.type_name().to_string());
             let use_cache = cacheable && i < tokens.len() - 1;
             let key = if use_cache {
                 format!(
-                    "{}|{}|{}|{}",
+                    "{}|{}|{}|{}|{}",
                     width,
                     token.type_name(),
                     next_token_type.clone().unwrap_or_default(),
-                    raw_of(&token)
+                    raw_of(&token),
+                    i
                 )
             } else {
                 String::new()
@@ -2568,6 +3054,250 @@ mod tests {
             !joined.contains("_gone_"),
             "strikethrough must not fall through to theme.italic: {joined:?}"
         );
+    }
+
+    /// marked's GFM `url` rule turns bare URLs, `www.` hosts and emails into `link`
+    /// tokens (markdown.ts uses marked's GFM defaults; markdown.test.ts:1065-1087 and
+    /// :1144-1156). Expected values in this test are the live `marked.lexer` output.
+    #[test]
+    fn bare_urls_and_emails_are_autolinked_like_marked() {
+        // The matcher is tried at each remaining offset, so the token starts at the
+        // URL itself, not at the start of the paragraph.
+        assert_eq!(
+            match_autolink("https://example.com for more"),
+            Some((
+                "https://example.com".to_string(),
+                "https://example.com".to_string()
+            ))
+        );
+        // `www.` hosts gain an `http://` scheme in `href` (marked.esm.js:24802).
+        assert_eq!(
+            match_autolink("www.example.com now"),
+            Some((
+                "http://www.example.com".to_string(),
+                "www.example.com".to_string()
+            ))
+        );
+        assert_eq!(
+            match_email_autolink("user@example.com for help"),
+            Some((
+                "mailto:user@example.com".to_string(),
+                "user@example.com".to_string()
+            ))
+        );
+        // `_backpedal` (marked.esm.js `J._backpedal`) strips prose punctuation and
+        // keeps a balanced `(...)` group; a trailing entity terminator is dropped.
+        assert_eq!(
+            match_autolink("https://example.com. b").unwrap().1,
+            "https://example.com"
+        );
+        assert_eq!(
+            match_autolink("https://example.com)").unwrap().1,
+            "https://example.com"
+        );
+        assert_eq!(
+            match_autolink("https://example.com/x_(y)").unwrap().1,
+            "https://example.com/x_(y)"
+        );
+        assert_eq!(match_autolink("https://ex.com/a(b").unwrap().1, "https://ex.com/a");
+        assert_eq!(match_autolink("https://ex.com&").unwrap().1, "https://ex.com&");
+        // Non-matches: a bare `user@example` has no dotted domain and a `2. ` list
+        // marker is not a `www.` host (both verified against marked).
+        assert_eq!(match_email_autolink("user@example"), None);
+        assert_eq!(match_autolink("cost $5 or $10"), None);
+    }
+
+    #[test]
+    fn autolinked_urls_render_as_links_and_do_not_duplicate() {
+        let mut md = markdown("Visit https://example.com for more");
+        let joined = md.render(80.0).join(" ");
+        assert!(
+            joined.contains("https://example.com"),
+            "URL must survive: {joined:?}"
+        );
+        assert_eq!(
+            joined.matches("https://example.com").count(),
+            1,
+            "an autolinked URL must appear exactly once (markdown.test.ts:1077-1087)"
+        );
+
+        // An autolinked email must not print its `mailto:` prefix, because marked's
+        // link token has `text == href - "mailto:"` (markdown.test.ts:1065-1075).
+        let mut md = markdown("Contact user@example.com for help");
+        let joined = md.render(80.0).join(" ");
+        assert!(joined.contains("user@example.com"), "{joined:?}");
+        assert!(!joined.contains("mailto:"), "{joined:?}");
+
+        // A `www.` host prints its `http://` target in parentheses, because there
+        // text != href (markdown.ts:632-636).
+        let mut md = markdown("Go to www.example.com now");
+        let joined = md.render(80.0).join(" ");
+        assert!(joined.contains("www.example.com"), "{joined:?}");
+        assert!(joined.contains("(http://www.example.com)"), "{joined:?}");
+    }
+
+    /// marked's `StrictStrikethroughTokenizer` requires `~~`; pulldown-cmark's own
+    /// rule also accepts a single `~` run (markdown.test.ts:1048-1057).
+    #[test]
+    fn single_tilde_stays_literal_text() {
+        let mut md = markdown("Use ~strikethrough~ literally");
+        let joined = md.render(80.0).join(" ");
+        assert!(joined.contains("~strikethrough~"), "{joined:?}");
+        assert_eq!(
+            joined.matches("~~strikethrough~~").count(),
+            0,
+            "single tildes must not become strikethrough: {joined:?}"
+        );
+    }
+
+    /// The assigned fixture (packages/tui/test/markdown.test.ts:118-148): two lists
+    /// separated by unindented code blocks, with a warm block cache because the
+    /// second list reuses the first list's shape. The key must carry the block's own
+    /// identity, as marked's `token.raw` does (markdown.ts:271).
+    #[test]
+    fn ordered_list_numbering_is_not_lost_to_the_block_cache() {
+        let fixture = "1. First item\n\n```typescript\n// code block\n```\n\n\
+                       2. Second item\n\n```typescript\n// another code block\n```\n\n\
+                       3. Third item";
+        let mut md = markdown(fixture);
+        let plain: Vec<String> = md
+            .render(80.0)
+            .iter()
+            .map(|line| line.trim().to_string())
+            .collect();
+        let numbered: Vec<&String> = plain
+            .iter()
+            .filter(|line| {
+                let digits = line.chars().take_while(|c| c.is_ascii_digit()).count();
+                digits > 0 && line[digits..].starts_with('.')
+            })
+            .collect();
+        assert_eq!(numbered.len(), 3, "expected 3 numbered items, got {numbered:?}");
+        for (index, prefix) in ["1.", "2.", "3."].iter().enumerate() {
+            assert!(
+                numbered[index].starts_with(prefix),
+                "item {index} must start with {prefix}, got {:?}",
+                numbered[index]
+            );
+        }
+
+        // A second render on the same object (the streaming path) must reproduce them.
+        let again: Vec<String> = md
+            .render(80.0)
+            .iter()
+            .map(|line| line.trim().to_string())
+            .collect();
+        assert_eq!(plain, again, "the warm cache must return the same lines");
+    }
+
+    /// The exact rendered lines for a fixture, with trailing pad removed, as the
+    /// `space`-token fixtures below compare whole documents.
+    fn rendered(text: &str) -> Vec<String> {
+        let mut md = markdown(text);
+        md.render(80.0)
+            .iter()
+            .map(|line| line.trim_end().to_string())
+            .collect()
+    }
+
+    /// marked emits a `space` token per blank-line run between top-level blocks and
+    /// `renderToken` prints one empty line for it (markdown.ts:553-555). Every expected
+    /// value here is the live `marked.lexer` + TS `Markdown.render` output.
+    #[test]
+    fn blank_line_run_between_blocks_renders_one_empty_line() {
+        assert_eq!(rendered("para\n\n- a\n- b"), ["para", "", "- a", "- b"]);
+        assert_eq!(rendered("- a\n- b\n\npara"), ["- a", "- b", "", "para"]);
+        assert_eq!(rendered("\n\npara\n\n"), ["", "para", ""]);
+        assert_eq!(rendered("a\n\nb\n\nc"), ["a", "", "b", "", "c"]);
+        // Table headers go through `theme.bold`, wrapped as `**a**` by the test theme.
+        assert_eq!(
+            rendered("| a |\n| --- |\n| 1 |\n\npara"),
+            ["┌───┐", "│ **a** │", "├───┤", "│ 1 │", "└───┘", "", "para"]
+        );
+        // A run of two or more newlines is one token however long it is.
+        assert_eq!(rendered("para\n\n\n\n- a"), ["para", "", "- a"]);
+        // A single trailing newline is not a `space` token: marked appends it to the
+        // previous token's raw (marked.esm.js:26185, `r.raw.length === 1`).
+        assert_eq!(rendered("para\n"), ["para"]);
+        // A blank line inside a list belongs to the list, not to a top-level `space`
+        // token: marked recurses into `blockTokens` for the items instead.
+        assert_eq!(rendered("- a\n\n- b"), ["- a", "- b"]);
+    }
+
+    /// `marked` normalises `\r\n` / `\r` to `\n` before its block tokenizers run
+    /// (marked.esm.js:25991, `carriageReturn:/\r\n|\r/g` at :2233), so CRLF display
+    /// math reaches `BLOCK_MATH_REGEX` with the LF its `[ \t]*(?:\n|$)` tail needs
+    /// (markdown-latex.test.ts:110-113).
+    #[test]
+    fn crlf_display_math_renders_as_math() {
+        assert_eq!(normalize_line_endings("a\r\nb\rc\n"), "a\nb\nc\n");
+        let lines = rendered("\\[\r\nE = mc^2\r\n\\]\r\n");
+        assert!(
+            lines.iter().any(|line| line.contains("E = mc²")),
+            "CRLF math must convert: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("\\[")),
+            "delimiters must be consumed: {lines:?}"
+        );
+        // The `\\[` block sits in a code block indent: the TS render adds the two
+        // spaces `theme.codeBlockIndent` supplies (markdown.ts:776-783).
+        assert_eq!(lines[0], "  E = mc²");
+    }
+
+    /// Render with a theme whose `strikethrough` marker is distinct from the source
+    /// delimiters, so a literal `~x~` is distinguishable from a struck `x`. The TS test
+    /// theme is chalk-based and shows the difference through the SGR sequence;
+    /// markdown.test.ts:1056 asserts exactly that (no `ESC[9m` for `~x~`).
+    #[test]
+    fn only_double_tildes_use_the_strikethrough_theme() {
+        let mut strike_theme = theme();
+        strike_theme.strikethrough = Rc::new(|text: &str| format!("<DEL>{text}</DEL>"));
+        fn render_with(theme: &MarkdownTheme, text: &str) -> String {
+            let mut md = Markdown::new(
+                text.to_string(),
+                0,
+                0,
+                MarkdownTheme {
+                    heading: Rc::clone(&theme.heading),
+                    link: Rc::clone(&theme.link),
+                    link_url: Rc::clone(&theme.link_url),
+                    code: Rc::clone(&theme.code),
+                    code_block: Rc::clone(&theme.code_block),
+                    code_block_border: Rc::clone(&theme.code_block_border),
+                    quote: Rc::clone(&theme.quote),
+                    quote_border: Rc::clone(&theme.quote_border),
+                    hr: Rc::clone(&theme.hr),
+                    list_bullet: Rc::clone(&theme.list_bullet),
+                    bold: Rc::clone(&theme.bold),
+                    italic: Rc::clone(&theme.italic),
+                    strikethrough: Rc::clone(&theme.strikethrough),
+                    underline: Rc::clone(&theme.underline),
+                    highlight_code: None,
+                    code_block_indent: None,
+                    math: None,
+                    math_block: None,
+                },
+                None,
+                MarkdownOptions::default(),
+            );
+            md.render(80.0)
+                .iter()
+                .map(|line| line.trim_end().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        let render = |text: &str| render_with(&strike_theme, text);
+
+        // markdown.test.ts:1036-1045: `~~x~~` is struck.
+        assert_eq!(render("Use ~~strikethrough~~ here"), "Use <DEL>strikethrough</DEL> here");
+        // markdown.test.ts:1048-1057: `~x~` stays literal text, with no strike styling.
+        assert_eq!(
+            render("Use ~strikethrough~ literally"),
+            "Use ~strikethrough~ literally"
+        );
+        // Both on one line: only the `~~` pair is struck.
+        assert_eq!(render("a ~~b~~ c ~d~ e"), "a <DEL>b</DEL> c ~d~ e");
     }
 
     #[test]
