@@ -385,10 +385,14 @@ impl HeartbeatManagerComponent {
                 heartbeat_id,
                 selected_index,
             } => {
+                // `Math.max(0, Math.min(selectedIndex + delta, count - 1))`
+                // (heartbeat-manager.ts:201-202). A vanished heartbeat leaves
+                // `count == 0`, where `clamp(0, -1)` would panic.
                 let count = self
                     .available_actions(self.find_heartbeat(&heartbeat_id).as_ref())
                     .len();
-                let next = (selected_index as i64 + delta).clamp(0, count as i64 - 1) as usize;
+                let upper = count as i64 - 1;
+                let next = (selected_index as i64 + delta).min(upper).max(0) as usize;
                 self.mode = HeartbeatManagerMode::Actions {
                     heartbeat_id,
                     selected_index: next,
@@ -576,7 +580,7 @@ impl HeartbeatManagerComponent {
             "steer"
         };
         let next = match &job.next_run_at {
-            Some(next_run_at) => self.format_timestamp(next_run_at),
+            Some(next_run_at) => format_timestamp(next_run_at),
             None => "—".to_string(),
         };
         format!(
@@ -652,17 +656,6 @@ impl HeartbeatManagerComponent {
         result.trim().to_string()
     }
 
-    /// `formatTimestamp(value)`.
-    fn format_timestamp(&self, value: &str) -> String {
-        match parse_iso_millis(value) {
-            Some(millis) => {
-                let iso = millis_to_iso(millis);
-                let slice: String = iso.chars().take(16).collect();
-                slice.replace('T', " ")
-            }
-            None => value.to_string(),
-        }
-    }
 }
 
 /// Port of the `availableActions` row shape.
@@ -698,30 +691,151 @@ impl Component for HeartbeatManagerComponent {
     }
 }
 
-/// `new Date(value)` -> epoch milliseconds; `Number.isFinite(parsed.getTime())`.
-fn parse_iso_millis(value: &str) -> Option<i64> {
-    let trimmed = value.trim();
-    // `YYYY-MM-DDTHH:MM:SS(.sss)(Z|±HH:MM)`
-    let (date_part, rest) = trimmed.split_once('T')?;
-    let mut date_fields = date_part.split('-');
-    let year: i64 = date_fields.next()?.parse().ok()?;
-    let month: i64 = date_fields.next()?.parse().ok()?;
-    let day: i64 = date_fields.next()?.parse().ok()?;
+/// Port of `formatTimestamp(value)` (heartbeat-manager.ts:321-325):
+/// `parsed.toISOString().slice(0, 16).replace("T", " ")`, or the raw value when
+/// `new Date(value)` is not finite.
+fn format_timestamp(value: &str) -> String {
+    match parse_iso_millis(value) {
+        Some(millis) => {
+            let iso = millis_to_iso(millis);
+            let slice: String = iso.chars().take(16).collect();
+            slice.replace('T', " ")
+        }
+        None => value.to_string(),
+    }
+}
 
+/// `new Date(value)` -> epoch milliseconds; `Number.isFinite(parsed.getTime())`.
+///
+/// The ECMAScript `Date` grammar is narrower than the ISO 8601 one the parser
+/// used to accept, so the accepted forms are spelled out here (`Date.parse`,
+/// `Date Time String Format`):
+/// - the date part is exactly `YYYY`, `YYYY-MM` or `YYYY-MM-DD`; the 6-digit
+///   `±YYYYYY` expanded form is also allowed,
+/// - month is `01..12`, day is `01..31` (a day past the end of its month rolls
+///   forward, as `Date.UTC(2024, 1, 30)` does), hour is `00..24`, minute and
+///   second are `00..59`; `24` is only valid with `00:00` and zero fraction,
+/// - the fraction, when present, must be non-empty and all digits,
+/// - the offset is `Z` or `±HH:MM` with hour `00..23` and minute `00..59`,
+/// - leading/trailing whitespace is rejected (unlike the trimmed Rust parser),
+/// - the result must survive the `±8.64e15` ms range check that makes
+///   `Number.isFinite(parsed.getTime())` false outside it.
+pub(crate) fn parse_iso_millis(value: &str) -> Option<i64> {
+    const MAX_MILLIS: i64 = 8_640_000_000_000_000;
+    let trimmed = value.trim();
+    if trimmed != value {
+        return None;
+    }
+    // `YYYY-MM-DDTHH:MM:SS(.sss)(Z|±HH:MM)`, or a bare `YYYY(-MM(-DD))` date.
+    // `T` and `Z` may be lowercase; Node accepts both spellings.
+    let (date_part, rest) = match trimmed
+        .find(['T', 't'])
+        .map(|index| (&trimmed[..index], &trimmed[index + 1..]))
+    {
+        Some((date_part, rest)) => (date_part, Some(rest)),
+        None => (trimmed, None),
+    };
+    let date_fields: Vec<&str> = date_part.split('-').collect();
+    let (year, month, day) = match date_fields.as_slice() {
+        [year] => (parse_year(year)?, 1, 1),
+        [year, month] => (parse_year(year)?, parse_component(month, 1, 12)?, 1),
+        [year, month, day] => (
+            parse_year(year)?,
+            parse_component(month, 1, 12)?,
+            parse_component(day, 1, 31)?,
+        ),
+        _ => return None,
+    };
+
+    let Some(rest) = rest else {
+        let days = days_from_civil(year, month, day);
+        return days
+            .checked_mul(86_400_000)
+            .filter(|millis| millis.abs() <= MAX_MILLIS);
+    };
     let (time_part, offset_seconds) = split_timezone(rest)?;
-    let mut time_fields = time_part.split(':');
-    let hour: i64 = time_fields.next()?.parse().ok()?;
-    let minute: i64 = time_fields.next()?.parse().ok()?;
-    let seconds_field = time_fields.next().unwrap_or("0");
-    let seconds: f64 = seconds_field.parse().ok()?;
+    let time_fields: Vec<&str> = time_part.split(':').collect();
+    let (hour, minute, seconds, fraction) = match time_fields.as_slice() {
+        [hour] => (parse_component(hour, 0, 24)?, 0, 0, (0, false)),
+        [hour, minute] => (
+            parse_component(hour, 0, 24)?,
+            parse_component(minute, 0, 59)?,
+            0,
+            (0, false),
+        ),
+        [hour, minute, seconds] => {
+            let (whole, fraction) = split_seconds(seconds)?;
+            (
+                parse_component(hour, 0, 24)?,
+                parse_component(minute, 0, 59)?,
+                parse_component(whole, 0, 59)?,
+                fraction,
+            )
+        }
+        _ => return None,
+    };
+    // `24:00` is the only hour-24 form. Node also rejects a fractional second
+    // there unless every fraction digit is zero: `24:00:00.000Z` is valid but
+    // `24:00:00.0001Z` is not.
+    if hour == 24 && (minute != 0 || seconds != 0 || fraction.1) {
+        return None;
+    }
 
     let days = days_from_civil(year, month, day);
-    let seconds_total = days * 86400 + hour * 3600 + minute * 60 + seconds.floor() as i64;
-    Some((seconds_total - offset_seconds) * 1000)
+    let millis = days
+        .checked_mul(86_400_000)?
+        .checked_add(hour.checked_mul(3_600_000)?)?
+        .checked_add(minute.checked_mul(60_000)?)?
+        .checked_add(seconds.checked_mul(1_000)?)?
+        .checked_add(fraction.0)?
+        .checked_sub(offset_seconds.checked_mul(1_000)?)?;
+    (millis.abs() <= MAX_MILLIS).then_some(millis)
+}
+
+/// `YYYY` or `±YYYYYY`; exactly the widths the grammar allows.
+fn parse_year(value: &str) -> Option<i64> {
+    let digits = value.strip_prefix('+').or_else(|| value.strip_prefix('-')).unwrap_or(value);
+    let signed = value.starts_with('+') || value.starts_with('-');
+    let expected = if signed { 6 } else { 4 };
+    if digits.len() != expected || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok()
+}
+
+/// A fixed-width unsigned field within `min..=max`.
+fn parse_component(value: &str, min: i64, max: i64) -> Option<i64> {
+    if value.len() != 2 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let parsed: i64 = value.parse().ok()?;
+    (min..=max).contains(&parsed).then_some(parsed)
+}
+
+/// Splits `SS` or `SS.sss`. A present fraction must be non-empty and all
+/// digits. Returns the whole part (range-checked by the caller), the
+/// milliseconds truncated after three fraction digits, and whether any
+/// fraction digit was non-zero.
+fn split_seconds(value: &str) -> Option<(&str, (i64, bool))> {
+    match value.split_once('.') {
+        Some((whole, fraction)) => {
+            if fraction.is_empty() || !fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+                return None;
+            }
+            let mut digits: String = fraction.chars().take(3).collect();
+            while digits.len() < 3 {
+                digits.push('0');
+            }
+            let millis: i64 = digits.parse().ok()?;
+            let any_non_zero = fraction.bytes().any(|byte| byte != b'0');
+            Some((whole, (millis, any_non_zero)))
+        }
+        None => Some((value, (0, false))),
+    }
 }
 
 fn split_timezone(rest: &str) -> Option<(&str, i64)> {
-    if let Some(time) = rest.strip_suffix('Z') {
+    if let Some(time) = rest.strip_suffix(['Z', 'z']) {
         return Some((time, 0));
     }
     for (index, ch) in rest.char_indices() {
@@ -729,10 +843,15 @@ fn split_timezone(rest: &str) -> Option<(&str, i64)> {
             let time = &rest[..index];
             let offset = &rest[index..];
             let sign = if ch == '-' { -1 } else { 1 };
-            let mut parts = offset[1..].split(':');
-            let hours: i64 = parts.next()?.parse().ok()?;
-            let minutes: i64 = parts.next().unwrap_or("0").parse().ok()?;
-            return Some((time, sign * (hours * 3600 + minutes * 60)));
+            let digits = &offset[1..];
+            let (hours, minutes) = match digits.split_once(':') {
+                Some((hours, minutes)) => (hours, minutes),
+                None if digits.len() == 4 => digits.split_at(2),
+                None => return None,
+            };
+            let hours = parse_component(hours, 0, 23)?;
+            let minutes = parse_component(minutes, 0, 59)?;
+            return Some((time, sign * (hours * 3_600 + minutes * 60)));
         }
     }
     Some((rest, 0))
@@ -758,7 +877,14 @@ fn millis_to_iso(millis: i64) -> String {
     let hour = seconds_of_day / 3600;
     let minute = (seconds_of_day % 3600) / 60;
     let second = seconds_of_day % 60;
-    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.000Z")
+    let year = if year < 0 {
+        format!("-{:06}", -year)
+    } else if year > 9999 {
+        format!("+{year:06}")
+    } else {
+        format!("{year:04}")
+    };
+    format!("{year}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.000Z")
 }
 
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
@@ -777,6 +903,111 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod pr18_tests {
     use super::*;
+
+    /// `formatTimestamp` must mirror `new Date(value).toISOString().slice(0,16)`
+    /// (heartbeat-manager.ts:321-325). The expectations below are the output of
+    /// `node -e "new Date(s)"` for the same inputs.
+    #[test]
+    fn format_timestamp_follows_the_javascript_date_grammar() {
+        let format = format_timestamp;
+        // Valid forms.
+        assert_eq!(format("2024-01-01T00:00:00Z"), "2024-01-01 00:00");
+        assert_eq!(format("2024-01-01T00:00:00+05:00"), "2023-12-31 19:00");
+        assert_eq!(format("2024-01-01T00:00:00-05:00"), "2024-01-01 05:00");
+        assert_eq!(format("2024-01-01T00:00:00+0500"), "2023-12-31 19:00");
+        assert_eq!(format("2024-01-01T00:00Z"), "2024-01-01 00:00");
+        assert_eq!(format("2024-01-01T00:00:00"), "2024-01-01 00:00");
+        assert_eq!(format("2024-01-01"), "2024-01-01 00:00");
+        assert_eq!(format("2024-01-01T00:00:00.1234Z"), "2024-01-01 00:00");
+        assert_eq!(format("2024-01-01t00:00:00z"), "2024-01-01 00:00");
+        // Out-of-range components roll forward instead of being rejected.
+        assert_eq!(format("2024-02-30T00:00:00Z"), "2024-03-01 00:00");
+        assert_eq!(format("2023-02-29T00:00:00Z"), "2023-03-01 00:00");
+        assert_eq!(format("2024-01-01T24:00:00Z"), "2024-01-02 00:00");
+        assert_eq!(format("2024-01-01T24:00:00.0Z"), "2024-01-02 00:00");
+        // Out-of-range components and malformed shapes fall back to the raw value.
+        for invalid in [
+            "2024-13-01T00:00:00Z",
+            "2024-00-01T00:00:00Z",
+            "2024-01-00T00:00:00Z",
+            "2024-01-32T00:00:00Z",
+            "2024-01-01T25:00:00Z",
+            "2024-01-01T00:60:00Z",
+            "2024-01-01T00:00:60Z",
+            "2024-01-01T24:00:01Z",
+            "2024-01-01T24:00:00.5Z",
+            "2024-01-01T24:00:00.0001Z",
+            "2024-01-01T00:00:00+24:00",
+            "2024-01-01T00:00:00+05:60",
+            "2024-01-01T00:00:00+99:00",
+            "2024-1-5T00:00:00Z",
+            "2024-01-01T0:00:00Z",
+            "2024-01-01T00:00:00.Z",
+            "2024-01-01T00:00:00,5Z",
+            "2024-01-01T00:00:1e5Z",
+            "2024-01-01T00:00:00Z+01:00",
+            "not a date",
+            "  2024-01-01T00:00:00Z  ",
+        ] {
+            assert_eq!(format(invalid), invalid, "{invalid} must not parse");
+        }
+        // Out-of-range years must not overflow the millisecond arithmetic.
+        assert_eq!(format("9223372036854775807-01-01T00:00:00Z"), "9223372036854775807-01-01T00:00:00Z");
+        assert_eq!(format("999999999999-01-01T00:00:00Z"), "999999999999-01-01T00:00:00Z");
+        assert_eq!(format("099999-01-01T00:00:00Z"), "099999-01-01T00:00:00Z");
+        assert_eq!(format("+275761-09-13T00:00:00Z"), "+275761-09-13T00:00:00Z");
+        // The expanded year form is valid. `toISOString().slice(0, 16)` counts
+        // the `±YYYYYY` prefix, so an expanded year truncates to the hour:
+        // Node gives "+275760-09-13 00", not the full "+275760-09-13 00:00".
+        assert_eq!(format("+275760-09-13T00:00:00Z"), "+275760-09-13 00");
+        assert_eq!(format("+099999-01-01T00:00:00Z"), "+099999-01-01 00");
+    }
+
+    /// `moveSelection` clamps with `Math.max(0, Math.min(...))`
+    /// (heartbeat-manager.ts:201-202), which cannot panic. A heartbeat that
+    /// disappears while its action list is open leaves the action count at 0,
+    /// and the Rust `clamp(0, count - 1)` port panicked there with
+    /// `min > max. min = 0, max = -1`.
+    #[test]
+    fn move_selection_survives_a_heartbeat_that_vanished() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        let job = AgentCronJob {
+            id: "h".into(),
+            status: "active".into(),
+            ..Default::default()
+        };
+        // The catalog empties out after the panel was opened.
+        let heartbeat = Rc::new(std::cell::RefCell::new(Some(AgentConnectionHeartbeat {
+            job: serde_json::to_value(&job).unwrap(),
+            ..Default::default()
+        })));
+        let heartbeats = heartbeat.clone();
+        let mut component = HeartbeatManagerComponent::new(HeartbeatManagerOptions {
+            get_heartbeats: Box::new(move || heartbeats.borrow().clone().into_iter().collect()),
+            get_rows: Rc::new(|| 24.0),
+            on_action: Box::new(|_, _| Box::pin(async { Ok(()) })),
+            on_close: Box::new(|| {}),
+            request_render: Box::new(|| {}),
+        });
+        component.render(80.0);
+        // Enter the action list for the heartbeat that is about to disappear.
+        component.handle_input("\r");
+        *heartbeat.borrow_mut() = None;
+
+        // Both directions must be harmless rather than panic. `tui.select.up`
+        // and `.down` default to the plain arrow keys.
+        component.handle_input("\x1b[A");
+        component.handle_input("\x1b[B");
+        // `render` falls back to the list panel when the selected heartbeat
+        // disappeared (`heartbeat-manager.ts:91-95`), so the panel must show the
+        // empty list rather than a stale action list.
+        let rendered = component.render(80.0).join("\n");
+        assert!(
+            rendered.contains("No running or paused heartbeats"),
+            "a vanished heartbeat must fall back to the empty list, got: {rendered}"
+        );
+    }
+
     #[test]
     fn owner_tick_runs_one_action_and_preserves_failure_for_retry() {
         crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
