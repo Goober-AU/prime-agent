@@ -3827,8 +3827,48 @@ mod tests {
         assert!(in_memory.private_prime_authorization_cache_path().is_none());
     }
 
+    /// Restores the process environment when the test ends, including on panic.
+    struct EnvRestore(Vec<(String, Option<String>)>);
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(&name, value),
+                    None => std::env::remove_var(&name),
+                }
+            }
+        }
+    }
+
+    /// Clear every ambient API-key/credential variable, so "no auth configured"
+    /// means what the TypeScript test means by it.
+    ///
+    /// `hasConfiguredAuth` is `authStorage.hasAuth(provider)`
+    /// (model-registry.ts:1220-1222), and `AuthStorage.hasAuth` accepts the
+    /// environment candidate (`auth-storage.ts:757-759` ->
+    /// `getEnvironmentAuthCandidate`, `auth-storage.ts:449-465` ->
+    /// `getEnvApiKey`). The TypeScript test that pins this behaviour,
+    /// `model-registry.test.ts:1189-1218`, therefore deletes
+    /// `PRIME_API_KEY`/`OPENAI_API_KEY` (lines 1193-1194) before asserting that
+    /// `configuredProviders` excludes "openai" - otherwise ambient credentials on
+    /// the host legitimately make models available. This test asserts the same TS
+    /// behaviour, so it clears the same ambient variables for the same reason.
+    fn clear_ambient_auth_env() -> EnvRestore {
+        let saved: Vec<(String, Option<String>)> =
+            crate::core::auth_storage::ambient_auth_env_var_names()
+                .into_iter()
+                .map(|name| (name.to_string(), std::env::var(name).ok()))
+                .collect();
+        for (name, _) in &saved {
+            std::env::remove_var(name);
+        }
+        EnvRestore(saved)
+    }
+
     #[tokio::test]
     async fn refresh_and_available_models_use_built_in_catalog() {
+        let _env = clear_ambient_auth_env();
         let mut registry = ModelRegistry::in_memory(in_memory_auth());
         registry.refresh();
         assert!(registry.get_error().is_none());
@@ -3837,7 +3877,8 @@ mod tests {
         assert!(all.iter().any(|model| model.provider == "anthropic"));
 
         let available = registry.refresh_available_models().await;
-        // No auth in the in-memory storage, so nothing is available.
+        // No auth in the in-memory storage and no ambient credentials, so nothing
+        // is available (TS model-registry.test.ts:1198-1200).
         assert!(available.is_empty());
         assert!(!registry.has_configured_auth(&all[0]));
 

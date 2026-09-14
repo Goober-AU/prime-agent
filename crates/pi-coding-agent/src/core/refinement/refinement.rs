@@ -596,27 +596,41 @@ fn with_default_refinement_scope(
     result
 }
 
+/// `path.join` for harness paths. The TypeScript joins with `join()` from
+/// `node:path` (refinement.ts:316-326), and the port normalises the result the
+/// same way the other slice owners do (`package_manager.rs:246`
+/// `to_posix_path`, mirroring `package-manager.ts:210` `p.split(sep).join("/")`):
+/// harness directories are exported to the RLM kernel and recorded in session
+/// JSON, so a host-style agent dir must not produce a mixed `C:\\agent/harness`
+/// path.
+fn to_posix_path(path: &str) -> String {
+    path.replace(std::path::MAIN_SEPARATOR, "/")
+}
+
+/// `join(base, leaf)` after POSIX normalisation; `join("", leaf) === leaf`
+/// (measured: Node `path.join('', 'harness') === 'harness'`).
+fn join_posix(base: &str, leaf: &str) -> String {
+    let base = to_posix_path(base);
+    if base.is_empty() {
+        return leaf.to_string();
+    }
+    if base.ends_with('/') {
+        format!("{base}{leaf}")
+    } else {
+        format!("{base}/{leaf}")
+    }
+}
+
 pub fn get_global_harness_state_dir(agent_dir: &str) -> String {
-    Path::new(agent_dir)
-        .join(HARNESS_STATE_DIR_NAME)
-        .to_string_lossy()
-        .to_string()
+    join_posix(agent_dir, HARNESS_STATE_DIR_NAME)
 }
 
 pub fn get_local_harness_state_dir(session_artifact_dir: Option<&str>) -> Option<String> {
-    session_artifact_dir.map(|dir| {
-        Path::new(dir)
-            .join(HARNESS_STATE_DIR_NAME)
-            .to_string_lossy()
-            .to_string()
-    })
+    session_artifact_dir.map(|dir| join_posix(dir, HARNESS_STATE_DIR_NAME))
 }
 
 pub fn get_harness_state_path(harness_state_dir: &str) -> String {
-    Path::new(harness_state_dir)
-        .join("harness_state.json")
-        .to_string_lossy()
-        .to_string()
+    join_posix(harness_state_dir, "harness_state.json")
 }
 
 fn entry_from_value(id: &str, raw: &Value, scope: HarnessScope) -> Option<HarnessEntry> {
@@ -785,10 +799,7 @@ pub fn save_harness_state(harness_state_dir: &str, state: &HarnessState) -> Resu
 }
 
 pub fn get_refinement_history_path(harness_state_dir: &str) -> String {
-    Path::new(harness_state_dir)
-        .join(REFINEMENT_HISTORY_FILE_NAME)
-        .to_string_lossy()
-        .to_string()
+    join_posix(harness_state_dir, REFINEMENT_HISTORY_FILE_NAME)
 }
 
 fn is_refinement_result(data: &Value) -> bool {

@@ -100,6 +100,42 @@ pub(crate) fn find_env_keys(provider: &str) -> Option<Vec<String>> {
     }
 }
 
+/// Every provider's API-key environment variables (`getApiKeyEnvVars`,
+/// packages/ai/src/env-api-keys.ts:92-135), plus the ambient-credential
+/// variables the environment candidate falls back to for `amazon-bedrock`
+/// (`env-api-keys.ts:182-199`) and `google-vertex` (`env-api-keys.ts:167-180`).
+///
+/// `AuthStorage.hasAuth` accepts the environment candidate
+/// (`auth-storage.ts:757-759`, `auth-storage.ts:449-465`), so a test that asserts
+/// "no auth configured" must clear the ambient variables for every provider -
+/// the same setup the TypeScript suite performs per-test with
+/// `delete process.env.<KEY>` (e.g. `model-registry.test.ts:1193-1194`).
+pub(crate) fn ambient_auth_env_var_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    for provider in pi_ai::models::get_providers() {
+        if let Some(vars) = api_key_env_vars(provider.as_str()) {
+            names.extend(vars);
+        }
+    }
+    names.extend([
+        "AWS_PROFILE",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_BEARER_TOKEN_BEDROCK",
+        "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_WEB_IDENTITY_TOKEN_FILE",
+        "GOOGLE_CLOUD_PROJECT",
+        "GCLOUD_PROJECT",
+        "GOOGLE_CLOUD_LOCATION",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+    ]);
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
 fn has_vertex_adc_credentials() -> bool {
     match std::env::var("GOOGLE_APPLICATION_CREDENTIALS") {
         Ok(path) if !path.is_empty() => Path::new(&path).exists(),
@@ -2387,8 +2423,56 @@ mod tests {
         assert_eq!(result.api_key.as_deref(), Some("stored"));
     }
 
+    /// Restores the process environment when the test ends, including on panic.
+    struct EnvRestore(Vec<(String, Option<String>)>);
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            for (name, value) in self.0.drain(..) {
+                match value {
+                    Some(value) => std::env::set_var(&name, value),
+                    None => std::env::remove_var(&name),
+                }
+            }
+        }
+    }
+
+    /// Remove every ambient API-key variable for `provider`, so the only
+    /// credential left is the one in this storage instance.
+    ///
+    /// `AuthStorage.hasAuth` accepts the environment candidate
+    /// (`auth-storage.ts:757-759` -> `getAvailableAuthCandidate` ->
+    /// `getEnvironmentAuthCandidate`, `auth-storage.ts:449-465` ->
+    /// `getEnvApiKey`), and the candidate order is runtime, stored, environment,
+    /// fallback (`auth-storage.ts:521-526`). So on a host where `OPENAI_API_KEY`
+    /// is set, marking the *stored* credential stale leaves the environment
+    /// credential selectable and the TS reports `environment`, exactly like the
+    /// Rust port does. The TypeScript suite handles this the same way the tests
+    /// below do: `auth-storage.test.ts:191-207` sets and restores `AWS_PROFILE`,
+    /// and `model-registry.test.ts:1193-1194` deletes `OPENAI_API_KEY` before
+    /// asserting that a provider has no auth.
+    fn clear_ambient_provider_env(provider: &str) -> EnvRestore {
+        let names: Vec<String> = api_key_env_vars(provider)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|name| std::env::var_os(name).is_some())
+            .map(|name| name.to_string())
+            .collect();
+        let saved: Vec<(String, Option<String>)> = names
+            .iter()
+            .map(|name| (name.clone(), std::env::var(name).ok()))
+            .collect();
+        for name in &names {
+            std::env::remove_var(name);
+        }
+        EnvRestore(saved)
+    }
+
     #[test]
     fn stale_marking_hides_a_source_until_cleared() {
+        // Only the stored credential exists for this test, so the stale marking
+        // must hide it and expose the stale status.
+        let _env = clear_ambient_provider_env("openai");
         let mut storage = memory(json!({"openai": {"type": "api_key", "key": "k"}}));
         assert!(storage.mark_auth_stale("openai"));
         let status = storage.get_auth_status("openai");
