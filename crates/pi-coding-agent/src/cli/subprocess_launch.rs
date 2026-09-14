@@ -72,6 +72,25 @@ pub fn create_cli_subprocess_env(
     }
 }
 
+/// Node's `path.isAbsolute` on the current platform.
+///
+/// This must NOT be `std::path::Path::is_absolute`: on win32 Node reports
+/// `isAbsolute('/abs') === true` (and true for `'\\abs'`), while Rust treats a
+/// drive-less rooted path as *relative* and `Path::join` then prefixes the
+/// current drive (`current_dir().join("/cli.ts")` == `"C:/cli.ts"`), silently
+/// rewriting an argv string the TypeScript passes through verbatim.
+fn is_node_absolute(path: &str) -> bool {
+    if cfg!(windows) {
+        let bytes = path.as_bytes();
+        let drive_absolute = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/');
+        return drive_absolute || matches!(bytes.first(), Some(b'\\') | Some(b'/'));
+    }
+    path.starts_with('/')
+}
+
 /// Node's `path.resolve` for a single path.
 fn resolve(path: &str) -> PathBuf {
     let candidate = PathBuf::from(path);
@@ -136,7 +155,11 @@ pub fn create_cli_subprocess_launch_spec(
         Some(entrypoint) if !entrypoint.is_empty() => entrypoint.to_string(),
         _ => current_entrypoint(),
     };
-    let resolved_entrypoint = if Path::new(&entrypoint).is_absolute() {
+    // subprocess-launch.ts:59
+    //   `const resolvedEntrypoint = isAbsolute(entrypoint) ? entrypoint : resolve(entrypoint);`
+    // The entrypoint is an argv string, not a filesystem operation, so an
+    // absolute entrypoint is passed through byte-for-byte.
+    let resolved_entrypoint = if is_node_absolute(&entrypoint) {
         entrypoint
     } else {
         resolve(&entrypoint).to_string_lossy().to_string()

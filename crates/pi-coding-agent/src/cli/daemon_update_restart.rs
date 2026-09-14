@@ -587,6 +587,17 @@ fn try_acquire_lock(guard_path: &str, stale_ms: u64) -> Result<bool, String> {
     }
 }
 
+/// daemon-update-restart.ts:357-363:
+///   `function matchesProcessStartId(identity) {`
+///   `  if (!identity.processStartId) return true;`
+///   `  const observed = getProcessStartId(identity.pid);`
+///   `  return observed === undefined || observed === identity.processStartId;`
+///   `}`
+/// A missing start id is permissive. An OBSERVABLE but different start id means
+/// a recycled pid, so the identity is stale. Observation failing (undefined)
+/// must stay permissive too: the local `get_process_start_id` falls back to `ps`,
+/// which does not exist on Windows, so treating "unavailable" as "mismatched"
+/// would make every recorded identity look dead on this host.
 fn matches_process_start_id(identity: &DaemonUpdateRestartProcessIdentity) -> bool {
     let process_start_id = match &identity.process_start_id {
         Some(process_start_id) => process_start_id,
@@ -1019,9 +1030,13 @@ fn normalize_lexically(path: &Path) -> String {
         match component {
             Component::Prefix(prefix_component) => prefix.push_str(&prefix_component.as_os_str().to_string_lossy()),
             Component::RootDir => {
-                if prefix.is_empty() {
-                    prefix.push('/');
-                }
+                // `Component::Prefix("C:")` followed by `Component::RootDir`
+                // is the single drive root "C:\". Pushing the root separator
+                // unconditionally keeps that root; the earlier `if prefix
+                // .is_empty()` test dropped it and produced "C:Users/...",
+                // a drive-relative path, so every caller failed with
+                // os error 3 (and "/tmp/registry" became "C:tmp/registry").
+                prefix.push('/');
             }
             Component::CurDir => {}
             Component::ParentDir => {
@@ -1051,12 +1066,18 @@ fn current_process_env() -> super::subprocess_launch::ProcessEnv {
     environment
 }
 
+/// session-lease.ts:162-168 dispatches to `getWindowsProcessStartId` on win32
+/// (session-lease.ts:129-145), which queries
+/// `([System.Diagnostics.Process]::GetProcessById($pid)).StartTime.ToUniversalTime().Ticks`
+/// and formats `win:<ticks>`. Returning `None` here instead made the port report
+/// "identity unavailable" for every pid on Windows, so process-identity checks
+/// could never distinguish a live process from a recycled pid.
 fn get_process_start_id(pid: i64) -> Option<String> {
     if pid <= 0 {
         return None;
     }
     if process_platform() == "win32" {
-        return None;
+        return crate::core::session_lease::get_windows_process_start_id(pid, None);
     }
     if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
         if let Some(command_end) = stat.rfind(')') {

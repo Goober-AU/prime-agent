@@ -1375,9 +1375,13 @@ fn normalize_lexically(path: &Path) -> String {
                 prefix.push_str(&prefix_component.as_os_str().to_string_lossy());
             }
             Component::RootDir => {
-                if prefix.is_empty() {
-                    prefix.push('/');
-                }
+                // `Component::Prefix("C:")` followed by `Component::RootDir`
+                // is the single drive root "C:\". Pushing the root separator
+                // unconditionally keeps that root; the earlier `if prefix
+                // .is_empty()` test dropped it and produced "C:Users/...",
+                // a drive-relative path, so every caller failed with
+                // os error 3 (and "/tmp/registry" became "C:tmp/registry").
+                prefix.push('/');
             }
             Component::CurDir => {}
             Component::ParentDir => {
@@ -2558,5 +2562,63 @@ u_str  LISTEN 0      4096   /tmp/foreign.sock 1 * 0 users:((\"other-app\",pid=2,
         )
         .unwrap()
         .is_empty());
+    }
+    /// `Component::Prefix("C:")` followed by `Component::RootDir` is the single
+    /// drive root "C:\". Returns the path once the host has produced that shape
+    /// (None on a POSIX host, where "C:\..." has no Prefix component at all), so
+    /// the assertions below cannot silently pass on a path that never reaches the
+    /// RootDir arm.
+    fn drive_absolute_input(label: &str, raw: &str) -> Option<PathBuf> {
+        use std::path::Component;
+        let path = Path::new(raw);
+        if !matches!(path.components().next(), Some(Component::Prefix(_))) {
+            return None;
+        }
+        assert!(
+            path.components().any(|component| component == Component::RootDir),
+            "{raw:?} has a drive prefix but no RootDir component ({label})"
+        );
+        Some(path.to_path_buf())
+    }
+
+    /// The defect this pins: the old `if prefix.is_empty()` guard skipped the
+    /// root separator because `Prefix("C:")` had already filled `prefix`, so a
+    /// drive-absolute path collapsed to a DRIVE-RELATIVE one - "C:Users/x/registry"
+    /// instead of "C:/Users/x/registry", and a drive-rooted "/tmp/x" became
+    /// "C:tmp/x". Every downstream create_dir_all / open / lockfile then failed
+    /// with os error 3 ("The system cannot find the path specified").
+    #[test]
+    fn drive_roots_survive_the_lexical_collapse() {
+        // Checked on every host: a rooted path keeps its root separator.
+        let rooted = normalize_lexically(Path::new("/tmp/x"));
+        assert!(rooted.starts_with('/'), "root separator dropped: {rooted}");
+
+        let registry = match drive_absolute_input("registry", "C:\\Users\\x\\registry") {
+            Some(path) => path,
+            None => return,
+        };
+        let normalised = normalize_lexically(&registry);
+        assert!(normalised.starts_with("C:/"), "drive root dropped: {normalised}");
+        assert_eq!(normalised, "C:/Users/x/registry");
+
+        // `Path::join` keeps the drive when it appends the rooted POSIX spelling,
+        // which is exactly how a caller's resolve("/tmp/x") reaches this function.
+        let joined = drive_absolute_input("joined /tmp/x", "C:\\base")
+            .expect("C:\\base is drive-absolute")
+            .join("/tmp/x");
+        let normalised = normalize_lexically(&joined);
+        assert!(!normalised.starts_with("C:tmp"), "/tmp/x became drive-relative: {normalised}");
+        assert_eq!(normalised, "C:/tmp/x");
+
+        let dotted = drive_absolute_input("parent collapse", "C:\\Users\\x\\..\\y")
+            .expect("C:\\Users\\x\\..\\y is drive-absolute");
+        assert_eq!(normalize_lexically(&dotted), "C:/Users/y");
+
+        // Only the RootDir arm changed: a drive-RELATIVE input has no RootDir, so
+        // it must still come back rootless instead of gaining a "C:/" root.
+        let relative = Path::new("C:registry");
+        if !relative.components().any(|component| component == std::path::Component::RootDir) {
+            assert_eq!(normalize_lexically(relative), "C:registry");
+        }
     }
 }

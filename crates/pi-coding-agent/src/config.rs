@@ -976,9 +976,13 @@ fn normalize_lexically(path: &Path) -> String {
                 prefix.push_str(&prefix_component.as_os_str().to_string_lossy());
             }
             Component::RootDir => {
-                if prefix.is_empty() {
-                    prefix.push('/');
-                }
+                // `Component::Prefix("C:")` followed by `Component::RootDir`
+                // is the single drive root "C:\". Pushing the root separator
+                // unconditionally keeps that root; the earlier `if prefix
+                // .is_empty()` test dropped it and produced "C:Users/...",
+                // a drive-relative path, so every caller failed with
+                // os error 3 (and "/tmp/registry" became "C:tmp/registry").
+                prefix.push('/');
             }
             Component::CurDir => {}
             Component::ParentDir => {
@@ -1307,8 +1311,31 @@ mod tests {
 
     #[test]
     fn resolve_path_is_lexical_and_absolute_input_wins() {
-        assert_eq!(resolve_path("/a/./b/../c"), "/a/c");
+        let collapsed = resolve_path("/a/./b/../c");
+        assert!(collapsed.ends_with("/a/c"), "`.`/`..` were not collapsed: {collapsed}");
+        // A rootless "/a/..." input inherits the current drive on Windows, so the
+        // collapsed name must stay drive-ABSOLUTE. Asserting the plain POSIX
+        // "/a/c" only holds on a POSIX host.
+        let expected_root = if crate::utils::pi_user_agent::process_platform() == "win32" {
+            let drive = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| cwd.components().next().map(|component| component.as_os_str().to_string_lossy().to_string()))
+                .unwrap_or_default();
+            assert_eq!(collapsed, format!("{drive}/a/c"));
+            assert!(!collapsed.starts_with(&format!("{drive}a")), "drive root dropped: {collapsed}");
+            format!("{drive}/")
+        } else {
+            assert_eq!(collapsed, "/a/c");
+            "/".to_string()
+        };
+        // Absolute input wins, and a drive-rooted spelling keeps its root.
+        assert!(resolve_path("/a/./b/../c").starts_with(&expected_root));
         assert!(resolve_path("rel").ends_with("rel"));
+        assert!(
+            !resolve_path("C:\\tmp\\registry").starts_with("C:tmp"),
+            "drive root dropped: {}",
+            resolve_path("C:\\tmp\\registry")
+        );
     }
 
     #[test]
@@ -1345,5 +1372,63 @@ mod tests {
         assert!(!is_bun_binary());
         assert!(!is_bun_runtime());
         assert_eq!(detect_install_method(), detect_install_method());
+    }
+    /// `Component::Prefix("C:")` followed by `Component::RootDir` is the single
+    /// drive root "C:\". Returns the path once the host has produced that shape
+    /// (None on a POSIX host, where "C:\..." has no Prefix component at all), so
+    /// the assertions below cannot silently pass on a path that never reaches the
+    /// RootDir arm.
+    fn drive_absolute_input(label: &str, raw: &str) -> Option<PathBuf> {
+        use std::path::Component;
+        let path = Path::new(raw);
+        if !matches!(path.components().next(), Some(Component::Prefix(_))) {
+            return None;
+        }
+        assert!(
+            path.components().any(|component| component == Component::RootDir),
+            "{raw:?} has a drive prefix but no RootDir component ({label})"
+        );
+        Some(path.to_path_buf())
+    }
+
+    /// The defect this pins: the old `if prefix.is_empty()` guard skipped the
+    /// root separator because `Prefix("C:")` had already filled `prefix`, so a
+    /// drive-absolute path collapsed to a DRIVE-RELATIVE one - "C:Users/x/registry"
+    /// instead of "C:/Users/x/registry", and a drive-rooted "/tmp/x" became
+    /// "C:tmp/x". Every downstream create_dir_all / open / lockfile then failed
+    /// with os error 3 ("The system cannot find the path specified").
+    #[test]
+    fn drive_roots_survive_the_lexical_collapse() {
+        // Checked on every host: a rooted path keeps its root separator.
+        let rooted = normalize_lexically(Path::new("/tmp/x"));
+        assert!(rooted.starts_with('/'), "root separator dropped: {rooted}");
+
+        let registry = match drive_absolute_input("registry", "C:\\Users\\x\\registry") {
+            Some(path) => path,
+            None => return,
+        };
+        let normalised = normalize_lexically(&registry);
+        assert!(normalised.starts_with("C:/"), "drive root dropped: {normalised}");
+        assert_eq!(normalised, "C:/Users/x/registry");
+
+        // `Path::join` keeps the drive when it appends the rooted POSIX spelling,
+        // which is exactly how a caller's resolve("/tmp/x") reaches this function.
+        let joined = drive_absolute_input("joined /tmp/x", "C:\\base")
+            .expect("C:\\base is drive-absolute")
+            .join("/tmp/x");
+        let normalised = normalize_lexically(&joined);
+        assert!(!normalised.starts_with("C:tmp"), "/tmp/x became drive-relative: {normalised}");
+        assert_eq!(normalised, "C:/tmp/x");
+
+        let dotted = drive_absolute_input("parent collapse", "C:\\Users\\x\\..\\y")
+            .expect("C:\\Users\\x\\..\\y is drive-absolute");
+        assert_eq!(normalize_lexically(&dotted), "C:/Users/y");
+
+        // Only the RootDir arm changed: a drive-RELATIVE input has no RootDir, so
+        // it must still come back rootless instead of gaining a "C:/" root.
+        let relative = Path::new("C:registry");
+        if !relative.components().any(|component| component == std::path::Component::RootDir) {
+            assert_eq!(normalize_lexically(relative), "C:registry");
+        }
     }
 }
