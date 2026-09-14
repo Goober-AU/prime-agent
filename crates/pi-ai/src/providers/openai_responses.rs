@@ -872,12 +872,13 @@ mod tests {
 
     #[test]
     fn resolve_cache_retention_defaults_to_short() {
-        std::env::remove_var("PI_CACHE_RETENTION");
+        let mut env = crate::test_env::ScopedEnv::new();
+        env.remove("PI_CACHE_RETENTION");
         assert_eq!(resolve_cache_retention(None), "short");
         assert_eq!(resolve_cache_retention(Some(&"long".to_string())), "long");
-        std::env::set_var("PI_CACHE_RETENTION", "long");
+        env.set("PI_CACHE_RETENTION", "long");
         assert_eq!(resolve_cache_retention(None), "long");
-        std::env::remove_var("PI_CACHE_RETENTION");
+        env.remove("PI_CACHE_RETENTION");
     }
 
     #[test]
@@ -1177,9 +1178,11 @@ mod tests {
 
     #[test]
     fn create_client_requires_an_api_key() {
+        // Held for the whole body: `create_client` reads the process-global
+        // OPENAI_API_KEY, so a parallel test must not set it in between.
+        let mut env = crate::test_env::ScopedEnv::new();
         let model = model();
-        let previous = std::env::var("OPENAI_API_KEY").ok();
-        std::env::remove_var("OPENAI_API_KEY");
+        env.remove("OPENAI_API_KEY");
         let error = match create_client(&model, &Context::default(), Some(""), None, None, None) {
             Err(error) => error,
             Ok(_) => panic!("expected create_client to fail without an API key"),
@@ -1188,9 +1191,6 @@ mod tests {
             error,
             "OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument."
         );
-        if let Some(previous) = previous {
-            std::env::set_var("OPENAI_API_KEY", previous);
-        }
     }
 
     #[test]

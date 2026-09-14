@@ -19,5 +19,7 @@ pub mod prime_inference_model_catalog;
 pub mod providers;
 pub mod session_resources;
 pub mod stream;
+#[cfg(test)]
+pub(crate) mod test_env;
 pub mod types;
 pub mod utils;

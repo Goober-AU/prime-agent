@@ -2513,12 +2513,13 @@ mod tests {
 
 	#[test]
 	fn cache_retention_defaults_to_short_and_reads_the_env_override() {
+		let mut env = crate::test_env::ScopedEnv::new();
 		assert_eq!(resolve_cache_retention(None), "short");
 		assert_eq!(resolve_cache_retention(Some(&"long".to_string())), "long");
 
-		std::env::set_var("PI_CACHE_RETENTION", "long");
+		env.set("PI_CACHE_RETENTION", "long");
 		assert_eq!(resolve_cache_retention(None), "long");
-		std::env::remove_var("PI_CACHE_RETENTION");
+		env.remove("PI_CACHE_RETENTION");
 		assert_eq!(resolve_cache_retention(None), "short");
 	}
 
@@ -3186,6 +3187,7 @@ mod tests {
 
 	#[test]
 	fn create_client_branches_match_the_typescript_headers() {
+		let mut env = crate::test_env::ScopedEnv::new();
 		let mut copilot = test_model("github-copilot", "claude-sonnet-4-5");
 		copilot.base_url = "https://api.githubcopilot.com".to_string();
 		let created = create_client(
@@ -3238,9 +3240,9 @@ mod tests {
 
 		let mut cloudflare = test_model("cloudflare-ai-gateway", "claude-sonnet-4-5");
 		cloudflare.base_url = "https://gateway.ai.cloudflare.com/v1/{CLOUDFLARE_ACCOUNT_ID}/gw/anthropic".to_string();
-		std::env::set_var("CLOUDFLARE_ACCOUNT_ID", "acct");
+		env.set("CLOUDFLARE_ACCOUNT_ID", "acct");
 		let created = create_client(&cloudflare, "cf-key", true, false, None, None, None).unwrap();
-		std::env::remove_var("CLOUDFLARE_ACCOUNT_ID");
+		env.remove("CLOUDFLARE_ACCOUNT_ID");
 		assert!(!created.is_oauth_token);
 		let headers = created.client.headers.unwrap();
 		assert_eq!(created.client.base_url.as_deref(), Some("https://gateway.ai.cloudflare.com/v1/acct/gw/anthropic"));

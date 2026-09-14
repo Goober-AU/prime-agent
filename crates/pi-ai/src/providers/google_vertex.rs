@@ -1600,6 +1600,7 @@ mod tests {
 
 	#[test]
 	fn resolve_api_key_rejects_placeholders_and_markers() {
+		let mut env = crate::test_env::ScopedEnv::new();
 		let mut options = GoogleVertexOptions::from_base(&base_options());
 		options.stream.api_key = Some("  real-key  ".to_string());
 		assert_eq!(resolve_api_key(Some(&options)).as_deref(), Some("real-key"));
@@ -1611,15 +1612,16 @@ mod tests {
 		assert_eq!(resolve_api_key(Some(&options)), None);
 
 		options.stream.api_key = Some("   ".to_string());
-		std::env::remove_var("GOOGLE_CLOUD_API_KEY");
+		env.remove("GOOGLE_CLOUD_API_KEY");
 		assert_eq!(resolve_api_key(Some(&options)), None);
 	}
 
 	#[test]
 	fn resolve_project_and_location_error_messages_match() {
-		std::env::remove_var("GOOGLE_CLOUD_PROJECT");
-		std::env::remove_var("GCLOUD_PROJECT");
-		std::env::remove_var("GOOGLE_CLOUD_LOCATION");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.remove("GOOGLE_CLOUD_PROJECT");
+		env.remove("GCLOUD_PROJECT");
+		env.remove("GOOGLE_CLOUD_LOCATION");
 		let error = resolve_project(None).unwrap_err();
 		assert_eq!(
 			error.message(),
@@ -1631,12 +1633,12 @@ mod tests {
 			"Vertex AI requires a location. Set GOOGLE_CLOUD_LOCATION or pass location in options."
 		);
 
-		std::env::set_var("GCLOUD_PROJECT", "from-env");
+		env.set("GCLOUD_PROJECT", "from-env");
 		assert_eq!(resolve_project(None).unwrap(), "from-env");
-		std::env::remove_var("GCLOUD_PROJECT");
-		std::env::set_var("GOOGLE_CLOUD_LOCATION", "us-central1");
+		env.remove("GCLOUD_PROJECT");
+		env.set("GOOGLE_CLOUD_LOCATION", "us-central1");
 		assert_eq!(resolve_location(None).unwrap(), "us-central1");
-		std::env::remove_var("GOOGLE_CLOUD_LOCATION");
+		env.remove("GOOGLE_CLOUD_LOCATION");
 	}
 
 	#[test]
@@ -1662,6 +1664,7 @@ mod tests {
 
 	#[test]
 	fn request_headers_use_api_key_or_bearer_token() {
+		let mut env = crate::test_env::ScopedEnv::new();
 		let model = model("gemini-3-pro");
 		let client = create_client_with_api_key(&model, "secret", None).unwrap();
 		let headers = build_request_headers(&client);
@@ -1671,12 +1674,12 @@ mod tests {
 		assert_eq!(headers.get("x-goog-api-key").map(String::as_str), Some("secret"));
 		assert!(headers.get("Authorization").is_none());
 
-		std::env::set_var("GOOGLE_VERTEX_ACCESS_TOKEN", "adc-token");
+		env.set("GOOGLE_VERTEX_ACCESS_TOKEN", "adc-token");
 		let client = create_client(&model, "proj", "us-central1", None).unwrap();
 		let headers = build_request_headers(&client);
 		assert_eq!(headers.get("Authorization").map(String::as_str), Some("Bearer adc-token"));
 		assert!(headers.get("x-goog-api-key").is_none());
-		std::env::remove_var("GOOGLE_VERTEX_ACCESS_TOKEN");
+		env.remove("GOOGLE_VERTEX_ACCESS_TOKEN");
 	}
 
 	#[test]
@@ -1910,12 +1913,13 @@ mod tests {
 	/// panic on this path; a panic here would hang this test until its timeout.
 	#[tokio::test]
 	async fn stream_simple_google_vertex_reports_missing_configuration_through_the_stream() {
+		let mut env = crate::test_env::ScopedEnv::new();
 		if std::env::var("GOOGLE_CLOUD_API_KEY").is_ok() {
-			std::env::remove_var("GOOGLE_CLOUD_API_KEY");
+			env.remove("GOOGLE_CLOUD_API_KEY");
 		}
-		std::env::remove_var("GOOGLE_CLOUD_PROJECT");
-		std::env::remove_var("GCLOUD_PROJECT");
-		std::env::remove_var("GOOGLE_CLOUD_LOCATION");
+		env.remove("GOOGLE_CLOUD_PROJECT");
+		env.remove("GCLOUD_PROJECT");
+		env.remove("GOOGLE_CLOUD_LOCATION");
 		let model = model("gemini-3-pro");
 		let context = Context::new(None, vec![], None);
 		let stream = stream_simple_google_vertex(&model, &context, None);

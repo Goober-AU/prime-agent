@@ -3438,9 +3438,12 @@ mod tests {
 
 	/// Test-only serialization for the process-global `AWS_*` / proxy variables, shared with the
 	/// other pi-ai modules that read them.
+	///
+	/// The lock is the crate-wide one from [`crate::test_env`], so the `AWS_*` tests in
+	/// `env_api_keys.rs`, `bedrock_responses_client.rs` and `amazon_bedrock_responses.rs`
+	/// cannot interleave with this one.
 	struct BedrockClientEnv {
-		_guard: std::sync::MutexGuard<'static, ()>,
-		saved: Vec<(&'static str, Option<String>)>,
+		env: crate::test_env::ScopedEnv,
 	}
 
 	const BEDROCK_CLIENT_ENV_NAMES: [&str; 11] = [
@@ -3459,28 +3462,21 @@ mod tests {
 
 	impl BedrockClientEnv {
 		fn new() -> Self {
-			let guard = crate::providers::bedrock_responses_client::AWS_ENV_TEST_LOCK
-				.lock()
-				.unwrap_or_else(|poisoned| poisoned.into_inner());
-			let saved: Vec<(&'static str, Option<String>)> = BEDROCK_CLIENT_ENV_NAMES
-				.iter()
-				.map(|name| (*name, std::env::var(name).ok()))
-				.collect();
+			// ScopedEnv holds the process-wide environment lock for the whole test body and
+			// journals each previous value (or its absence) for restore on drop.
+			let mut env = crate::test_env::ScopedEnv::new();
 			for name in BEDROCK_CLIENT_ENV_NAMES {
-				std::env::remove_var(name);
+				env.remove(name);
 			}
-			Self { _guard: guard, saved }
+			Self { env }
 		}
-	}
 
-	impl Drop for BedrockClientEnv {
-		fn drop(&mut self) {
-			for (name, value) in &self.saved {
-				match value {
-					Some(value) => std::env::set_var(name, value),
-					None => std::env::remove_var(name),
-				}
-			}
+		/// Set `name` while the lock is held, journaled for restore on drop.
+		///
+		/// The only test that uses this guard writes `AWS_BEDROCK_FORCE_HTTP1` and
+		/// `HTTPS_PROXY`, so no `remove` helper is needed here.
+		fn set(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) {
+			self.env.set(name, value);
 		}
 	}
 
@@ -3513,7 +3509,7 @@ mod tests {
 
 	#[test]
 	fn aws_bedrock_force_http1_env_reaches_the_client_builder() {
-		let _env = BedrockClientEnv::new();
+		let mut env = BedrockClientEnv::new();
 		let model = model("global.anthropic.claude-opus-4-6-v1", "Claude Opus 4.6");
 
 		// No flag: the resolved config keeps HTTP/2 available.
@@ -3521,7 +3517,7 @@ mod tests {
 		assert!(!config.force_http1);
 		assert!(!format!("{:?}", bedrock_http_client_builder(&config)).contains("http1_only"));
 
-		std::env::set_var("AWS_BEDROCK_FORCE_HTTP1", "1");
+		env.set("AWS_BEDROCK_FORCE_HTTP1", "1");
 		let config = resolve_bedrock_client_config(&model, &BedrockOptions::default());
 		assert!(
 			config.force_http1,
@@ -3533,7 +3529,7 @@ mod tests {
 		);
 
 		// `else if` in the TypeScript: a proxy handler wins, so the flag is not applied.
-		std::env::set_var("HTTPS_PROXY", "http://proxy.example.com:3128");
+		env.set("HTTPS_PROXY", "http://proxy.example.com:3128");
 		let config = resolve_bedrock_client_config(&model, &BedrockOptions::default());
 		assert!(config.use_proxy_env);
 		assert!(!config.force_http1);

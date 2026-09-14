@@ -338,15 +338,18 @@ mod tests {
 
     #[test]
     fn anthropic_oauth_token_takes_precedence() {
-        std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "oauth-token");
-        std::env::set_var("ANTHROPIC_API_KEY", "api-key");
+        // Held for the whole body: these variables are read through the process-global
+        // environment, so a parallel test must not write them in between.
+        let mut env = crate::test_env::ScopedEnv::new();
+        env.set("ANTHROPIC_OAUTH_TOKEN", "oauth-token");
+        env.set("ANTHROPIC_API_KEY", "api-key");
         let keys = find_env_keys("anthropic").unwrap();
         assert_eq!(keys, vec!["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]);
         assert_eq!(get_env_api_key(&"anthropic".to_string()).as_deref(), Some("oauth-token"));
 
-        std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+        env.remove("ANTHROPIC_OAUTH_TOKEN");
         assert_eq!(get_env_api_key(&"anthropic".to_string()).as_deref(), Some("api-key"));
-        std::env::remove_var("ANTHROPIC_API_KEY");
+        env.remove("ANTHROPIC_API_KEY");
         assert_eq!(find_env_keys("anthropic"), None);
     }
 
@@ -362,9 +365,10 @@ mod tests {
     /// `HOME` / `USERPROFILE` are pointed at an empty directory so the `~/.aws/credentials` and
     /// `~/.aws/config` fallbacks inside `resolve_aws_credentials` cannot make the assertions depend
     /// on the machine the test runs on.
+    /// The lock is the crate-wide one from `crate::test_env`, so the `AWS_*` tests in
+    /// `bedrock_responses_client.rs` and `amazon_bedrock.rs` cannot interleave with this one.
     struct BedrockEnv {
-        _guard: std::sync::MutexGuard<'static, ()>,
-        saved: Vec<(&'static str, Option<String>)>,
+        env: crate::test_env::ScopedEnv,
         home: std::path::PathBuf,
     }
 
@@ -385,93 +389,90 @@ mod tests {
 
     impl BedrockEnv {
         fn new() -> Self {
-            let guard = crate::providers::bedrock_responses_client::AWS_ENV_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let saved: Vec<(&'static str, Option<String>)> = BEDROCK_ENV_NAMES
-                .iter()
-                .map(|name| (*name, std::env::var(name).ok()))
-                .collect();
+            // ScopedEnv takes the process-wide environment lock for the whole test body and
+            // journals each previous value (or its absence) for restore on drop.
+            let mut env = crate::test_env::ScopedEnv::new();
             for name in BEDROCK_ENV_NAMES {
-                std::env::remove_var(name);
+                env.remove(name);
             }
             let home = std::env::temp_dir().join("pi-env-api-keys-bedrock-home");
             let _ = std::fs::remove_dir_all(&home);
             std::fs::create_dir_all(&home).unwrap();
-            std::env::set_var("HOME", &home);
-            std::env::set_var("USERPROFILE", &home);
-            Self {
-                _guard: guard,
-                saved,
-                home,
-            }
+            env.set("HOME", &home);
+            env.set("USERPROFILE", &home);
+            Self { env, home }
+        }
+
+        /// Set `name` while the lock is held, journaled for restore on drop.
+        fn set(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) {
+            self.env.set(name, value);
+        }
+
+        /// Remove `name` while the lock is held, journaled for restore on drop.
+        fn remove(&mut self, name: &str) {
+            self.env.remove(name);
         }
     }
 
     impl Drop for BedrockEnv {
         fn drop(&mut self) {
-            for (name, value) in &self.saved {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
+            // The `env` field restores every variable (or its absence) after this.
             let _ = std::fs::remove_dir_all(&self.home);
         }
     }
 
     #[test]
     fn bedrock_credentials_report_authenticated() {
-        let _env = BedrockEnv::new();
+        let mut env = BedrockEnv::new();
 
         assert_eq!(get_env_api_key(&"amazon-bedrock".to_string()), None);
 
         // A bare `AWS_PROFILE` is no longer enough: the marker must not claim a credential the
         // port cannot resolve (`resolve_aws_credentials` fails with "Could not load credentials
         // from any providers" when the profile has no readable static keys).
-        std::env::set_var("AWS_PROFILE", "default");
+        env.set("AWS_PROFILE", "default");
         assert_eq!(
             get_env_api_key(&"amazon-bedrock".to_string()),
             None,
             "a profile name alone is not a usable credential"
         );
-        std::env::remove_var("AWS_PROFILE");
+        env.remove("AWS_PROFILE");
 
         // The sources the port really signs with are advertised.
-        std::env::set_var("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE");
-        std::env::set_var("AWS_SECRET_ACCESS_KEY", "secret");
+        env.set("AWS_ACCESS_KEY_ID", "AKIAEXAMPLE");
+        env.set("AWS_SECRET_ACCESS_KEY", "secret");
         assert_eq!(
             get_env_api_key(&"amazon-bedrock".to_string()).as_deref(),
             Some("<authenticated>")
         );
-        std::env::remove_var("AWS_ACCESS_KEY_ID");
-        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+        env.remove("AWS_ACCESS_KEY_ID");
+        env.remove("AWS_SECRET_ACCESS_KEY");
 
-        std::env::set_var("AWS_BEARER_TOKEN_BEDROCK", "bedrock-bearer");
+        env.set("AWS_BEARER_TOKEN_BEDROCK", "bedrock-bearer");
         assert_eq!(
             get_env_api_key(&"amazon-bedrock".to_string()).as_deref(),
             Some("<authenticated>")
         );
-        std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK");
+        env.remove("AWS_BEARER_TOKEN_BEDROCK");
 
         // A profile file the port can read counts.
         let dir = std::env::temp_dir().join("pi-env-api-keys-bedrock-profile");
         std::fs::create_dir_all(&dir).unwrap();
         let credentials = dir.join("credentials");
         std::fs::write(&credentials, "[default]\naws_access_key_id = AKIAFILE\naws_secret_access_key = filesecret\n").unwrap();
-        std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &credentials);
+        env.set("AWS_SHARED_CREDENTIALS_FILE", &credentials);
         assert_eq!(
             get_env_api_key(&"amazon-bedrock".to_string()).as_deref(),
             Some("<authenticated>"),
             "a readable profile file is a source the port implements"
         );
-        std::env::remove_var("AWS_SHARED_CREDENTIALS_FILE");
+        env.remove("AWS_SHARED_CREDENTIALS_FILE");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn bedrock_authenticated_marker_skips_the_unimplemented_aws_sdk_sources() {
-        let _env = BedrockEnv::new();
+        let mut env = BedrockEnv::new();
 
         // The SDK default chain sources below need IMDS / ECS / STS / SSO / a child process.
         // None of them exists in this port, so the marker must stay absent: the real failure would
@@ -482,7 +483,7 @@ mod tests {
             ("AWS_CONTAINER_CREDENTIALS_FULL_URI", "http://169.254.170.2/v2/credentials"),
             ("AWS_WEB_IDENTITY_TOKEN_FILE", "/var/run/aws/token"),
         ] {
-            std::env::set_var(name, value);
+            env.set(name, value);
             assert_eq!(
                 get_env_api_key(&"amazon-bedrock".to_string()),
                 None,
@@ -496,7 +497,7 @@ mod tests {
                 true,
                 "{name} really cannot be resolved by the port"
             );
-            std::env::remove_var(name);
+            env.remove(name);
         }
     }
 }

@@ -116,17 +116,19 @@ mod tests {
 
 	#[test]
 	fn resolve_substitutes_environment_variables() {
-		std::env::set_var("CLOUDFLARE_ACCOUNT_ID_TEST_ONLY", "acct");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.set("CLOUDFLARE_ACCOUNT_ID_TEST_ONLY", "acct");
 		let resolved =
 			resolve_cloudflare_base_url(&model("cloudflare-workers-ai", "https://x/{CLOUDFLARE_ACCOUNT_ID_TEST_ONLY}/v1"))
 				.unwrap();
 		assert_eq!(resolved, "https://x/acct/v1");
-		std::env::remove_var("CLOUDFLARE_ACCOUNT_ID_TEST_ONLY");
+		env.remove("CLOUDFLARE_ACCOUNT_ID_TEST_ONLY");
 	}
 
 	#[test]
 	fn resolve_errors_when_variable_missing() {
-		std::env::remove_var("CLOUDFLARE_MISSING_TEST_ONLY");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.remove("CLOUDFLARE_MISSING_TEST_ONLY");
 		let error =
 			resolve_cloudflare_base_url(&model("cloudflare-ai-gateway", "https://x/{CLOUDFLARE_MISSING_TEST_ONLY}/v1"))
 				.unwrap_err();

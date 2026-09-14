@@ -3454,7 +3454,8 @@ mod tests {
 
     #[test]
     fn create_codex_request_id_has_the_fallback_shape() {
-        std::env::remove_var("CODEX_REQUEST_ID_UUID_V4");
+        let mut env = crate::test_env::ScopedEnv::new();
+        env.remove("CODEX_REQUEST_ID_UUID_V4");
         let id = create_codex_request_id();
         assert!(id.starts_with("codex_"));
         assert_eq!(id.split('_').count(), 3);
@@ -3463,7 +3464,8 @@ mod tests {
 
     #[test]
     fn stream_requires_an_api_key_and_reports_it_in_the_stream() {
-        std::env::remove_var("OPENAI_API_KEY");
+        let mut env = crate::test_env::ScopedEnv::new();
+        env.remove("OPENAI_API_KEY");
         let model = model();
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let result = runtime.block_on(async {
@@ -3641,7 +3643,8 @@ mod tests {
 
     #[test]
     fn stream_simple_reports_a_missing_api_key_in_the_stream() {
-        std::env::remove_var("OPENAI_API_KEY");
+        let mut env = crate::test_env::ScopedEnv::new();
+        env.remove("OPENAI_API_KEY");
         let model = model();
         // openai-codex-responses.ts:350-352 throws "No API key for provider: ..." before the
         // stream starts; the port delivers that message through the stream's terminal error

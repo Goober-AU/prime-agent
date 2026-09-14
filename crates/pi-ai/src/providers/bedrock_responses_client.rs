@@ -450,8 +450,14 @@ pub async fn send_signed_responses_request(
 /// The transport tests in this module and the run-body tests in `amazon_bedrock_responses.rs`
 /// both observe the process-global `AWS_*` variables, so they must share one lock. Tests only:
 /// no production code touches this.
+///
+/// The lock itself lives in `crate::test_env`, which every `AWS_*`-writing test in this crate
+/// takes; `amazon_bedrock_responses.rs` holds it directly and the writing tests of this module
+/// hold it through `CleanAwsEnv`.
 #[cfg(test)]
-pub(crate) static AWS_ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) fn aws_env_test_lock() -> &'static std::sync::Mutex<()> {
+	crate::test_env::env_lock()
+}
 
 /// The boxed response byte stream used by `responses_event_stream`.
 pub type BedrockByteStream =
@@ -654,9 +660,12 @@ mod tests {
 
 	/// The client reads `AWS_*` environment variables; tests that touch them must not run
 	/// concurrently with tests that depend on them.
+	///
+	/// The lock is the crate-wide one from [`crate::test_env`], so this also serialises the
+	/// `AWS_*` tests in `env_api_keys.rs`, `amazon_bedrock.rs` and
+	/// `amazon_bedrock_responses.rs`; a per-module lock would still let those interleave.
 	struct CleanAwsEnv {
-		_guard: std::sync::MutexGuard<'static, ()>,
-		saved: Vec<(&'static str, Option<String>)>,
+		env: crate::test_env::ScopedEnv,
 	}
 
 	const AWS_ENV_NAMES: [&str; 7] = [
@@ -669,37 +678,25 @@ mod tests {
 		"AWS_SECRET_ACCESS_KEY",
 	];
 
-	fn env_lock() -> &'static std::sync::Mutex<()> {
-		&AWS_ENV_TEST_LOCK
-	}
-
 	impl CleanAwsEnv {
 		fn new() -> Self {
-			let guard = env_lock()
-				.lock()
-				.unwrap_or_else(|poisoned| poisoned.into_inner());
-			let saved: Vec<(&'static str, Option<String>)> = AWS_ENV_NAMES
-				.iter()
-				.map(|name| (*name, std::env::var(name).ok()))
-				.collect();
+			// ScopedEnv holds the process-wide environment lock for the whole test body and
+			// journals each previous value (or its absence) for restore on drop.
+			let mut env = crate::test_env::ScopedEnv::new();
 			for name in AWS_ENV_NAMES {
-				std::env::remove_var(name);
+				env.remove(name);
 			}
-			Self {
-				_guard: guard,
-				saved,
-			}
+			Self { env }
 		}
-	}
 
-	impl Drop for CleanAwsEnv {
-		fn drop(&mut self) {
-			for (name, value) in &self.saved {
-				match value {
-					Some(value) => std::env::set_var(name, value),
-					None => std::env::remove_var(name),
-				}
-			}
+		/// Set `name` while the lock is held, journaled for restore on drop.
+		fn set(&mut self, name: &str, value: impl AsRef<std::ffi::OsStr>) {
+			self.env.set(name, value);
+		}
+
+		/// Remove `name` while the lock is held, journaled for restore on drop.
+		fn remove(&mut self, name: &str) {
+			self.env.remove(name);
 		}
 	}
 
@@ -755,9 +752,9 @@ mod tests {
 
 	#[test]
 	fn signing_region_comes_from_option_endpoint_or_env() {
-		let _env = CleanAwsEnv::new();
-		std::env::remove_var("AWS_REGION");
-		std::env::remove_var("AWS_DEFAULT_REGION");
+		let mut env = CleanAwsEnv::new();
+		env.remove("AWS_REGION");
+		env.remove("AWS_DEFAULT_REGION");
 
 		let mut options = BedrockResponsesAuthOptions::default();
 		options.region = Some("eu-west-1".to_string());
@@ -841,8 +838,8 @@ mod tests {
 
 	#[test]
 	fn bearer_token_and_explicit_credentials_are_mutually_exclusive() {
-		let _env = CleanAwsEnv::new();
-		std::env::remove_var("AWS_BEARER_TOKEN_BEDROCK");
+		let mut env = CleanAwsEnv::new();
+		env.remove("AWS_BEARER_TOKEN_BEDROCK");
 		let mut options = BedrockResponsesAuthOptions::default();
 		options.stream.api_key = Some("token".to_string());
 		options.profile = Some("profile".to_string());
@@ -901,8 +898,8 @@ mod tests {
 
 	#[test]
 	fn base_url_env_override_wins_over_the_model() {
-		let _env = CleanAwsEnv::new();
-		std::env::set_var("AWS_BEDROCK_BASE_URL", "  https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1  ");
+		let mut env = CleanAwsEnv::new();
+		env.set("AWS_BEDROCK_BASE_URL", "  https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1  ");
 		let client = create_bedrock_responses_client(
 			&model("global.openai.gpt-6-astra", "https://bedrock-runtime.us-west-2.amazonaws.com/openai/v1"),
 			None,
@@ -913,7 +910,7 @@ mod tests {
 			"https://bedrock-runtime.eu-central-1.amazonaws.com/openai/v1"
 		);
 		assert_eq!(client.signer.as_ref().unwrap().region, "eu-central-1");
-		std::env::remove_var("AWS_BEDROCK_BASE_URL");
+		env.remove("AWS_BEDROCK_BASE_URL");
 	}
 
 	#[test]

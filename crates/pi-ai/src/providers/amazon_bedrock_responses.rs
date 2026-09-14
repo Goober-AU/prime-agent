@@ -767,7 +767,9 @@ mod tests {
 	fn http_error_status_ends_the_run_as_an_error_not_an_empty_answer() {
 		// Held for the whole test, so it must not be an async test: a std lock guard live
 		// across an `.await` is exactly what the client module's env guards avoid too.
-		let _env = crate::providers::bedrock_responses_client::AWS_ENV_TEST_LOCK
+		// This is the crate-wide `AWS_*` lock, so a client test that writes
+		// `AWS_BEDROCK_BASE_URL` cannot land between this test's request and its read.
+		let _env = crate::providers::bedrock_responses_client::aws_env_test_lock()
 			.lock()
 			.unwrap_or_else(|poisoned| poisoned.into_inner());
 		let runtime = tokio::runtime::Builder::new_current_thread()

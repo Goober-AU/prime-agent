@@ -3642,8 +3642,9 @@ mod message_tests {
 
 	#[test]
 	fn client_requires_an_api_key() {
+		let mut env = crate::test_env::ScopedEnv::new();
 		let model = base_model();
-		std::env::remove_var("OPENAI_API_KEY");
+		env.remove("OPENAI_API_KEY");
 		let compat = get_compat(&model);
 		let error = create_client(&model, &context(vec![]), Some(""), None, None, &compat, None).unwrap_err();
 		assert_eq!(
@@ -3689,16 +3690,17 @@ mod message_tests {
 
 	#[test]
 	fn client_adds_prime_team_header() {
+		let mut env = crate::test_env::ScopedEnv::new();
 		let mut model = base_model();
 		model.provider = "prime-inference".to_string();
-		std::env::set_var("PRIME_TEAM_ID", "team-1");
+		env.set("PRIME_TEAM_ID", "team-1");
 		let compat = get_compat(&model);
 		let client = create_client(&model, &context(vec![]), Some("key"), None, None, &compat, None).expect("client");
 		assert_eq!(
 			client.default_headers.get("X-Prime-Team-ID"),
 			Some(&Some("team-1".to_string()))
 		);
-		std::env::remove_var("PRIME_TEAM_ID");
+		env.remove("PRIME_TEAM_ID");
 	}
 
 	#[test]
@@ -3717,12 +3719,13 @@ mod message_tests {
 
 	#[test]
 	fn resolve_cache_retention_prefers_the_explicit_value() {
-		std::env::remove_var("PI_CACHE_RETENTION");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.remove("PI_CACHE_RETENTION");
 		assert_eq!(resolve_cache_retention(None), "short");
 		assert_eq!(resolve_cache_retention(Some(&"none".to_string())), "none");
-		std::env::set_var("PI_CACHE_RETENTION", "long");
+		env.set("PI_CACHE_RETENTION", "long");
 		assert_eq!(resolve_cache_retention(None), "long");
-		std::env::remove_var("PI_CACHE_RETENTION");
+		env.remove("PI_CACHE_RETENTION");
 	}
 
 	#[test]

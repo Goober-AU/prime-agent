@@ -2205,7 +2205,8 @@ mod tests {
 	/// event instead of panicking (a panic would abort the whole process).
 	#[tokio::test]
 	async fn stream_simple_mistral_reports_a_missing_api_key_through_the_stream() {
-		std::env::remove_var("MISTRAL_API_KEY");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.remove("MISTRAL_API_KEY");
 		let model = model("mistral-large-latest");
 		let context = Context::new(None, vec![], None);
 		let stream = stream_simple_mistral(&model, &context, None);

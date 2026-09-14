@@ -742,7 +742,8 @@ mod tests {
 
 	#[test]
 	fn resolve_deployment_name_prefers_option_then_env_then_model() {
-		std::env::set_var("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", "model-1=deploy-env");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.set("AZURE_OPENAI_DEPLOYMENT_NAME_MAP", "model-1=deploy-env");
 		let target = model("azure-openai-responses", "model-1", "https://example.openai.azure.com");
 		assert_eq!(resolve_deployment_name(&target, None), "deploy-env");
 
@@ -754,7 +755,7 @@ mod tests {
 
 		let other = model("azure-openai-responses", "unknown-model", "https://example.openai.azure.com");
 		assert_eq!(resolve_deployment_name(&other, None), "unknown-model");
-		std::env::remove_var("AZURE_OPENAI_DEPLOYMENT_NAME_MAP");
+		env.remove("AZURE_OPENAI_DEPLOYMENT_NAME_MAP");
 	}
 
 	#[test]
@@ -803,9 +804,10 @@ mod tests {
 
 	#[test]
 	fn resolve_azure_config_precedence() {
-		std::env::remove_var("AZURE_OPENAI_BASE_URL");
-		std::env::remove_var("AZURE_OPENAI_RESOURCE_NAME");
-		std::env::remove_var("AZURE_OPENAI_API_VERSION");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.remove("AZURE_OPENAI_BASE_URL");
+		env.remove("AZURE_OPENAI_RESOURCE_NAME");
+		env.remove("AZURE_OPENAI_API_VERSION");
 
 		let model = model("azure-openai-responses", "m", "https://model.openai.azure.com");
 		let (base_url, api_version) = resolve_azure_config(&model, None).unwrap();
@@ -831,45 +833,34 @@ mod tests {
 
 	#[test]
 	fn resolve_azure_config_treats_empty_env_values_as_absent() {
+		// Held for the whole body: these values are read through the process-global
+		// environment, so a parallel test must not write them in between.
+		let mut env = crate::test_env::ScopedEnv::new();
 		// `azure-openai-responses.ts:184` `||` and `:187` `||` treat an EMPTY env var as
 		// falsy, so an empty AZURE_OPENAI_API_VERSION falls back to "v1" and an empty
 		// AZURE_OPENAI_RESOURCE_NAME must not produce `https://.openai.azure.com/openai/v1`.
-		let saved_version = std::env::var("AZURE_OPENAI_API_VERSION").ok();
-		let saved_resource = std::env::var("AZURE_OPENAI_RESOURCE_NAME").ok();
-		std::env::set_var("AZURE_OPENAI_API_VERSION", "");
-		std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", "");
+		env.set("AZURE_OPENAI_API_VERSION", "");
+		env.set("AZURE_OPENAI_RESOURCE_NAME", "");
 
 		let configured = model("azure-openai-responses", "m", "https://model.openai.azure.com");
 		let (base_url, api_version) = resolve_azure_config(&configured, None).unwrap();
 		assert_eq!(api_version, DEFAULT_AZURE_API_VERSION);
 		assert_eq!(base_url, "https://model.openai.azure.com/openai/v1");
 
-		let saved_base = std::env::var("AZURE_OPENAI_BASE_URL").ok();
-		std::env::remove_var("AZURE_OPENAI_BASE_URL");
+		env.remove("AZURE_OPENAI_BASE_URL");
 		let no_base = model("azure-openai-responses", "m", "");
 		assert!(
 			resolve_azure_config(&no_base, None).is_err(),
 			"an empty resource name must not be treated as a configured resource"
 		);
 
-		match saved_version {
-			Some(value) => std::env::set_var("AZURE_OPENAI_API_VERSION", value),
-			None => std::env::remove_var("AZURE_OPENAI_API_VERSION"),
-		}
-		match saved_resource {
-			Some(value) => std::env::set_var("AZURE_OPENAI_RESOURCE_NAME", value),
-			None => std::env::remove_var("AZURE_OPENAI_RESOURCE_NAME"),
-		}
-		match saved_base {
-			Some(value) => std::env::set_var("AZURE_OPENAI_BASE_URL", value),
-			None => std::env::remove_var("AZURE_OPENAI_BASE_URL"),
-		}
 	}
 
 	#[test]
 	fn resolve_azure_config_errors_without_any_base_url() {
-		std::env::remove_var("AZURE_OPENAI_BASE_URL");
-		std::env::remove_var("AZURE_OPENAI_RESOURCE_NAME");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.remove("AZURE_OPENAI_BASE_URL");
+		env.remove("AZURE_OPENAI_RESOURCE_NAME");
 		let model = model("azure-openai-responses", "m", "");
 		let error = resolve_azure_config(&model, None).unwrap_err();
 		assert_eq!(
@@ -880,7 +871,8 @@ mod tests {
 
 	#[test]
 	fn create_client_requires_api_key() {
-		std::env::remove_var("AZURE_OPENAI_API_KEY");
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.remove("AZURE_OPENAI_API_KEY");
 		let model = model("azure-openai-responses", "m", "https://res.openai.azure.com");
 		let error = create_client(&model, "", None).unwrap_err();
 		assert_eq!(
@@ -893,8 +885,9 @@ mod tests {
 	fn create_client_merges_model_and_option_headers() {
 		// `azure-openai-responses.ts:184` reads AZURE_OPENAI_API_VERSION, so this test is
 		// deterministic only when the ambient value is cleared (same assertions either way).
-		let saved_api_version = std::env::var("AZURE_OPENAI_API_VERSION").ok();
-		std::env::remove_var("AZURE_OPENAI_API_VERSION");
+		// Held for the whole body, so a parallel test cannot set it in between.
+		let mut env = crate::test_env::ScopedEnv::new();
+		env.remove("AZURE_OPENAI_API_VERSION");
 		let mut model = model("azure-openai-responses", "m", "https://res.openai.azure.com");
 		let mut model_headers = IndexMap::new();
 		model_headers.insert("X-Model".to_string(), "1".to_string());
@@ -914,10 +907,6 @@ mod tests {
 		assert_eq!(client.api_version, "v1");
 		assert_eq!(client.default_headers.get("X-Model").map(String::as_str), Some("1"));
 		assert_eq!(client.default_headers.get("X-Option").map(String::as_str), Some("2"));
-		match saved_api_version {
-			Some(value) => std::env::set_var("AZURE_OPENAI_API_VERSION", value),
-			None => std::env::remove_var("AZURE_OPENAI_API_VERSION"),
-		}
 	}
 
 	#[test]
