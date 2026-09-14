@@ -744,6 +744,12 @@ impl TUI {
             Some(overlay) => overlay,
             None => return,
         };
+        // TS `isFocused()` reads `focusedComponent === component` live
+        // (packages/tui/src/tui.ts:499), so a popped overlay can never report
+        // focus again. The Rust handle mirrors that bit in a shared cell, so the
+        // pop must clear it exactly like the `sync_overlays` removal path does
+        // (tui.rs:657); otherwise the dismissed handle claims focus forever.
+        overlay.shared.focused.set(false);
         if self.is_focused_component(&overlay.component) {
             // Find topmost visible overlay, or fall back to preFocus
             let top_visible = self
@@ -824,7 +830,15 @@ impl TUI {
         })
     }
 
-    fn is_fullscreen_overlay_focused(&self) -> bool {
+    /// Port of `isFullscreenOverlayFocused` (packages/tui/src/tui.ts:549-551):
+    /// `this.overlayStack.some((entry) => entry.component === this.focusedComponent)`.
+    ///
+    /// This - not `has_overlay()` - is the predicate the TypeScript viewport gate
+    /// uses (`overlayFocused || !fullscreen.viewportControls`,
+    /// packages/tui/src/tui.ts:1004). A visible NON-capturing overlay never takes
+    /// focus (tui.ts:439), so it must not block viewport keys; only a focused
+    /// overlay does.
+    pub fn is_fullscreen_overlay_focused(&self) -> bool {
         match &self.focused_component {
             Some(focused) => self
                 .overlay_stack
@@ -3304,6 +3318,147 @@ mod tests {
         let position = tui.extract_cursor_position(&mut emoji, 24).unwrap();
         assert_eq!(position.col, 2);
         assert_eq!(emoji, vec!["\u{1F600}tail".to_string()]);
+    }
+
+    /// TS `hideOverlay` pops the entry and restores focus
+    /// (packages/tui/src/tui.ts:504-516). `isFocused()` reads
+    /// `focusedComponent === component` live (tui.ts:499), so after the pop the
+    /// dismissed handle can never report focus again. The Rust handle mirrors the
+    /// bit in a shared cell, so `hide_overlay` must clear it like the
+    /// `sync_overlays` removal path (tui.rs:657) does.
+    ///
+    /// Teeth: without `overlay.shared.focused.set(false)`, the final assertion
+    /// fails with "a popped overlay must not stay focused".
+    #[test]
+    fn hide_overlay_clears_the_stale_handle_focus_bit() {
+        let mut tui = TUI::new(Box::new(FakeTerminal::new(80, 24)), Some(false));
+        let base = Rc::new(RefCell::new(FocusableLine {
+            text: "base",
+            focused: false,
+        })) as Rc<RefCell<dyn Component>>;
+        tui.add_child(base.clone());
+        tui.set_focus(Some(base.clone()));
+        let overlay_component = Rc::new(RefCell::new(Line("picker"))) as Rc<RefCell<dyn Component>>;
+        let handle = tui.show_overlay(overlay_component.clone(), OverlayOptions::default());
+        tui.sync_overlays();
+        assert!(handle.is_focused(), "precondition: the overlay took focus");
+        assert!(tui.is_fullscreen_overlay_focused());
+
+        // The TUI-level pop: `hideOverlay()` (packages/tui/src/tui.ts:504).
+        tui.hide_overlay();
+
+        assert!(
+            !handle.is_focused(),
+            "a popped overlay must not stay focused"
+        );
+        assert!(
+            !tui.is_fullscreen_overlay_focused(),
+            "focus must fall back to preFocus, not a removed component"
+        );
+        assert!(
+            base.borrow_mut()
+                .as_focusable()
+                .expect("base is focusable")
+                .focused(),
+            "preFocus must receive the focus the popped overlay handed back"
+        );
+        assert!(!tui.has_overlay(), "the entry left the stack");
+        // `hideOverlay` ends with `syncFullscreenMouseTracking()` +
+        // `requestRender()` (packages/tui/src/tui.ts:514-515), so the frame that
+        // drops the overlay is already scheduled when the pop returns.
+        assert!(
+            tui.render_requested(),
+            "hiding an overlay must schedule a repaint"
+        );
+        // The bit is shared with the entry, which is gone; a second pop is a no-op.
+        tui.hide_overlay();
+        assert!(!handle.is_focused());
+    }
+
+    /// The TypeScript viewport gate is `overlayFocused || !fullscreen.viewportControls`
+    /// (packages/tui/src/tui.ts:1004), NOT `hasOverlay()`. A visible non-capturing
+    /// overlay never takes focus (`if (!options?.nonCapturing && ...) this.setFocus`,
+    /// tui.ts:439), like the editor's autocomplete dropdown
+    /// (packages/tui/src/components/editor.ts:2352). So it must not block the
+    /// transcript viewport keys: PageUp still scrolls while the dropdown paints.
+    ///
+    /// Teeth: with the host gate's old `!has_overlay()` predicate - or with
+    /// `overlay_focused` broadened to `has_overlay()` - the PageUp assertion fails
+    /// with lines_above == 0 (the key was swallowed).
+    #[test]
+    fn a_non_capturing_overlay_does_not_block_viewport_keys() {
+        let terminal = Rc::new(RefCell::new(FakeTerminal::new(20, 5)));
+        let mut tui = TUI::new(Box::new(SharedTerminal(terminal.clone())), Some(false));
+        let scroll: Vec<Rc<RefCell<dyn Component>>> = (0..12)
+            .map(|_| Rc::new(RefCell::new(Line("line"))) as Rc<RefCell<dyn Component>>)
+            .collect();
+        let dock = Rc::new(RefCell::new(Line("dock"))) as Rc<RefCell<dyn Component>>;
+        tui.enter_fullscreen(FullscreenOptions {
+            scroll,
+            dock,
+            mouse: true,
+            viewport_controls: true,
+        });
+        tui.do_render();
+        assert!(tui.get_scroll_info().unwrap().following);
+
+        // The autocomplete dropdown's shape: visible, non-capturing, never focused.
+        let dropdown = Rc::new(RefCell::new(Line("SUGGESTION"))) as Rc<RefCell<dyn Component>>;
+        let handle = tui.show_overlay(
+            dropdown,
+            OverlayOptions {
+                non_capturing: true,
+                ..OverlayOptions::default()
+            },
+        );
+        assert!(tui.has_overlay(), "precondition: the dropdown is visible");
+        assert!(!handle.is_focused(), "non-capturing takes no focus");
+        assert!(
+            !tui.is_fullscreen_overlay_focused(),
+            "the host gate must read false here so viewport_input stays enabled"
+        );
+
+        // PageUp must reach `handle_fullscreen_input`'s viewport branch.
+        assert!(tui.handle_fullscreen_input("\x1b[5~"));
+        let info = tui.get_scroll_info().unwrap();
+        assert!(
+            !info.following && info.lines_above > 0,
+            "PageUp must scroll while a non-capturing overlay is visible: {info:?}"
+        );
+    }
+
+    /// The focused-overlay half of the same gate: when a capturing overlay DOES
+    /// take focus it keeps its own PageUp, so the transcript must not move
+    /// (packages/tui/src/tui.ts:1004, `overlayFocused`).
+    #[test]
+    fn a_focused_capturing_overlay_keeps_the_viewport_keys() {
+        let terminal = Rc::new(RefCell::new(FakeTerminal::new(20, 5)));
+        let mut tui = TUI::new(Box::new(SharedTerminal(terminal.clone())), Some(false));
+        let scroll: Vec<Rc<RefCell<dyn Component>>> = (0..12)
+            .map(|_| Rc::new(RefCell::new(Line("line"))) as Rc<RefCell<dyn Component>>)
+            .collect();
+        let dock = Rc::new(RefCell::new(Line("dock"))) as Rc<RefCell<dyn Component>>;
+        tui.enter_fullscreen(FullscreenOptions {
+            scroll,
+            dock,
+            mouse: true,
+            viewport_controls: true,
+        });
+        tui.do_render();
+        let lines_above = tui.get_scroll_info().unwrap().lines_above;
+
+        let picker = Rc::new(RefCell::new(Line("picker"))) as Rc<RefCell<dyn Component>>;
+        let handle = tui.show_overlay(picker, OverlayOptions::default());
+        tui.sync_overlays();
+        assert!(handle.is_focused(), "a capturing overlay takes focus");
+        assert!(tui.is_fullscreen_overlay_focused());
+
+        assert!(!tui.handle_fullscreen_input("\x1b[5~"));
+        assert_eq!(
+            tui.get_scroll_info().unwrap().lines_above,
+            lines_above,
+            "a focused overlay keeps PageUp for its own list"
+        );
     }
 
     /// Same contract for the `aboveMarker` strip in `composite_overlays`
