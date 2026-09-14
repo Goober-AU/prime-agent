@@ -375,7 +375,12 @@ mod tests {
     fn host_drive() -> String {
         std::env::current_dir()
             .ok()
-            .and_then(|cwd| cwd.components().next().map(|component| component.as_os_str().to_string_lossy().to_string()))
+            .and_then(|cwd| match cwd.components().next() {
+                Some(std::path::Component::Prefix(prefix)) => {
+                    Some(prefix.as_os_str().to_string_lossy().to_string())
+                }
+                _ => None,
+            })
             .unwrap_or_default()
     }
 

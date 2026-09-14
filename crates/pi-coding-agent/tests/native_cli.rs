@@ -149,10 +149,10 @@ struct PrivateCli {
 }
 impl PrivateCli {
     fn new(base_url: &str) -> Self {
-        let scratch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.port-env/tmp");
-        fs::create_dir_all(&scratch).unwrap();
-        // Unix socket paths have a small platform limit; remove crate-relative segments.
-        let scratch = scratch.canonicalize().unwrap();
+        // Keep the fixture independent of checkout depth: the daemon also puts
+        // worker sockets under this root's tmp directory. Deep checkout paths
+        // can exceed sockaddr_un's limit before a session is created.
+        let scratch = std::env::temp_dir().canonicalize().unwrap();
         let root = tempfile::Builder::new()
             .prefix("native-cli-")
             .tempdir_in(scratch)

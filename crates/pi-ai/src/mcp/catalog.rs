@@ -110,6 +110,7 @@ mod tests {
 
     #[test]
     fn registers_mcp_oauth_providers_idempotently() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         register_builtin_mcp_oauth_providers();
         assert!(get_oauth_provider("mcp:linear").is_some());

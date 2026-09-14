@@ -823,14 +823,9 @@ mod tests {
         })
         .await;
 
-        // Outbox entries live under `getAgentDir()`, which agent_traces.rs resolves
-        // from the home directory (agent_traces.rs:974-987). Only entries naming this
-        // temp session file are touched.
-        let outbox_dir = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".prime")
-            .join("agent")
-            .join("agent-traces-outbox");
+        // Follow the same configured profile as agent-traces.ts; the test runner
+        // deliberately hides the real home directory behind an isolated profile.
+        let outbox_dir = Path::new(&get_agent_dir()).join("agent-traces-outbox");
         let ledger_path = crate::core::semantic_edges::semantic_edge_ledger_path(
             None,
             session_manager

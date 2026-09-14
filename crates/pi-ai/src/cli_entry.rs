@@ -278,6 +278,7 @@ mod tests {
 
     #[tokio::test]
     async fn help_output_lists_providers() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         // The help path prints and returns 0 without touching stdin.
         assert_eq!(main_with_args(&["--help".to_string()]).await, 0);
@@ -287,12 +288,14 @@ mod tests {
 
     #[tokio::test]
     async fn list_command_succeeds() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         assert_eq!(main_with_args(&["list".to_string()]).await, 0);
     }
 
     #[tokio::test]
     async fn unknown_command_and_provider_exit_one() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         assert_eq!(main_with_args(&["bogus".to_string()]).await, 1);
         assert_eq!(main_with_args(&["login".to_string(), "nope".to_string()]).await, 1);
@@ -390,6 +393,7 @@ mod tests {
     /// success.
     #[tokio::test]
     async fn failed_auth_save_exits_non_zero_and_reports_the_error() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         register_oauth_provider(test_provider(|_| {
             Box::pin(async {
@@ -420,6 +424,7 @@ mod tests {
     /// cli.ts:130-133 - the login rejection surfaces as `Error: <err.message>`.
     #[tokio::test]
     async fn failed_login_reports_the_error_message_not_the_provider_id() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         register_oauth_provider(test_provider(|_| {
             Box::pin(async { Err("provider said no".to_string()) })

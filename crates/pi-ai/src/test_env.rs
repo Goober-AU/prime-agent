@@ -101,3 +101,29 @@ impl Drop for ScopedEnv {
         }
     }
 }
+
+/// Holds the OAuth registry stable across CLI and catalog tests, including awaits.
+pub(crate) struct ScopedOAuthProviders {
+    _lock: MutexGuard<'static, ()>,
+    previous: Vec<crate::utils::oauth::OAuthProviderInterface>,
+}
+
+impl ScopedOAuthProviders {
+    pub(crate) fn new() -> Self {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self {
+            _lock: lock,
+            previous: crate::utils::oauth::get_oauth_providers(),
+        }
+    }
+}
+
+impl Drop for ScopedOAuthProviders {
+    fn drop(&mut self) {
+        crate::utils::oauth::reset_oauth_providers();
+        for provider in self.previous.drain(..) {
+            crate::utils::oauth::register_oauth_provider(provider);
+        }
+    }
+}

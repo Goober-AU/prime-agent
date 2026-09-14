@@ -27,6 +27,7 @@
 		"prepublishOnly": "npm run clean && npm run build && npm run check",
 		"publish": "npm run prepublishOnly && npm publish -ws --access public",
 		"publish:dry": "npm run prepublishOnly && npm publish -ws --access public --dry-run",
+		"release:pack": "node scripts/pack-prime-agent-release.mjs",
 		"release:patch": "node scripts/release.mjs patch",
 		"release:minor": "node scripts/release.mjs minor",
 		"release:major": "node scripts/release.mjs major",
@@ -49,7 +50,7 @@
 	},
 	"version": "0.1.0",
 	"dependencies": {
-		"@earendil-works/pi-coding-agent": "^0.9.3",
+		"@earendil-works/pi-coding-agent": "^0.1.0",
 		"get-east-asian-width": "^1.6.0"
 	},
 	"overrides": {

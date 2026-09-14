@@ -1,0 +1,83 @@
+Rust main readiness: all final checks passed
+Rust workspace: 3088 passed, 0 failed, 0 ignored; 4 test threads
+pi-ai parallel stress: 20 x 668 tests at 8 threads passed
+Cron timezone regression: Australia/Melbourne, America/New_York, UTC passed
+cargo check: 0 errors; 676 warning diagnostics including lib/test duplicates
+
+test-build.log
+   Compiling pi-ai v0.1.0 (/home/anthony/optimus-rust-main/crates/pi-ai)
+   Compiling pi-agent-core v0.1.0 (/home/anthony/optimus-rust-main/crates/pi-agent-core)
+   Compiling pi-coding-agent v0.1.0 (/home/anthony/optimus-rust-main/crates/pi-coding-agent)
+    Finished `test` profile [unoptimized] target(s) in 4m 26s
+
+check-final.log
+    Checking pi-ai v0.1.0 (/home/anthony/optimus-rust-main/crates/pi-ai)
+    Checking pi-agent-core v0.1.0 (/home/anthony/optimus-rust-main/crates/pi-agent-core)
+    Checking pi-coding-agent v0.1.0 (/home/anthony/optimus-rust-main/crates/pi-coding-agent)
+    Finished `dev` profile [unoptimized] target(s) in 1m 59s
+
+test-run.log
+Running native_cli
+{"name":"native_cli","exitCode":0,"signal":null,"seconds":0.567,"summaries":["ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s"]}
+Running pi_coding_agent
+{"name":"pi_coding_agent","exitCode":0,"signal":null,"seconds":22.227,"summaries":["ok. 2165 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.19s"]}
+Running pi_tui
+{"name":"pi_tui","exitCode":0,"signal":null,"seconds":0.271,"summaries":["ok. 217 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s"]}
+Running pi_agent_core
+{"name":"pi_agent_core","exitCode":0,"signal":null,"seconds":0.022,"summaries":["ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"]}
+Running pi_ai
+{"name":"pi_ai","exitCode":0,"signal":null,"seconds":0.187,"summaries":["ok. 668 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s"]}
+
+terminal-smoke.log
+80x24 chat started
+Escape interrupted the in-flight HTTP response
+Typed prompt, HTTP response rendering, quit and terminal restoration passed
+Roster open, conversation navigation and exit passed
+
+kernel-smoke.log
+stage: first execute
+update: [Text(TextContent { type_: "text", text: "Starting Python kernel...", text_signature: None })]
+update: [Text(TextContent { type_: "text", text: "Preparing Python runtime...", text_signature: None })]
+update: [Text(TextContent { type_: "text", text: "hello €", text_signature: None })]
+update: [Text(TextContent { type_: "text", text: "\n", text_signature: None })]
+stage: persistent execute
+stage: host request
+stage: namespace listing
+stage: shutdown
+Rust default ipython factory: startup, Unicode output, persistent namespace, local host request, namespace query, and shutdown passed
+
+npm-check-final.log
+
+> prime-agent@0.1.0 check
+> biome check --write --error-on-warnings . && tsgo --noEmit && npm run check:installer && npm run check:browser-smoke
+
+Checked 1072 files in 3s. No fixes applied.
+
+> prime-agent@0.1.0 check:installer
+> node scripts/check-installer.mjs
+
+Installer check passed.
+
+> prime-agent@0.1.0 check:browser-smoke
+> node scripts/check-browser-smoke.mjs
+
+
+typescript-release-tests.log
+
+ RUN  v4.1.10 /home/anthony/optimus-rust-main/packages/coding-agent
+
+ ✓ test/builtin-skills.test.ts (22 tests) 214ms
+ ✓ test/release-pack.test.ts (3 tests) 6487ms
+     ✓ packs 'main' assets with resolvable internal dependencies and matching checksums  2831ms
+     ✓ packs 'stable' assets with resolvable internal dependencies and matching checksums  2209ms
+     ✓ packs 'beta' assets with resolvable internal dependencies and matching checksums  1445ms
+
+ Test Files  2 passed (2)
+      Tests  25 passed (25)
+   Start at  13:03:52
+   Duration  6.70s (transform 1.49s, setup 0ms, import 2.88s, tests 6.70s, environment 0ms)
+
+
+cron-typescript-reference.log
+{"zone":"Australia/Melbourne","start":"Thu Mar 05 2026 08:30:00 GMT+1100 (Australian Eastern Daylight Time)","result":{"schedule":{"kind":"cron","expression":"0 9 * * *"},"nextRunAt":"2026-03-04T22:00:00.000Z"}}
+{"zone":"Australia/Melbourne","start":"Sun Jul 05 2026 08:30:00 GMT+1000 (Australian Eastern Standard Time)","result":{"schedule":{"kind":"cron","expression":"0 9 * * *"},"nextRunAt":"2026-07-04T23:00:00.000Z"}}

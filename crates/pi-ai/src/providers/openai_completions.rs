@@ -1547,7 +1547,19 @@ async fn read_sse_data(
 			let _ = sender.send(Err(abort_error()));
 			return;
 		}
-		let chunk = match response.chunk().await {
+		// The SDK's AbortSignal also cancels a pending body read. Checking only
+		// between chunks leaves a stalled stream holding its connection open.
+		let next_chunk = match signal.as_ref() {
+			Some(signal) => tokio::select! {
+				chunk = response.chunk() => chunk,
+				_ = signal.cancelled() => {
+					let _ = sender.send(Err(abort_error()));
+					return;
+				}
+			},
+			None => response.chunk().await,
+		};
+		let chunk = match next_chunk {
 			Ok(Some(chunk)) => chunk,
 			Ok(None) => break,
 			Err(error) => {
@@ -2498,6 +2510,74 @@ mod tests {
 			socket.flush().await.unwrap();
 		});
 		(address, server)
+	}
+
+	#[tokio::test]
+	async fn cancellation_closes_a_stalled_stream_and_preserves_partial_output() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			loop {
+				let mut buffer = [0u8; 4096];
+				let count = socket.read(&mut buffer).await.unwrap();
+				assert_ne!(count, 0, "client closed before sending the request");
+				request.extend_from_slice(&buffer[..count]);
+				if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+					let headers = std::str::from_utf8(&request[..end]).unwrap();
+					let length = headers
+						.lines()
+						.filter_map(|line| line.split_once(':'))
+						.find(|(key, _)| key.eq_ignore_ascii_case("content-length"))
+						.map(|(_, value)| value.trim().parse::<usize>().unwrap())
+						.unwrap();
+					if request.len() >= end + 4 + length {
+						break;
+					}
+				}
+			}
+			let body = "data: {\"choices\":[{\"delta\":{\"content\":\"partial text\"}}]}\n\n";
+			let response = format!(
+				"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n",
+				body.len()
+			);
+			socket.write_all(response.as_bytes()).await.unwrap();
+			socket.flush().await.unwrap();
+			// Keep the body open without another chunk or [DONE]. Cancellation must
+			// release the connection without requiring further provider activity.
+			let mut buffer = [0u8; 1];
+			assert_eq!(socket.read(&mut buffer).await.unwrap(), 0);
+		});
+		let mut model = base_model();
+		model.base_url = format!("http://{address}");
+		let signal = tokio_util::sync::CancellationToken::new();
+		let mut options = keyed_options();
+		options.stream.signal = Some(signal.clone());
+		let stream = stream_openai_completions(&model, &context(vec![user_text("hi")]), Some(options));
+		let mut aborted = false;
+		while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+			.await
+			.expect("stalled stream did not respond to cancellation")
+		{
+			match event {
+				AssistantMessageEvent::TextDelta { .. } => signal.cancel(),
+				AssistantMessageEvent::Error { reason, error } => {
+					assert_eq!(reason, "aborted");
+					assert_eq!(error.stop_reason, "aborted");
+					assert_eq!(error.content, vec![ContentBlock::Text(TextContent::new("partial text"))]);
+					aborted = true;
+				}
+				AssistantMessageEvent::Done { .. } => panic!("cancelled stream reported success"),
+				_ => {}
+			}
+		}
+		assert!(aborted);
+		tokio::time::timeout(std::time::Duration::from_secs(5), server)
+			.await
+			.expect("cancelled stream kept the HTTP connection open")
+			.unwrap();
 	}
 
 	#[tokio::test]

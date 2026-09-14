@@ -23,7 +23,9 @@ fn next_cleanup_id() -> usize {
 }
 
 /// `registerSessionResourceCleanup(cleanup)` - returns the unregister function.
-pub fn register_session_resource_cleanup(cleanup: SessionResourceCleanup) -> Box<dyn Fn() + Send + Sync> {
+pub fn register_session_resource_cleanup(
+    cleanup: SessionResourceCleanup,
+) -> Box<dyn Fn() + Send + Sync> {
     let id = next_cleanup_id();
     {
         let mut registry = cleanup_registry()
@@ -56,7 +58,10 @@ pub fn cleanup_session_resources(session_id: Option<&str>) -> Result<(), String>
         let registry = cleanup_registry()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        registry.iter().map(|(_, cleanup)| cleanup.clone()).collect()
+        registry
+            .iter()
+            .map(|(_, cleanup)| cleanup.clone())
+            .collect()
     };
     let mut errors: Vec<String> = Vec::new();
     for cleanup in cleanups {
@@ -84,22 +89,36 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    struct RegisteredCleanup(Box<dyn Fn() + Send + Sync>);
+    impl Drop for RegisteredCleanup {
+        fn drop(&mut self) {
+            (self.0)();
+        }
+    }
+
     #[test]
     fn cleanups_run_in_registration_order_and_unregister() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let calls: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let first = calls.clone();
-        let unregister_first = register_session_resource_cleanup(Arc::new(move |session_id| {
-            first
-                .lock()
-                .unwrap()
-                .push(format!("first:{:?}", session_id));
-        }));
+        let unregister_first = RegisteredCleanup(register_session_resource_cleanup(Arc::new(
+            move |session_id| {
+                first
+                    .lock()
+                    .unwrap()
+                    .push(format!("first:{:?}", session_id));
+            },
+        )));
         let second = calls.clone();
-        register_session_resource_cleanup(Arc::new(move |_session_id| {
-            second.lock().unwrap().push("second".to_string());
-        }));
+        let _second = RegisteredCleanup(register_session_resource_cleanup(Arc::new(
+            move |_session_id| {
+                second.lock().unwrap().push("second".to_string());
+            },
+        )));
 
-        unregister_first();
+        (unregister_first.0)();
         cleanup_session_resources(Some("session-1")).unwrap();
 
         let recorded = calls.lock().unwrap().clone();
@@ -108,12 +127,13 @@ mod tests {
 
     #[test]
     fn failing_cleanup_is_reported() {
+        let _lock = TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let counter = Arc::new(AtomicUsize::new(0));
         let seen = counter.clone();
-        register_session_resource_cleanup(Arc::new(move |_| {
+        let _failing = RegisteredCleanup(register_session_resource_cleanup(Arc::new(move |_| {
             seen.fetch_add(1, Ordering::SeqCst);
             panic!("cleanup failed");
-        }));
+        })));
         let error = cleanup_session_resources(None).unwrap_err();
         assert!(error.starts_with("Failed to cleanup session resources:"));
         assert!(error.contains("cleanup failed"));

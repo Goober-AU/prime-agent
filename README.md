@@ -17,7 +17,7 @@ Optimus began as a fork of Prime Agent. It is now developing its own direction: 
 | Area | Current position |
 | --- | --- |
 | Main implementation | TypeScript/Node.js harness with a Python execution runtime |
-| Rust implementation | Active development on a separate branch; not yet a validated replacement for `main` |
+| Rust implementation | Available on `main` as the opt-in `optimus-rust` executable; remaining parity gaps are documented |
 | Platforms | macOS, Linux, and native Windows; Windows currently requires a Bash shell such as Git Bash |
 | Memory | Session, project, and global harness memory, with optional selected sharing; authoritative project storage is JSON |
 | TencentDB-backed memory | An intended integration direction, not an implemented backend in the current `main` branch |
@@ -134,7 +134,7 @@ See [Telegram setup and recovery](https://github.com/telemusai/optimus-agent/blo
 
 ## The Rust migration
 
-Optimus is being ported from its TypeScript application layer to Rust in a separate development branch. This is a substantial implementation effort, not a claim that the current `main` branch is already a Rust application.
+The Rust application port is included on `main` alongside the TypeScript reference. Build and run it as `optimus-rust`; the existing `prime-agent.sh` launcher continues to run TypeScript.
 
 The Rust workspace is organized around four components:
 
@@ -149,9 +149,29 @@ The Python execution environment remains part of the design. Moving the harness 
 
 The objectives are clearer ownership, predictable concurrency, lower host overhead, and native deployment while preserving the existing behavioral contracts. Compilation alone does not establish parity: session recovery, compaction checkpoints, provider behavior, skills, and process cleanup still need runtime validation.
 
-Follow the [Rust development branch](https://github.com/telemusai/optimus-agent/tree/fix/rust-cli-runtime). Treat it as development work, use an isolated profile, and do not point it at your only copy of production sessions. No blanket speedup or token-saving claim is made for the migration.
+See [Rust validation and remaining gaps](docs/RUST_MAIN_READINESS.md) for the verified paths and known limitations. Use an isolated profile while evaluating the port. No blanket speedup or token-saving claim is made for the migration.
 
 ## Get started
+
+### Rust implementation
+
+From a checkout of this repository, build with Cargo:
+
+```bash
+cargo build --locked -p pi-coding-agent --bin optimus-rust
+./target/debug/optimus-rust --help
+./target/debug/optimus-rust --version
+```
+
+For a separate development profile on macOS/Linux:
+
+```bash
+mkdir -p .port-env/agent
+PRIME_AGENT_CODING_AGENT_DIR="$PWD/.port-env/agent" \
+  ./target/debug/optimus-rust --daemon-socket /tmp/optimus-dev-$UID.sock
+```
+
+Configure providers with `/login` and `/model`. Keep the checkout available for the Python runtime and bundled resources; copying the executable alone is not a complete installation. See the [validation notes](docs/RUST_MAIN_READINESS.md) for toolchain details and Windows validation limits.
 
 ### Current TypeScript implementation
 

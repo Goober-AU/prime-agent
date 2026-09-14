@@ -2992,7 +2992,7 @@ fn civil_from_millis(millis: f64) -> CivilComponents {
 /// `Date.getTimezoneOffset()`, which the TypeScript never calls because it reads local getters).
 fn local_offset_millis(millis: f64) -> f64 {
     use chrono::TimeZone as _;
-    match chrono::Local.timestamp_opt(millis.floor() as i64, 0) {
+    match chrono::Local.timestamp_millis_opt(millis.floor() as i64) {
         chrono::LocalResult::Single(value) | chrono::LocalResult::Ambiguous(value, _) => {
             chrono::Offset::fix(value.offset()).local_minus_utc() as f64 * 1000.0
         }
@@ -3523,20 +3523,22 @@ mod tests {
     fn cron_matches_the_local_clock_not_utc() {
         // `0 9 * * *` at local 09:00 (cron-jobs.ts:1369-1373 walks local Date getters).
         use chrono::TimeZone as _;
-        let start = chrono::Local
-            .with_ymd_and_hms(2026, 3, 5, 8, 30, 0)
-            .single()
-            .expect("local 08:30 exists");
-        let next = next_cron_run_after("0 9 * * *", start.timestamp_millis() as f64).unwrap();
-        let next_local = chrono::Local
-            .timestamp_opt((next / 1000.0) as i64, 0)
-            .single()
-            .expect("local timestamp");
-        assert_eq!(
-            next_local.format("%Y-%m-%d %H:%M").to_string(),
-            "2026-03-05 09:00",
-            "the cron schedule fired at the wrong wall-clock time"
-        );
+        for month in [3, 7] {
+            let start = chrono::Local
+                .with_ymd_and_hms(2026, month, 5, 8, 30, 0)
+                .single()
+                .expect("local 08:30 exists");
+            let next = next_cron_run_after("0 9 * * *", start.timestamp_millis() as f64).unwrap();
+            let next_local = chrono::Local
+                .timestamp_millis_opt(next as i64)
+                .single()
+                .expect("local timestamp");
+            assert_eq!(
+                next_local.format("%Y-%m-%d %H:%M").to_string(),
+                format!("2026-{month:02}-05 09:00"),
+                "the cron schedule fired at the wrong wall-clock time"
+            );
+        }
     }
 
     #[test]

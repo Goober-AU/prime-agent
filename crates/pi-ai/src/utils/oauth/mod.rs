@@ -314,6 +314,7 @@ mod tests {
 
     #[test]
     fn built_in_providers_are_registered() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         let ids: Vec<String> = get_oauth_providers().into_iter().map(|provider| provider.id).collect();
         assert!(ids.contains(&"anthropic".to_string()));
@@ -324,6 +325,7 @@ mod tests {
 
     #[test]
     fn unregister_restores_built_in_and_drops_custom() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         let custom = OAuthProviderInterface {
             id: "custom".to_string(),
@@ -348,6 +350,7 @@ mod tests {
 
     #[test]
     fn provider_info_list_reports_available() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         let list = get_oauth_provider_info_list();
         assert!(list.iter().all(|info| info.available));
@@ -356,6 +359,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_oauth_api_key_returns_none_without_credentials() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         let credentials = HashMap::new();
         assert!(get_oauth_api_key("anthropic", &credentials).await.unwrap().is_none());
@@ -363,6 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_oauth_api_key_uses_stored_credentials_when_unexpired() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         reset_oauth_providers();
         let mut credentials = HashMap::new();
         credentials.insert(
@@ -381,6 +386,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_provider_errors() {
+        let _providers = crate::test_env::ScopedOAuthProviders::new();
         let credentials = HashMap::new();
         assert_eq!(
             get_oauth_api_key("nope", &credentials).await.unwrap_err(),
