@@ -1,0 +1,13 @@
+{
+  "slice": "rust-model-selector",
+  "files": [
+    "README.md",
+    "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+    "scripts/optimus-rust",
+    "docs/RUST_LAUNCHER.md",
+    "evidence/status/rust-model-selector.json",
+    "packages/coding-agent/.changes/rust-model-selector.md"
+  ],
+  "purpose": "Connect the rendered TypeScript-equivalent model picker to the native TUI and document the installed optimus-rust launcher"
+}

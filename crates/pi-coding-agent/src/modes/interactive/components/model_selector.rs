@@ -1,16 +1,15 @@
 //! Port of packages/coding-agent/src/modes/interactive/components/model-selector.ts
 //!
-//! PARTIAL: the component's chrome (`MenuPanel`, `MenuList`, `MenuRow`,
-//! `MenuSearchInput`) is owned by components/menu-panel.ts ->
-//! `super::menu_panel` and `shouldTreatAsBack` by components/modal-back.ts ->
-//! `super::modal_back`. Every free function and every scoring/sorting/layout
-//! decision of this file is ported 1:1 against those real modules.
+//! Uses the shared menu components for the same search, rows and responsive
+//! layout as the TypeScript model picker.
 
 use pi_ai::types::Model;
+use pi_tui::components::{spacer::Spacer, text::Text};
 use pi_tui::fuzzy::fuzzy_match;
-use pi_tui::tui::Component as _;
 use pi_tui::keybindings::get_keybindings;
+use pi_tui::tui::{Component, Focusable};
 use serde_json::Value;
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::core::model_registry::ModelRegistry;
@@ -18,13 +17,14 @@ use crate::modes::interactive::theme::theme::theme;
 
 use super::keybinding_hints::{key_hint, KeyTextOptions};
 use super::menu_panel::{
-    get_menu_list_layout, MenuListLayout, MenuListLayoutOptions, MenuViewportProvider,
+    get_menu_list_layout, MenuList, MenuListLayout, MenuListLayoutOptions, MenuPanel,
+    MenuPanelOptions, MenuRow, MenuRowOptions, MenuSearchInput, MenuViewportProvider,
 };
 use super::modal_back::{should_treat_as_back, BackGuardInput};
 
 /// Adapter that exposes the model filter's cursor column to `modalBack`'s
 /// `BackGuardInput` guard (components/modal-back.ts).
-struct SearchInputCursor<'a>(&'a pi_tui::components::input::Input);
+struct SearchInputCursor<'a>(&'a MenuSearchInput);
 
 impl BackGuardInput for SearchInputCursor<'_> {
     fn get_cursor(&self) -> usize {
@@ -207,6 +207,7 @@ pub struct ModelSelectorOptions {
     pub subtitle: Option<String>,
     pub get_rows: Option<Rc<dyn Fn() -> f64>>,
     pub recent_models: Option<Vec<String>>,
+    pub initial_search_input: Option<String>,
 }
 
 /// `type ModelScope = "all" | "scoped"`
@@ -312,7 +313,7 @@ pub struct ModelSelectorComponent {
     pub subtitle: Option<String>,
     pub rows_requested: bool,
     /// `MenuSearchInput` state (its `Input` component and the last visible slice).
-    pub search_input: pi_tui::components::input::Input,
+    pub search_input: Rc<RefCell<MenuSearchInput>>,
     pub visible_range: (usize, usize),
     /// Set when the user cancelled (`onCancelCallback`).
     pub cancelled: bool,
@@ -340,6 +341,7 @@ impl ModelSelectorComponent {
             .enumerate()
             .map(|(index, key)| (key, index))
             .collect();
+        let initial_search = options.initial_search_input.clone().unwrap_or_default();
         let header_rows = options.header_rows;
         let has_header = header_rows.is_some();
         let mut component = Self {
@@ -374,7 +376,7 @@ impl ModelSelectorComponent {
             has_header,
             subtitle: options.subtitle,
             rows_requested: false,
-            search_input: pi_tui::components::input::Input::new(),
+            search_input: Rc::new(RefCell::new(MenuSearchInput::new("Search models".into()))),
             visible_range: (0, 0),
             cancelled: false,
             selected_model: None,
@@ -387,12 +389,7 @@ impl ModelSelectorComponent {
             ..Default::default()
         });
         component.load_models();
-        if !component.search_input.get_value().is_empty() {
-            let query = component.search_input.get_value().to_string();
-            component.filter_models(&query);
-        } else {
-            component.update_list();
-        }
+        component.set_search_value(initial_search);
         component
     }
 
@@ -415,7 +412,7 @@ impl ModelSelectorComponent {
         self.current_model = current_model;
         self.available_models = available_models;
         self.configured_providers = configured_providers;
-        let query = self.search_input.get_value().to_string();
+        let query = self.search_input.borrow().get_value();
         let selected_key = self.get_selected_model_key();
 
         self.load_models();
@@ -525,7 +522,7 @@ impl ModelSelectorComponent {
     }
 
     fn recent_rank_of(&self, item: &ModelItem) -> usize {
-        // Finite sentinel so subtracting two non-recent ranks yields 0, not NaN.
+        // Unseen models sort after every recorded recent model.
         self.recent_rank
             .get(&format!("{}/{}", item.provider, item.id))
             .copied()
@@ -556,9 +553,9 @@ impl ModelSelectorComponent {
                     std::cmp::Ordering::Greater
                 };
             }
-            let rank_diff = self.recent_rank_of(a) as i64 - self.recent_rank_of(b) as i64;
-            if rank_diff != 0 {
-                return rank_diff.cmp(&0);
+            let rank_order = self.recent_rank_of(a).cmp(&self.recent_rank_of(b));
+            if rank_order != std::cmp::Ordering::Equal {
+                return rank_order;
             }
             let provider_diff = a.provider.cmp(&b.provider);
             if provider_diff != std::cmp::Ordering::Equal {
@@ -620,7 +617,7 @@ impl ModelSelectorComponent {
             .iter()
             .position(|item| models_are_equal(self.current_model.as_ref(), Some(&item.model)));
         self.selected_index = current_index.unwrap_or(0);
-        let query = self.search_input.get_value().to_string();
+        let query = self.search_input.borrow().get_value();
         self.filter_models(&query);
     }
 
@@ -741,14 +738,17 @@ impl ModelSelectorComponent {
         }
         // Escape / Ctrl+C, or left arrow when the search field is at its start
         else if kb.matches(key_data, "tui.select.cancel")
-            || should_treat_as_back(key_data, Some(&SearchInputCursor(&self.search_input)))
+            || should_treat_as_back(
+                key_data,
+                Some(&SearchInputCursor(&self.search_input.borrow())),
+            )
         {
             self.cancelled = true;
         }
         // Pass everything else to search input
         else {
-            self.search_input.handle_input(key_data);
-            let value = self.search_input.get_value().to_string();
+            self.search_input.borrow_mut().handle_input(key_data);
+            let value = self.search_input.borrow().get_value();
             self.filter_models(&value);
         }
     }
@@ -843,23 +843,157 @@ impl ModelSelectorComponent {
     }
 
     /// Port of `getSearchInput()`.
-    pub fn search_input(&self) -> &pi_tui::components::input::Input {
-        &self.search_input
+    pub fn search_input(&self) -> Rc<RefCell<MenuSearchInput>> {
+        self.search_input.clone()
     }
 
-    /// Port of `getSearchInput().getValue()`.
-    pub fn get_search_value(&self) -> &str {
-        self.search_input.get_value()
+    pub fn get_search_value(&self) -> String {
+        self.search_input.borrow().get_value()
     }
 
-    /// Port of `getSearchInput().setValue(value)`.
     pub fn set_search_value(&mut self, value: impl Into<String>) {
-        self.search_input.set_value(value.into());
+        let value = value.into();
+        self.search_input.borrow_mut().set_value(&value);
+        self.filter_models(&value);
     }
 
-    /// Port of `getSearchInput().getCursor()`.
     pub fn get_cursor(&self) -> usize {
-        self.search_input.get_cursor()
+        self.search_input.borrow().get_cursor()
+    }
+}
+
+impl Component for ModelSelectorComponent {
+    fn render(&mut self, width: f64) -> Vec<String> {
+        self.update_list();
+        let mut panel = MenuPanel::new(MenuPanelOptions {
+            title: "Models".into(),
+            subtitle: Some(
+                self.subtitle
+                    .clone()
+                    .unwrap_or_else(|| "All models across supported providers.".into()),
+            ),
+        });
+        if self.should_show_header_help() {
+            let help = if self.scoped_model_items.is_empty() {
+                theme().fg(
+                    "muted",
+                    "Signed-in providers first. Other models prompt sign-in.",
+                )
+            } else {
+                format!("{}\n{}", self.get_scope_text(), self.get_scope_hint_text())
+            };
+            panel.add_child(Rc::new(RefCell::new(Text::new(help, 0, 0, None))));
+            panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+        }
+        panel.add_full_width_child(self.search_input.clone());
+        panel.add_child(Rc::new(RefCell::new(Spacer::new(1))));
+        let compact = self.list_layout.compact;
+        let mut list = MenuList::new(Some(Box::new(move || compact)));
+        let (start, end) = self.visible_range;
+        for (index, item) in self
+            .filtered_models
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(start)
+        {
+            let current = models_are_equal(self.current_model.as_ref(), Some(&item.model));
+            let meta = if self.is_provider_configured(item) {
+                current.then(|| theme().fg("success", "current"))
+            } else {
+                Some(theme().fg(
+                    "warning",
+                    if current {
+                        "current · sign in"
+                    } else {
+                        "sign in"
+                    },
+                ))
+            };
+            list.add_row(Rc::new(RefCell::new(MenuRow::new(MenuRowOptions {
+                primary: item.id.clone(),
+                secondary: Some(item.provider.clone()),
+                meta,
+                selected: index == self.selected_index,
+            }))));
+        }
+        if start > 0 || end < self.filtered_models.len() {
+            list.add_child(
+                Rc::new(RefCell::new(Text::new(
+                    theme().fg(
+                        "muted",
+                        &format!(
+                            "  ({}/{})",
+                            self.selected_index + 1,
+                            self.filtered_models.len()
+                        ),
+                    ),
+                    0,
+                    0,
+                    None,
+                ))),
+                false,
+            );
+        }
+        if let Some(error) = &self.error_message {
+            for line in error.lines() {
+                list.add_child(
+                    Rc::new(RefCell::new(Text::new(
+                        theme().fg("error", line),
+                        0,
+                        0,
+                        None,
+                    ))),
+                    false,
+                );
+            }
+        } else if self.filtered_models.is_empty() {
+            list.add_child(
+                Rc::new(RefCell::new(Text::new(
+                    theme().fg("muted", "No matching models"),
+                    0,
+                    0,
+                    None,
+                ))),
+                false,
+            );
+        } else if self.should_show_selected_details() {
+            if let Some(selected) = self.filtered_models.get(self.selected_index) {
+                list.add_child(Rc::new(RefCell::new(Spacer::new(1))), false);
+                list.add_child(
+                    Rc::new(RefCell::new(Text::new(
+                        theme().fg("muted", &selected.model.name),
+                        0,
+                        0,
+                        None,
+                    ))),
+                    false,
+                );
+            }
+        }
+        panel.add_full_width_child(Rc::new(RefCell::new(list)));
+        panel.render(width)
+    }
+
+    fn handle_input(&mut self, data: &str) {
+        ModelSelectorComponent::handle_input(self, data);
+    }
+
+    fn invalidate(&mut self) {
+        self.search_input.borrow_mut().invalidate();
+    }
+
+    fn as_focusable(&mut self) -> Option<&mut dyn Focusable> {
+        Some(self)
+    }
+}
+
+impl Focusable for ModelSelectorComponent {
+    fn focused(&self) -> bool {
+        self.search_input.borrow().focused()
+    }
+    fn set_focused(&mut self, focused: bool) {
+        self.search_input.borrow_mut().set_focused(focused);
     }
 }
 
@@ -1042,5 +1176,182 @@ mod tests {
         selector.selected_index = 0;
         selector.handle_input("\u{1b}[A");
         assert_eq!(selector.selected_index, 1);
+    }
+
+    fn picker(models: Vec<ModelItemModel>) -> ModelSelectorComponent {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        ModelSelectorComponent::new(
+            None,
+            vec![],
+            ModelSelectorOptions {
+                available_models: Some(models),
+                configured_providers: Some(vec!["signed".into()]),
+                get_rows: Some(Rc::new(|| 24.0)),
+                ..Default::default()
+            },
+        )
+    }
+
+    #[test]
+    fn rendered_picker_supports_search_focus_confirmation_and_empty_results() {
+        let mut selector = picker(vec![
+            item("signed", "alpha", "Alpha model").model,
+            item("other", "beta", "Beta model").model,
+        ]);
+        selector.set_focused(true);
+        let lines = selector.render(80.0);
+        let text = pi_tui::utils::strip_ansi(&lines.join("\n"));
+        assert!(text.contains("Models"));
+        assert!(text.contains("Signed-in providers first"));
+        assert!(text.contains("sign in"));
+        assert!(lines.join("\n").contains(pi_tui::tui::CURSOR_MARKER));
+        selector.handle_input("beta");
+        assert_eq!(selector.filtered_models.len(), 1);
+        assert_eq!(selector.get_search_value(), "beta");
+        selector.handle_input("\r");
+        assert_eq!(selector.selected_model.take().unwrap().provider, "other");
+        selector.handle_input("-no-such-model");
+        assert!(selector
+            .render(80.0)
+            .join("\n")
+            .contains("No matching models"));
+        selector.handle_input("\r");
+        assert!(selector.selected_model.is_none());
+        selector.handle_input("\x1b");
+        assert!(selector.cancelled);
+    }
+
+    #[test]
+    fn refresh_preserves_query_and_selection_and_accepts_an_empty_catalog() {
+        let models = vec![
+            item("signed", "model1", "One").model,
+            item("signed", "model2", "Two").model,
+        ];
+        let mut selector = picker(models.clone());
+        selector.handle_input("model");
+        selector.handle_input("\x1b[B");
+        selector.update_state(None, Some(models), Some(vec!["signed".into()]));
+        assert_eq!(selector.get_search_value(), "model");
+        assert_eq!(
+            selector.get_selected_model_key().as_deref(),
+            Some("signed/model2")
+        );
+        selector.update_state(None, Some(vec![]), Some(vec![]));
+        assert_eq!(selector.get_search_value(), "model");
+        assert!(selector.filtered_models.is_empty());
+        assert!(selector
+            .render(80.0)
+            .join("\n")
+            .contains("No matching models"));
+    }
+
+    #[test]
+    fn ordering_prefers_signed_in_current_and_recent_models() {
+        let models = vec![
+            item("signed", "a-unseen", "Unseen").model,
+            item("signed", "z-recent", "Recent").model,
+            item("signed", "y-current", "Current").model,
+            item("other", "a-unconfigured", "Other").model,
+        ];
+        let mut selector = picker(models.clone());
+        selector.current_model = Some(models[2].clone());
+        selector.recent_rank.insert("signed/z-recent".into(), 0);
+        selector.load_models();
+        let ids: Vec<_> = selector
+            .filtered_models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(ids, ["y-current", "z-recent", "a-unseen", "a-unconfigured"]);
+        selector.handle_input(" \t ");
+        assert_eq!(selector.filtered_models.len(), 4);
+    }
+
+    #[test]
+    fn initial_search_ranks_exact_short_ids_and_provider_qualified_queries() {
+        let models = vec![
+            item("signed", "namespace/gpt-5", "Target").model,
+            item("signed", "gpt-5-mini", "Mini").model,
+            item("other", "gpt-5", "Other").model,
+        ];
+        let mut selector = ModelSelectorComponent::new(
+            None,
+            vec![],
+            ModelSelectorOptions {
+                available_models: Some(models),
+                configured_providers: Some(vec!["signed".into()]),
+                initial_search_input: Some("gpt5".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(selector.filtered_models[0].id, "namespace/gpt-5");
+        selector.set_search_value("other/gpt-5");
+        assert_eq!(selector.filtered_models[0].provider, "other");
+    }
+
+    #[test]
+    fn scoped_search_toggles_with_the_configured_binding() {
+        let models = vec![
+            item("signed", "alpha", "Alpha").model,
+            item("signed", "beta", "Beta").model,
+        ];
+        let mut selector = picker(models.clone());
+        selector.scoped_models = vec![ScopedModelItem {
+            model: models[0].clone(),
+            thinking_level: None,
+        }];
+        selector.load_models();
+        selector.set_scope(ModelScope::Scoped);
+        selector.handle_input("beta");
+        assert!(selector.filtered_models.is_empty());
+        selector.handle_input("\x1bs");
+        assert_eq!(selector.scope, ModelScope::All);
+        assert_eq!(selector.get_search_value(), "beta");
+        assert_eq!(selector.filtered_models[0].id, "beta");
+        selector.handle_input("\x1bs");
+        assert!(selector.filtered_models.is_empty());
+    }
+
+    #[test]
+    fn short_viewports_keep_search_and_selection_visible_after_resize() {
+        let rows = Rc::new(std::cell::Cell::new(24.0));
+        let mut selector = picker(
+            (0..20)
+                .map(|n| item("signed", &format!("model{n}"), "Model detail").model)
+                .collect(),
+        );
+        let viewport = rows.clone();
+        selector.viewport.get_rows = Some(Rc::new(move || viewport.get()));
+        selector.set_focused(true);
+        for height in [24, 12, 16, 24] {
+            rows.set(height as f64);
+            selector.handle_input("\x1b[A");
+            let lines = selector.render(80.0);
+            assert!(
+                lines.len() <= height,
+                "{height} rows: {} rendered",
+                lines.len()
+            );
+            assert!(lines
+                .iter()
+                .all(|line| pi_tui::utils::visible_width(line) <= 80));
+            assert!(lines
+                .join("\n")
+                .contains(&selector.filtered_models[selector.selected_index].id));
+            assert!(lines.join("\n").contains(pi_tui::tui::CURSOR_MARKER));
+        }
+    }
+
+    #[test]
+    fn left_arrow_edits_search_before_cancelling_at_its_start() {
+        let mut selector = picker(vec![]);
+        selector.handle_input("ab");
+        selector.handle_input("\x1b[D");
+        assert!(!selector.cancelled);
+        selector.handle_input("\x1b[D");
+        assert!(!selector.cancelled);
+        selector.handle_input("\x1b[D");
+        assert!(selector.cancelled);
     }
 }

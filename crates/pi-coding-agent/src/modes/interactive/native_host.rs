@@ -14,13 +14,16 @@ use crate::modes::interactive::components::{
     extension_input::{ExtensionInputComponent, ExtensionInputOptions},
     extension_selector::{ExtensionSelectorComponent, ExtensionSelectorOptions},
     login_dialog::LoginDialogComponent,
+    model_selector::{
+        ModelItemModel, ModelSelectorComponent, ModelSelectorOptions, ScopedModelItem,
+    },
     tool_execution::{ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult},
     user_message::UserMessageComponent,
 };
 use crate::modes::interactive::interactive_mode_services as local;
 use pi_tui::components::text::Text as TuiText;
 use pi_tui::tui::{Component as TuiComponent, InputListenerResult, TuiStopOptions, TUI};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -312,7 +315,12 @@ enum HostEvent {
     Connection(wire::AgentConnectionEvent),
     Completed(Result<(), String>),
     Status(String),
-    Models(Vec<wire::AgentConnectionModel>),
+    Models(wire::AgentConnectionModelCatalog, Option<String>),
+    ModelSelected {
+        session_id: String,
+        model: wire::AgentConnectionModel,
+        result: Result<wire::AgentConnectionState, String>,
+    },
     LoginProviders(Vec<pi_tui::components::select_list::SelectItem>),
     BeginLogin(String, bool),
     LoginAuth(String, Option<String>),
@@ -495,6 +503,7 @@ async fn run_terminal(
         }
     };
     let snapshot = connection.get_initial_snapshot().await?;
+    let mut current_session_id = snapshot.state.session_id.clone();
     let services = if let Some(runtime) = &options.runtime {
         local::create_interactive_mode_ui_services(&runtime.session())
     } else {
@@ -681,6 +690,10 @@ async fn run_terminal(
     let mut overlay: Option<pi_tui::tui::OverlayHandle> = None;
     let (selection_send, selection_receive) = mpsc::channel::<Option<String>>();
     let mut models = Vec::<wire::AgentConnectionModel>::new();
+    let mut configured_providers = std::collections::HashSet::<String>::new();
+    let mut model_selector: Option<Rc<RefCell<ModelSelectorComponent>>> = None;
+    let model_rows = Rc::new(Cell::new(ui.borrow().terminal_rows() as f64));
+    let mut pending_login_model: Option<String> = None;
     let mut login_dialog: Option<Rc<RefCell<LoginDialogComponent>>> = None;
     let mut login_cancel: Option<tokio_util::sync::CancellationToken> = None;
     let mut extension: Option<ExtensionDialog> = None;
@@ -703,6 +716,14 @@ async fn run_terminal(
                 dialog.component.borrow_mut().handle_input(&data);
             } else if let Some(dialog) = &login_dialog {
                 dialog.borrow_mut().handle_input(&data);
+            } else if let Some(picker) = &model_selector {
+                let mut picker = picker.borrow_mut();
+                picker.handle_input(&data);
+                if picker.cancelled {
+                    let _ = selection_send.send(None);
+                } else if let Some(model) = picker.selected_model.take() {
+                    let _ = selection_send.send(Some(format!("{}/{}", model.provider, model.id)));
+                }
             } else if let Some(selector) = &selector {
                 selector.borrow_mut().handle_input(&data);
             } else if pi_tui::keybindings::get_keybindings().matches(&data, "app.message.followUp")
@@ -730,6 +751,7 @@ async fn run_terminal(
                 handle.hide();
             }
             selector = None;
+            model_selector = None;
             if let Some(selected) = selected {
                 if let Some(target) = selected.strip_prefix("login:") {
                     if let Some((kind, provider)) = target.split_once(':') {
@@ -741,14 +763,43 @@ async fn run_terminal(
                     .iter()
                     .find(|model| format!("{}/{}", model.provider, model.id) == selected)
                 {
-                    let (connection, send, model) =
-                        (connection.clone(), send.clone(), model.clone());
+                    if !configured_providers.contains(&model.provider) {
+                        let oauth =
+                            pi_ai::utils::oauth::get_oauth_provider(&model.provider).is_some();
+                        let api_key =
+                            crate::core::provider_display_names::built_in_provider_display_names()
+                                .iter()
+                                .any(|(id, _)| *id == model.provider);
+                        if oauth || api_key {
+                            pending_login_model = Some(selected);
+                            let _ = send.send(HostEvent::BeginLogin(model.provider.clone(), oauth));
+                        } else {
+                            mode.borrow_mut().show_error(&format!(
+                                "Authentication for {} must be configured externally.",
+                                model.provider
+                            ));
+                        }
+                        continue;
+                    }
+                    mode.borrow_mut()
+                        .show_status(&format!("Switching model: {}", model.id), "dim");
+                    let (connection, send, model, session_id) = (
+                        connection.clone(),
+                        send.clone(),
+                        model.clone(),
+                        current_session_id.clone(),
+                    );
                     tokio::spawn(async move {
-                        let result = connection
-                            .set_model(&model.provider, &model.id)
-                            .await
-                            .map(|_| ());
-                        let _ = send.send(HostEvent::Completed(result));
+                        let result = async {
+                            connection.set_model(&model.provider, &model.id).await?;
+                            connection.get_state().await
+                        }
+                        .await;
+                        let _ = send.send(HostEvent::ModelSelected {
+                            session_id,
+                            model,
+                            result,
+                        });
                     });
                 }
             }
@@ -868,11 +919,13 @@ async fn run_terminal(
                             ),
                         );
                     }
+                    current_session_id = state.session_id.clone();
                     mode.borrow_mut()
                         .apply_connection_state_snapshot(project_state(state));
                     transcript.borrow_mut().replace(messages);
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SessionResynced { snapshot }) => {
+                    current_session_id = snapshot.state.session_id.clone();
                     mode.borrow_mut()
                         .apply_connection_state_snapshot(project_state(snapshot.state));
                     transcript.borrow_mut().replace(snapshot.messages);
@@ -943,14 +996,36 @@ async fn run_terminal(
                     mode.borrow_mut().render_recap();
                 }
                 HostEvent::Connection(_) => {}
+                HostEvent::ModelSelected {
+                    session_id,
+                    model,
+                    result,
+                } => match result {
+                    Ok(state)
+                        if current_session_id == session_id && state.session_id == session_id =>
+                    {
+                        let mut controller = mode.borrow_mut();
+                        controller
+                            .settings_manager()
+                            .lock()
+                            .map_err(|error| error.to_string())?
+                            .set_default_model_and_provider(&model.provider, &model.id);
+                        controller.apply_connection_state_snapshot(project_state(state));
+                        controller.show_status(&format!("Model: {}", model.id), "success");
+                    }
+                    Ok(_) => {}
+                    Err(error) => mode.borrow_mut().show_error(&error),
+                },
                 HostEvent::Completed(result) => {
                     if let Err(error) = result {
                         mode.borrow_mut().show_error(&error);
                     }
                     match connection.get_state().await {
-                        Ok(state) => mode
-                            .borrow_mut()
-                            .apply_connection_state_snapshot(project_state(state)),
+                        Ok(state) => {
+                            current_session_id = state.session_id.clone();
+                            mode.borrow_mut()
+                                .apply_connection_state_snapshot(project_state(state));
+                        }
                         Err(error) => mode.borrow_mut().show_error(&error),
                     }
                 }
@@ -1035,48 +1110,80 @@ async fn run_terminal(
                                     .map_err(|e| e.to_string())?
                                     .refresh();
                             }
-                            submit(&connection, &send, "/model".into(), false, None);
+                            let command = pending_login_model
+                                .take()
+                                .map(|key| format!("/model {key}"))
+                                .unwrap_or_else(|| "/model".into());
+                            submit(&connection, &send, command, false, None);
                         }
-                        Err(error) if error == "Login cancelled" => {}
-                        Err(error) => mode.borrow_mut().show_error(&error),
+                        Err(error) => {
+                            pending_login_model = None;
+                            if error != "Login cancelled" {
+                                mode.borrow_mut().show_error(&error);
+                            }
+                        }
                     }
                 }
-                HostEvent::Models(available) => {
-                    models = available;
-                    if models.is_empty() {
-                        mode.borrow_mut().show_warning(
-                            &crate::core::auth_guidance::format_no_models_available_message(),
-                        );
+                HostEvent::Models(catalog, search) => {
+                    models = catalog.models;
+                    configured_providers = catalog.configured_providers.into_iter().collect();
+                    if let Some(model) = search.as_deref().and_then(|query| {
+                        crate::core::model_resolver::find_exact_model_reference_match(
+                            query, &models,
+                        )
+                    }) {
+                        let _ =
+                            selection_send.send(Some(format!("{}/{}", model.provider, model.id)));
                     } else {
-                        let items = models
-                            .iter()
-                            .map(|model| pi_tui::components::select_list::SelectItem {
-                                value: format!("{}/{}", model.provider, model.id),
-                                label: model.name.clone(),
-                                description: Some(model.provider.clone()),
-                                ..Default::default()
-                            })
-                            .collect();
-                        let mut list = pi_tui::components::select_list::SelectList::new(
-                            items,
-                            12,
-                            select_theme(),
-                            Default::default(),
-                        );
-                        let tx = selection_send.clone();
-                        list.on_select = Some(Box::new(move |item| {
-                            let _ = tx.send(Some(item.value.clone()));
-                        }));
-                        let tx = selection_send.clone();
-                        list.on_cancel = Some(Box::new(move || {
-                            let _ = tx.send(None);
-                        }));
-                        let list = Rc::new(RefCell::new(list));
-                        overlay = Some(
-                            ui.borrow_mut()
-                                .show_overlay(list.clone(), Default::default()),
-                        );
-                        selector = Some(list);
+                        let current = mode.borrow().get_current_model().cloned();
+                        let configured = configured_providers.iter().cloned().collect::<Vec<_>>();
+                        if let Some(picker) = &model_selector {
+                            picker.borrow_mut().update_state(
+                                current.as_ref().map(model_item),
+                                Some(models.iter().map(model_item).collect()),
+                                Some(configured),
+                            );
+                        } else {
+                            let scoped = mode
+                                .borrow()
+                                .get_scoped_model_state()
+                                .into_iter()
+                                .map(|entry| ScopedModelItem {
+                                    model: model_item(&entry.model),
+                                    thinking_level: None,
+                                })
+                                .collect();
+                            let recent = mode
+                                .borrow()
+                                .settings_manager()
+                                .lock()
+                                .map_err(|error| error.to_string())?
+                                .get_recent_models();
+                            let picker = Rc::new(RefCell::new(make_model_selector(
+                                current.as_ref(),
+                                scoped,
+                                &models,
+                                configured,
+                                recent,
+                                search,
+                                model_rows.clone(),
+                            )));
+                            if let Some(handle) = overlay.take() {
+                                handle.hide();
+                            }
+                            selector = None;
+                            overlay = Some(ui.borrow_mut().show_overlay(
+                                picker.clone(),
+                                pi_tui::tui::OverlayOptions {
+                                    width: Some(pi_tui::tui::SizeValue::Number(96.0)),
+                                    max_height: Some(pi_tui::tui::SizeValue::Percent(
+                                        "100%".into(),
+                                    )),
+                                    ..Default::default()
+                                },
+                            ));
+                            model_selector = Some(picker);
+                        }
                     }
                 }
             }
@@ -1093,7 +1200,11 @@ async fn run_terminal(
                 respond_extension(&connection, &send, (dialog.request.id, response));
             }
         }
-        if extension.is_none() && login_dialog.is_none() && selector.is_none() {
+        if extension.is_none()
+            && login_dialog.is_none()
+            && selector.is_none()
+            && model_selector.is_none()
+        {
             if let Some(request) = extension_queue.pop_front() {
                 extension = extension_dialog(request.clone(), &ui, &extension_send);
                 if extension.is_none() {
@@ -1118,6 +1229,7 @@ async fn run_terminal(
             last_tick = Instant::now();
         }
         let rows = ui.borrow().terminal_rows();
+        model_rows.set(rows as f64);
         editor.borrow_mut().editor_mut().set_terminal_rows(rows);
         ui.borrow_mut().run_pending_render(now_ms());
         tokio::time::sleep(Duration::from_millis(16)).await;
@@ -1190,9 +1302,9 @@ fn submit(
         } else if let Some(provider) = text.trim().strip_prefix("/login ") {
             let _ = send.send(HostEvent::BeginLogin(provider.trim().into(), false));
             Ok(())
-        } else if text.trim() == "/model" {
-            connection.get_available_models().await.map(|models| {
-                let _ = send.send(HostEvent::Models(models));
+        } else if let Some(search) = model_command_search(&text) {
+            connection.get_model_catalog().await.map(|catalog| {
+                let _ = send.send(HostEvent::Models(catalog, search));
             })
         } else if text.trim() == "/context" {
             connection.get_session_stats().await.map(|stats| {
@@ -1220,6 +1332,48 @@ fn submit(
         };
         let _ = send.send(HostEvent::Completed(result));
     });
+}
+
+fn model_command_search(text: &str) -> Option<Option<String>> {
+    let rest = text.trim().strip_prefix("/model")?;
+    if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let search = rest.trim();
+    Some((!search.is_empty()).then(|| search.to_string()))
+}
+
+fn model_item(model: &wire::AgentConnectionModel) -> ModelItemModel {
+    ModelItemModel {
+        provider: model.provider.clone(),
+        id: model.id.clone(),
+        name: model.name.clone(),
+        featured: model.featured.unwrap_or(false),
+        raw: serde_json::to_value(model).unwrap_or_default(),
+    }
+}
+
+fn make_model_selector(
+    current: Option<&wire::AgentConnectionModel>,
+    scoped: Vec<ScopedModelItem>,
+    models: &[wire::AgentConnectionModel],
+    configured: Vec<String>,
+    recent: Vec<String>,
+    search: Option<String>,
+    rows: Rc<Cell<f64>>,
+) -> ModelSelectorComponent {
+    ModelSelectorComponent::new(
+        current.map(model_item),
+        scoped,
+        ModelSelectorOptions {
+            available_models: Some(models.iter().map(model_item).collect()),
+            configured_providers: Some(configured),
+            recent_models: Some(recent),
+            initial_search_input: search,
+            get_rows: Some(Rc::new(move || rows.get())),
+            ..Default::default()
+        },
+    )
 }
 
 fn string(value: &serde_json::Value, key: &str) -> String {
@@ -1531,5 +1685,20 @@ mod tests {
             &send
         )
         .is_none());
+    }
+
+    #[test]
+    fn model_command_supports_prefilled_search_without_consuming_other_commands() {
+        assert_eq!(model_command_search(" /model "), Some(None));
+        assert_eq!(
+            model_command_search("/model signed/model-2"),
+            Some(Some("signed/model-2".into()))
+        );
+        assert_eq!(
+            model_command_search("/model\t model 2 "),
+            Some(Some("model 2".into()))
+        );
+        assert_eq!(model_command_search("/models"), None);
+        assert_eq!(model_command_search("tell me about /model"), None);
     }
 }

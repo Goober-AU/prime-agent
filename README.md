@@ -155,6 +155,14 @@ See [Rust validation and remaining gaps](docs/RUST_MAIN_READINESS.md) for the ve
 
 ### Rust implementation
 
+For an installed Rust release, launch it from your project directory with:
+
+```bash
+optimus-rust
+```
+
+The maintained launcher is [`scripts/optimus-rust`](scripts/optimus-rust). See [the installation layout and launcher guide](docs/RUST_LAUNCHER.md). In the TUI, `/model` opens searchable model selection; `/model <search>` prefills the search or selects an exact, unambiguous reference.
+
 From a checkout of this repository, build with Cargo:
 
 ```bash
