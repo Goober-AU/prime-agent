@@ -29,6 +29,7 @@ use crate::modes::interactive::prompt_stash_state::{
 use pi_tui::components::text::Text as TuiText;
 use pi_tui::tui::{Component as TuiComponent, InputListenerResult, TuiStopOptions, TUI};
 use std::cell::{Cell, RefCell};
+use std::io::IsTerminal;
 use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -430,6 +431,10 @@ enum HostEvent {
     /// The submitted command echoed as the user's own message
     /// (`echoLocalCommand`, interactive-mode.ts:6405-6413).
     EchoLocal(String),
+    /// The raw `getContextTree()` reply, formatted and mounted on the owner loop
+    /// so the width is the LIVE terminal width (`handleContextCommand`,
+    /// interactive-mode.ts:9799-9808).
+    ContextTree(serde_json::Value),
     /// `showWarning` (interactive-mode.ts:7678-7682).
     Warning(String),
     /// `/effort` with no argument opens `ThinkingSelectorComponent`
@@ -444,6 +449,11 @@ enum HostEvent {
     CloseHeartbeats,
     Settings(wire::AgentConnectionState),
     Setting(native_settings::Change),
+    /// The daemon accepted a settings change, so its `.then` continuation can
+    /// run (`onThinkingLevelChange` patches the state only after the remote call
+    /// resolves, interactive-mode.ts:7852-7856). The owner loop must not await
+    /// the RPC itself: the continuation travels back as this event.
+    SettingAccepted(native_settings::Change),
     Models(wire::AgentConnectionModelCatalog, Option<String>),
     ModelSelected {
         session_id: String,
@@ -459,10 +469,148 @@ enum HostEvent {
     LoginAuth(String, Option<String>),
     LoginProgress(String),
     LoginPrompt(String, Option<String>, tokio::sync::oneshot::Sender<String>),
-    LoginFinished(Result<(), String>),
+    /// The generation identifies the login that finished, so a login that
+    /// completes after a newer login began cannot touch the newer login's dialog.
+    ///
+    /// TypeScript gives every login its own `LoginDialogComponent` with its own
+    /// `abortController` (login-dialog.ts:77, read at :136, aborted at :140), so
+    /// one login's cancellation is independent of every sibling's. The port
+    /// collapsed that per-dialog state into shared single slots
+    /// (`login_cancel`/`overlay`), which is what let a stale login steal them.
+    LoginFinished(LoginGeneration, Result<(), String>),
     /// `requestAgentsView()` - `/resume` without arguments and the
     /// `app.agents.open` handoff (interactive-mode.ts:8736-8738).
     AgentsView,
+    /// `showError` (interactive-mode.ts:7672-7676) raised by a local handler
+    /// that runs off the UI thread and must not render from there.
+    Error(String),
+    /// `/fullscreen [on|off]` (interactive-mode.ts:5014-5023). `Some(value)` is
+    /// an explicit `on`/`off`; `None` resolves against the live state.
+    Fullscreen(Option<bool>),
+}
+
+/// Monotonic identity for one login attempt.
+///
+/// TypeScript scopes cancellation to a single `LoginDialogComponent` instance
+/// (`private abortController = new AbortController()`, login-dialog.ts:77);
+/// the port carries the equivalent identity on the event so `LoginFinished`
+/// can tell its own dialog from a newer one.
+pub(crate) type LoginGeneration = u64;
+
+/// The state one in-flight login owns.
+///
+/// Mirrors the per-dialog fields of `LoginDialogComponent`
+/// (login-dialog.ts:77 `abortController`) plus the overlay it is shown in.
+pub(crate) struct LoginSlot {
+    pub generation: LoginGeneration,
+    pub token: tokio_util::sync::CancellationToken,
+    pub overlay: pi_tui::tui::OverlayHandle,
+    pub dialog: Rc<RefCell<LoginDialogComponent>>,
+}
+
+/// Owns the one login the host may have in flight.
+///
+/// TypeScript keeps this state on each `LoginDialogComponent`
+/// (login-dialog.ts:77). The port keeps it here so a superseded login can be
+/// told from the current one; without an owner the two shared slots
+/// (`login_cancel`/`overlay`) let a stale login cancel its successor.
+#[derive(Default)]
+pub(crate) struct LoginCoordinator {
+    next_generation: LoginGeneration,
+    current: Option<LoginSlot>,
+}
+
+impl LoginCoordinator {
+    /// Retires the login in flight and mints the generation for the next one.
+    ///
+    /// Port of showing a fresh dialog: the previous dialog is torn down with
+    /// `abortController.abort()` (login-dialog.ts:140) before the new one is
+    /// shown, so the previous login can never cancel its successor.
+    pub fn begin(&mut self) -> LoginGeneration {
+        if let Some(previous) = self.current.take() {
+            previous.token.cancel();
+            previous.overlay.hide();
+        }
+        self.next_generation += 1;
+        self.next_generation
+    }
+
+    /// Records the login that generation `generation` owns.
+    pub fn install(&mut self, slot: LoginSlot) {
+        self.current = Some(slot);
+    }
+
+    /// The generation currently in flight.
+    pub fn current_generation(&self) -> Option<LoginGeneration> {
+        self.current.as_ref().map(|slot| slot.generation)
+    }
+
+    /// Whether a finishing login still owns the host's login state.
+    ///
+    /// False for a superseded generation, so a stale completion cannot cancel
+    /// or hide the newer dialog.
+    pub fn is_current(&self, finishing: LoginGeneration) -> bool {
+        self.current_generation() == Some(finishing)
+    }
+
+    /// Consumes the slot when `finishing` still owns it.
+    ///
+    /// Returns the retired slot for the current generation, and nothing for a
+    /// stale one, so the caller can cancel/hide only its own dialog.
+    pub fn finish(&mut self, finishing: LoginGeneration) -> Option<LoginSlot> {
+        if self.is_current(finishing) {
+            self.current.take()
+        } else {
+            None
+        }
+    }
+
+    /// The dialog the current login shows, if one is open.
+    pub fn dialog(&self) -> Option<&Rc<RefCell<LoginDialogComponent>>> {
+        self.current.as_ref().map(|slot| &slot.dialog)
+    }
+
+    /// Whether any login is in flight. Shutdown uses this in place of the old
+    /// `login_dialog.is_none()` shared slot.
+    pub fn is_active(&self) -> bool {
+        self.current.is_some()
+    }
+
+    /// Cancels the login in flight without hiding its overlay.
+    ///
+    /// Shutdown uses this to abort the pending sign-in before tearing the
+    /// terminal down, matching the old `login_cancel.take(); cancel.cancel()`.
+    pub fn cancel_current(&mut self) {
+        if let Some(slot) = self.current.take() {
+            slot.token.cancel();
+        }
+    }
+}
+
+/// Applies one `LoginFinished` to the host's login state.
+///
+/// Returns `true` when `generation` still owned the dialog, so the caller may
+/// continue with the mode/UI effects; `false` for a superseded login, which must
+/// be ignored. This is the whole decision the `HostEvent::LoginFinished` arm
+/// makes, so the arm and its tests share one path.
+pub(crate) fn apply_login_finished(
+    logins: &mut LoginCoordinator,
+    generation: LoginGeneration,
+) -> bool {
+    match logins.finish(generation) {
+        Some(finished) => {
+            // `cancel()` aborts this dialog's own controller and rejects its
+            // pending input promise (login-dialog.ts:139-146); the overlay is
+            // the one this dialog was shown in.
+            finished.token.cancel();
+            finished.overlay.hide();
+            true
+        }
+        // Superseded: the newer `BeginLogin` already cancelled and hid this
+        // dialog, so a late completion must not touch the newer one
+        // (login-dialog.ts:77 gives each login an independent controller).
+        None => false,
+    }
 }
 
 struct ExtensionDialog {
@@ -732,6 +880,37 @@ fn editor_theme() -> pi_tui::components::editor::EditorTheme {
         select_list: select_theme(),
     }
 }
+/// Applies one session snapshot to the transcript: history reset first, then the
+/// in-flight assistant message.
+///
+/// This is the ordering both TypeScript entry points use.
+/// `renderInitialMessages` renders the transcript and only afterwards calls
+/// `restoreStreamingMessageFromSnapshot` (interactive-mode.ts:6865-6871), and
+/// `renderResyncedSession` does the same (:3066-3067). Adding the streaming row
+/// before the reset loses it, because the reset replaces the transcript.
+///
+/// Returns the error to report when optional recent-first history metadata could
+/// not be used. The reference reports and continues instead of failing the
+/// attachment: the interactive event handler catches the throw and calls only
+/// `showError` (interactive-mode.ts:5302-5304), the no-window branch renders the
+/// plain transcript (:6759-6767), and the daemon refuses to attach metadata it
+/// cannot build ("retain the full legacy snapshot rather than dropping or
+/// misidentifying it", modes/daemon/daemon-mode.ts:5507-5509).
+fn apply_history_snapshot(
+    history: Option<wire::AgentConnectionHistoryWindow>,
+    messages: Vec<AgentMessage>,
+    streaming_message: Option<AgentMessage>,
+    transcript: &Rc<RefCell<Transcript>>,
+    editor: &Rc<RefCell<CustomEditor>>,
+    history_runtime: &mut native_history::HistoryRuntime,
+) -> Option<String> {
+    let error = history_runtime.reset(history, messages, transcript, editor);
+    if let Some(message) = streaming_message {
+        transcript.borrow_mut().message(message, true);
+    }
+    error
+}
+
 fn select_theme() -> pi_tui::components::select_list::SelectListTheme {
     pi_tui::components::select_list::SelectListTheme {
         selected_prefix: Box::new(|s| theme().fg("accent", s)),
@@ -826,10 +1005,7 @@ async fn run_terminal(
     let transcript = Rc::new(RefCell::new(Transcript::new(mode.clone())));
     let initial_history = snapshot.history.clone();
     let initial_history_messages = snapshot.messages.clone();
-    transcript.borrow_mut().replace(snapshot.messages);
-    if let Some(message) = snapshot.streaming_message {
-        transcript.borrow_mut().message(message, true);
-    }
+    let initial_streaming_message = snapshot.streaming_message.clone();
     let ui = Rc::new(RefCell::new(TUI::new(
         Box::new(pi_tui::terminal::ProcessTerminal::new()),
         None,
@@ -858,12 +1034,26 @@ async fn run_terminal(
     }
     bind_editor_actions(&editor, &actions);
     let mut history_runtime = native_history::HistoryRuntime::new(connection.clone());
-    history_runtime.reset(
+    // `renderInitialMessages` renders the transcript first and restores the
+    // in-flight assistant message afterwards (interactive-mode.ts:6865-6871), the
+    // same reset-then-streaming order the `SessionResynced` arm uses
+    // (:3057-3067). `reset` replaces the transcript, so the streaming row must be
+    // added after it or the attach loses the in-flight response.
+    if let Some(error) = apply_history_snapshot(
         initial_history,
         initial_history_messages,
+        initial_streaming_message,
         &transcript,
         &editor,
-    )?;
+        &mut history_runtime,
+    ) {
+        // Optional history metadata never aborts attachment. The reference
+        // reports and continues instead: the interactive event handler catches
+        // the throw and only calls `showError` (interactive-mode.ts:5302-5304), so
+        // the session stays attached and usable, and the no-window branch renders
+        // the plain transcript (:6759-6767).
+        mode.borrow_mut().show_error(&error);
+    }
     let mut queue_runtime =
         native_queue::QueueRuntime::new(mode.clone(), editor.clone(), connection.clone());
     {
@@ -1020,8 +1210,10 @@ async fn run_terminal(
     let mut thinking_selector: Option<Rc<RefCell<ThinkingSelectorComponent>>> = None;
     let model_rows = Rc::new(Cell::new(ui.borrow().terminal_rows() as f64));
     let mut pending_login_model: Option<String> = None;
-    let mut login_dialog: Option<Rc<RefCell<LoginDialogComponent>>> = None;
-    let mut login_cancel: Option<tokio_util::sync::CancellationToken> = None;
+    // TS keeps this per `LoginDialogComponent` (`abortController`,
+    // login-dialog.ts:77); the port owns it here so a superseded login is
+    // distinguishable from the current one.
+    let mut logins = LoginCoordinator::default();
     let mut extension: Option<ExtensionDialog> = None;
     let mut extension_queue =
         std::collections::VecDeque::<wire::AgentConnectionExtensionUiRequest>::new();
@@ -1078,7 +1270,13 @@ async fn run_terminal(
                 break;
             }
         }
-        viewport_input.set(ui.borrow().is_fullscreen() && !ui.borrow().has_overlay());
+        // The TypeScript gate is `overlayFocused || !fullscreen.viewportControls`
+        // (packages/tui/src/tui.ts:1004), i.e. only a FOCUSED overlay blocks the
+        // transcript; a visible non-capturing overlay (the editor's autocomplete
+        // dropdown, packages/tui/src/components/editor.ts:2352) never takes focus
+        // (tui.ts:439) and must not steal the viewport keys.
+        viewport_input
+            .set(ui.borrow().is_fullscreen() && !ui.borrow().is_fullscreen_overlay_focused());
         ui.borrow_mut().drain_input();
         if history_requested.replace(false) {
             history_runtime.request(&mode.borrow());
@@ -1088,7 +1286,7 @@ async fn run_terminal(
                 splash.borrow_mut().handle_input(&data);
             } else if let Some(dialog) = &extension {
                 dialog.component.borrow_mut().handle_input(&data);
-            } else if let Some(dialog) = &login_dialog {
+            } else if let Some(dialog) = logins.dialog() {
                 dialog.borrow_mut().handle_input(&data);
             } else if let Some(menu) = &configuration {
                 menu.borrow_mut().handle_input(&data);
@@ -1151,23 +1349,43 @@ async fn run_terminal(
                     .iter()
                     .find(|model| format!("{}/{}", model.provider, model.id) == selected)
                 {
-                    if !configured_providers.contains(&model.provider) {
-                        let oauth = crate::core::auth_storage::get_oauth_provider(&model.provider)
-                            .is_some();
-                        let api_key =
-                            crate::core::provider_display_names::built_in_provider_display_names()
-                                .iter()
-                                .any(|(id, _)| *id == model.provider);
-                        if oauth || api_key {
-                            pending_login_model = Some(selected);
-                            let _ = send.send(HostEvent::BeginLogin(model.provider.clone(), oauth));
-                        } else {
+                    // `ensureModelProviderConfigured(model, authFlows, providerOptions)`
+                    // (interactive-mode.ts:8015-8040) with
+                    // `isModelProviderConfigured` (interactive-mode.ts:8042-8044).
+                    // The provider list is the same one the Providers tab was built
+                    // from, so a custom API-key provider offered there is accepted
+                    // here too.
+                    let registry_has_auth = match &options.runtime {
+                        Some(runtime) => runtime
+                            .services()
+                            .model_registry
+                            .lock()
+                            .map_err(|e| e.to_string())?
+                            .has_configured_auth(model),
+                        None => false,
+                    };
+                    match native_configuration::model_selection_action(
+                        &native_configuration::login_options_for(&models),
+                        &model.provider,
+                        configured_providers.contains(&model.provider),
+                        registry_has_auth,
+                    ) {
+                        native_configuration::ModelSelectionAction::ExternallyConfigured => {
                             mode.borrow_mut().show_error(&format!(
                                 "Authentication for {} must be configured externally.",
                                 model.provider
                             ));
+                            continue;
                         }
-                        continue;
+                        native_configuration::ModelSelectionAction::BeginLogin { oauth } => {
+                            // `authFlows.loginProvider(provider)` routes to the
+                            // OAuth dialog for an `oauth` entry and to the
+                            // API-key dialog otherwise (auth-flows.ts:173-185).
+                            pending_login_model = Some(selected);
+                            let _ = send.send(HostEvent::BeginLogin(model.provider.clone(), oauth));
+                            continue;
+                        }
+                        native_configuration::ModelSelectionAction::Switch => {}
                     }
                     mode.borrow_mut()
                         .show_status(&format!("Switching model: {}", model.id), "dim");
@@ -1431,21 +1649,31 @@ async fn run_terminal(
                     queue_runtime.reset_session(current_session_id.clone());
                     mode.borrow_mut()
                         .apply_connection_state_snapshot(project_state(state));
-                    history_runtime.reset(None, messages, &transcript, &editor)?;
+                    if let Some(error) = apply_history_snapshot(
+                        None,
+                        messages,
+                        None,
+                        &transcript,
+                        &editor,
+                        &mut history_runtime,
+                    ) {
+                        mode.borrow_mut().show_error(&error);
+                    }
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SessionResynced { snapshot }) => {
                     current_session_id = snapshot.state.session_id.clone();
                     queue_runtime.reset_session(current_session_id.clone());
                     mode.borrow_mut()
                         .apply_connection_state_snapshot(project_state(snapshot.state));
-                    history_runtime.reset(
+                    if let Some(error) = apply_history_snapshot(
                         snapshot.history,
                         snapshot.messages,
+                        snapshot.streaming_message,
                         &transcript,
                         &editor,
-                    )?;
-                    if let Some(message) = snapshot.streaming_message {
-                        transcript.borrow_mut().message(message, true);
+                        &mut history_runtime,
+                    ) {
+                        mode.borrow_mut().show_error(&error);
                     }
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::ExtensionError {
@@ -1667,19 +1895,26 @@ async fn run_terminal(
                     settings_selector = None;
                     ui.borrow_mut().set_focus(Some(editor.clone()));
                 }
+                HostEvent::SettingAccepted(change) => {
+                    native_settings::apply_remote_applied(&change, &mode, &ui);
+                }
                 HostEvent::Setting(change) => {
-                    if let Err(error) = native_settings::apply(
+                    // DEFECT A: the daemon calls are fire-and-forget, so the
+                    // owner loop never waits on a daemon round-trip. TypeScript
+                    // fires `void agentConnection.set*.catch(showError)`
+                    // (interactive-mode.ts:7804, :7836, :7842, :7847, :7852)
+                    // AFTER patching the connection state locally (:7803,
+                    // :7835, :7840), so the local state and its persistence
+                    // survive a failed remote call.
+                    native_settings::apply_change(
                         change,
                         &mode,
                         &editor,
                         &ui,
                         &transcript,
                         &connection,
-                    )
-                    .await
-                    {
-                        mode.borrow_mut().show_error(&error);
-                    }
+                        &send,
+                    );
                 }
                 HostEvent::Status(status) => mode.borrow_mut().show_status(&status, "dim"),
                 HostEvent::Warning(warning) => mode.borrow_mut().show_warning(&warning),
@@ -1688,6 +1923,20 @@ async fn run_terminal(
                 }
                 HostEvent::EchoLocal(text) => {
                     transcript.borrow_mut().echo_local(&text);
+                }
+                HostEvent::ContextTree(tree) => {
+                    let width = context_tree_width(ui.borrow().terminal.columns());
+                    match serde_json::from_value::<crate::core::context_tree::ContextTreeNode>(tree)
+                    {
+                        Ok(root) => transcript.borrow_mut().panel(
+                            &crate::modes::interactive::components::context_tree_format::format_context_tree(
+                                &root, width,
+                            ),
+                        ),
+                        // `handleContextCommand`'s `catch` reports a formatting
+                        // failure through `showError` (interactive-mode.ts:9802-9804).
+                        Err(error) => mode.borrow_mut().show_error(&error.to_string()),
+                    }
                 }
                 // `showThinkingSelector` (interactive-mode.ts:8285-8307) mounts
                 // `ThinkingSelectorComponent`; selecting a level calls
@@ -1753,15 +2002,22 @@ async fn run_terminal(
                     configuration = Some(menu);
                 }
                 HostEvent::BeginLogin(provider, oauth) => {
+                    // `new LoginDialogComponent(...)` gives this login its own
+                    // `abortController` (login-dialog.ts:77). `begin()` retires
+                    // the previous login first, exactly like the previous
+                    // dialog's `cancel()` aborting only its own controller
+                    // (login-dialog.ts:139-146).
+                    let generation = logins.begin();
                     let tx = send.clone();
                     let mut dialog = LoginDialogComponent::new(
                         ui.clone(),
                         &provider,
                         Box::new(move |success, error| {
                             if !success {
-                                let _ = tx.send(HostEvent::LoginFinished(Err(
-                                    error.unwrap_or_else(|| "Login cancelled".into())
-                                )));
+                                let _ = tx.send(HostEvent::LoginFinished(
+                                    generation,
+                                    Err(error.unwrap_or_else(|| "Login cancelled".into())),
+                                ));
                             }
                         }),
                         None,
@@ -1772,26 +2028,29 @@ async fn run_terminal(
                         dialog.show_progress("Starting sign-in...");
                     }
                     let dialog = Rc::new(RefCell::new(dialog));
-                    overlay = Some(
-                        ui.borrow_mut()
-                            .show_overlay(dialog.clone(), Default::default()),
-                    );
-                    login_dialog = Some(dialog);
-                    login_cancel = Some(token.clone());
-                    start_login(provider, oauth, send.clone(), token);
+                    let handle = ui
+                        .borrow_mut()
+                        .show_overlay(dialog.clone(), Default::default());
+                    logins.install(LoginSlot {
+                        generation,
+                        token: token.clone(),
+                        overlay: handle,
+                        dialog: dialog.clone(),
+                    });
+                    start_login(generation, provider, oauth, send.clone(), token);
                 }
                 HostEvent::LoginAuth(url, instructions) => {
-                    if let Some(dialog) = &login_dialog {
+                    if let Some(dialog) = logins.dialog() {
                         dialog.borrow_mut().show_auth(&url, instructions.as_deref());
                     }
                 }
                 HostEvent::LoginProgress(message) => {
-                    if let Some(dialog) = &login_dialog {
+                    if let Some(dialog) = logins.dialog() {
                         dialog.borrow_mut().show_progress(&message);
                     }
                 }
                 HostEvent::LoginPrompt(message, placeholder, sender) => {
-                    if let Some(dialog) = &login_dialog {
+                    if let Some(dialog) = logins.dialog() {
                         let receiver = dialog
                             .borrow_mut()
                             .show_prompt(&message, placeholder.as_deref());
@@ -1802,14 +2061,15 @@ async fn run_terminal(
                         });
                     }
                 }
-                HostEvent::LoginFinished(result) => {
-                    if let Some(cancel) = login_cancel.take() {
-                        cancel.cancel();
+                HostEvent::LoginFinished(generation, result) => {
+                    // Only the login still in flight may cancel, hide, or touch
+                    // host state. A superseded generation is ignored: its dialog
+                    // was already retired by the newer `BeginLogin`, and its
+                    // completion must not disturb the newer dialog
+                    // (login-dialog.ts:77 keeps the two controllers independent).
+                    if !apply_login_finished(&mut logins, generation) {
+                        continue;
                     }
-                    if let Some(handle) = overlay.take() {
-                        handle.hide();
-                    }
-                    login_dialog = None;
                     match result {
                         Ok(()) => {
                             mode.borrow_mut().show_status(
@@ -1824,19 +2084,57 @@ async fn run_terminal(
                                     .map_err(|e| e.to_string())?
                                     .refresh();
                             }
+                            // `invalidateConnectionModels(); await
+                            // this.getConnectionAvailableModels()` via
+                            // `onAuthChanged` (interactive-mode.ts:8123-8126, :8855-8858),
+                            // then the menu refresh at :8384-8401. The daemon
+                            // re-derives its catalog on this call
+                            // (`daemon_mode.rs` "get_model_catalog" ->
+                            // `refresh_model_catalog`), which is what makes the
+                            // newly authenticated provider visible to the
+                            // selection loop below.
+                            let current_model = mode.borrow().get_current_model().cloned();
+                            let scoped: Vec<wire::AgentConnectionModel> = mode
+                                .borrow()
+                                .get_scoped_model_state()
+                                .into_iter()
+                                .map(|scoped| scoped.model)
+                                .collect();
+                            match native_configuration::refresh_after_login(
+                                connection.as_ref(),
+                                configuration.as_ref(),
+                                current_model.as_ref(),
+                                &scoped,
+                            )
+                            .await
+                            {
+                                Ok(refreshed) => {
+                                    // The outer state the model-selection loop reads
+                                    // (`this.connectionModelCatalog` /
+                                    // `this.connectionConfiguredProviders`,
+                                    // interactive-mode.ts:8042-8044).
+                                    models = refreshed.models;
+                                    configured_providers = refreshed.configured_providers;
+                                }
+                                Err(error) => mode.borrow_mut().show_error(&error),
+                            }
                             if let Some(key) = pending_login_model.take() {
                                 submit(&connection, &send, format!("/model {key}"), false, None);
-                            } else if let Some(menu) = &configuration {
-                                menu.borrow_mut().refresh_authentication();
-                                if let Some(handle) = &configuration_overlay {
-                                    handle.focus();
-                                }
+                            } else if let Some(handle) = &configuration_overlay {
+                                handle.focus();
                             } else {
                                 submit(&connection, &send, "/model".into(), false, None);
                             }
                         }
                         Err(error) => {
                             pending_login_model = None;
+                            // `menu.refreshAuthentication()` runs before the
+                            // status check in `authenticate`
+                            // (interactive-mode.ts:8379-8382), so a cancelled or
+                            // failed login still re-reads the credential store.
+                            if let Some(menu) = &configuration {
+                                menu.borrow_mut().refresh_authentication();
+                            }
                             if error != "Login cancelled" {
                                 mode.borrow_mut().show_error(&error);
                             }
@@ -1849,6 +2147,11 @@ async fn run_terminal(
                     // they cannot.
                     mode.borrow_mut().request_agents_view();
                 }
+                HostEvent::Error(error) => mode.borrow_mut().show_error(&error),
+                HostEvent::Fullscreen(requested) => {
+                    apply_fullscreen_request(requested, &mode, &editor, &ui, &transcript)
+                }
+                // `showModelsSelector` (interactive-mode.ts:8457-8533).
                 HostEvent::Models(catalog, search) => {
                     models = catalog.models;
                     configured_providers = catalog.configured_providers.into_iter().collect();
@@ -1889,7 +2192,7 @@ async fn run_terminal(
             }
         }
         if extension.is_none()
-            && login_dialog.is_none()
+            && !logins.is_active()
             && heartbeat_manager.is_none()
             && settings_selector.is_none()
             && thinking_selector.is_none()
@@ -1982,9 +2285,9 @@ async fn run_terminal(
             )
             .await;
     }
-    if let Some(cancel) = login_cancel {
-        cancel.cancel();
-    }
+    // The login in flight owns its own token (login-dialog.ts:77); cancelling it
+    // here aborts a pending sign-in before the terminal is torn down.
+    logins.cancel_current();
     mode.borrow_mut().shutdown().await;
     drop(guard);
     connection.dispose().await?;
@@ -2014,6 +2317,27 @@ fn submit(
 ) {
     let (connection, send) = (connection.clone(), send.clone());
     tokio::spawn(async move {
+        let result = dispatch_submission(&connection, &send, &text, follow_up, images).await;
+        let _ = send.send(HostEvent::Completed(result));
+    });
+}
+
+/// The awaited body of [`submit`].
+///
+/// Split out of the `tokio::spawn` so the dispatch chain - the part that picks
+/// between a local built-in handler, a session slash command, and a model
+/// prompt - is directly awaitable and can be asserted against a recording
+/// connection (`interactive-mode.ts:4784-5039`).
+async fn dispatch_submission(
+    connection: &Arc<dyn wire::AgentConnection>,
+    send: &mpsc::Sender<HostEvent>,
+    text: &str,
+    follow_up: bool,
+    images: Option<Vec<ImageContent>>,
+) -> Result<(), String> {
+    let (connection, send) = (connection.clone(), send.clone());
+    let text = text.to_string();
+    {
         // `const slashCommand = parseSlashCommand(text)` then
         // `resolveBuiltinSlashCommandName` (interactive-mode.ts:4784-4785).
         let dispatch = classify_submission(&text);
@@ -2048,29 +2372,49 @@ fn submit(
                         })
                 }
             }
+            // A session slash command reaches the session exactly like free
+            // text: TypeScript has no arm for `compact`/`refine`/`goal`/
+            // `autonomous` in its local chain (interactive-mode.ts:4821-5030),
+            // so they fall through to `agentConnection.prompt(...)`
+            // (interactive-mode.ts:5177-5181) and `AgentSession` turns the text
+            // into a session command action (`agent-session.ts:5065-5068`,
+            // `_executeQueuedSessionCommand` :6760-6824).
+            SlashDispatch::SessionCommand(line) => {
+                prompt_model(&connection, &line, follow_up, images).await
+            }
             // `!command` runs shell (interactive-mode.ts:5043-5070).
             SlashDispatch::Model(line) => match line.strip_prefix('!') {
                 Some(command) => connection.execute_bash(command, None).await,
                 // Anything else - free text and extension commands - prompts the
                 // model with the original text (interactive-mode.ts:5130-5145).
-                None => {
-                    connection
-                        .prompt(
-                            &line,
-                            Some(wire::AgentConnectionPromptOptions {
-                                images,
-                                streaming_behavior: Some(
-                                    if follow_up { "followUp" } else { "steer" }.into(),
-                                ),
-                                ..Default::default()
-                            }),
-                        )
-                        .await
-                }
+                None => prompt_model(&connection, &line, follow_up, images).await,
             },
         };
-        let _ = send.send(HostEvent::Completed(result));
-    });
+        result
+    }
+}
+
+/// `agentConnection.prompt(text, { streamingBehavior, queueIfBusy, images })`
+/// (interactive-mode.ts:5177-5181).
+///
+/// Session slash commands and free text share this call, which is why the port
+/// routes them through the same helper instead of a parallel execution path.
+async fn prompt_model(
+    connection: &Arc<dyn wire::AgentConnection>,
+    line: &str,
+    follow_up: bool,
+    images: Option<Vec<ImageContent>>,
+) -> Result<(), String> {
+    connection
+        .prompt(
+            line,
+            Some(wire::AgentConnectionPromptOptions {
+                images,
+                streaming_behavior: Some(if follow_up { "followUp" } else { "steer" }.into()),
+                ..Default::default()
+            }),
+        )
+        .await
 }
 
 /// `getAvailableThinkingLevels` (interactive-mode.ts:8189-8193).
@@ -2091,6 +2435,34 @@ fn available_thinking_levels(
     }
 }
 
+/// Built-ins whose TypeScript arm requires `!commandArgs`
+/// (interactive-mode.ts:4826-5030) and which no later arm accepts.
+///
+/// `/clear` is deliberately absent: the alias reports `Usage: /clear` instead of
+/// prompting, and `/new` takes arguments (:4968-4989). `/login` and `/model` are
+/// absent too - both have argument-taking arms (:4836-4840, :4953-4956).
+fn no_argument_builtin_slash_command(name: &str) -> bool {
+    matches!(
+        name,
+        "settings"
+            | "scoped-models"
+            | "share"
+            | "copy"
+            | "session"
+            | "system-prompt"
+            | "context"
+            | "logs"
+            | "changelog"
+            | "hotkeys"
+            | "fork"
+            | "clone"
+            | "tree"
+            | "logout"
+            | "reload"
+            | "debug"
+    )
+}
+
 /// The decision the host makes for one submitted line.
 ///
 /// Port of interactive-mode.ts:4784-4786 (`parseSlashCommand` +
@@ -2104,6 +2476,10 @@ enum SlashDispatch {
         args: String,
         raw: String,
     },
+    /// A session slash command (`compact`, `refine`, `goal`, `autonomous`):
+    /// the line is submitted verbatim, exactly as free text is, so the session
+    /// recognises it (`slash-commands.ts:273-281`).
+    SessionCommand(String),
     /// Free text, an extension command, or a bare `/` - it goes to the model
     /// exactly as typed (interactive-mode.ts:5130-5145).
     Model(String),
@@ -2115,8 +2491,23 @@ enum SlashDispatch {
 /// names and aliases, which is what routes `/clear`, `/usage`, `/thinking`,
 /// `/rename`, and `/side` to their canonical commands.
 fn classify_submission(text: &str) -> SlashDispatch {
+    // Session commands are checked BEFORE the local built-in chain: TypeScript
+    // turns them into session command actions inside `AgentSession`
+    // (`agent-session.ts:5065-5068`) and has no local arm for them
+    // (interactive-mode.ts:4821-5030), so the host must not run them locally.
+    if crate::core::slash_commands::parse_session_slash_command(text).is_some() {
+        return SlashDispatch::SessionCommand(text.trim().to_string());
+    }
+
     if let Some(command) = crate::core::slash_commands::resolve_leading_builtin_slash_command(text)
     {
+        // TypeScript gates these arms on `!commandArgs` and has no later arm for
+        // them (interactive-mode.ts:4826-5030), so a command WITH arguments falls
+        // through the whole local chain and reaches
+        // `agentConnection.prompt(text, ...)` like free text (:5177-5181).
+        if !command.args.is_empty() && no_argument_builtin_slash_command(&command.name) {
+            return SlashDispatch::Model(text.to_string());
+        }
         return SlashDispatch::Builtin {
             name: command.name,
             args: command.args,
@@ -2150,13 +2541,47 @@ fn classify_submission(text: &str) -> SlashDispatch {
 /// Each arm maps to one of the TypeScript's local render paths
 /// (`showStatus`, `showWarning`, `echoLocalCommand`), so a dispatched command
 /// never reaches the model as chat text.
+#[derive(Debug)]
 enum CommandOutput {
     Nothing,
     Status(String),
     Warning(String),
     EchoLocal(String),
+    /// `echoLocalCommand(text)` followed by the command's own panel.
+    ///
+    /// The TypeScript pairs the two in ONE arm for every command that renders a
+    /// panel: `/session` interactive-mode.ts:4887+9499-9501, `/system-prompt`
+    /// :4893+9541-9544, `/context` :4904+9807-9808, `/logs` :4910+9532-9533, and
+    /// `/changelog` :4926+10016-10021. `echoLocalCommand` (6405-6413) mounts the
+    /// TYPED command as the user's own message, so the panel output stays anchored
+    /// to a visible command instead of floating, and the command itself is never
+    /// lost. `command` is the raw text as typed (`/clear` stays `/clear`), not the
+    /// canonical name.
+    ///
+    /// `/rlm-max-depth` (:4881-4884) and `/heartbeat` (:4914-4918) call no
+    /// `echoLocalCommand`, so they keep the bare [`CommandOutput::Panel`].
+    EchoPanel {
+        command: String,
+        panel: String,
+    },
     /// `chatContainer.addChild(new Spacer(1)); addChild(new Text(info, 1, 0))`.
     Panel(String),
+    /// `handleContextCommand` (interactive-mode.ts:9796-9809): the raw
+    /// `getContextTree()` reply, echoed first like every other panel command.
+    ///
+    /// The tree is formatted on the owner loop because the reference width is the
+    /// LIVE terminal width (`Math.max(60, Math.min(this.ui.terminal.columns - 2,
+    /// 120))`, :9800) and the dispatch task holds no UI handle.
+    ContextTree {
+        command: String,
+        tree: serde_json::Value,
+    },
+    /// `showError` (interactive-mode.ts:7672-7676) - `/fullscreen bogus`.
+    Error(String),
+    /// `setFullscreenMode(enable)` (interactive-mode.ts:5014-5023, :7522-7537).
+    /// `Some(enabled)` is an explicit `on`/`off`; `None` is the bare toggle,
+    /// which resolves against the LIVE state on the main loop.
+    Fullscreen(Option<bool>),
 }
 
 impl CommandOutput {
@@ -2173,8 +2598,22 @@ impl CommandOutput {
             CommandOutput::EchoLocal(text) => {
                 let _ = send.send(HostEvent::EchoLocal(text));
             }
+            CommandOutput::EchoPanel { command, panel } => {
+                let _ = send.send(HostEvent::EchoLocal(command));
+                let _ = send.send(HostEvent::Panel(panel));
+            }
             CommandOutput::Panel(panel) => {
                 let _ = send.send(HostEvent::Panel(panel));
+            }
+            CommandOutput::ContextTree { command, tree } => {
+                let _ = send.send(HostEvent::EchoLocal(command));
+                let _ = send.send(HostEvent::ContextTree(tree));
+            }
+            CommandOutput::Error(error) => {
+                let _ = send.send(HostEvent::Error(error));
+            }
+            CommandOutput::Fullscreen(requested) => {
+                let _ = send.send(HostEvent::Fullscreen(requested));
             }
         }
     }
@@ -2191,15 +2630,30 @@ impl CommandOutput {
             CommandOutput::Status(status) => vec![HostEvent::Status(status)],
             CommandOutput::Warning(warning) => vec![HostEvent::Warning(warning)],
             CommandOutput::EchoLocal(text) => vec![HostEvent::EchoLocal(text)],
+            CommandOutput::EchoPanel { command, panel } => {
+                vec![HostEvent::EchoLocal(command), HostEvent::Panel(panel)]
+            }
             CommandOutput::Panel(panel) => vec![HostEvent::Panel(panel)],
+            CommandOutput::ContextTree { command, tree } => {
+                vec![HostEvent::EchoLocal(command), HostEvent::ContextTree(tree)]
+            }
+            CommandOutput::Error(error) => vec![HostEvent::Error(error)],
+            CommandOutput::Fullscreen(requested) => vec![HostEvent::Fullscreen(requested)],
         }
     }
+}
+
+/// `Math.max(60, Math.min(this.ui.terminal.columns - 2, 120))`
+/// (interactive-mode.ts:9800): the live width `/context` formats its tree at.
+fn context_tree_width(columns: usize) -> f64 {
+    60.0f64.max((columns as f64 - 2.0).min(120.0))
 }
 
 /// `handleSessionCommand` (interactive-mode.ts:9481-9502).
 async fn session_panel(
     connection: &Arc<dyn wire::AgentConnection>,
     session_name: Option<String>,
+    command: &str,
 ) -> Result<CommandOutput, String> {
     let stats = connection.get_session_stats().await?;
     let text = |key: &str| {
@@ -2230,11 +2684,14 @@ async fn session_panel(
     info.push_str(&format!("Tool Results: {}\n", text("toolResults")));
     info.push_str(&format!("Total: {}\n\n", text("totalMessages")));
     info.push_str("Use /context for token, cost, and context usage.");
-    Ok(CommandOutput::EchoLocal(info))
+    Ok(CommandOutput::EchoPanel {
+        command: command.to_string(),
+        panel: info,
+    })
 }
 
 /// `handleLogsCommand` (interactive-mode.ts:9504-9536).
-fn logs_panel() -> CommandOutput {
+fn logs_panel(command: &str) -> CommandOutput {
     let logs_dir = crate::config::get_logs_dir();
     let mut info = format!("Logs\n\nDirectory: {logs_dir}\n\n");
     let mut files: Vec<String> = std::fs::read_dir(&logs_dir)
@@ -2260,11 +2717,14 @@ fn logs_panel() -> CommandOutput {
     info.push_str(
         "\nDaemon crashes log to <socket>.log; agent-open failures log to client-errors.log.",
     );
-    CommandOutput::EchoLocal(info)
+    CommandOutput::EchoPanel {
+        command: command.to_string(),
+        panel: info,
+    }
 }
 
 /// `handleChangelogCommand` (interactive-mode.ts:10004-10021).
-fn changelog_panel() -> CommandOutput {
+fn changelog_panel(command: &str) -> CommandOutput {
     let entries = crate::utils::changelog::parse_changelog(&crate::config::get_changelog_path());
     let markdown = if entries.is_empty() {
         "No changelog entries found.".to_string()
@@ -2276,7 +2736,10 @@ fn changelog_panel() -> CommandOutput {
             .collect::<Vec<String>>()
             .join("\n\n")
     };
-    CommandOutput::EchoLocal(format!("What's New\n\n{markdown}"))
+    CommandOutput::EchoPanel {
+        command: command.to_string(),
+        panel: format!("What's New\n\n{markdown}"),
+    }
 }
 
 /// `handleRlmMaxDepthCommand` (interactive-mode.ts:9430-9479).
@@ -2427,16 +2890,19 @@ async fn run_builtin_command(
             let _ = send.send(HostEvent::Settings(connection.get_state().await?));
             Ok(CommandOutput::Nothing)
         }
-        "fullscreen" => {
-            let _ = send.send(HostEvent::Setting(native_settings::Change::Fullscreen(
-                !crate::core::settings_manager::SettingsManager::create(
-                    &connection.get_state().await?.cwd,
-                    None,
-                )
-                .get_fullscreen(),
-            )));
-            Ok(CommandOutput::Nothing)
-        }
+        // `commandName === "fullscreen"` (interactive-mode.ts:5014-5023).
+        //
+        // The TypeScript parses `on`/`off` and resolves the bare toggle against
+        // the LIVE `this.fullscreenEnabled` (:5021), then `setFullscreenMode`
+        // persists and applies it (:7522-7537). The previous port built a fresh
+        // `SettingsManager` and negated the SAVED value, so it ignored its
+        // arguments and diverged from the live terminal state.
+        "fullscreen" => match parse_fullscreen_argument(args) {
+            Ok(requested) => Ok(CommandOutput::Fullscreen(requested)),
+            Err(()) => Ok(CommandOutput::Error(
+                "Usage: /fullscreen [on|off]".to_string(),
+            )),
+        },
         // `/model` keeps its existing search behaviour exactly.
         "model" => {
             let search = (!args.is_empty()).then(|| args.to_string());
@@ -2534,24 +3000,34 @@ async fn run_builtin_command(
         // `commandName === "session"` (interactive-mode.ts:4885-4889).
         "session" => {
             let state = connection.get_state().await?;
-            session_panel(connection, state.session_name).await
+            session_panel(connection, state.session_name, text.trim()).await
         }
-        // `commandName === "system-prompt"` (interactive-mode.ts:4891-4895).
+        // `commandName === "system-prompt"` (interactive-mode.ts:4891-4895,
+        // panel at :9541-9544).
         "system-prompt" => {
             let prompt = connection.get_system_prompt().await?;
-            Ok(CommandOutput::Panel(format!(
-                "System Prompt ({} chars)\n\n{prompt}",
-                prompt.chars().count()
-            )))
+            Ok(CommandOutput::EchoPanel {
+                command: text.trim().to_string(),
+                panel: format!(
+                    "System Prompt ({} chars)\n\n{prompt}",
+                    prompt.chars().count()
+                ),
+            })
         }
-        // `commandName === "context"` (interactive-mode.ts:4903-4907).
-        "context" => connection.get_session_stats().await.map(|stats| {
-            CommandOutput::Panel(serde_json::to_string_pretty(&stats).unwrap_or_default())
-        }),
+        // `commandName === "context"` (interactive-mode.ts:4903-4907, handler at
+        // :9796-9809). The tree is returned raw; the owner loop formats it at the
+        // live terminal width.
+        "context" => connection
+            .get_context_tree()
+            .await
+            .map(|tree| CommandOutput::ContextTree {
+                command: text.trim().to_string(),
+                tree,
+            }),
         // `commandName === "logs"` (interactive-mode.ts:4909-4913).
-        "logs" => Ok(logs_panel()),
+        "logs" => Ok(logs_panel(text.trim())),
         // `commandName === "changelog"` (interactive-mode.ts:4925-4929).
-        "changelog" => Ok(changelog_panel()),
+        "changelog" => Ok(changelog_panel(text.trim())),
         // `commandName === "rlm-max-depth"` (interactive-mode.ts:4881-4884).
         "rlm-max-depth" => rlm_max_depth_command(connection, args).await,
         // `commandName === "heartbeat"` (interactive-mode.ts:4914-4918).
@@ -2674,9 +3150,27 @@ async fn run_builtin_command(
                 "Reloaded keybindings, extensions, skills, prompts, themes".to_string(),
             ))
         }
-        // `commandName === "clear"` / `"new"` (interactive-mode.ts:4968-4989).
-        // `/clear` is the alias, so the registry reports `new` with raw `/clear`.
+        // `if (slashCommand?.name === "clear")` / `"new"` (interactive-mode.ts:4968-4989).
+        // `/clear` is the alias, so the registry reports the canonical `new` with
+        // raw `/clear`; both TypeScript arms therefore key on the name AS TYPED,
+        // not on the canonical one.
         "new" => {
+            // `clear` is the no-argument compatibility alias
+            // (`builtin_slash_command_takes_argument` is false for it,
+            // core/slash_commands.rs:530-533), and TypeScript answers any argument
+            // with `showError("Usage: /clear")` (:4969-4971) INSTEAD of starting a
+            // session. Reading the contract from the registry keeps the alias
+            // resolution in one place.
+            let typed = crate::core::slash_commands::parse_slash_command(text)
+                .map(|command| command.name)
+                .filter(|name| crate::core::slash_commands::is_builtin_slash_command_name(name));
+            let alias_without_arguments = typed.as_deref().is_some_and(|name| {
+                name != "new"
+                    && !crate::core::slash_commands::builtin_slash_command_takes_argument(name)
+            });
+            if alias_without_arguments && !args.trim().is_empty() {
+                return Ok(CommandOutput::Error("Usage: /clear".to_string()));
+            }
             let parsed = crate::core::new_session_command::parse_new_session_command(
                 text.trim().strip_prefix("/new").unwrap_or(""),
             );
@@ -2702,6 +3196,75 @@ async fn run_builtin_command(
             "/{other} is recognised but the native host has no handler for it yet."
         ))),
     }
+}
+
+/// `commandArgs?.trim().toLowerCase()` for `/fullscreen`
+/// (interactive-mode.ts:5016-5020).
+///
+/// `Ok(Some(on))` is an explicit `on`/`off`; `Ok(None)` is the bare toggle;
+/// `Err(())` is an unrecognised argument, which the TypeScript answers with
+/// `showError("Usage: /fullscreen [on|off]")`.
+fn parse_fullscreen_argument(args: &str) -> Result<Option<bool>, ()> {
+    let arg = args.trim().to_lowercase();
+    if arg.is_empty() {
+        return Ok(None);
+    }
+    match arg.as_str() {
+        "on" => Ok(Some(true)),
+        "off" => Ok(Some(false)),
+        _ => Err(()),
+    }
+}
+
+/// `/fullscreen`'s argument resolution (interactive-mode.ts:5016-5022).
+///
+/// `arg === "on" ? true : arg === "off" ? false : !this.fullscreenEnabled` - the
+/// bare toggle reads the LIVE field, never the persisted setting.
+fn apply_fullscreen_request(
+    requested: Option<bool>,
+    mode: &Rc<RefCell<InteractiveMode>>,
+    editor: &Rc<RefCell<CustomEditor>>,
+    ui: &Rc<RefCell<TUI>>,
+    transcript: &Rc<RefCell<Transcript>>,
+) {
+    let enable = requested.unwrap_or_else(|| !mode.borrow().fullscreen_enabled);
+    set_fullscreen_mode(enable, mode, editor, ui, transcript);
+}
+
+/// `setFullscreenMode(enabled)` (interactive-mode.ts:7522-7537).
+///
+/// Persists the choice, refuses fullscreen on a non-interactive stdout with the
+/// exact status line, then applies the live state and reports it.
+fn set_fullscreen_mode(
+    enable: bool,
+    mode: &Rc<RefCell<InteractiveMode>>,
+    editor: &Rc<RefCell<CustomEditor>>,
+    ui: &Rc<RefCell<TUI>>,
+    transcript: &Rc<RefCell<Transcript>>,
+) {
+    if let Ok(mut settings) = mode.borrow().settings_manager().lock() {
+        settings.set_fullscreen(enable);
+    }
+    // `enabled && !process.stdout.isTTY` (interactive-mode.ts:7524-7528).
+    if enable && !std::io::stdout().is_terminal() {
+        mode.borrow_mut().fullscreen_enabled = false;
+        mode.borrow_mut().show_status(
+            "Fullscreen rendering requires an interactive terminal",
+            "dim",
+        );
+        return;
+    }
+    mode.borrow_mut().fullscreen_enabled = enable;
+    native_settings::fullscreen(enable, mode, editor, ui, transcript);
+    let follow_key = mode.borrow().get_editor_key_display("tui.viewport.follow");
+    mode.borrow_mut().show_status(
+        &if enable {
+            format!("Fullscreen rendering on — wheel/pageUp scroll, {follow_key} follows output")
+        } else {
+            "Fullscreen rendering off".to_string()
+        },
+        "dim",
+    );
 }
 
 fn model_command_search(text: &str) -> Option<Option<String>> {
@@ -2993,6 +3556,7 @@ fn make_selector(
 }
 
 fn start_login(
+    generation: LoginGeneration,
     provider: String,
     oauth: bool,
     send: mpsc::Sender<HostEvent>,
@@ -3043,7 +3607,7 @@ fn start_login(
         };
         let errors = auth.drain_errors();
         let result = if result.is_ok() && !errors.is_empty() { Err(errors.join("\n")) } else { result };
-        let _ = send.send(HostEvent::LoginFinished(result));
+        let _ = send.send(HostEvent::LoginFinished(generation, result));
     })
     });
 }
@@ -3051,6 +3615,688 @@ fn start_login(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `AgentConnectionInputPause` stand-in for the recording connection.
+    struct NoopInputPause;
+
+    impl wire::AgentConnectionInputPause for NoopInputPause {
+        fn release(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// Recording `AgentConnection`.
+    ///
+    /// Every method records its own name; the methods the local command handlers
+    /// call also record their arguments, so a behaviour test asserts the ACTUAL
+    /// connection call and its arguments rather than only the command name.
+    #[derive(Default)]
+    struct RecordingConnection {
+        calls: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+        state: std::sync::Mutex<wire::AgentConnectionState>,
+        user_messages: std::sync::Mutex<Vec<wire::AgentConnectionUserMessage>>,
+        last_assistant_text: std::sync::Mutex<Option<String>>,
+        session_tree: std::sync::Mutex<wire::AgentConnectionWatchSessionTree>,
+        export_path: std::sync::Mutex<Option<String>>,
+        fork_result: std::sync::Mutex<serde_json::Value>,
+        /// The `get_context_tree` reply, so a `/context` test drives a REAL tree
+        /// through the real `format_context_tree` instead of an empty object.
+        context_tree: std::sync::Mutex<serde_json::Value>,
+    }
+
+    impl RecordingConnection {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn record(&self, name: &str) {
+            self.record_with(name, &[]);
+        }
+
+        fn record_with(&self, name: &str, args: &[String]) {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.to_string(), args.to_vec()));
+        }
+
+        /// `(method, args)` pairs in call order.
+        fn calls(&self) -> Vec<(String, Vec<String>)> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// The argument list of the single `name` call. Panics when the call is
+        /// absent or repeated, so a test can never pass on the wrong call.
+        fn only_call(&self, name: &str) -> Vec<String> {
+            let matches: Vec<Vec<String>> = self
+                .calls()
+                .into_iter()
+                .filter(|(method, _)| method == name)
+                .map(|(_, args)| args)
+                .collect();
+            assert_eq!(
+                matches.len(),
+                1,
+                "expected exactly one {name} call, got {matches:?}"
+            );
+            matches.into_iter().next().unwrap()
+        }
+    }
+
+    impl wire::AgentConnection for RecordingConnection {
+        fn get_state(&self) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionState, String>> {
+            self.record("get_state");
+            let state = self.state.lock().unwrap().clone();
+            Box::pin(async move { Ok(state) })
+        }
+        fn get_initial_snapshot(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionSnapshot, String>> {
+            self.record("get_initial_snapshot");
+            Box::pin(async move { Ok(wire::AgentConnectionSnapshot::default()) })
+        }
+        fn get_rlm_child_snapshots(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Vec<wire::AgentConnectionRlmChildAgentSnapshot>, String>>
+        {
+            self.record("get_rlm_child_snapshots");
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn get_messages(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Vec<pi_agent_core::types::AgentMessage>, String>>
+        {
+            self.record("get_messages");
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn get_session_header(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Option<wire::AgentConnectionSessionHeader>, String>>
+        {
+            self.record("get_session_header");
+            Box::pin(async move { Ok(None) })
+        }
+        fn get_commands(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Vec<wire::AgentConnectionSlashCommand>, String>>
+        {
+            self.record("get_commands");
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn get_resource_snapshot(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionResourceSnapshot, String>>
+        {
+            self.record("get_resource_snapshot");
+            Box::pin(async move { Ok(wire::AgentConnectionResourceSnapshot::default()) })
+        }
+        fn get_model_catalog(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionModelCatalog, String>> {
+            self.record("get_model_catalog");
+            Box::pin(async move { Ok(wire::AgentConnectionModelCatalog::default()) })
+        }
+        fn get_available_models(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Vec<wire::AgentConnectionModel>, String>> {
+            self.record("get_available_models");
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn get_session_stats(&self) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("get_session_stats");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn get_context_tree(&self) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("get_context_tree");
+            let tree = self.context_tree.lock().unwrap().clone();
+            Box::pin(async move { Ok(tree) })
+        }
+        fn get_session_context(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionSessionContext, String>> {
+            self.record("get_session_context");
+            Box::pin(async move { Ok(wire::AgentConnectionSessionContext::default()) })
+        }
+        fn get_session_tree(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionWatchSessionTree, String>>
+        {
+            self.record("get_session_tree");
+            let tree = self.session_tree.lock().unwrap().clone();
+            Box::pin(async move { Ok(tree) })
+        }
+        fn list_saved_sessions(
+            &self,
+            scope: &str,
+        ) -> pi_ai::types::BoxFuture<Result<Vec<wire::AgentConnectionSavedSessionInfo>, String>>
+        {
+            self.record("list_saved_sessions");
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn get_queue(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionQueueState, String>> {
+            self.record("get_queue");
+            Box::pin(async move { Ok(wire::AgentConnectionQueueState::default()) })
+        }
+        fn mutate_queued_message(
+            &self,
+            lane: &str,
+            index: i64,
+            expected_text: &str,
+            mutation: serde_json::Value,
+        ) -> pi_ai::types::BoxFuture<Result<String, String>> {
+            self.record("mutate_queued_message");
+            Box::pin(async move { Ok(String::new()) })
+        }
+        fn clear_queue(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionQueueState, String>> {
+            self.record("clear_queue");
+            Box::pin(async move { Ok(wire::AgentConnectionQueueState::default()) })
+        }
+        fn abort_and_clear_queue(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionQueueState, String>> {
+            self.record("abort_and_clear_queue");
+            Box::pin(async move { Ok(wire::AgentConnectionQueueState::default()) })
+        }
+        fn acquire_session_input_pause(
+            &self,
+            lease_key: &str,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionSessionInputPause, String>>
+        {
+            self.record("acquire_session_input_pause");
+            Box::pin(async move {
+                Ok(std::sync::Arc::new(NoopInputPause) as wire::AgentConnectionSessionInputPause)
+            })
+        }
+        fn list_cron_jobs(
+            &self,
+            include_inactive: bool,
+        ) -> pi_ai::types::BoxFuture<Result<Vec<serde_json::Value>, String>> {
+            self.record("list_cron_jobs");
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn list_heartbeats(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Vec<wire::AgentConnectionHeartbeat>, String>> {
+            self.record("list_heartbeats");
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+        fn manage_heartbeat(
+            &self,
+            active_session_id: &str,
+            job_id: &str,
+            action: serde_json::Value,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("manage_heartbeat");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn add_cron_job(
+            &self,
+            schedule: &str,
+            prompt: &str,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("add_cron_job");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn cancel_cron_job(
+            &self,
+            job_id: &str,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("cancel_cron_job");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn get_heartbeat(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Option<serde_json::Value>, String>> {
+            self.record("get_heartbeat");
+            Box::pin(async move { Ok(None) })
+        }
+        fn set_heartbeat(
+            &self,
+            schedule: &str,
+            instruction: &str,
+            delivery_mode: Option<&str>,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("set_heartbeat");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn update_heartbeat(
+            &self,
+            action: serde_json::Value,
+        ) -> pi_ai::types::BoxFuture<Result<Option<serde_json::Value>, String>> {
+            self.record("update_heartbeat");
+            Box::pin(async move { Ok(None) })
+        }
+        fn send_agent_message(
+            &self,
+            target_active_session_id: &str,
+            message: &str,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("send_agent_message");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn get_agent_message_status(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("get_agent_message_status");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn pause_agent_messages(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("pause_agent_messages");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn resume_agent_messages(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("resume_agent_messages");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn clear_agent_messages(&self) -> pi_ai::types::BoxFuture<Result<f64, String>> {
+            self.record("clear_agent_messages");
+            Box::pin(async move { Ok(0.0) })
+        }
+        fn get_user_messages_for_forking(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Vec<wire::AgentConnectionUserMessage>, String>>
+        {
+            self.record("get_user_messages_for_forking");
+            let messages = self.user_messages.lock().unwrap().clone();
+            Box::pin(async move { Ok(messages) })
+        }
+        fn get_last_assistant_text(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Option<String>, String>> {
+            self.record("get_last_assistant_text");
+            let text = self.last_assistant_text.lock().unwrap().clone();
+            Box::pin(async move { Ok(text) })
+        }
+        fn get_system_prompt(&self) -> pi_ai::types::BoxFuture<Result<String, String>> {
+            self.record("get_system_prompt");
+            Box::pin(async move { Ok(String::new()) })
+        }
+        fn get_tool_definition(
+            &self,
+            name: &str,
+        ) -> pi_ai::types::BoxFuture<Result<Option<wire::AgentConnectionToolDefinition>, String>>
+        {
+            self.record("get_tool_definition");
+            Box::pin(async move { Ok(None) })
+        }
+        fn set_session_entry_label(
+            &self,
+            entry_id: &str,
+            label: Option<&str>,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record_with(
+                "set_session_entry_label",
+                &[format!("{entry_id}:{label:?}")],
+            );
+            Box::pin(async { Ok(()) })
+        }
+        fn respond_to_extension_ui_request(
+            &self,
+            request_id: &str,
+            response: wire::AgentConnectionExtensionUiResponse,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("respond_to_extension_ui_request");
+            Box::pin(async move { Ok(()) })
+        }
+        fn prompt(
+            &self,
+            message: &str,
+            options: Option<wire::AgentConnectionPromptOptions>,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            let images = options
+                .as_ref()
+                .and_then(|options| options.images.as_ref())
+                .map(|images| images.len());
+            let behavior = options
+                .as_ref()
+                .and_then(|options| options.streaming_behavior.clone())
+                .unwrap_or_else(|| "none".to_string());
+            self.record_with(
+                "prompt",
+                &[message.to_string(), behavior, format!("{images:?}")],
+            );
+            Box::pin(async { Ok(()) })
+        }
+        fn prompt_and_wait(
+            &self,
+            message: &str,
+            options: Option<wire::AgentConnectionPromptOptions>,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("prompt_and_wait");
+            Box::pin(async move { Ok(()) })
+        }
+        fn start_side_question(
+            &self,
+            id: &str,
+            question: &str,
+            previous_turns: Option<Vec<wire::AgentConnectionSideQuestionTurn>>,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record_with(
+                "start_side_question",
+                &[question.to_string(), format!("{previous_turns:?}")],
+            );
+            let _ = id;
+            Box::pin(async { Ok(()) })
+        }
+        fn abort_side_question(&self, id: &str) -> pi_ai::types::BoxFuture<Result<bool, String>> {
+            self.record("abort_side_question");
+            Box::pin(async move { Ok(false) })
+        }
+        fn steer(
+            &self,
+            message: &str,
+            images: Option<Vec<ImageContent>>,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("steer");
+            Box::pin(async move { Ok(()) })
+        }
+        fn follow_up(
+            &self,
+            message: &str,
+            images: Option<Vec<ImageContent>>,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("follow_up");
+            Box::pin(async move { Ok(()) })
+        }
+        fn abort(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("abort");
+            Box::pin(async move { Ok(()) })
+        }
+        fn cancel_rlm_child(
+            &self,
+            child_id: &str,
+        ) -> pi_ai::types::BoxFuture<Result<bool, String>> {
+            self.record("cancel_rlm_child");
+            Box::pin(async move { Ok(false) })
+        }
+        fn wait_for_idle(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("wait_for_idle");
+            Box::pin(async move { Ok(()) })
+        }
+        fn wait_for_headless_completion(
+            &self,
+            options: Option<wire::AgentConnectionHeadlessCompletionOptions>,
+        ) -> pi_ai::types::BoxFuture<Result<crate::core::autonomous::AgentAutonomousStatus, String>>
+        {
+            self.record("wait_for_headless_completion");
+            Box::pin(async move {
+                Ok(crate::core::autonomous::AgentAutonomousStatus {
+                    enabled: false,
+                    continuations_used: 0.0,
+                    turns_used: 0.0,
+                    tokens_used: 0.0,
+                    started_at: None,
+                    limits: crate::core::autonomous::default_autonomous_limits(),
+                    gates: crate::core::autonomous::default_autonomous_gates(),
+                    gate_attempts: std::collections::BTreeMap::new(),
+                    last_gate_failure: None,
+                })
+            })
+        }
+        fn execute_bash(
+            &self,
+            command: &str,
+            options: Option<wire::AgentConnectionExecuteBashOptions>,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record_with("execute_bash", &[format!("{command}|{options:?}")]);
+            Box::pin(async { Ok(()) })
+        }
+        fn execute_bash_and_wait(
+            &self,
+            command: &str,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("execute_bash_and_wait");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn abort_bash(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("abort_bash");
+            Box::pin(async move { Ok(()) })
+        }
+        fn set_model(
+            &self,
+            provider: &str,
+            model_id: &str,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionModel, String>> {
+            self.record("set_model");
+            Box::pin(async move { Ok(wire::AgentConnectionModel::default()) })
+        }
+        fn cycle_model(
+            &self,
+            direction: Option<&str>,
+        ) -> pi_ai::types::BoxFuture<Result<Option<wire::AgentConnectionModelCycleResult>, String>>
+        {
+            self.record("cycle_model");
+            Box::pin(async move { Ok(None) })
+        }
+        fn set_scoped_models(
+            &self,
+            scoped_models: Vec<wire::AgentConnectionScopedModel>,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record_with(
+                "set_scoped_models",
+                &[scoped_models
+                    .iter()
+                    .map(|scoped| format!("{}/{}", scoped.model.provider, scoped.model.id))
+                    .collect::<Vec<_>>()
+                    .join(",")],
+            );
+            Box::pin(async { Ok(()) })
+        }
+        fn set_thinking_level(
+            &self,
+            level: pi_agent_core::types::ThinkingLevel,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record_with("set_thinking_level", &[level.as_str().to_string()]);
+            Box::pin(async { Ok(()) })
+        }
+        fn set_service_tier(
+            &self,
+            service_tier: ServiceTier,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("set_service_tier");
+            Box::pin(async move { Ok(()) })
+        }
+        fn cycle_thinking_level(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<Option<pi_agent_core::types::ThinkingLevel>, String>>
+        {
+            self.record("cycle_thinking_level");
+            Box::pin(async move { Ok(None) })
+        }
+        fn set_transport(
+            &self,
+            transport: pi_ai::types::Transport,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("set_transport");
+            Box::pin(async move { Ok(()) })
+        }
+        fn set_steering_mode(&self, mode: &str) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("set_steering_mode");
+            Box::pin(async move { Ok(()) })
+        }
+        fn set_follow_up_mode(&self, mode: &str) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("set_follow_up_mode");
+            Box::pin(async move { Ok(()) })
+        }
+        fn set_auto_compaction_enabled(
+            &self,
+            enabled: bool,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("set_auto_compaction_enabled");
+            Box::pin(async move { Ok(()) })
+        }
+        fn set_auto_retry_enabled(
+            &self,
+            enabled: bool,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("set_auto_retry_enabled");
+            Box::pin(async move { Ok(()) })
+        }
+        fn compact(
+            &self,
+            custom_instructions: Option<&str>,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("compact");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn refine(
+            &self,
+            options: serde_json::Value,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("refine");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn abort_compaction(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("abort_compaction");
+            Box::pin(async move { Ok(()) })
+        }
+        fn abort_branch_summary(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("abort_branch_summary");
+            Box::pin(async move { Ok(()) })
+        }
+        fn abort_retry(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("abort_retry");
+            Box::pin(async move { Ok(()) })
+        }
+        fn reload(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("reload");
+            Box::pin(async move { Ok(()) })
+        }
+        fn new_session(
+            &self,
+            options: Option<wire::AgentConnectionNewSessionOptions>,
+        ) -> pi_ai::types::BoxFuture<Result<bool, String>> {
+            self.record("new_session");
+            Box::pin(async move { Ok(false) })
+        }
+        fn switch_session(
+            &self,
+            session_path: &str,
+            options: Option<wire::AgentConnectionSwitchSessionOptions>,
+        ) -> pi_ai::types::BoxFuture<Result<bool, String>> {
+            self.record("switch_session");
+            Box::pin(async move { Ok(false) })
+        }
+        fn fork(
+            &self,
+            entry_id: &str,
+            options: Option<wire::AgentConnectionForkOptions>,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record_with("fork", &[format!("{entry_id}|{options:?}")]);
+            let result = self.fork_result.lock().unwrap().clone();
+            Box::pin(async move { Ok(result) })
+        }
+        fn navigate_tree(
+            &self,
+            target_id: &str,
+            options: Option<wire::AgentConnectionNavigateTreeOptions>,
+        ) -> pi_ai::types::BoxFuture<Result<wire::AgentConnectionNavigateTreeResult, String>>
+        {
+            self.record("navigate_tree");
+            Box::pin(async move { Ok(wire::AgentConnectionNavigateTreeResult::default()) })
+        }
+        fn import_from_jsonl(
+            &self,
+            input_path: &str,
+            cwd_override: Option<&str>,
+        ) -> pi_ai::types::BoxFuture<Result<bool, String>> {
+            self.record("import_from_jsonl");
+            Box::pin(async move { Ok(false) })
+        }
+        fn export_to_html(
+            &self,
+            output_path: Option<&str>,
+        ) -> pi_ai::types::BoxFuture<Result<String, String>> {
+            self.record_with("export_to_html", &[format!("{output_path:?}")]);
+            let path = self
+                .export_path
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "/tmp/session.html".to_string());
+            Box::pin(async move { Ok(path) })
+        }
+        fn export_to_jsonl(
+            &self,
+            output_path: Option<&str>,
+        ) -> pi_ai::types::BoxFuture<Result<String, String>> {
+            self.record_with("export_to_jsonl", &[format!("{output_path:?}")]);
+            let path = self
+                .export_path
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| "/tmp/session.jsonl".to_string());
+            Box::pin(async move { Ok(path) })
+        }
+        fn set_session_name(&self, name: &str) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record_with("set_session_name", &[name.to_string()]);
+            Box::pin(async { Ok(()) })
+        }
+        fn get_rlm_max_depth_status(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("get_rlm_max_depth_status");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn set_rlm_max_depth(
+            &self,
+            max_depth: f64,
+            options: Option<serde_json::Value>,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("set_rlm_max_depth");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn rename_saved_session(
+            &self,
+            session_path: &str,
+            name: &str,
+        ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("rename_saved_session");
+            Box::pin(async move { Ok(()) })
+        }
+        fn delete_saved_session(
+            &self,
+            session_path: &str,
+        ) -> pi_ai::types::BoxFuture<Result<serde_json::Value, String>> {
+            self.record("delete_saved_session");
+            Box::pin(async move { Ok(serde_json::json!({})) })
+        }
+        fn watch_session(
+            &self,
+            active_session_id: &str,
+        ) -> pi_ai::types::BoxFuture<
+            Result<Option<Box<dyn wire::AgentConnectionSessionWatcher>>, String>,
+        > {
+            self.record("watch_session");
+            Box::pin(async move { Ok(None) })
+        }
+        fn dispose(&self) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            self.record("dispose");
+            Box::pin(async move { Ok(()) })
+        }
+        fn subscribe(
+            &self,
+            _listener: wire::AgentConnectionEventListener,
+        ) -> Box<dyn Fn() + Send + Sync> {
+            Box::new(|| {})
+        }
+
+        fn on_before_session_invalidate(
+            &self,
+            _listener: wire::AgentConnectionBeforeSessionInvalidateListener,
+        ) -> Box<dyn Fn() + Send + Sync> {
+            Box::new(|| {})
+        }
+    }
 
     #[test]
     fn extension_dialogs_return_real_component_selection_and_text() {
@@ -3309,8 +4555,9 @@ mod tests {
         assert_eq!(scoped, vec![catalog[0].clone()]);
     }
 
-    /// A mode with no connection, enough for the Ctrl+S dispatch chain.
-    fn stash_mode(session_id: &str) -> InteractiveMode {
+    /// A mode with no connection, enough for the Ctrl+S dispatch chain and for the
+    /// history-runtime regression tests in the sibling `native_history` module.
+    pub(super) fn stash_mode(session_id: &str) -> InteractiveMode {
         crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
         crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
         let services = local::InteractiveModeUiServices {
@@ -3349,6 +4596,489 @@ mod tests {
             prompt_stash_session_id: Some(session_id.to_string()),
         })
         .expect("mode")
+    }
+
+    /// DEFECT 6: `/compact`, `/refine`, `/goal` and `/autonomous` must reach the
+    /// connection's `prompt`, not a local handler (interactive-mode.ts:4821-5030
+    /// has no local arm for them; they fall through to
+    /// `agentConnection.prompt(text, ...)` at :5177-5181, which
+    /// `AgentSession._normalizeSubmission` turns into the session command action
+    /// at agent-session.ts:5065-5068).
+    #[tokio::test]
+    async fn session_slash_commands_are_prompted_not_handled_locally() {
+        for text in [
+            "/compact",
+            "/compact keep the plan",
+            "/refine",
+            "/goal ship the port",
+            "/autonomous",
+        ] {
+            let recorder = Arc::new(RecordingConnection::new());
+            let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+            let (send, _receive) = mpsc::channel();
+            assert_eq!(
+                classify_submission(text),
+                SlashDispatch::SessionCommand(text.trim().to_string()),
+                "{text} must classify as a session command"
+            );
+            // The session-command route is the prompt path, so it must run through
+            // `dispatch_submission`, not the local built-in chain.
+            let result = dispatch_submission(&connection, &send, text, false, None).await;
+            let recorded = recorder.calls();
+            let prompt = recorded
+                .iter()
+                .find(|(name, _)| name == "prompt")
+                .unwrap_or_else(|| panic!("{text} must reach connection.prompt, got {recorded:?}"));
+            assert_eq!(prompt.1[0], text.trim(), "{text} must be prompted verbatim");
+            assert_eq!(
+                prompt.1[1], "steer",
+                "{text} must keep the default steer queue mode"
+            );
+            assert!(
+                result.is_ok(),
+                "{text} must prompt successfully: {result:?}"
+            );
+        }
+    }
+
+    /// The teeth of the DEFECT 6 assertion: a session command must never be
+    /// answered by the local `/status`-style chain. `/compact` has no local arm,
+    /// so a dispatcher that lost the `SessionCommand` branch would send it to the
+    /// model as chat text and leave `prompt` uncalled.
+    #[tokio::test]
+    async fn a_session_command_does_not_take_the_local_builtin_path() {
+        let text = "/compact keep the plan";
+        assert!(
+            crate::core::slash_commands::parse_session_slash_command(text).is_some(),
+            "the registry must own the session-command classification"
+        );
+        // `compact` IS a registry entry, but it is marked `execution: "session"`
+        // (slash-commands.ts:... / slash_commands.rs:438-440), which is exactly
+        // why the local chain must not execute it.
+        let command = crate::core::slash_commands::builtin_slash_commands()
+            .iter()
+            .find(|command| command.name == "compact")
+            .expect("`compact` must be a registry entry");
+        assert_eq!(
+            command.execution.as_deref(),
+            Some("session"),
+            "`compact` must be a session-executed command, not a local one"
+        );
+        assert_eq!(
+            crate::core::slash_commands::parse_session_slash_command("/compact keep the plan")
+                .map(|command| command.name),
+            Some("compact".to_string())
+        );
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, _receive) = mpsc::channel();
+        // `run_builtin_command` is the LOCAL chain: no session command may appear
+        // there, so it must report the name as unhandled rather than act on it.
+        let local = run_builtin_command(&connection, &send, text, "compact", "keep the plan").await;
+        assert!(
+            matches!(local, Ok(CommandOutput::Status(ref message))
+                if message.starts_with("/compact is recognised but the native host has no handler")),
+            "the local chain must not silently handle a session command, got {local:?}"
+        );
+        assert_eq!(
+            recorder.calls(),
+            Vec::new(),
+            "the local chain must not touch the connection"
+        );
+    }
+
+    /// DEFECT 1 (DESTRUCTIVE): `/clear <anything>` must NOT start a new session.
+    ///
+    /// TypeScript keys the two arms on the name AS TYPED
+    /// (interactive-mode.ts:4968 `slashCommand?.name === "clear"`), and answers any
+    /// argument with `showError("Usage: /clear")` at :4969-4971 - it never reaches
+    /// `handleClearCommand` (:10222). `clear` is the no-argument compatibility alias
+    /// (`builtin_slash_command_takes_argument` returns false for it,
+    /// core/slash_commands.rs:530-533). The assertion is on the RECORDED CONNECTION,
+    /// so a handler that starts a session fails here even if it also prints a usage
+    /// line.
+    #[tokio::test]
+    async fn clear_with_arguments_reports_usage_and_never_starts_a_session() {
+        for text in ["/clear foo", "/clear extra words", "/clear --name x"] {
+            let recorder = Arc::new(RecordingConnection::new());
+            let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+            let (send, _receive) = mpsc::channel();
+            let command =
+                crate::core::slash_commands::parse_slash_command(text).expect("a slash command");
+            let resolved = crate::core::slash_commands::resolve_slash_command(&command);
+            assert_eq!(resolved.name, "new", "{text} must resolve to the new arm");
+            assert_eq!(command.name, "clear", "{text} must be the /clear alias");
+            assert!(
+                !crate::core::slash_commands::builtin_slash_command_takes_argument(&command.name),
+                "{text} names the no-argument compatibility alias"
+            );
+            assert!(
+                !resolved.args.is_empty(),
+                "{text} must carry a real argument (TypeScript trims it, slash-commands.ts:246)"
+            );
+
+            let output =
+                run_builtin_command(&connection, &send, text, &resolved.name, &resolved.args)
+                    .await
+                    .expect("the usage error is a local reply, not an Err");
+
+            assert_eq!(
+                recorder.calls(),
+                Vec::new(),
+                "{text} must NOT touch the connection at all, got {:?}",
+                recorder.calls()
+            );
+            match output {
+                CommandOutput::Error(message) => assert_eq!(message, "Usage: /clear"),
+                other => panic!("{text} must report Usage: /clear via showError, got {other:?}"),
+            }
+        }
+    }
+
+    /// GUARD for DEFECT 1: the BARE `/clear` still clears, and a whitespace-only
+    /// suffix is not an argument (`slashCommand.args` is trimmed,
+    /// slash-commands.ts:246, so `if (commandArgs)` at interactive-mode.ts:4969 is
+    /// false). Both must reach `handleClearCommand` (:4972-4974 -> :10232).
+    #[tokio::test]
+    async fn bare_clear_still_starts_a_new_session() {
+        for text in ["/clear", "/clear   ", "/new"] {
+            let recorder = Arc::new(RecordingConnection::new());
+            let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+            let (send, _receive) = mpsc::channel();
+            let command = crate::core::slash_commands::parse_slash_command(text).unwrap();
+            let resolved = crate::core::slash_commands::resolve_slash_command(&command);
+            assert_eq!(resolved.name, "new");
+            assert!(resolved.args.is_empty(), "{text} carries no argument");
+
+            let output =
+                run_builtin_command(&connection, &send, text, &resolved.name, &resolved.args)
+                    .await
+                    .expect("bare /clear clears");
+            assert_eq!(
+                recorder.only_call("new_session"),
+                Vec::<String>::new(),
+                "{text} must create a session"
+            );
+            assert!(
+                matches!(output, CommandOutput::Status(ref message) if message == "New session started"),
+                "{text} must report the new session, got {output:?}"
+            );
+        }
+    }
+
+    /// GUARD for DEFECT 1: the `/new` argument form still creates the session and
+    /// applies both `--name` and the prompt-free default
+    /// (interactive-mode.ts:4978-4989 -> :10232-10248).
+    #[tokio::test]
+    async fn new_with_a_name_still_starts_a_session_and_sets_the_name() {
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, _receive) = mpsc::channel();
+        let text = "/new --name scratch";
+        let command = crate::core::slash_commands::parse_slash_command(text).unwrap();
+        let resolved = crate::core::slash_commands::resolve_slash_command(&command);
+
+        let output = run_builtin_command(&connection, &send, text, &resolved.name, &resolved.args)
+            .await
+            .expect("a /new with a name succeeds");
+
+        assert_eq!(
+            recorder.only_call("new_session"),
+            Vec::<String>::new(),
+            "/new must create the session"
+        );
+        assert_eq!(
+            recorder.only_call("set_session_name"),
+            vec!["scratch".to_string()],
+            "/new --name scratch must apply the parsed name"
+        );
+        assert!(
+            matches!(output, CommandOutput::Status(ref message) if message == "New session started"),
+            "got {output:?}"
+        );
+    }
+
+    /// DEFECT 2: `/context` renders the context tree, not the session-stats JSON.
+    ///
+    /// TypeScript calls `getContextTree()` and renders it with
+    /// `formatContextTree(tree, width)` (interactive-mode.ts:9799-9803). The old
+    /// port called `get_session_stats` and pretty-printed the raw JSON.
+    #[tokio::test]
+    async fn context_asks_for_the_context_tree_not_the_session_stats() {
+        let recorder = Arc::new(RecordingConnection::new());
+        *recorder.context_tree.lock().unwrap() = serde_json::json!({
+            "id": "root",
+            "label": "Session",
+            "status": "running",
+            "ownUsage": { "input": 5, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 10,
+                          "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } },
+            "totalUsage": { "input": 5, "output": 5, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 10,
+                            "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } },
+            "children": []
+        });
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, _receive) = mpsc::channel();
+
+        let output = run_builtin_command(&connection, &send, "/context", "context", "")
+            .await
+            .expect("the context tree reply succeeds");
+
+        let methods: Vec<String> = recorder.calls().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(
+            methods,
+            vec!["get_context_tree".to_string()],
+            "/context must call get_context_tree and nothing else"
+        );
+        let tree = match output {
+            CommandOutput::ContextTree { ref command, .. } => {
+                assert_eq!(command, "/context");
+                true
+            }
+            _ => false,
+        };
+        assert!(tree, "got {output:?}");
+        let events = output.into_events();
+        let rendered = events
+            .iter()
+            .find_map(|event| match event {
+                HostEvent::ContextTree(value) => Some(value.clone()),
+                _ => None,
+            })
+            .expect("a ContextTree event must be emitted");
+        assert!(
+            !serde_json::to_string(&rendered)
+                .unwrap()
+                .contains("\"get_session_stats\""),
+            "the raw reply must not be pretty-printed at the user: {rendered}"
+        );
+    }
+
+    /// The `/context` tree is formatted at `Math.max(60, Math.min(columns - 2, 120))`
+    /// (interactive-mode.ts:9800), and the formatter emits the human-readable tree
+    /// rather than JSON.
+    #[test]
+    fn context_tree_width_matches_the_typescript_clamp() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        assert_eq!(context_tree_width(80), 78.0);
+        assert_eq!(context_tree_width(200), 120.0);
+        assert_eq!(context_tree_width(30), 60.0);
+        assert_eq!(context_tree_width(0), 60.0);
+
+        let root = crate::core::context_tree::ContextTreeNode {
+            id: "root".into(),
+            label: "Session".into(),
+            status: "running".into(),
+            model: None,
+            own_usage: pi_ai::types::Usage::default(),
+            total_usage: pi_ai::types::Usage::default(),
+            context_usage: None,
+            children: Vec::new(),
+        };
+        let text = crate::modes::interactive::components::context_tree_format::format_context_tree(
+            &root,
+            context_tree_width(80),
+        );
+        assert!(
+            text.contains("Context") && text.contains("tokens") && text.contains("agent"),
+            "the tree formatter must produce the header rows, got {text:?}"
+        );
+        assert!(
+            !text.trim_start().starts_with('{'),
+            "the /context output must not be JSON, got {text:?}"
+        );
+    }
+
+    /// The variant names of a command reply, so an assertion can name what it saw
+    /// without a `Debug` impl on the whole `HostEvent` union.
+    fn event_names(events: &[HostEvent]) -> Vec<&'static str> {
+        events
+            .iter()
+            .map(|event| match event {
+                HostEvent::Connection(_) => "Connection",
+                HostEvent::Completed(_) => "Completed",
+                HostEvent::Status(_) => "Status",
+                HostEvent::Panel(_) => "Panel",
+                HostEvent::EchoLocal(_) => "EchoLocal",
+                HostEvent::ContextTree(_) => "ContextTree",
+                HostEvent::Warning(_) => "Warning",
+                HostEvent::ThinkingLevels { .. } => "ThinkingLevels",
+                HostEvent::Render => "Render",
+                HostEvent::Heartbeats(_, _) => "Heartbeats",
+                HostEvent::HeartbeatUpdated(_, _) => "HeartbeatUpdated",
+                HostEvent::CloseHeartbeats => "CloseHeartbeats",
+                HostEvent::Settings(_) => "Settings",
+                HostEvent::Setting(_) => "Setting",
+                HostEvent::SettingAccepted(_) => "SettingAccepted",
+                HostEvent::Models(_, _) => "Models",
+                HostEvent::ModelSelected { .. } => "ModelSelected",
+                HostEvent::Configuration(_, _, _) => "Configuration",
+                HostEvent::BeginLogin(_, _) => "BeginLogin",
+                HostEvent::LoginAuth(_, _) => "LoginAuth",
+                HostEvent::LoginProgress(_) => "LoginProgress",
+                HostEvent::LoginPrompt(_, _, _) => "LoginPrompt",
+                HostEvent::LoginFinished(_, _) => "LoginFinished",
+                HostEvent::AgentsView => "AgentsView",
+                HostEvent::Error(_) => "Error",
+                HostEvent::Fullscreen(_) => "Fullscreen",
+            })
+            .collect()
+    }
+
+    /// DEFECT 3: every local command that renders a panel echoes the TYPED command
+    /// first (`echoLocalCommand`, interactive-mode.ts:6405-6413), because the panel
+    /// then anchors to a visible command instead of floating
+    /// (`/session` :4887+9499-9501, `/logs` :4910+9532-9533, `/changelog`
+    /// :4926+10016-10021).
+    #[tokio::test]
+    async fn panel_commands_echo_the_typed_command_before_the_panel() {
+        let cases: [(&str, &str); 4] = [
+            ("/session", "session"),
+            ("/context", "context"),
+            ("/logs", "logs"),
+            ("/changelog", "changelog"),
+        ];
+        for (text, name) in cases {
+            let recorder = Arc::new(RecordingConnection::new());
+            *recorder.context_tree.lock().unwrap() = serde_json::json!({
+                "id": "root", "label": "Session", "status": "running",
+                "ownUsage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                              "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } },
+                "totalUsage": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 0,
+                                "cost": { "input": 0.0, "output": 0.0, "cacheRead": 0.0, "cacheWrite": 0.0, "total": 0.0 } },
+                "children": []
+            });
+            let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+            let (send, _receive) = mpsc::channel();
+            let output = run_builtin_command(&connection, &send, text, name, "")
+                .await
+                .unwrap_or_else(|error| panic!("{text} must succeed: {error}"));
+
+            let events = output.into_events();
+            let echoed = events
+                .iter()
+                .find_map(|event| match event {
+                    HostEvent::EchoLocal(value) => Some(value.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{text} must echo the typed command, got {} events",
+                        events.len()
+                    )
+                });
+            assert_eq!(
+                echoed, text,
+                "{text} must echo the command AS TYPED (interactive-mode.ts:6405-6413)"
+            );
+            assert!(
+                matches!(events.first(), Some(HostEvent::EchoLocal(_))),
+                "{text} must echo BEFORE the panel content, got [{:?}]",
+                event_names(&events)
+            );
+            assert!(
+                events.len() >= 2,
+                "{text} must also emit its panel content, got [{:?}]",
+                event_names(&events)
+            );
+        }
+    }
+
+    /// The echo path itself renders the submitted text as the user's own message
+    /// (`echoLocalCommand` -> `UserMessageComponent`, interactive-mode.ts:6409-6413).
+    #[test]
+    fn echo_local_renders_the_typed_command_as_a_user_message() {
+        let mode = Rc::new(RefCell::new(stash_mode("host-echo-session")));
+        let mut transcript = Transcript::new(mode);
+        transcript.echo_local("/logs");
+        assert_eq!(transcript.rows.len(), 2, "a spacer then the user message");
+        let rendered = transcript.render(80.0).join("\n");
+        assert!(
+            rendered.contains("/logs"),
+            "the typed command must be visible in the transcript, got {rendered:?}"
+        );
+    }
+
+    /// DEFECT 4: `/fullscreen on|off` sets that exact state, an invalid argument is
+    /// a usage error, and the bare form toggles the LIVE value
+    /// (interactive-mode.ts:5014-5023, :7522-7537).
+    #[test]
+    fn fullscreen_arguments_select_the_requested_state() {
+        assert_eq!(parse_fullscreen_argument(""), Ok(None));
+        assert_eq!(parse_fullscreen_argument("  "), Ok(None));
+        assert_eq!(parse_fullscreen_argument("on"), Ok(Some(true)));
+        assert_eq!(parse_fullscreen_argument(" OFF "), Ok(Some(false)));
+        assert_eq!(parse_fullscreen_argument("yes"), Err(()));
+        assert_eq!(parse_fullscreen_argument("tru"), Err(()));
+    }
+
+    /// `/fullscreen off` while the live state is already `false` must not flip it
+    /// to `true`, and the bare toggle must invert the LIVE field rather than the
+    /// persisted setting. A handler that ignored its argument fails both rows.
+    #[test]
+    fn fullscreen_explicit_argument_beats_the_live_toggle() {
+        let mode = Rc::new(RefCell::new(stash_mode("host-fullscreen-session")));
+        let tui = Rc::new(RefCell::new(TUI::new(
+            Box::new(pi_tui::terminal::ProcessTerminal::new()),
+            None,
+        )));
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            tui.clone(),
+            editor_theme(),
+            CustomEditorOptions::default(),
+        )));
+        let transcript = Rc::new(RefCell::new(Transcript::new(mode.clone())));
+
+        // The persisted value is written before the TTY guard
+        // (interactive-mode.ts:7523), so it distinguishes "honour the argument"
+        // from "toggle", which the guard would otherwise mask.
+        let persisted = |mode: &Rc<RefCell<InteractiveMode>>| {
+            mode.borrow()
+                .with_settings(|settings| settings.get_fullscreen())
+        };
+
+        // `/fullscreen off` with the live state already off must stay off. A
+        // handler that ignores its argument and toggles would persist `true`.
+        mode.borrow_mut()
+            .with_settings_mut(|settings| settings.set_fullscreen(false));
+        mode.borrow_mut().fullscreen_enabled = false;
+        apply_fullscreen_request(Some(false), &mode, &editor, &tui, &transcript);
+        assert!(
+            !mode.borrow().fullscreen_enabled,
+            "`/fullscreen off` must keep the live state off"
+        );
+        assert!(
+            !persisted(&mode),
+            "`/fullscreen off` must persist `false`, not a toggled value"
+        );
+
+        // `/fullscreen on` with the live state already on must request `true`. A
+        // toggle would request `false` and persist `false`.
+        mode.borrow_mut()
+            .with_settings_mut(|settings| settings.set_fullscreen(true));
+        mode.borrow_mut().fullscreen_enabled = true;
+        apply_fullscreen_request(Some(true), &mode, &editor, &tui, &transcript);
+        assert!(
+            persisted(&mode),
+            "`/fullscreen on` must persist `true`, not a toggled value"
+        );
+        // The test harness has no TTY, so the refusal at
+        // interactive-mode.ts:7524-7528 keeps the live state off. That is the
+        // specified behaviour, not a failure of the argument handling.
+        assert!(
+            !mode.borrow().fullscreen_enabled,
+            "the non-TTY guard must refuse to enable fullscreen (interactive-mode.ts:7525)"
+        );
+
+        // The bare toggle reads the LIVE field. With the setting `true` and the
+        // live field `false`, only a live read requests `true`.
+        mode.borrow_mut()
+            .with_settings_mut(|settings| settings.set_fullscreen(true));
+        mode.borrow_mut().fullscreen_enabled = false;
+        apply_fullscreen_request(None, &mode, &editor, &tui, &transcript);
+        assert!(
+            persisted(&mode),
+            "the bare toggle must invert the LIVE state, not the persisted setting"
+        );
     }
 
     /// The Ctrl+S byte reaches a real handler: the editor is cleared and a stash is
@@ -3550,5 +5280,136 @@ mod tests {
             "draft typed before leaving"
         );
         assert!(!session.restore_on_open_pending(), "the stash is consumed");
+    }
+
+    /// One login attempt's slot, shown in its own overlay.
+    ///
+    /// `new LoginDialogComponent(...)` + `showFullPaneOverlay(...)` is what
+    /// starts an attempt (auth-flows.ts:512-522), and each dialog owns an
+    /// independent `abortController` (login-dialog.ts:77).
+    fn login_slot(
+        ui: &Rc<RefCell<TUI>>,
+        generation: LoginGeneration,
+        token: tokio_util::sync::CancellationToken,
+    ) -> LoginSlot {
+        let dialog = Rc::new(RefCell::new(LoginDialogComponent::new(
+            ui.clone(),
+            "anthropic",
+            Box::new(|_, _| {}),
+            None,
+            None,
+        )));
+        let overlay = ui
+            .borrow_mut()
+            .show_overlay(dialog.clone(), Default::default());
+        LoginSlot {
+            generation,
+            token,
+            overlay,
+            dialog,
+        }
+    }
+
+    fn login_test_ui() -> Rc<RefCell<TUI>> {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        Rc::new(RefCell::new(TUI::new(
+            Box::new(pi_tui::terminal::ProcessTerminal::new()),
+            None,
+        )))
+    }
+
+    /// A superseded login that finishes late must not cancel or hide the dialog
+    /// that replaced it.
+    ///
+    /// TypeScript scopes cancellation to one `LoginDialogComponent`: its
+    /// `abortController` is per-instance (login-dialog.ts:77) and `cancel()`
+    /// aborts only that controller (:139-146), while the overlay hidden on
+    /// completion is the handle this dialog was shown in (auth-flows.ts:524-527).
+    /// The port's old shared `login_cancel`/`overlay` slots let a stale
+    /// completion take the newer dialog down with it; this is that regression.
+    #[test]
+    fn a_stale_login_does_not_cancel_or_hide_the_newer_login() {
+        let ui = login_test_ui();
+        let mut logins = LoginCoordinator::default();
+
+        // Login A starts and owns the host's login state.
+        let a_generation = logins.begin();
+        let a_token = tokio_util::sync::CancellationToken::new();
+        logins.install(login_slot(&ui, a_generation, a_token.clone()));
+        assert_eq!(logins.current_generation(), Some(a_generation));
+
+        // Login B starts: `begin()` retires A exactly as A's own `cancel()` would
+        // (login-dialog.ts:140), so A's controller and overlay go away HERE.
+        let b_generation = logins.begin();
+        assert_ne!(
+            a_generation, b_generation,
+            "each attempt gets its own identity"
+        );
+        let b_token = tokio_util::sync::CancellationToken::new();
+        logins.install(login_slot(&ui, b_generation, b_token.clone()));
+        assert!(
+            a_token.is_cancelled(),
+            "the retired dialog aborts its own sign-in"
+        );
+        ui.borrow_mut().sync_overlays();
+        assert!(
+            ui.borrow().has_overlay(),
+            "only B's overlay is on screen, and it is"
+        );
+
+        // A completes late. It no longer owns the login state.
+        let applied = apply_login_finished(&mut logins, a_generation);
+
+        // The whole point: B keeps its own controller and its own overlay.
+        assert!(
+            !b_token.is_cancelled(),
+            "the stale login stole the newer dialog's cancellation"
+        );
+        ui.borrow_mut().sync_overlays();
+        assert!(
+            ui.borrow().has_overlay(),
+            "the stale login hid the newer dialog's overlay"
+        );
+        assert!(
+            !applied,
+            "a superseded generation must report that it was ignored"
+        );
+        assert_eq!(
+            logins.current_generation(),
+            Some(b_generation),
+            "B still owns the login state"
+        );
+    }
+
+    /// Over-correction guard: the login that still owns the state must cancel its
+    /// own token and hide its own overlay, and report that it was applied.
+    ///
+    /// `cancel()` aborts this dialog's controller (login-dialog.ts:139-146) and
+    /// completion hides this dialog's overlay (auth-flows.ts:524-527).
+    #[test]
+    fn the_current_login_still_cancels_and_hides_its_own_dialog() {
+        let ui = login_test_ui();
+        let mut logins = LoginCoordinator::default();
+
+        let generation = logins.begin();
+        let token = tokio_util::sync::CancellationToken::new();
+        logins.install(login_slot(&ui, generation, token.clone()));
+        ui.borrow_mut().sync_overlays();
+        assert!(ui.borrow().has_overlay(), "its overlay is on screen");
+
+        let applied = apply_login_finished(&mut logins, generation);
+        assert!(
+            token.is_cancelled(),
+            "the current dialog aborts its own sign-in"
+        );
+        ui.borrow_mut().sync_overlays();
+        assert!(
+            !ui.borrow().has_overlay(),
+            "the current dialog hides its own overlay"
+        );
+        assert!(applied, "the current generation is applied");
+        assert_eq!(logins.current_generation(), None, "the slot is consumed");
+        assert!(!logins.is_active(), "no login is in flight");
     }
 }
