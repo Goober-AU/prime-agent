@@ -22,6 +22,7 @@ use pi_agent_core::types::{AgentMessage, ThinkingLevel};
 use pi_ai::types::{BoxFuture, ImageContent, ServiceTier, Transport};
 
 use crate::modes::agent_connection::types::*;
+use crate::modes::daemon::daemon_protocol::DaemonClosingReason;
 
 /// Extended request timeout for refine requests, which run an LLM pass.
 pub const DAEMON_REFINE_REQUEST_TIMEOUT_MS: u64 = 10 * 60 * 1000;
@@ -336,15 +337,30 @@ pub trait DaemonTransportClient: Send + Sync {
     fn control_plane_transport(self: Arc<Self>) -> Arc<dyn DaemonTransportClient>;
 }
 
-/// `getDaemonSocketCloseReason(error)`.
-pub fn get_daemon_socket_close_reason(error: &str) -> Option<&'static str> {
-    if error.contains("daemon socket closed: shutdown") {
-        Some("shutdown")
-    } else if error.contains("daemon socket closed: update") {
-        Some("update")
-    } else {
-        None
-    }
+/// `getDaemonSocketCloseReason(error)` (`daemon-client.ts:103-105`).
+///
+/// TS returns the reason from a *typed* carrier: `error instanceof DaemonSocketClosedError ?
+/// error.daemonClosingReason : undefined`. The one wire-visible form of that field is
+/// `DaemonSocketClosedError`'s message template (`daemon-client.ts:73-86`):
+/// `Connection to the Prime Agent daemon closed.{ Reason: <reason>.}{ Cause: <cause>.} Socket: ...`,
+/// which is what `getDaemonSocketCloseReason`'s consumers actually receive, because
+/// `daemon-agent-connection.ts` and `daemon-routed-client.ts:27` hand it the close *listener's*
+/// `Error`. The only producer of this string on the Rust side is `DaemonSocketClosedError::message`
+/// (`daemon_client.rs:235-250`), which formats the reason through `format!("{reason}")` as well.
+///
+/// The port previously matched the bare `"daemon socket closed: <reason>"` form, which no producer
+/// on either side ever writes; every real close therefore classified as `None`. For
+/// `daemon-agent-connection.ts:316` that means an authoritative shutdown was treated as transient
+/// (it reconnects instead of emitting the terminal closed event), and for
+/// `daemon-routed-client.ts:27` the closing reason never reached `DaemonDirectTransportClosedError`.
+///
+/// The reason is matched in its template position (`closed. Reason: <reason>.`), which is the text
+/// analogue of reading the typed field; a `Cause:` body cannot inject a reason because the template
+/// writes `closed.` immediately before the reason segment and `Cause:` before the cause.
+pub fn get_daemon_socket_close_reason(error: &str) -> Option<DaemonClosingReason> {
+    [DaemonClosingReason::Shutdown, DaemonClosingReason::Update]
+        .into_iter()
+        .find(|reason| error.contains(&format!("closed. Reason: {}.", reason.as_str())))
 }
 
 /// `getDaemonLogPath(socketPath)`.
@@ -1192,7 +1208,7 @@ impl DaemonAgentConnection {
             *connection.initial_attach_pending.lock().unwrap() = false;
             let initial_close = connection.initial_control_plane_close.lock().unwrap().take();
             if let Some(initial_close) = initial_close {
-                if get_daemon_socket_close_reason(&initial_close) == Some("shutdown") {
+                if get_daemon_socket_close_reason(&initial_close) == Some(DaemonClosingReason::Shutdown) {
                     connection.dispose_inner().await;
                     return Err(initial_close);
                 }
@@ -1339,14 +1355,14 @@ impl DaemonAgentConnection {
             return;
         }
         // An authoritative shutdown/update reason outranks the surviving direct link.
-        if get_daemon_socket_close_reason(&error) == Some("shutdown") {
+        if get_daemon_socket_close_reason(&error) == Some(DaemonClosingReason::Shutdown) {
             *self.terminal_close_emitted.lock().unwrap() = true;
             let message = self.format_daemon_session_closed_error("shutdown");
             self.emit(AgentConnectionEvent::Closed { error: Some(message) }).await;
             return;
         }
         let update_pending = *self.update_restart_pending.lock().unwrap();
-        if (update_pending || get_daemon_socket_close_reason(&error) == Some("update"))
+        if (update_pending || get_daemon_socket_close_reason(&error) == Some(DaemonClosingReason::Update))
             && !*self.update_reconnect_failed.lock().unwrap()
         {
             *self.update_restart_pending.lock().unwrap() = true;
@@ -4068,6 +4084,7 @@ fn thinking_level_from_str(value: &str) -> Option<ThinkingLevel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::modes::daemon::daemon_client::{DaemonClientError, DaemonSocketClosedError};
 
     fn flat_node(id: &str, parent: Option<&str>, timestamp: &str) -> AgentConnectionSessionTreeFlatNode {
         AgentConnectionSessionTreeFlatNode {
@@ -4223,6 +4240,59 @@ mod tests {
             "unknown command: abort_bash",
             "execute_bash"
         ));
+    }
+
+    /// `getDaemonSocketCloseReason` (`daemon-client.ts:103-105`) reads the typed
+    /// `DaemonSocketClosedError.daemonClosingReason`; on the wire that field reaches consumers only
+    /// through the class message template (`daemon-client.ts:73-86`), which the Rust producer mirrors
+    /// (`daemon_client.rs:235-250`). These are exactly the strings `handle_transport_close` receives.
+    #[test]
+    fn a_named_close_reason_is_classified_from_the_socket_closed_message() {
+        let shutdown = DaemonClientError::SocketClosed(DaemonSocketClosedError::new(
+            "/tmp/prime.sock",
+            Some("shutdown"),
+            None,
+        ))
+        .message();
+        assert_eq!(
+            get_daemon_socket_close_reason(&shutdown),
+            Some(DaemonClosingReason::Shutdown),
+            "an authoritative shutdown must be recognised from its close message: {shutdown}"
+        );
+
+        let update = DaemonClientError::SocketClosed(DaemonSocketClosedError::new(
+            "/tmp/prime.sock",
+            Some("update"),
+            Some("reset"),
+        ))
+        .message();
+        assert_eq!(
+            get_daemon_socket_close_reason(&update),
+            Some(DaemonClosingReason::Update),
+            "an update close must be recognised from its close message: {update}"
+        );
+
+        // The direct-worker form TS builds at `daemon-routed-client.ts:25-30`.
+        let direct = DaemonClientError::SocketClosed(DaemonSocketClosedError::new(
+            "direct-worker",
+            None,
+            Some("Daemon worker socket closed"),
+        ))
+        .message();
+        assert_eq!(
+            get_daemon_socket_close_reason(&direct),
+            None,
+            "a generic EOF carries no reason and must stay transient: {direct}"
+        );
+
+        // Only the reason token counts: a `Cause:` cannot spoof one.
+        let spoofed = DaemonClientError::SocketClosed(DaemonSocketClosedError::new(
+            "/tmp/prime.sock",
+            None,
+            Some(" Reason: shutdown."),
+        ))
+        .message();
+        assert_eq!(get_daemon_socket_close_reason(&spoofed), None);
     }
 
     #[test]
