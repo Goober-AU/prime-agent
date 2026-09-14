@@ -1,0 +1,902 @@
+{
+ "D-assert-false": [
+  [
+   "cli::daemon_command::tests::double_dash_is_a_separator_for_send_and_cron_only",
+   "crates\\pi-coding-agent\\src\\cli\\daemon_command.rs:2718:9",
+   "assertion failed: parsed.json"
+  ],
+  [
+   "cli::daemon_launch::tests::early_launch_skips_public_and_removed_commands_but_keeps_agents",
+   "crates\\pi-coding-agent\\src\\cli\\daemon_launch.rs:1436:9",
+   "assertion failed: should_start_daemon_early(&args(&[\"help\"]), false)"
+  ],
+  [
+   "cli::daemon_update_restart::tests::start_id_matching_is_permissive_when_unavailable",
+   "crates\\pi-coding-agent\\src\\cli\\daemon_update_restart.rs:1363:9",
+   "assertion failed: !matches_process_start_id(&DaemonUpdateRestartProcessIdentity {"
+  ],
+  [
+   "core::autonomous::tests::gate_failure_continuation_matches_the_typescript_text",
+   "crates\\pi-coding-agent\\src\\core\\autonomous.rs:1177:9",
+   "assertion failed: text.contains(\"`npm test` exit 1.\\n\\nContinue working.\")"
+  ],
+  [
+   "core::event_log::tests::torn_tail_repair_is_logged",
+   "crates\\pi-coding-agent\\src\\core\\event_log.rs:431:9",
+   "assertion failed: messages.iter().any(|message|"
+  ],
+  [
+   "core::agent_traces::tests::catch_up_prunes_missing_sessions_and_counts_ledgers",
+   "crates\\pi-coding-agent\\src\\core\\agent_traces.rs:2196:9",
+   "assertion failed: catch_up.results.is_empty()"
+  ],
+  [
+   "core::kernel::bootstrap::tests::ready_check_embeds_the_harness_method_list",
+   "crates\\pi-coding-agent\\src\\core\\kernel\\bootstrap.rs:2359:9",
+   "assertion failed: check.contains(\"_harness_methods = [\\\"create_memory\\\", \\\"update_memory\\\"\")"
+  ],
+  [
+   "core::package_manager::tests::git_install_paths_follow_the_scope",
+   "crates\\pi-coding-agent\\src\\core\\package_manager.rs:3596:9",
+   "assertion failed: project.ends_with(\"git/github.com/user/repo\")"
+  ],
+  [
+   "core::package_manager::tests::bundled_skills_are_discovered_with_overrides",
+   "crates\\pi-coding-agent\\src\\core\\package_manager.rs:3998:9",
+   "assertion failed: !websearch.enabled"
+  ],
+  [
+   "core::model_registry::tests::refresh_and_available_models_use_built_in_catalog",
+   "crates\\pi-coding-agent\\src\\core\\model_registry.rs:3684:9",
+   "assertion failed: available.is_empty()"
+  ],
+  [
+   "core::package_manager::tests::resolves_local_resource_entries_with_patterns",
+   "crates\\pi-coding-agent\\src\\core\\package_manager.rs:3624:9",
+   "assertion failed: !paths.iter().any(|path| path.ends_with(\"drop.md\"))"
+  ],
+  [
+   "core::tools::edit_diff::tests::generate_diff_string_collapses_unchanged_gaps",
+   "crates\\pi-coding-agent\\src\\core\\tools\\edit_diff.rs:838:9",
+   "assertion failed: diff.contains(\"-1 line1\")"
+  ],
+  [
+   "modes::agents_view::agents_view_mode::tests::splash_metadata_reports_scope_and_depth",
+   "crates\\pi-coding-agent\\src\\modes\\agents_view\\agents_view_mode.rs:5978:13",
+   "assertion failed: metadata[0].contains(\"1 running, 0 idle, 0 inactive\")"
+  ],
+  [
+   "modes::agents_view::agents_view_state::tests::subagent_summary_detection_covers_legacy_summaries",
+   "crates\\pi-coding-agent\\src\\modes\\agents_view\\agents_view_state.rs:2478:9",
+   "assertion failed: is_subagent_summary(&summary)"
+  ],
+  [
+   "modes::daemon::active_session_state::tests::ambiguous_suffixes_are_reported",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\active_session_state.rs:427:9",
+   "assertion failed: error.to_string().starts_with(\"Ambiguous active session \\\"aa\\\": matches \")"
+  ],
+  [
+   "modes::daemon::daemon_catalog_process::tests::source_path_detection_uses_the_src_directory",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_catalog_process.rs:1169:9",
+   "assertion failed: is_daemon_catalog_source_path(\"/pkg/src/modes/daemon/daemon-catalog-entry.ts\","
+  ],
+  [
+   "modes::daemon::rlm_ledger::tests::dead_edges_are_dropped_and_delete_policy_tombstones_children",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\rlm_ledger.rs:1437:9",
+   "assertion failed: result.ledger_edge.is_some()"
+  ],
+  [
+   "modes::headless_completion::tests::gate_failure_continuation_omits_empty_output",
+   "crates\\pi-coding-agent\\src\\modes\\headless_completion.rs:410:9",
+   "assertion failed: text.contains(\"exit 1.\\n\\nContinue working.\")"
+  ],
+  [
+   "modes::interactive::auth_flows::tests::api_key_login_provider_rules",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\auth_flows.rs:1012:9",
+   "assertion failed: !is_api_key_login_provider(\"deepseek\", &oauth, Some(&builtins))"
+  ],
+  [
+   "modes::interactive::components::config_selector::tests::ctrl_c_exits_and_escape_cancels",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\config_selector.rs:1268:9",
+   "assertion failed: *exited.borrow()"
+  ],
+  [
+   "modes::interactive::components::context_tree_format::tests::renders_header_rows_and_totals",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\context_tree_format.rs:465:9",
+   "assertion failed: text.contains(\"\\u{2514}\\u{2500} Child\")"
+  ],
+  [
+   "modes::interactive::components::earendil_announcement::tests::renders_the_announcement_text_between_two_borders",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\earendil_announcement.rs:145:9",
+   "assertion failed: plain.iter().any(|line| line.contains(BLOG_URL))"
+  ],
+  [
+   "modes::interactive::components::ipython_cell::tests::queues_and_runs_render_the_expected_marker",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\ipython_cell.rs:1442:9",
+   "assertion failed: queued.contains(\"waiting for code\")"
+  ],
+  [
+   "modes::interactive::components::login_dialog::tests::a_guarded_left_arrow_only_cancels_at_column_zero",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\login_dialog.rs:1084:9",
+   "assertion failed: component.signal_aborted()"
+  ],
+  [
+   "modes::interactive::components::login_dialog::tests::show_waiting_and_show_progress_append_to_the_panel",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\login_dialog.rs:1049:9",
+   "assertion failed: rendered.iter().any(|line| line.contains(\"Preparing authentication\"))"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::update_args_include_self_follows_the_flag_rules",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:3904:9",
+   "assertion failed: !update_args_include_self(&args(&[\"--self\", \"--extensions\"]))"
+  ],
+  [
+   "modes::print_mode::tests::autonomous_limit_text_matches_the_typescript",
+   "crates\\pi-coding-agent\\src\\modes\\print_mode.rs:397:9",
+   "assertion failed: describe_autonomous_limit(&status, LIMIT_TIMEOUT_MS).ends_with(\"/1800000\")"
+  ],
+  [
+   "modes::rpc::rpc_client::tests::lines_resolve_pending_requests_before_events",
+   "crates\\pi-coding-agent\\src\\modes\\rpc\\rpc_client.rs:1174:9",
+   "assertion failed: receiver.try_recv().is_ok()"
+  ],
+  [
+   "modes::telegram::worker::tests::pairing_acceptance_round_trips_through_the_frame_the_worker_sends",
+   "crates\\pi-coding-agent\\src\\modes\\telegram\\worker.rs:1197:9",
+   "assertion failed: accept_telegram_pairing(&mut settings, &frame)"
+  ],
+  [
+   "package_manager_cli::tests::unknown_commands_and_removed_flags_are_rejected",
+   "crates\\pi-coding-agent\\src\\package_manager_cli.rs:2435:9",
+   "assertion failed: parse_package_command(&args(&[\"install\", \"--daemon-socket\","
+  ]
+ ],
+ "C-value-mismatch": [
+  [
+   "cli::daemon_list_format::tests::display_ids_truncate_to_twelve_characters",
+   "crates\\pi-coding-agent\\src\\cli\\daemon_list_format.rs:360:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "cli::daemon_list_format::tests::renders_an_aligned_table_in_status_order",
+   "crates\\pi-coding-agent\\src\\cli\\daemon_list_format.rs:291:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "cli::daemon_list_format::tests::status_colour_wraps_the_padded_cell",
+   "crates\\pi-coding-agent\\src\\cli\\daemon_list_format.rs:304:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "cli::daemon_ps_format::tests::marks_the_default_socket_and_appends_the_legend",
+   "crates\\pi-coding-agent\\src\\cli\\daemon_ps_format.rs:206:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "cli::owned_session_worker::tests::preserves_the_current_runtime_flags_and_cli_entrypoint",
+   "crates\\pi-coding-agent\\src\\cli\\owned_session_worker.rs:1244:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "cli::subprocess_launch::tests::falls_back_to_the_exec_path_and_entrypoint",
+   "crates\\pi-coding-agent\\src\\cli\\subprocess_launch.rs:180:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "config::tests::pnpm_self_update_command_replaces_the_package_name",
+   "crates\\pi-coding-agent\\src\\config.rs:1266:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "config::tests::resolve_path_is_lexical_and_absolute_input_wins",
+   "crates\\pi-coding-agent\\src\\config.rs:1310:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::agent_messages::tests::reservation_key_encodes_depth_parent_and_name",
+   "crates\\pi-coding-agent\\src\\core\\agent_messages.rs:1407:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::agent_session_runtime::tests::resolve_path_keeps_absolute_paths",
+   "crates\\pi-coding-agent\\src\\core\\agent_session_runtime.rs:1850:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::agent_traces::tests::upload_all_aggregates_results",
+   "crates\\pi-coding-agent\\src\\core\\agent_traces.rs:2230:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::agent_traces::tests::upload_reports_http_failure_with_status_and_retry_after",
+   "crates\\pi-coding-agent\\src\\core\\agent_traces.rs:2124:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::auth_storage::tests::api_key_credential_round_trips_with_absent_null_and_value_team",
+   "crates\\pi-coding-agent\\src\\core\\auth_storage.rs:2092:58",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::auth_storage::tests::env_keys_match_the_typescript_table",
+   "crates\\pi-coding-agent\\src\\core\\auth_storage.rs:2368:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::auth_storage::tests::stale_marking_hides_a_source_until_cleared",
+   "crates\\pi-coding-agent\\src\\core\\auth_storage.rs:2172:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::export_html::tests::light_and_dark_derivations_match_the_typescript",
+   "crates\\pi-coding-agent\\src\\core\\export_html\\mod.rs:505:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::extensions::runner::tests::registered_commands_get_suffixed_invocation_names",
+   "crates\\pi-coding-agent\\src\\core\\extensions\\runner.rs:2130:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::goals::tests::builds_the_host_response_with_python_style_keys",
+   "crates\\pi-coding-agent\\src\\core\\goals.rs:537:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::mcp::mcp_manager::tests::keeps_acp_credentials_session_scoped_and_isolated_from_stored_oauth",
+   "crates\\pi-coding-agent\\src\\core\\mcp\\mcp_manager.rs:1011:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::memory::project::tests::keeps_ports_and_local_paths_intact",
+   "crates\\pi-coding-agent\\src\\core\\memory\\project.rs:210:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::memory::search::tests::bounds_recalled_content_and_respects_recall_controls",
+   "crates\\pi-coding-agent\\src\\core\\memory\\search.rs:536:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::memory::store::tests::empty_document_matches_the_typescript_shape",
+   "crates\\pi-coding-agent\\src\\core\\memory\\store.rs:977:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::memory::store::tests::fails_closed_on_corrupt_authoritative_state",
+   "crates\\pi-coding-agent\\src\\core\\memory\\store.rs:1064:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::model_registry::tests::codex_models_url_rewrites_the_path_and_adds_the_client_version",
+   "crates\\pi-coding-agent\\src\\core\\model_registry.rs:3591:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::memory::store::tests::keeps_host_facts_private_and_remaps_sources",
+   "crates\\pi-coding-agent\\src\\core\\memory\\store.rs:1193:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::model_registry::tests::private_prime_authorization_refresh_uses_injected_fetch",
+   "crates\\pi-coding-agent\\src\\core\\model_registry.rs:3889:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::memory::jobs::tests::limits_extraction_calls_per_invocation",
+   "crates\\pi-coding-agent\\src\\core\\memory\\jobs.rs:749:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::package_manager::tests::identity_normalizes_ssh_and_https",
+   "crates\\pi-coding-agent\\src\\core\\package_manager.rs:3748:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::package_manager::tests::parses_npm_specs",
+   "crates\\pi-coding-agent\\src\\core\\package_manager.rs:3441:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::package_manager::tests::parses_source_forms",
+   "crates\\pi-coding-agent\\src\\core\\package_manager.rs:3453:17",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::package_manager::tests::local_package_source_adds_extension_and_filtered_resources",
+   "crates\\pi-coding-agent\\src\\core\\package_manager.rs:3920:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::package_manager::tests::local_package_without_resource_dirs_is_an_extension",
+   "crates\\pi-coding-agent\\src\\core\\package_manager.rs:3942:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::prime_inference_model_catalog::tests::build_models_fills_defaults_from_template",
+   "crates\\pi-coding-agent\\src\\core\\prime_inference_model_catalog.rs:675:9",
+   "assertion `left == right` failed: private entry is excluded by default"
+  ],
+  [
+   "core::prime_inference_model_catalog::tests::refresh_writes_cache_and_dedupes",
+   "crates\\pi-coding-agent\\src\\core\\prime_inference_model_catalog.rs:805:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::prompt_templates::tests::substitute_args_handles_positional_and_all_arguments",
+   "crates\\pi-coding-agent\\src\\core\\prompt_templates.rs:526:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::refinement::refinement::tests::extracts_refinement_history_from_custom_session_entries",
+   "crates\\pi-coding-agent\\src\\core\\refinement\\refinement.rs:2746:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::refinement::refinement::tests::reports_an_exhausted_output_budget_instead_of_a_json_parse_error",
+   "crates\\pi-coding-agent\\src\\core\\refinement\\refinement.rs:3041:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::refinement::refinement::tests::uses_a_global_harness_state_directory_under_the_agent_dir_by_default",
+   "crates\\pi-coding-agent\\src\\core\\refinement\\refinement.rs:2555:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::prime_inference_model_catalog::tests::read_cached_models_returns_none_for_missing_or_bad_cache",
+   "crates\\pi-coding-agent\\src\\core\\prime_inference_model_catalog.rs:737:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::prompt_templates::tests::load_prompt_templates_reads_files_and_frontmatter",
+   "crates\\pi-coding-agent\\src\\core\\prompt_templates.rs:574:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::semantic_edges::tests::completed_compaction_flushes_pending_to_the_last_slice",
+   "crates\\pi-coding-agent\\src\\core\\semantic_edges.rs:957:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::session_manager::tests::artifact_paths_follow_the_session_file",
+   "crates\\pi-coding-agent\\src\\core\\session_manager.rs:5440:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::telemetry::tests::batches_events_through_the_configured_endpoint_without_network_access",
+   "crates\\pi-coding-agent\\src\\core\\telemetry.rs:1507:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::bash::tests::execute_bash_reports_abort_and_timeout_statuses",
+   "crates\\pi-coding-agent\\src\\core\\tools\\bash.rs:833:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::code_preview::tests::descriptor_collapses_whitespace_and_truncates",
+   "crates\\pi-coding-agent\\src\\core\\tools\\code_preview.rs:1278:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::code_preview::tests::redact_noise_masks_secrets_and_blobs",
+   "crates\\pi-coding-agent\\src\\core\\tools\\code_preview.rs:1286:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::edit::tests::render_edit_result_reports_diff_and_error",
+   "crates\\pi-coding-agent\\src\\core\\tools\\edit.rs:1024:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::code_preview::tests::preview_python_code_simplifies_control_line_with_child",
+   "crates\\pi-coding-agent\\src\\core\\tools\\code_preview.rs:1338:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::code_preview::tests::preview_bash_command_prefers_heredoc_body",
+   "crates\\pi-coding-agent\\src\\core\\tools\\code_preview.rs:1316:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::edit_diff::tests::generate_diff_string_marks_added_and_removed_lines",
+   "crates\\pi-coding-agent\\src\\core\\tools\\edit_diff.rs:826:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::edit_diff::tests::compute_edits_diff_returns_diff_for_existing_file",
+   "crates\\pi-coding-agent\\src\\core\\tools\\edit_diff.rs:884:17",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::output_accumulator::tests::large_output_spills_to_temp_file_and_reports_path",
+   "crates\\pi-coding-agent\\src\\core\\tools\\output_accumulator.rs:428:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::path_utils::tests::resolves_relative_paths_against_cwd",
+   "crates\\pi-coding-agent\\src\\core\\tools\\path_utils.rs:212:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::edit::tests::execute_edit_replaces_text_and_reports_diff",
+   "crates\\pi-coding-agent\\src\\core\\tools\\edit.rs:945:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "core::tools::path_utils::tests::missing_file_returns_resolved_path",
+   "crates\\pi-coding-agent\\src\\core\\tools\\path_utils.rs:233:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "main_entry::tests::autonomous_config_is_built_only_from_autonomous_flags",
+   "crates\\pi-coding-agent\\src\\main_entry.rs:3692:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "main_entry::tests::runtime_config_mirrors_the_cli_flags",
+   "crates\\pi-coding-agent\\src\\main_entry.rs:3651:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::agent_connection::daemon_agent_connection::tests::builds_a_tree_and_sorts_siblings_by_timestamp",
+   "crates\\pi-coding-agent\\src\\modes\\agent_connection\\daemon_agent_connection.rs:4012:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::agents_view::agents_view_mode::tests::mode_search_filters_rows_and_restores_on_clear",
+   "crates\\pi-coding-agent\\src\\modes\\agents_view\\agents_view_mode.rs:5656:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "main_entry::tests::read_session_manager_adopts_the_header_cwd",
+   "crates\\pi-coding-agent\\src\\main_entry.rs:3885:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::agents_view::agents_view_mode::tests::relative_time_matches_the_reference_buckets",
+   "crates\\pi-coding-agent\\src\\modes\\agents_view\\agents_view_mode.rs:5610:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::agents_view::agents_view_mode::tests::resolve_attach_model_fallback_prefers_the_summary",
+   "crates\\pi-coding-agent\\src\\modes\\agents_view\\agents_view_mode.rs:5867:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::agents_view::agents_view_mode::tests::resume_saved_session_sends_the_session_path",
+   "crates\\pi-coding-agent\\src\\modes\\agents_view\\agents_view_mode.rs:5895:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::agents_view::agents_view_state::tests::rows_nest_subagents_and_flatten_with_summary_and_code_rows",
+   "crates\\pi-coding-agent\\src\\modes\\agents_view\\agents_view_state.rs:2353:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::daemon::daemon_protocol::tests::capability_and_schema_gates_every_gated_command",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_protocol.rs:3060:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::daemon::daemon_session_id::tests::display_id_is_the_trailing_twelve_characters",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_session_id.rs:60:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::daemon::daemon_worker_protocol::tests::startup_gate_rejects_an_invalid_fd",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_worker_protocol.rs:484:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::daemon::rlm_ledger::tests::seeding_publishes_registry_edges_once",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\rlm_ledger.rs:1487:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::daemon::snapshot_transcript_cache::tests::small_target_bytes_split_the_chunks",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\snapshot_transcript_cache.rs:582:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::agent_message::tests::leading_space_is_suppressed_on_request",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\agent_message.rs:285:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::config_selector::tests::filtering_keeps_matching_groups_subgroups_and_items",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\config_selector.rs:1210:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::compaction_outcome_message::tests::malformed_message_renders_the_error_label",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\compaction_outcome_message.rs:133:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::config_selector::tests::subgroups_sort_by_type_order_and_items_by_name",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\config_selector.rs:1164:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::conversation_components::tests::displayed_session_command_results_produce_their_component",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\conversation_components.rs:422:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::custom_message::tests::custom_renderer_takes_over_when_it_returns_a_component",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\custom_message.rs:279:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::custom_message::tests::default_renderer_labels_the_custom_type",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\custom_message.rs:263:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::edit_summary::tests::counts_added_and_removed_lines",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\edit_summary.rs:311:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::keybinding_hints::tests::normalizes_escape_and_arrow_parts",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\keybinding_hints.rs:130:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::login_dialog::tests::the_prime_inference_header_hides_the_title_and_subtitle",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\login_dialog.rs:956:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::menu_panel::tests::compact_layout_wins_when_it_fits_more_items",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\menu_panel.rs:798:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::prime_onboarding_splash::tests::render_cells_batches_runs_by_tone_bold_and_italic",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\prime_onboarding_splash.rs:761:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::scoped_models_selector::tests::enable_all_returns_null_when_everything_is_enabled",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\scoped_models_selector.rs:661:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::settings_selector::tests::parseInt_matches_javascript",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\settings_selector.rs:1072:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::settings_selector::tests::borders_and_list_are_rendered_in_order",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\settings_selector.rs:1104:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::tool_panel::tests::panel_line_pads_to_full_width_with_panel_padding",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\tool_panel.rs:156:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::tool_panel::tests::renders_header_then_blank_then_child_lines",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\tool_panel.rs:166:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::visual_truncate::tests::short_text_is_returned_whole",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\visual_truncate.rs:72:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::components::visual_truncate::tests::takes_the_last_visual_lines_and_counts_the_skipped_ones",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\visual_truncate.rs:80:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::feature_hints::tests::hints_without_keybindings_are_skipped",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\feature_hints.rs:210:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::goal_detail_suffix_hides_narrow_details",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:4439:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::goal_status_formatting_matches_the_typescript_branches",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:4424:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::heartbeat_argument_completions_filter_by_prefix",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:4394:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::queue_selection_and_tray_labels_use_the_connection_state",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:4119:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::initial_render_messages_keeps_orphan_tool_calls_attached",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:3981:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::start_hints_and_random_selection",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:3810:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::subagent_summary_seeding_and_removal_follow_the_status_rules",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:4187:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode::tests::truncate_path_middle_keeps_the_tail",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode.rs:3866:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::interactive_mode_services::tests::ui_services_expose_initial_cwd_and_name",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode_services.rs:1134:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::queue_selection::tests::refresh_at_drops_a_stale_selection",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\queue_selection.rs:189:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::interactive::theme::theme::tests::thinking_border_colors_fall_back_to_off_and_reuse_xhigh_for_max",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\theme\\theme.rs:1898:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::rpc::rpc_client::tests::model_info_keeps_the_wire_names",
+   "crates\\pi-coding-agent\\src\\modes\\rpc\\rpc_client.rs:1229:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::rpc::rpc_client::tests::observed_session_events_reach_their_own_listeners",
+   "crates\\pi-coding-agent\\src\\modes\\rpc\\rpc_client.rs:1217:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "modes::rpc::rpc_types::tests::observed_session_events_keep_their_names",
+   "crates\\pi-coding-agent\\src\\modes\\rpc\\rpc_types.rs:745:9",
+   "assertion `left == right` failed"
+  ],
+  [
+   "themes::optimus_logo::tests::picks_the_largest_variant_that_fits",
+   "crates\\pi-coding-agent\\src\\themes\\optimus_logo.rs:133:9",
+   "assertion `left == right` failed"
+  ]
+ ],
+ "E-other": [
+  [
+   "cli::daemon_update_restart::tests::coordinator_acquisition_blocks_a_second_live_coordinator",
+   "crates\\pi-coding-agent\\src\\cli\\daemon_update_restart.rs:1389:10",
+   "called `Result::unwrap()` on an `Err` value: \"The system cannot find the path specified. (os error 3"
+  ],
+  [
+   "config::tests::npm_self_update_command_orders_uninstall_first_for_direct_specs",
+   "crates\\pi-coding-agent\\src\\config.rs:1256:35",
+   "called `Option::unwrap()` on a `None` value"
+  ],
+  [
+   "core::compaction::checkpoint::tests::reads_legacy_checkpoints_with_encrypted_items",
+   "crates\\pi-coding-agent\\src\\core\\compaction\\checkpoint.rs:147:60",
+   "checkpoint"
+  ],
+  [
+   "core::context_tree::tests::disk_loading_reads_the_newest_session_file",
+   "crates\\pi-coding-agent\\src\\core\\context_tree.rs:816:39",
+   "called `Option::unwrap()` on a `None` value"
+  ],
+  [
+   "core::event_log::tests::torn_final_line_is_skipped_on_read_and_truncated_on_append",
+   "crates\\pi-coding-agent\\src\\core\\event_log.rs:329:14",
+   "called `Result::unwrap()` on an `Err` value: \"corrupt semantic-edge ledger line 2: trailing characte"
+  ],
+  [
+   "core::memory::search::tests::searches_beyond_overview_limits_across_allowed_stores",
+   "crates\\pi-coding-agent\\src\\core\\memory\\search.rs:439:18",
+   "called `Result::unwrap()` on an `Err` value: \"Exact duplicate: entry_0\""
+  ],
+  [
+   "core::memory::store::tests::rolls_back_a_committed_refinement_and_restores_host_isolation",
+   "crates\\pi-coding-agent\\src\\core\\memory\\store.rs:1115:14",
+   "rollback: \"Memory belongs to another host\""
+  ],
+  [
+   "core::session_manager::tests::provider_checkpoints_are_detected_and_legacy_ones_are_read",
+   "crates\\pi-coding-agent\\src\\core\\session_manager.rs:5566:59",
+   "called `Option::unwrap()` on a `None` value"
+  ],
+  [
+   "core::tools::acp_mcp::tests::tool_names_reject_invalid_and_duplicate_servers",
+   "crates\\pi-coding-agent\\src\\core\\tools\\acp_mcp.rs:276:71",
+   "too long: [\"mcp_list_tools_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\", \"mcp_call_aaaaaaaaaaa"
+  ],
+  [
+   "core::tools::ipython::tests::execute_ipython_joins_error_sections_and_marks_error",
+   "crates\\pi-coding-agent\\src\\core\\tools\\ipython.rs:1655:10",
+   "executed: Message(\"Failed to initialize rlm runtime in the Python kernel:\\nwarn\\nline 1\\nline 2\")"
+  ],
+  [
+   "modes::daemon::active_session_state::tests::resolves_by_active_id_session_id_and_suffix",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\active_session_state.rs:408:62",
+   "suffix: Unknown(\"Unknown active session: cdef\")"
+  ],
+  [
+   "modes::daemon::compact_session_stream::tests::creates_a_compact_delta_from_a_message_update",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\compact_session_stream.rs:418:14",
+   "parses: \"missing field `partial`\""
+  ],
+  [
+   "modes::daemon::compact_session_stream::tests::content_start_carries_an_empty_block",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\compact_session_stream.rs:441:14",
+   "parses: \"missing field `partial`\""
+  ],
+  [
+   "modes::interactive::components::custom_editor::tests::app_action_handlers_fire_before_the_editor",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\custom_editor.rs:741:40",
+   "ctrl+o binding"
+  ],
+  [
+   "modes::interactive::components::custom_editor::tests::ctrl_d_on_an_empty_editor_requests_exit",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\custom_editor.rs:754:34",
+   "index out of bounds: the len is 0 but the index is 0"
+  ],
+  [
+   "modes::interactive::components::custom_editor::tests::repeated_clear_keybinding_splits_into_individual_inputs",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\custom_editor.rs:763:44",
+   "escape binding"
+  ],
+  [
+   "modes::interactive::components::diff::tests::parses_diff_lines_like_the_typescript_regex",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\diff.rs:507:51",
+   "parsed"
+  ],
+  [
+   "modes::interactive::components::modal_back::tests::left_arrow_is_back_only_at_column_zero",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\modal_back.rs:50:9",
+   "app.modal.back must have a default key"
+  ],
+  [
+   "modes::rpc::rpc_extension_ui_context::tests::a_dialog_resolves_from_its_response",
+   "crates\\pi-coding-agent\\src\\modes\\rpc\\rpc_extension_ui_context.rs:458:20",
+   "index out of bounds: the len is 0 but the index is 0"
+  ],
+  [
+   "modes::rpc::rpc_extension_ui_context::tests::editor_requests_carry_their_prefill",
+   "crates\\pi-coding-agent\\src\\modes\\rpc\\rpc_extension_ui_context.rs:534:31",
+   "index out of bounds: the len is 0 but the index is 0"
+  ]
+ ],
+ "B-env-guard": [
+  [
+   "core::memory::sharing::tests::ignores_a_cached_endpoint_after_the_url_changes",
+   "crates\\pi-coding-agent\\src\\core\\memory\\sharing.rs:527:14",
+   "called `Result::unwrap()` on an `Err` value: \"Use HTTPS or a loopback SSH tunnel for memory sharing\""
+  ],
+  [
+   "core::memory::sharing::tests::rejects_host_scoped_and_unknown_memories",
+   "crates\\pi-coding-agent\\src\\core\\memory\\sharing.rs:424:14",
+   "called `Result::unwrap()` on an `Err` value: \"Use HTTPS or a loopback SSH tunnel for memory sharing\""
+  ],
+  [
+   "core::memory::sharing::tests::queues_a_pending_write_and_refuses_a_second_one",
+   "crates\\pi-coding-agent\\src\\core\\memory\\sharing.rs:397:10",
+   "called `Result::unwrap()` on an `Err` value: \"Use HTTPS or a loopback SSH tunnel for memory sharing\""
+  ],
+  [
+   "core::memory::sharing::tests::reports_offline_sync_and_short_tokens",
+   "crates\\pi-coding-agent\\src\\core\\memory\\sharing.rs:462:14",
+   "called `Result::unwrap()` on an `Err` value: \"Use HTTPS or a loopback SSH tunnel for memory sharing\""
+  ],
+  [
+   "core::memory::store::tests::validates_settings_limits_and_shared_endpoints",
+   "crates\\pi-coding-agent\\src\\core\\memory\\store.rs:1229:10",
+   "called `Result::unwrap()` on an `Err` value: \"Use HTTPS or a loopback SSH tunnel for memory sharing\""
+  ]
+ ],
+ "A-harness-runtime": [
+  [
+   "modes::daemon::rlm_ledger::tests::family_and_siblings_use_ledger_topology",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\rlm_ledger.rs:1116:23",
+   "can call blocking only when running on the multi-threaded runtime"
+  ],
+  [
+   "modes::daemon::rlm_ledger::tests::passive_descendants_are_merged_and_cwd_filtered",
+   "crates\\pi-coding-agent\\src\\modes\\daemon\\rlm_ledger.rs:1116:23",
+   "can call blocking only when running on the multi-threaded runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::append_output_merges_partial_lines",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::cancelled_execution_renders_the_warning",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::complete_with_exit_code_zero_is_not_an_error",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::hidden_lines_are_counted_and_the_hint_renders",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::nonzero_exit_code_renders_the_error_status",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::append_output_normalises_newlines_and_strips_ansi",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bordered_loader::tests::non_cancellable_loaders_omit_the_hint_block",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bordered_loader::tests::on_abort_fires_for_the_cancellable_loader",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::set_failed_prefers_the_message_over_the_exit_code",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::truncation_warning_names_the_full_output_path",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bordered_loader::tests::renders_borders_loader_hint_and_spacers",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bash_execution::tests::running_component_renders_the_command_and_loader_message",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bordered_loader::tests::escape_aborts_only_the_cancellable_loader",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::bordered_loader::tests::dispose_stops_the_loader",
+   "crates\\pi-tui\\src\\components\\loader.rs:129:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::countdown_timer::tests::ticks_immediately_then_expires_after_the_remaining_ticks",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\countdown_timer.rs:67:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "modes::interactive::components::countdown_timer::tests::dispose_stops_the_interval",
+   "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\countdown_timer.rs:67:20",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ],
+  [
+   "postinstall::tests::requesting_the_kernel_sets_the_uv_flag",
+   "crates\\pi-coding-agent\\src\\core\\kernel\\bootstrap.rs:923:19",
+   "there is no reactor running, must be called from the context of a Tokio 1.x runtime"
+  ]
+ ]
+}

@@ -1,0 +1,66 @@
+{
+  "slice": "runnable-runtime",
+  "status": "partial",
+  "files": [
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session.rs",
+      "src": "packages/coding-agent/src/core/agent-session.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session/agent_handle.rs",
+      "src": "packages/coding-agent/src/core/agent-session.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session/runtime_members.rs",
+      "src": "packages/coding-agent/src/core/agent-session.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session_runtime.rs",
+      "src": "packages/coding-agent/src/core/agent-session-runtime.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session_runtime/daemon_adapter.rs",
+      "src": "packages/coding-agent/src/core/agent-session-runtime.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session_runtime/in_process_adapter.rs",
+      "src": "packages/coding-agent/src/core/agent-session-runtime.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/sdk.rs",
+      "src": "packages/coding-agent/src/core/sdk.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session_services.rs",
+      "src": "packages/coding-agent/src/core/agent-session-services.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session_config.rs",
+      "src": "packages/coding-agent/src/core/agent-session-config.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/print_mode.rs",
+      "src": "packages/coding-agent/src/modes/print-mode.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/agent_connection/in_process_agent_connection.rs",
+      "src": "packages/coding-agent/src/modes/agent-connection/in-process-agent-connection.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/agent_session/runtime_bridge.rs",
+      "src": "packages/coding-agent/src/core/agent-session.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/agent_connection/types.rs",
+      "src": "packages/coding-agent/src/modes/agent-connection/types.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/agent_connection/daemon_agent_connection.rs",
+      "src": "packages/coding-agent/src/modes/agent-connection/daemon-agent-connection.ts"
+    }
+  ],
+  "build": "Final source-stable workspace --tests check: 1 test compile error in repl_manager.rs; see global handoff. Earlier check and executable build passed before final fixes.",
+  "tests": "Final edits not rerun; exact prior results and blockers in evidence/diagnostics/runnable-cli-handoff.json.",
+  "blocked_on": "First-response/Python proof, roster service, remaining runtime parity; user requested checkpoint and PR handoff.",
+  "handoff": "docs/RUST_CLI_NEXT_STEPS.md"
+}

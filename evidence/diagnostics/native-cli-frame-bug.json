@@ -1,0 +1,15 @@
+{
+ "title": "native_cli --print fails: a JSONL peer is decoded with a private-frame decoder",
+ "error": "Error: Invalid private frame header length: 2065855609",
+ "decoded": "2065855609 == 0x7B227479 == the four ASCII bytes {\"ty",
+ "rule_derived": "An 8-byte private frame = [u32 BE header_len][u32 BE payload_len]. 0x7B227479 read as the header length means the decoder consumed the first 4 bytes of a plain JSON line as a length field. So the reader expected a frame and the writer sent JSONL.",
+ "verified_facts": {
+  "worker_frames_correctly": "Spawned a real worker the way native_supervisor::spawn_worker_process does; its first 16 bytes on the pipe were 00 00 00 4b | 00 00 03 ee | {\"kind\": - i.e. a correct 8-byte frame prefix. The worker side is NOT the bug.",
+  "supervisor_speaks_jsonl": "With daemon-worker role env cleared, the supervisor's first line on its pipe is plain {\"type\":\"daemon_hello\",...} with no frame prefix, and it advertises client_owned_sessions (correct).",
+  "jsonl_decision": "daemon_server.rs:72 sets transport = is_worker() ? private-framed : jsonl, and the transport value selects the encoder in write_serialized_encoded (daemon_mode.rs:~7737) and the decoder in daemon_worker_client.rs:277.",
+  "daemon_client_is_jsonl_only": "The CLI's DaemonClient (wrapped by MainEntryDaemonTransport, main_entry.rs:1789-1818) has no PrivateFrameDecoder at all."
+ },
+ "therefore": "A PrivateFrameDecoder reader (daemon_worker_client.rs:277, inside DaemonWorkerClient) is connected to a peer that is writing plain JSONL. The only production constructor of DaemonWorkerClient is native_supervisor.rs:274/335, i.e. the supervisor->worker link. So either that link's peer is not the framed worker it should be, or something writes a JSONL line into the worker socket.",
+ "next_step": "Instrument DaemonWorkerClient::connect to log the socket path and the transport the peer reports, then compare the supervisor's own transport value for that client against TS daemon-mode.ts:3540 (transport: this.options.worker ? 'private-framed' : 'jsonl').",
+ "harness_note": "This shell is itself a daemon worker, so every ad-hoc probe must clear PRIME_AGENT_INTERNAL_DAEMON_WORKER* / ORPHAN_PROCESS* / SESSION_LEASE* or the spawned daemon boots in worker mode. The native_cli fixture uses env_clear(), so this is NOT the cause of the test failure."
+}

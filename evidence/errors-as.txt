@@ -1,0 +1,62 @@
+crates\pi-coding-agent\src\core\agent_session.rs:50:5: error[E0432]: unresolved import `crate::core::agent_messages::HostRequestHandlers`: no `HostRequestHandlers` in `core::agent_messages`
+crates\pi-coding-agent\src\core\agent_session.rs:4715:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4747:17: error[E0425]: cannot find type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4773:25: error[E0422]: cannot find struct, variant or union type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4794:14: error[E0422]: cannot find struct, variant or union type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5606:38: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6321:36: error[E0425]: cannot find function `agent_message_timestamp` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6864:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6878:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6962:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7146:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7438:30: error[E0422]: cannot find struct, variant or union type `TurnExecutionPolicyOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7448:26: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7645:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7688:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7758:30: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7821:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7915:25: error[E0425]: cannot find type `TurnExecutionPolicyOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7974:25: error[E0425]: cannot find type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8554:21: error[E0425]: cannot find value `DEFERRED_SESSION_INPUT_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8745:24: error[E0425]: cannot find value `DEFERRED_SESSION_INPUT_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8913:21: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:9047:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:9065:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10163:49: error[E0425]: cannot find type `RestoreResult` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10719:29: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10767:20: error[E0425]: cannot find type `ResourceExtensionEntry` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10827:65: error[E0425]: cannot find function `builtin_tool_registry` in module `crate::core::extensions::types`: not found in `crate::core::extensions::types`
+crates\pi-coding-agent\src\core\agent_session.rs:10882:41: error[E0425]: cannot find function `create_builtin_tools` in module `crate::core::tools`
+crates\pi-coding-agent\src\core\agent_session.rs:10882:82: error[E0422]: cannot find struct, variant or union type `BuiltinToolOptions` in module `crate::core::tools`
+crates\pi-coding-agent\src\core\agent_session.rs:11064:17: error[E0425]: cannot find type `RlmCreateSubagentRuntimeOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:11069:12: error[E0422]: cannot find struct, variant or union type `RlmCreateSubagentRuntimeOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:11890:50: error[E0425]: cannot find function `execute_bash` in module `crate::core::bash_executor`: not found in `crate::core::bash_executor`
+crates\pi-coding-agent\src\core\agent_session.rs:11890:91: error[E0422]: cannot find struct, variant or union type `BashExecutionOptions` in module `crate::core::bash_executor`
+crates\pi-coding-agent\src\core\agent_session.rs:12492:38: error[E0425]: cannot find type `RestoreResult` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12759:77: error[E0425]: cannot find value `COMPACTION_CANCELLED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12760:40: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12876:32: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12879:24: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12904:24: error[E0425]: cannot find value `COMPACTION_CANCELLED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:13225:25: error[E0425]: cannot find type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:24:52: warning: unused import: `VecDeque`
+crates\pi-coding-agent\src\core\agent_session.rs:27:29: warning: unused imports: `OnceLock` and `Weak`
+crates\pi-coding-agent\src\core\agent_session.rs:34:66: warning: unused imports: `STOP_REASON_STOP` and `StopReason`
+crates\pi-coding-agent\src\core\agent_session.rs:42:5: warning: unused imports: `AGENT_MESSAGE_CUSTOM_TYPE`, `AgentFamilyCatalogEntry`, `AgentSessionNameAvailabilityInput`, `AgentSessionNameScope`, `DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION`, `assert_agent_message_queue_capacity`, `assert_agent_session_name_available`, and `create_agent_message_host_handlers`
+crates\pi-coding-agent\src\core\agent_session.rs:63:5: warning: unused imports: `AGENT_OBSERVE_SKILL_NAME`, `AgentObserveAgentSnapshot`, `AgentObserveListResult`, `AgentObserveRecentMessagesResult`, `ORCHESTRATION_HEARTBEAT_SKILL_NAME`, and `create_agent_observe_host_handlers`
+crates\pi-coding-agent\src\core\agent_session.rs:74:5: warning: unused imports: `BranchSummaryResult` and `collect_entries_for_branch_summary`
+crates\pi-coding-agent\src\core\agent_session.rs:79:31: warning: unused imports: `COMPACT_SKILL_NAME`, `CompactionPreparation`, `compact`, and `estimate_tokens`
+crates\pi-coding-agent\src\core\agent_session.rs:83:5: warning: unused import: `crate::core::compaction::utils::serialize_conversation`
+crates\pi-coding-agent\src\core\agent_session.rs:85:34: warning: unused imports: `ContextTreeNode`, `load_context_tree_child_from_disk`, and `load_context_tree_children_from_disk`
+crates\pi-coding-agent\src\core\agent_session.rs:92:5: warning: unused import: `GOAL_SKILL_NAME`
+crates\pi-coding-agent\src\core\agent_session.rs:97:5: warning: unused imports: `AsyncBashCompletionDetails`, `CompactionOutcomeReason`, `CompactionOutcome`, `HarnessDigestDetails`, `RlmChildFailureDetails`, `RlmChildTerminalNoticeDetails`, `SESSION_SLASH_COMMAND_CUSTOM_TYPE`, `SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE`, `convert_to_llm`, `create_async_bash_completion_message`, `create_refinement_notice_message`, `create_rlm_child_failure_message`, `create_rlm_child_terminal_notice_message`, `is_compaction_outcome_message`, `is_session_slash_command_message`, `is_session_slash_command`, and `without_harness_digests_for_compaction`
+crates\pi-coding-agent\src\core\agent_session.rs:135:5: warning: unused imports: `ModelToolOutputPolicyOptions`, `ModelToolOutputPolicy`, `ModelToolOutputScope`, and `apply_model_tool_output_policy`
+crates\pi-coding-agent\src\core\agent_session.rs:140:5: warning: unused imports: `AutoRefineReviewContext`, `REFINEMENT_FAILURE_CUSTOM_TYPE`, `REFINE_SKILL_NAME`, `RefinementFailureError`, `append_global_refinement`, `generate_refinement_id`, `get_global_harness_state_dir`, `infer_refinement_result_scope`, `merge_harness_states`, `review_auto_refine`, and `save_harness_state`
+crates\pi-coding-agent\src\core\agent_session.rs:152:5: warning: unused imports: `ActionTicket` and `SessionActionPayload`
+crates\pi-coding-agent\src\core\agent_session.rs:177:5: warning: unused import: `CURRENT_SESSION_VERSION`
+crates\pi-coding-agent\src\core\agent_session.rs:182:26: warning: unused import: `SlashCommandInfo`
+crates\pi-coding-agent\src\core\agent_session.rs:187:26: warning: unused imports: `SessionUsageSummary`, `clone_usage`, and `empty_usage`
+crates\pi-coding-agent\src\core\agent_session.rs:2952:17: error[E0425]: cannot find function `block_on` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5187:29: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5242:36: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5275:36: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope

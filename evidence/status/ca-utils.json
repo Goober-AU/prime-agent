@@ -1,0 +1,184 @@
+{
+  "slice": "ca-utils",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/utils/atomic-file.ts",
+      "rust": "crates/pi-coding-agent/src/utils/atomic_file.rs",
+      "status": "ported",
+      "functions_mapped": 14,
+      "notes": "sync/async atomic write, rename retry, dir fsync, write coordinator with generations and drain, realpath symlink walk"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/changelog.ts",
+      "rust": "crates/pi-coding-agent/src/utils/changelog.rs",
+      "status": "ported",
+      "functions_mapped": 5,
+      "notes": "parse/compare/filter; getChangelogPath kept as a local minimal config stand-in"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/child-process.ts",
+      "rust": "crates/pi-coding-agent/src/utils/child_process.rs",
+      "status": "ported",
+      "functions_mapped": 24,
+      "notes": "spawn/exec helpers with windowsHide, pid/group probes, signal exit codes, waitForChildProcess stdio grace"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/clipboard-image.ts",
+      "rust": "crates/pi-coding-agent/src/utils/clipboard_image.rs",
+      "status": "ported",
+      "functions_mapped": 14,
+      "notes": "wl-paste/xclip/powershell/native readers, mime selection, PNG conversion fallback"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/clipboard-native.ts",
+      "rust": "crates/pi-coding-agent/src/utils/clipboard_native.rs",
+      "status": "partial",
+      "functions_mapped": 2,
+      "notes": "ClipboardModule trait and display/Termux gate ported; the native addon has no Rust binding so the module is always absent (callers fall back)"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/clipboard.ts",
+      "rust": "crates/pi-coding-agent/src/utils/clipboard.rs",
+      "status": "ported",
+      "functions_mapped": 5,
+      "notes": "platform clipboard order, wl-copy spawn, xclip/xsel, OSC 52 with 100000-char cap"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/daemon-socket-path.ts",
+      "rust": "crates/pi-coding-agent/src/utils/daemon_socket_path.rs",
+      "status": "ported",
+      "functions_mapped": 1,
+      "notes": "win32 lowercase identity, lexical resolve otherwise"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/dir-lock.ts",
+      "rust": "crates/pi-coding-agent/src/utils/dir_lock.rs",
+      "status": "ported",
+      "functions_mapped": 4,
+      "notes": "link(2) publish, candidate sweep, stat identity, judge/reclaim/restore"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/exif-orientation.ts",
+      "rust": "crates/pi-coding-agent/src/utils/exif_orientation.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "notes": "JPEG/WebP TIFF walk plus all 8 orientation transforms"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/file-lines.ts",
+      "rust": "crates/pi-coding-agent/src/utils/file_lines.rs",
+      "status": "ported",
+      "functions_mapped": 4,
+      "notes": "first line, byte range, chunked line reader with byte observation"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/frontmatter.ts",
+      "rust": "crates/pi-coding-agent/src/utils/frontmatter.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "notes": "BOM/CRLF normalize, YAML frontmatter, error on invalid YAML"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/fs-watch.ts",
+      "rust": "crates/pi-coding-agent/src/utils/fs_watch.rs",
+      "status": "partial",
+      "functions_mapped": 5,
+      "notes": "close/error-handler shape kept; node fs.watch has no stdlib equivalent so polling stands in for the event listener"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/git.ts",
+      "rust": "crates/pi-coding-agent/src/utils/git.rs",
+      "status": "ported",
+      "functions_mapped": 7,
+      "notes": "splitRef, hosted/ generic URL parsing, findGitPaths, captureGitContext"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/image-convert.ts",
+      "rust": "crates/pi-coding-agent/src/utils/image_convert.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "notes": "PNG passthrough, EXIF apply, re-encode via the in-process image backend"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/image-resize.ts",
+      "rust": "crates/pi-coding-agent/src/utils/image_resize.rs",
+      "status": "ported",
+      "functions_mapped": 8,
+      "notes": "limit checks, dimension math, PNG/JPEG candidate ladder, 0.75 shrink loop, dimension note"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/mime.ts",
+      "rust": "crates/pi-coding-agent/src/utils/mime.rs",
+      "status": "ported",
+      "functions_mapped": 5,
+      "notes": "4100-byte sniff, supported image MIME gate"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/paths.ts",
+      "rust": "crates/pi-coding-agent/src/utils/paths.rs",
+      "status": "ported",
+      "functions_mapped": 4,
+      "notes": "canonicalize, isLocalPath, cwd-relative helpers (file was overwritten once by another slice, rewritten by me and re-verified)"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/photon.ts",
+      "rust": "crates/pi-coding-agent/src/utils/photon.rs",
+      "status": "partial",
+      "functions_mapped": 12,
+      "notes": "load/cache, exec-dir fallback list and decode/encode/resize ported; the WASM readFileSync patch has no Rust analogue and is a comment"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/pi-user-agent.ts",
+      "rust": "crates/pi-coding-agent/src/utils/pi_user_agent.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "notes": "user agent string with platform/arch and runtime token"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/semaphore.ts",
+      "rust": "crates/pi-coding-agent/src/utils/semaphore.rs",
+      "status": "ported",
+      "functions_mapped": 4,
+      "notes": "FIFO waiters, abort removal, permit release on panic"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/shell.ts",
+      "rust": "crates/pi-coding-agent/src/utils/shell.rs",
+      "status": "ported",
+      "functions_mapped": 10,
+      "notes": "bash discovery, Windows candidate order, kernel shell, env PATH, sanitizeBinaryOutput, detached pid tracking"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/sleep.ts",
+      "rust": "crates/pi-coding-agent/src/utils/sleep.rs",
+      "status": "ported",
+      "functions_mapped": 1,
+      "notes": "abort-aware sleep with the same Aborted message"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/tools-manager.ts",
+      "rust": "crates/pi-coding-agent/src/utils/tools_manager.rs",
+      "status": "ported",
+      "functions_mapped": 27,
+      "notes": "asset tables, tool path probe, GitHub release fetch, tar/zip install, offline/Termux gates, ripgrep message"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/update-source.ts",
+      "rust": "crates/pi-coding-agent/src/utils/update_source.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "notes": "repository and release URL constants"
+    },
+    {
+      "src": "packages/coding-agent/src/utils/version-check.ts",
+      "rust": "crates/pi-coding-agent/src/utils/version_check.rs",
+      "status": "ported",
+      "functions_mapped": 9,
+      "notes": "semver compare, prerelease identifiers, main-channel manifest validation, install spec checks"
+    }
+  ],
+  "build": "cargo check -p pi-coding-agent: blocked outside my slice (pi-ai lib has 50 errors from the ai-providers slice). My 25 files compile clean: cargo check in .port-env/tmp/ca-utils-check (same files, same deps): 0 errors, 0 warnings.",
+  "tests": "129 passed / 0 failed in .port-env/tmp/ca-utils-check (cargo test --lib over the 25 files). The in-workspace cargo test -p pi-coding-agent cannot run until pi-ai compiles.",
+  "blocked_on": "needs pi-ai::types::ImageContent (ImageContent is defined locally in image_resize.rs). Local minimal stand-ins kept for cross-slice calls: config::get_bin_dir (tools_manager/shell), config::get_changelog_path (changelog), core::orphan_process_journal::record_orphan_process_state (shell). No new crate dependencies were needed.",
+  "honest_summary": "All 25 slice files exist at the mapped paths and are real ports: every significant TypeScript export has a Rust counterpart with the same names, constants, error strings and ordering. Three files are partial: clipboard-native (no Rust binding for the @mariozechner/clipboard addon, so it is always absent and callers fall back), photon (the WASM readFileSync patch has no Rust analogue; decode/encode/resize use the image crate), fs-watch (polling stands in for node fs.watch events). Untested behaviour: anything needing a real terminal clipboard, a real GitHub download, a real WASM photon module, or a non-Windows host for the win32 branches; those paths are ported but not exercised."
+}

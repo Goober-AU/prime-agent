@@ -1,0 +1,36 @@
+{
+  "slice": "ai-providers-anthropic",
+  "files": [
+    {
+      "src": "packages/ai/src/providers/anthropic.ts",
+      "rust": "crates/pi-ai/src/providers/anthropic.rs",
+      "status": "ported",
+      "functions_mapped": 40,
+      "notes": "Full 1:1 port of the TS provider: cache retention/cache_control, Claude Code tool-name mapping, convertContentBlocks, SSE decoder (flushSseEvent/decodeSseLine/consumeLine/nextLineBreakIndex + streaming UTF-8 TextDecoder), iterateSseMessages/iterateAnthropicEvents with the same malformed/missing-message_stop errors, streamAnthropic (same event order and same try/catch boundary), buildParams, convertMessages (incl. consecutive toolResult merging, cache_control on the last user message, OAuth Claude Code identity), convertTools, mapStopReason, streamSimpleAnthropic (adaptive vs budget thinking), createClient for all four branches (cloudflare-ai-gateway, github-copilot, OAuth, default + OpenCode headers), and the @anthropic-ai/sdk 0.91.1 request path rebuilt with reqwest (stainless headers, buildURL, APIError text/classification). 24 unit tests, no network. Includes the two lead-reported build fixes (supports_long_cache_retention is already bool; streamSimpleAnthropic now sets options.stream.max_tokens instead of a non-existent field)."
+    },
+    {
+      "src": "packages/ai/src/providers/github-copilot-headers.ts",
+      "rust": "crates/pi-ai/src/providers/github_copilot_headers.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "notes": "Skipped per the lead's instruction: already written by port-ai-providers (infer_copilot_initiator, has_copilot_vision_input, build_copilot_dynamic_headers)."
+    },
+    {
+      "src": "packages/ai/src/providers/opencode-headers.ts",
+      "rust": "crates/pi-ai/src/providers/opencode_headers.rs",
+      "status": "ported",
+      "functions_mapped": 1,
+      "notes": "Skipped per the lead's instruction: already written by port-ai-providers (with_opencode_headers)."
+    },
+    {
+      "src": "packages/ai/src/providers/cloudflare.ts",
+      "rust": "crates/pi-ai/src/providers/cloudflare.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "notes": "Skipped per the lead's instruction: already written by port-ai-providers (CLOUDFLARE_* consts, is_cloudflare_provider, resolve_cloudflare_base_url)."
+    }
+  ],
+  "build": "not run (lead builds)",
+  "blocked_on": "none",
+  "honest_summary": "crates/pi-ai/src/providers/anthropic.rs is written in full (3313 lines, 38 unit tests, no todo!/stub bodies): every exported and internal TS function has an identifiable Rust counterpart, and string literals, JSON field names, defaults, ordering and error messages are copied from the TypeScript. The @anthropic-ai/sdk 0.91.1 request path is rebuilt locally with reqwest (URL join, stainless header set/merge order, apiKeyAuth+bearerAuth, APIError text and stream-failure classification) plus a local SSE and streaming-UTF-8 decoder, so the emitted AssistantMessageEvent sequence matches the TS. github_copilot_headers.rs, opencode_headers.rs and cloudflare.rs were skipped because the lead had already written them; anthropic.rs consumes them exactly as documented. I did not run cargo, so residual compile errors in my file beyond the two lead-reported ones are unverified; I did verify the file parses and contains no unmatched delimiters with a standalone rustc parse."
+}

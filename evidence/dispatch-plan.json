@@ -1,0 +1,24 @@
+{
+ "generated": "post-crash recovery state",
+ "files_total": 412,
+ "files_written": 330,
+ "files_empty": 82,
+ "live_children": 14,
+ "cap_total_agents": 15,
+ "dispatcher": {
+  "rule": "keep <=13 live depth-1 children; never let TOTAL agents (all depths) exceed 15; sub-agents must never spawn children",
+  "model": "ollama-cloud/deepseek-v4.1-flash only, no fallback"
+ },
+ "orphan_empty_by_slice": {
+  "ca-modes-rest-b": 2,
+  "ca-cli-b": 2
+ },
+ "queue_order": [
+  "ca-daemon-consolidate",
+  "mega-daemon-supervisor",
+  "ca-cli-b",
+  "ca-modes-rest-b",
+  "ca-session-core-b"
+ ],
+ "notes": "mega-daemon-supervisor is a RE-RUN: its file on disk is a placeholder (2 of 29 functions) and must be deleted and re-ported in 7 sequential passes. ca-kernel-c is running repl-manager.ts with the 4-pass method. Cap: 1 lead + N children <= 15, so N <= 14. Dispatch only when a slot frees. ca-daemon-consolidate is a REPAIR slice: remove daemon_client.rs's duplicate inner protocol module (83KB) in favour of the real daemon_protocol.rs, and fix the two stale DaemonErrorResponse helpers that do not compile. 2026-09-12: wired the missing crate deps (once_cell, globset) into pi-coding-agent/Cargo.toml after a worker reported unresolved crates. All three sibling crates already declared them; pi-coding-agent did not. windows-sys is already covered by [target.'cfg(windows)'.dependencies]. Also: lead ran git stash with live writers (self-inflicted incident, recovered - see evidence/incidents.md) - never do that again."
+}

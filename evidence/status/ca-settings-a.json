@@ -1,0 +1,86 @@
+{
+ "slice": "ca-settings-a",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/settings-manager.ts",
+   "rust": "crates/pi-coding-agent/src/core/settings_manager.rs",
+   "status": "ported",
+   "functions_mapped": 137,
+   "notes": "Settings is a JSON object (Map<String,Value>) so unknown keys, absent-vs-null and key order stay observable; 137 TS members mapped 1:1. Private local stand-ins until other slices land: CONFIG_DIR_NAME/getAgentDir/expandTildePath (config.ts, slice ca-root), JSON.stringify/parse, and the proper-lockfile <file>.lock protocol (utils/dir-lock). Writes use crate::utils::atomic_file::write_file_atomic_sync (slice ca-utils, already landed). enqueueWrite persists eagerly in TS; this port queues and runs writes in flush()/reload() with the same order and the same error-to-recordError behaviour. Verified: 52 tests pass in an isolated parse crate."
+  },
+  {
+   "src": "packages/coding-agent/src/core/usage.ts",
+   "rust": "crates/pi-coding-agent/src/core/usage.rs",
+   "status": "ported",
+   "functions_mapped": 4,
+   "notes": "session_usage_summary_from, empty_usage, add_assistant_usage, subtract_assistant_usage, clone_usage. Uses pi_ai::types::Usage. Zero-summary returns None (= undefined)."
+  },
+  {
+   "src": "packages/coding-agent/src/core/output-guard.ts",
+   "rust": "crates/pi-coding-agent/src/core/output_guard.rs",
+   "status": "ported",
+   "functions_mapped": 5,
+   "notes": "TS swaps process.stdout.write for a stderr-forwarding writer; Rust has no writable global stdout, so the takeover is a process-global flag plus write_stdout (guarded) and write_raw_stdout (raw). is_stdout_taken_over/restore_stdout/flush_raw_stdout match. Call sites (main.ts, acp-mode, rpc-mode, print-mode) are other slices."
+  },
+  {
+   "src": "packages/coding-agent/src/core/source-info.ts",
+   "rust": "crates/pi-coding-agent/src/core/source_info.rs",
+   "status": "ported",
+   "functions_mapped": 2,
+   "notes": "create_source_info/create_synthetic_source_info with defaults scope=temporary, origin=top-level. PathMetadata is defined locally (package-manager.ts is slice mega-package-manager) and should become a re-export once that lands."
+  },
+  {
+   "src": "packages/coding-agent/src/core/timings.ts",
+   "rust": "crates/pi-coding-agent/src/core/timings.rs",
+   "status": "ported",
+   "functions_mapped": 3,
+   "notes": "reset_timings/time/print_timings with PI_TIMING=1 gate, module state behind a Mutex, debug log via pi_ai::log::get_logger plus the same stderr block."
+  },
+  {
+   "src": "packages/coding-agent/src/core/logging.ts",
+   "rust": "crates/pi-coding-agent/src/core/logging.rs",
+   "status": "ported",
+   "functions_mapped": 2,
+   "notes": "set_log_context/install_file_log_sink with pid first then caller fields, sink merging { ...entry, ...context } (context wins) and 20MiB rotating JSONL append. Private local stand-ins for config.ts getAgentLogPath/appendRotatingLog until slice ca-root lands."
+  },
+  {
+   "src": "packages/coding-agent/src/core/diagnostics.ts",
+   "rust": "crates/pi-coding-agent/src/core/diagnostics.rs",
+   "status": "ported",
+   "functions_mapped": 0,
+   "notes": "ResourceCollision/ResourceDiagnostic serde structs with camelCase renames and skip_serializing_if for optional keys."
+  },
+  {
+   "src": "packages/coding-agent/src/core/rlm-max-depth.ts",
+   "rust": "crates/pi-coding-agent/src/core/rlm_max_depth.rs",
+   "status": "ported",
+   "functions_mapped": 0,
+   "notes": "RlmMaxDepthStatus/SetRlmMaxDepthResult with camelCase wire names and omitted globalError when absent."
+  },
+  {
+   "src": "packages/coding-agent/src/core/websearch-credential.ts",
+   "rust": "crates/pi-coding-agent/src/core/websearch_credential.rs",
+   "status": "ported",
+   "functions_mapped": 0,
+   "notes": "Four constants, names unchanged."
+  },
+  {
+   "src": "packages/coding-agent/src/core/defaults.ts",
+   "rust": "crates/pi-coding-agent/src/core/defaults.rs",
+   "status": "ported",
+   "functions_mapped": 0,
+   "notes": "DEFAULT_THINKING_LEVEL = medium."
+  },
+  {
+   "src": "packages/coding-agent/src/core/thinking-levels.ts",
+   "rust": "crates/pi-coding-agent/src/core/thinking_levels.rs",
+   "status": "ported",
+   "functions_mapped": 0,
+   "notes": "THINKING_LEVELS = off, minimal, low, medium, high, xhigh, max (7 entries, includes off)."
+  }
+ ],
+ "build": "cargo check -p pi-coding-agent: failed",
+ "tests": "cargo test -p pi-coding-agent: 0 passed / 0 failed (blocked: dependency crates pi-ai and pi-tui do not compile)",
+ "blocked_on": "crates/pi-tui and crates/pi-ai fail to compile (errors in pi-tui/src/tui.rs, components/editor.rs, pi-ai/src/providers/register_builtins.rs, openai_codex_responses.rs, openai_responses_shared.rs, openai_completions.rs, amazon_bedrock.rs, anthropic.rs, mcp/oauth.rs, pi-tui/src/east_asian_width_tables.rs, terminal.rs). pi-coding-agent cannot be compiled until those crates build. My 11 files were verified separately: a throwaway crate outside the workspace compiled them with stub pi-ai/atomic-file definitions and ran all 52 slice tests green (52 passed / 0 failed).",
+ "honest_summary": "All 11 files of slice ca-settings-a are written at their mapped paths, and all 52 in-slice unit tests pass when the files are compiled in an isolated crate with stub pi-ai/atomic-file definitions. The workspace build of pi-coding-agent cannot be run: crates/pi-tui and crates/pi-ai fail to compile with ~60 errors in files outside this slice (editor.rs, tui.rs, east_asian_width_tables.rs, terminal.rs, register_builtins.rs, openai_*_responses*.rs, amazon_bedrock.rs, anthropic.rs, mcp/oauth.rs). No slice file was skipped; the only unverifiable claim is compilation inside pi-coding-agent itself. Private helpers replace config.ts and dir-lock symbols that belong to other slices; they are marked TODO(slice) in the code and must become re-exports when those slices land."
+}

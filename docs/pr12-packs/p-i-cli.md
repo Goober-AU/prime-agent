@@ -1,0 +1,59 @@
+# Pack p-i-cli - repairI-cli - 18 errors in 3 files
+
+Owned files (edit ONLY these):
+- crates/pi-coding-agent/src/cli/daemon_command.rs
+- crates/pi-coding-agent/src/cli/daemon_ps_format.rs
+- crates/pi-coding-agent/src/cli/daemon_update_restart.rs
+
+## Errors to fix (file:line: message)
+- `cli/daemon_command.rs:2682` `ParsedDaemonClientCommand` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedDaemonClientCommand` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2684` `ParsedDaemonClientCommand` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedDaemonClientCommand` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2773` `ParsedSessionArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2777` `ParsedSessionArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2781` `ParsedSessionArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2785` `ParsedSessionArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2789` `ParsedSessionArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2794` `ParsedSessionArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSessionArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2940` `ParsedSendArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSendArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2941` `ParsedSendArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSendArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2942` `ParsedSendArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSendArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2944` `ParsedSendArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSendArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2947` `ParsedSendArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSendArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:2949` `ParsedSendArgs` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `ParsedSendArgs` with `#[derive(Debug)]`
+- `cli/daemon_command.rs:3081` cannot borrow `logged` as mutable, as it is a captured variable in a `Fn` closure
+- `cli/daemon_command.rs:3082` cannot borrow `errors` as mutable, as it is not declared as mutable
+    - consider changing this to be mutable
+- `cli/daemon_ps_format.rs:178` mismatched types
+    - the type constructed contains `{integer}` due to the type of the argument passed
+    - tuple variant defined here
+- `cli/daemon_update_restart.rs:1397` `DaemonUpdateRestartCoordinatorLease` doesn't implement `Debug`
+    - required by a bound in `Result::<T, E>::unwrap_err`
+    - consider annotating `DaemonUpdateRestartCoordinatorLease` with `#[derive(Debug)]`

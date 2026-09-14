@@ -1,0 +1,80 @@
+{
+  "slice": "runnable-foundation",
+  "branch": "fix/rust-cli-runtime",
+  "reference": "9f547ceaba079dee45ee415a430d57fb86fa940d",
+  "status": "foundation-and-bedrock-ready-for-root-validation-supervisor-frozen",
+  "original_owned_failures": 34,
+  "production_fixes": [
+    "Auth credential explicit-null primeTeam remains distinct from omitted primeTeam.",
+    "Checkpoint/compaction JSON uses the canonical camelCase wire names; explicit null checkpoint endpoint rejected.",
+    "Event log rereads seek to the start after torn-tail repair.",
+    "Prime catalog explicit vision=false overrides a vision-capable model template.",
+    "Codex model discovery preserves the /codex/models endpoint path.",
+    "Scoped npm names retain @; malformed specs preserve the TS regex fallback.",
+    "Reservation keys serialize integral JS-number depths without a .0 suffix.",
+    "Unix lease errors expose ENOTEMPTY and EBUSY errno names.",
+    "Unix sync and async shell adapters execute /bin/sh -c; status/output come from the real child.",
+    "HeadlessCompletionSession implementation forwards real AgentSession operations and propagates failures.",
+    "Native supervisor serves public Unix/named-pipe JSONL, owns the canonical supervisor/socket leases, starts the Rust catalog process, and creates separate authenticated worker processes.",
+    "Worker descriptors and nonsecret supervisor config are persisted atomically; descriptor commit precedes startup-gate release (Unix fd3/Windows dedicated stdin pipe).",
+    "Supervisor forwards full attach snapshots, reconstructs compact worker deltas, tracks public subscriptions/counts, distinguishes protocol and display client identity, and namespaces admissions/input pauses per connection.",
+    "Resident workers can be reauthenticated/adopted; saved resident sessions recover on supervisor restart or retry_worker with stable assigned active IDs.",
+    "Owned worker cleanup and explicit stops persist stop intent before shutdown; command journal errors fail closed using daemon-agent Result APIs.",
+    "Bedrock Converse modelId is escaped as one non-greedy URI label, including the slash in inference-profile ARNs."
+  ],
+  "fixture_corrections": [
+    "Auth env-key table test now checks declared keys, not ambient enabled credentials.",
+    "Untemplated Prime model fixtures include required context/output/input/reasoning specs; template cache pricing remains its canonical input multiplier.",
+    "Prompt substitution keeps literal $ARGUMENT; prompts under agentDir use user scope.",
+    "HTML dark derived background uses JS Math.round (46).",
+    "Autonomous gate fallback has the three newlines present in the source literal.",
+    "Goal response numeric assertions compare JS-number-equivalent values.",
+    "Context-tree disk fixture includes model_change entry before requesting model context-window resolution.",
+    "Performance opt-in uses portable isolated absolute paths rather than C:/ paths on Unix.",
+    "Semantic-edge fixture creates a pending failed turn; compaction outbound edge commits when a target turn finishes.",
+    "Telemetry epoch fixture timestamp is 2026-03-26, not March 29.",
+    "Private Prime catalog fake transport uses saved team credential and /models endpoint, with explicit offline injection instead of mutable global environment.",
+    "Refinement history fixture supplies all required RefinementResult fields; malformed summary literal length is 15.",
+    "Package fixtures use persisted in-memory settings and user-relative agentDir paths, retain disabled resource entries, expect directory-only extension paths, prefix Git shorthand with git:, explicitly disable default-enabled websearch, and use native path separators.",
+    "Package offline tests use a pure value parser and explicit offline argument rather than mutating PI_OFFLINE in parallel tests.",
+    "Bedrock block-handler tests explicitly end their test-owned stream after the last block; production completion already matches TS response-producer ownership.",
+    "Bedrock endpoint fixtures now pin standard hosts only with no configured region/profile; explicit signing region precedence is exercised on a custom proxy and the separate mismatch rejection regression remains.",
+    "Models without explicit maps support off/minimal/low/medium/high; Bedrock extended-effort fixtures now declare xhigh/max and separately assert the unmapped clamp.",
+    "Bedrock tool-result grouping fixture provides both corresponding assistant calls; signature replay fixtures use matching source model identity and separately assert cross-model text fallback.",
+    "Bedrock budget assertions use JS-number-equivalent f64 values; cache cost uses the exact IEEE-754 result of 3 * 0.1.",
+    "SigV4 fixture includes the default Smithy payload checksum header; independently computed HMAC signature dd479fa8... replaces the checksum-disabled published 5d672d79... value."
+  ],
+  "new_regressions_unrun_by_this_agent": [
+    "Prime catalog explicit text-only vision override versus absent vision inheritance.",
+    "Checkpoint wire roundtrip and explicit-null endpoint rejection.",
+    "Unix synchronous shell quoting/output; asynchronous shell success and nonzero exit.",
+    "Lease ENOTEMPTY errno classification.",
+    "Malformed npm specification fallback.",
+    "Supervisor descriptor/socket hash shape and public command envelope identity."
+  ],
+  "validation": {
+    "cargo_run_by_this_agent": false,
+    "coordination": "Root batches Cargo validation. Supervisor remains frozen; Bedrock/model/cache batch is ready for integrated rerun after shared StreamOptions camelCase fix.",
+    "syntax": "rustfmt --check parsed native_supervisor.rs; formatting differences remain (not a parser failure).",
+    "diff_check": "Scoped changed-file diff --check passed, including added performance-metrics lines after preserving existing CRLF lines.",
+    "pi_ai_oom": "Root bounded suite observed about 34 MB, timed out at 180s on four unterminated helper-test streams; excluding those yielded 525 passed/55 failed. This agent fixed both Bedrock hangs and assigned Bedrock/model/cache failures without running Cargo."
+  },
+  "remaining_limits": [
+    "Native supervisor does not yet implement the TS chunk/history snapshot cache, full roster/global-heartbeat projection, idle eviction, scheduled wake, update-restart transaction, or the full bounded worker retry ladder. Missing transport capabilities are not advertised; unsupported supervisor operations return errors.",
+    "Client-owned dead-worker recovery still requires owning-client environment wiring; owned_session_recovery_context is not advertised.",
+    "Refinement history deserialization is stricter than the TS minimal runtime type guard for malformed/partial legacy records; test fixture now follows the required interface.",
+    "Known unrelated telemetry batch-limit auto-flush omission found during full read was not changed in this failure-focused slice.",
+    "Windows gate code is implemented but Windows execution validation remains pending."
+  ],
+  "bedrock_reference_sources": [
+    "packages/ai/src/providers/amazon-bedrock.ts",
+    "packages/ai/src/providers/bedrock-responses-client.ts",
+    "packages/ai/src/providers/transform-messages.ts",
+    "packages/ai/src/models.ts",
+    "packages/ai/src/cache-pricing.ts",
+    "packages/ai/src/utils/event-stream.ts",
+    "https://raw.githubusercontent.com/aws/aws-sdk-js-v3/main/codegen/sdk-codegen/aws-models/bedrock-runtime.json",
+    "https://raw.githubusercontent.com/smithy-lang/smithy-typescript/main/packages/signature-v4/src/SignatureV4.ts",
+    "https://raw.githubusercontent.com/smithy-lang/smithy-typescript/main/packages/signature-v4/src/SignatureV4Base.ts"
+  ]
+}

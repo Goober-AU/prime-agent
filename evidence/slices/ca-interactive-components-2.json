@@ -1,0 +1,82 @@
+{
+ "slice": "ca-interactive-components-2",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/ipython-cell.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/ipython_cell.rs",
+   "loc": 774
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/menu-panel.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/menu_panel.rs",
+   "loc": 433
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/assistant-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/assistant_message.rs",
+   "loc": 388
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/custom-editor.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_editor.rs",
+   "loc": 332
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/bash-execution.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/bash_execution.rs",
+   "loc": 211
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/context-tree-format.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/context_tree_format.rs",
+   "loc": 200
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/extension-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_selector.rs",
+   "loc": 172
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/edit-summary.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/edit_summary.rs",
+   "loc": 135
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/agent-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/agent_message.rs",
+   "loc": 111
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/extension-input.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_input.rs",
+   "loc": 87
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/theme-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/theme_selector.rs",
+   "loc": 59
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/branch-summary-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/branch_summary_message.rs",
+   "loc": 56
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/feature-hint.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/feature_hint.rs",
+   "loc": 46
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/countdown-timer.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/countdown_timer.rs",
+   "loc": 34
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/compaction-outcome-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/compaction_outcome_message.rs",
+   "loc": 27
+  }
+ ],
+ "loc": 3065
+}

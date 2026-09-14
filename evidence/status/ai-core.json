@@ -1,0 +1,281 @@
+{
+  "slice": "ai-core",
+  "files": [
+    {
+      "src": "packages/ai/src/api-registry.ts",
+      "rust": "crates/pi-ai/src/api_registry.rs",
+      "status": "ported",
+      "functions_mapped": 9,
+      "tests": 4,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/bedrock-provider.ts",
+      "rust": "crates/pi-ai/src/bedrock_provider.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "tests": 1,
+      "notes": "Depends on providers::amazon_bedrock{,_responses} exports owned by the ai-providers slice."
+    },
+    {
+      "src": "packages/ai/src/cache-pricing.ts",
+      "rust": "crates/pi-ai/src/cache_pricing.rs",
+      "status": "ported",
+      "functions_mapped": 8,
+      "tests": 3,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/cli.ts",
+      "rust": "crates/pi-ai/src/cli_entry.rs",
+      "status": "ported",
+      "functions_mapped": 10,
+      "tests": 5,
+      "notes": "CLI entry: auth file is relative \"auth.json\" in CWD (never the production path)."
+    },
+    {
+      "src": "packages/ai/src/compaction.ts",
+      "rust": "crates/pi-ai/src/compaction.rs",
+      "status": "ported",
+      "functions_mapped": 5,
+      "tests": 4,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/copilot-client-version.ts",
+      "rust": "crates/pi-ai/src/copilot_client_version.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "tests": 1,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/env-api-keys.ts",
+      "rust": "crates/pi-ai/src/env_api_keys.rs",
+      "status": "ported",
+      "functions_mapped": 5,
+      "tests": 4,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/index.ts",
+      "rust": "crates/pi-ai/src/mod.rs",
+      "status": "ported",
+      "functions_mapped": 0,
+      "tests": 0,
+      "notes": "Port of packages/ai/src/index.ts; compiled as `#[path = \"mod.rs\"] pub mod index;` so the file keeps the slice's mapped name."
+    },
+    {
+      "src": "packages/ai/src/log.ts",
+      "rust": "crates/pi-ai/src/log.rs",
+      "status": "ported",
+      "functions_mapped": 14,
+      "tests": 3,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/mcp.ts",
+      "rust": "crates/pi-ai/src/mcp_api.rs",
+      "status": "ported",
+      "functions_mapped": 0,
+      "tests": 0,
+      "notes": "Re-export surface of the mcp module (ai-mcp slice owns mcp/*)."
+    },
+    {
+      "src": "packages/ai/src/models.ts",
+      "rust": "crates/pi-ai/src/models.rs",
+      "status": "ported",
+      "functions_mapped": 17,
+      "tests": 9,
+      "notes": "Full Model/Api/Compat surface; Compat uses a key-sniffing Deserialize because TS picks the shape from the model api."
+    },
+    {
+      "src": "packages/ai/src/oauth.ts",
+      "rust": "crates/pi-ai/src/oauth_api.rs",
+      "status": "ported",
+      "functions_mapped": 0,
+      "tests": 0,
+      "notes": "Re-export surface of utils/oauth."
+    },
+    {
+      "src": "packages/ai/src/openrouter-reasoning.ts",
+      "rust": "crates/pi-ai/src/openrouter_reasoning.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "tests": 4,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/prime-inference-model-catalog.ts",
+      "rust": "crates/pi-ai/src/prime_inference_model_catalog.rs",
+      "status": "ported",
+      "functions_mapped": 4,
+      "tests": 5,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/session-resources.ts",
+      "rust": "crates/pi-ai/src/session_resources.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "tests": 2,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/stream.ts",
+      "rust": "crates/pi-ai/src/stream.rs",
+      "status": "ported",
+      "functions_mapped": 7,
+      "tests": 3,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/types.ts",
+      "rust": "crates/pi-ai/src/types.rs",
+      "status": "ported",
+      "functions_mapped": 171,
+      "tests": 10,
+      "notes": "Unions are String aliases + KNOWN_* const arrays; Model is non-generic; OnManualCodeInput returns Result (TS promise rejection)."
+    },
+    {
+      "src": "packages/ai/src/utils/diagnostics.ts",
+      "rust": "crates/pi-ai/src/utils/diagnostics.rs",
+      "status": "ported",
+      "functions_mapped": 11,
+      "tests": 4,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/event-stream.ts",
+      "rust": "crates/pi-ai/src/utils/event_stream.rs",
+      "status": "ported",
+      "functions_mapped": 18,
+      "tests": 7,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/hash.ts",
+      "rust": "crates/pi-ai/src/utils/hash.rs",
+      "status": "ported",
+      "functions_mapped": 1,
+      "tests": 1,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/headers.ts",
+      "rust": "crates/pi-ai/src/utils/headers.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "tests": 2,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/json-parse.ts",
+      "rust": "crates/pi-ai/src/utils/json_parse.rs",
+      "status": "ported",
+      "functions_mapped": 16,
+      "tests": 9,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/oauth/anthropic.ts",
+      "rust": "crates/pi-ai/src/utils/oauth/anthropic.rs",
+      "status": "ported",
+      "functions_mapped": 21,
+      "tests": 7,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/oauth/github-copilot.ts",
+      "rust": "crates/pi-ai/src/utils/oauth/github_copilot.rs",
+      "status": "ported",
+      "functions_mapped": 16,
+      "tests": 7,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/oauth/index.ts",
+      "rust": "crates/pi-ai/src/utils/oauth/mod.rs",
+      "status": "ported",
+      "functions_mapped": 11,
+      "tests": 6,
+      "notes": "Provider registry + callback-server plumbing in a private `plumbing` module (Node http.createServer replacement)."
+    },
+    {
+      "src": "packages/ai/src/utils/oauth/oauth-page.ts",
+      "rust": "crates/pi-ai/src/utils/oauth/oauth_page.rs",
+      "status": "ported",
+      "functions_mapped": 4,
+      "tests": 2,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/oauth/openai-codex.ts",
+      "rust": "crates/pi-ai/src/utils/oauth/openai_codex.rs",
+      "status": "ported",
+      "functions_mapped": 23,
+      "tests": 7,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/oauth/pkce.ts",
+      "rust": "crates/pi-ai/src/utils/oauth/pkce.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "tests": 3,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/oauth/types.ts",
+      "rust": "crates/pi-ai/src/utils/oauth/types.rs",
+      "status": "ported",
+      "functions_mapped": 16,
+      "tests": 3,
+      "notes": "Unions are String aliases + KNOWN_* const arrays; Model is non-generic; OnManualCodeInput returns Result (TS promise rejection)."
+    },
+    {
+      "src": "packages/ai/src/utils/overflow.ts",
+      "rust": "crates/pi-ai/src/utils/overflow.rs",
+      "status": "ported",
+      "functions_mapped": 4,
+      "tests": 9,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/sanitize-unicode.ts",
+      "rust": "crates/pi-ai/src/utils/sanitize_unicode.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "tests": 4,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/stream-failure.ts",
+      "rust": "crates/pi-ai/src/utils/stream_failure.rs",
+      "status": "ported",
+      "functions_mapped": 27,
+      "tests": 9,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/typebox-helpers.ts",
+      "rust": "crates/pi-ai/src/utils/typebox_helpers.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "tests": 2,
+      "notes": ""
+    },
+    {
+      "src": "packages/ai/src/utils/validation.ts",
+      "rust": "crates/pi-ai/src/utils/validation.rs",
+      "status": "ported",
+      "functions_mapped": 8,
+      "tests": 6,
+      "notes": ""
+    }
+  ],
+  "build": "cargo check -p pi-ai: ok (0 errors, 0 warnings from this slice)",
+  "tests": "cargo test -p pi-ai: PENDING - the lib test target fails to build on 45 errors, all inside providers/*.rs #[cfg(test)] modules (ai-providers slice). No test binary ran, so 0 passed / 0 failed executed for this slice's 146 tests.",
+  "blocked_on": "ai-providers test-module compile errors (see notes); ai-mcp owns mcp/*.",
+  "honest_summary": "All 34 ai-core files are written and the pi-ai library itself compiles with 0 errors and 0 warnings from this slice (cargo check -p pi-ai: ok). Behaviour is ported 1:1 from the TypeScript: same names, constants, literals, defaults, error strings, JSON field names, absent-vs-null handling and ordering. 146 unit tests are included in this slice, but they could not be executed: the crate's test target does not build because 45 compile errors remain inside OTHER slices' #[cfg(test)] modules (providers/*.rs). No test binary ran, so 0 passed / 0 failed executed. Two deliberate Rust-level deviations, both documented in-file: (1) TS union types become String aliases + KNOWN_* const arrays; (2) Compat (the TS conditional type) uses a key-sniffing Deserialize because a serde untagged enum would always match the all-optional OpenAICompletionsCompat first. models.generated.ts is embedded as base64 JSON (32 providers / 1283 models) instead of 22884 lines of literals. Node http.createServer callbacks became a private `plumbing` module inside utils/oauth/mod.rs (not a new public API). The TypeBox dependency has no Rust counterpart: tool schemas are serde_json::Value and validation.ts is a hand-rolled JSON-Schema subset validator with the exact TS error strings."
+}

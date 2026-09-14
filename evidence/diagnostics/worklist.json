@@ -1,0 +1,5720 @@
+{
+ "core/agent_session_runtime.rs": [
+  [
+   33,
+   "E0583",
+   "file not found for module `daemon_adapter`"
+  ],
+  [
+   34,
+   "E0583",
+   "file not found for module `in_process_adapter`"
+  ]
+ ],
+ "cli/config_selector.rs": [
+  [
+   49,
+   "E0507",
+   "cannot move out of `close_sender`, a captured variable in an `Fn` closure"
+  ],
+  [
+   53,
+   "E0507",
+   "cannot move out of `exit_sender`, a captured variable in an `Fn` closure"
+  ]
+ ],
+ "cli/daemon_command.rs": [
+  [
+   372,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   887,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   955,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1014,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1067,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1102,
+   "E0308",
+   "`?` operator has incompatible types"
+  ],
+  [
+   1126,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1156,
+   "E0308",
+   "`?` operator has incompatible types"
+  ],
+  [
+   1161,
+   "E0308",
+   "`?` operator has incompatible types"
+  ],
+  [
+   1234,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1390,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1437,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1459,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1524,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1560,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1629,
+   "E0308",
+   "`?` operator has incompatible types"
+  ],
+  [
+   1687,
+   "E0308",
+   "`?` operator has incompatible types"
+  ],
+  [
+   1702,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1713,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1724,
+   "E0308",
+   "`?` operator has incompatible types"
+  ],
+  [
+   1737,
+   "E0308",
+   "`?` operator has incompatible types"
+  ]
+ ],
+ "cli/daemon_ps.rs": [
+  [
+   615,
+   "E0382",
+   "borrow of partially moved value: `action`"
+  ],
+  [
+   127,
+   "E0063",
+   "missing field `uptime_seconds` in initializer of `DiscoveredDaemonProcess`"
+  ],
+  [
+   170,
+   "E0063",
+   "missing field `uptime_seconds` in initializer of `DiscoveredDaemonProcess`"
+  ],
+  [
+   271,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "cli/daemon_update_restart.rs": [
+  [
+   760,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/agent_session/runtime_members.rs": [
+  [
+   8,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   493,
+   "E0609",
+   "no field `agents` on type `rlm_runtime::RlmListSubagentsResult`"
+  ],
+  [
+   509,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`"
+  ],
+  [
+   510,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`"
+  ],
+  [
+   511,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`"
+  ],
+  [
+   518,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`"
+  ],
+  [
+   519,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`"
+  ],
+  [
+   520,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`"
+  ],
+  [
+   540,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`"
+  ],
+  [
+   541,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`"
+  ],
+  [
+   542,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`"
+  ],
+  [
+   588,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `child_id`"
+  ],
+  [
+   591,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `label`"
+  ],
+  [
+   591,
+   "E0609",
+   "no field `label` on type `&agent_session::RlmChildRun`"
+  ],
+  [
+   592,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `model`"
+  ],
+  [
+   679,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `deleted`"
+  ],
+  [
+   680,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `child_id`"
+  ],
+  [
+   681,
+   "E0560",
+   "struct `rlm_runtime::RlmDeleteSubagentResult` has no field named `message`"
+  ],
+  [
+   782,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   809,
+   "E0308",
+   "`match` arms have incompatible types"
+  ],
+  [
+   814,
+   "E0560",
+   "struct `agent_session::RlmSubagentModelSelection` has no field named `thinking_level`"
+  ],
+  [
+   828,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   832,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   826,
+   "E0063",
+   "missing fields `id`, `spawn_code` and `spawned_by_request_id` in initializer of `agent_session::RlmSubagentRuntimeOptionsInput`"
+  ],
+  [
+   842,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   844,
+   "E0560",
+   "struct `rlm_runtime::RlmCreateSessionResult` has no field named `child_id`"
+  ],
+  [
+   844,
+   "E0609",
+   "no field `runtime_id` on type `rlm_runtime::RlmSubagentRuntime`"
+  ],
+  [
+   845,
+   "E0560",
+   "struct `rlm_runtime::RlmCreateSessionResult` has no field named `session_dir`"
+  ],
+  [
+   845,
+   "E0609",
+   "no field `session_dir` on type `rlm_runtime::RlmSubagentRuntime`"
+  ],
+  [
+   846,
+   "E0560",
+   "struct `rlm_runtime::RlmCreateSessionResult` has no field named `session_name`"
+  ],
+  [
+   858,
+   "E0560",
+   "struct `rlm_runtime::RlmSpawnHandle` has no field named `child_id`"
+  ],
+  [
+   858,
+   "E0609",
+   "no field `child_id` on type `rlm_runtime::RlmCreateSessionResult`"
+  ],
+  [
+   859,
+   "E0609",
+   "no field `session_dir` on type `rlm_runtime::RlmCreateSessionResult`"
+  ],
+  [
+   860,
+   "E0560",
+   "struct `rlm_runtime::RlmSpawnHandle` has no field named `session_name`"
+  ],
+  [
+   860,
+   "E0609",
+   "no field `session_name` on type `rlm_runtime::RlmCreateSessionResult`"
+  ],
+  [
+   975,
+   "E0609",
+   "no field `max_attempts` on type `ResolvedRetrySettings`"
+  ],
+  [
+   985,
+   "E0609",
+   "no field `max_attempts` on type `ResolvedRetrySettings`"
+  ],
+  [
+   991,
+   "E0609",
+   "no field `delay_ms` on type `ResolvedRetrySettings`"
+  ],
+  [
+   1003,
+   "E0609",
+   "no field `max_attempts` on type `ResolvedRetrySettings`"
+  ],
+  [
+   1023,
+   "E0599",
+   "the method `clone` exists for struct `MutexGuard<'_, Option<Pin<Box<dyn Future<Output = ...> + Send>>>>`, but its trait bounds were not satisfied"
+  ],
+  [
+   1209,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1216,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1216,
+   "E0560",
+   "struct `agent_session::SetRlmMaxDepthResult` has no field named `global`"
+  ],
+  [
+   1251,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   1252,
+   "E0599",
+   "no method named `is_empty` found for struct `BranchPreparation` in the current scope"
+  ],
+  [
+   1256,
+   "E0560",
+   "struct `branch_summarization::GenerateBranchSummaryOptions` has no field named `messages`"
+  ],
+  [
+   1255,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   1261,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1293,
+   "E0599",
+   "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied"
+  ],
+  [
+   53,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   54,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   68,
+   "E0425",
+   "cannot find function `runtime_extension_actions` in this scope"
+  ],
+  [
+   68,
+   "E0425",
+   "cannot find function `runtime_extension_context_actions` in this scope"
+  ],
+  [
+   81,
+   "E0425",
+   "cannot find function `runtime_source_info` in this scope"
+  ],
+  [
+   85,
+   "E0425",
+   "cannot find function `runtime_source_info` in this scope"
+  ],
+  [
+   123,
+   "E0277",
+   "the trait bound `std::sync::Mutex<session_manager::SessionManager>: extensions::types::SessionManager` is not satisfied"
+  ],
+  [
+   124,
+   "E0425",
+   "cannot find function, tuple struct or tuple variant `RuntimeModelRegistry` in this scope"
+  ],
+  [
+   317,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   451,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `child_id`"
+  ],
+  [
+   454,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `label`"
+  ],
+  [
+   454,
+   "E0609",
+   "no field `label` on type `&agent_session::RlmChildRun`"
+  ],
+  [
+   455,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `model`"
+  ],
+  [
+   459,
+   "E0609",
+   "no field `subagents` on type `agent_messages::AgentSessionMessageListResult`"
+  ],
+  [
+   464,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `child_id`"
+  ],
+  [
+   467,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `label`"
+  ],
+  [
+   468,
+   "E0560",
+   "struct `rlm_runtime::RlmSubagentRegistryEntry` has no field named `model`"
+  ],
+  [
+   474,
+   "E0560",
+   "struct `rlm_runtime::RlmListSubagentsResult` has no field named `agents`"
+  ],
+  [
+   475,
+   "E0560",
+   "struct `rlm_runtime::RlmListSubagentsResult` has no field named `max_depth`"
+  ],
+  [
+   476,
+   "E0560",
+   "struct `rlm_runtime::RlmListSubagentsResult` has no field named `depth`"
+  ],
+  [
+   639,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   705,
+   "E0560",
+   "struct `agent_session::RlmChildAgentSnapshot` has no field named `child_id`"
+  ],
+  [
+   706,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   708,
+   "E0609",
+   "no field `label` on type `&agent_session::RlmChildRun`"
+  ],
+  [
+   709,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   710,
+   "E0560",
+   "struct `agent_session::RlmChildAgentSnapshot` has no field named `depth`"
+  ],
+  [
+   710,
+   "E0609",
+   "no field `depth` on type `&agent_session::RlmChildRun`"
+  ],
+  [
+   718,
+   "E0560",
+   "struct `agent_session::RlmChildAgentSnapshot` has no field named `child_id`"
+  ],
+  [
+   721,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   722,
+   "E0609",
+   "no field `id` on type `std::option::Option<pi_ai::index::Model>`"
+  ],
+  [
+   723,
+   "E0560",
+   "struct `agent_session::RlmChildAgentSnapshot` has no field named `depth`"
+  ],
+  [
+   872,
+   "E0599",
+   "no method named `as_deref` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   895,
+   "E0609",
+   "no field `details` on type `&pi_ai::index::AssistantMessage`"
+  ],
+  [
+   905,
+   "E0609",
+   "no field `details` on type `&pi_ai::index::AssistantMessage`"
+  ],
+  [
+   924,
+   "E0609",
+   "no field `details` on type `&pi_ai::index::AssistantMessage`"
+  ],
+  [
+   1038,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1039,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1183,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1352,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   1354,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1356,
+   "E0560",
+   "struct `session_stats::SessionStats` has no field named `message_count`"
+  ],
+  [
+   1357,
+   "E0560",
+   "struct `session_stats::SessionStats` has no field named `user_message_count`"
+  ],
+  [
+   1361,
+   "E0560",
+   "struct `session_stats::SessionStats` has no field named `assistant_message_count`"
+  ],
+  [
+   1365,
+   "E0560",
+   "struct `session_stats::SessionStats` has no field named `tool_call_count`"
+  ],
+  [
+   1367,
+   "E0599",
+   "no variant, associated function, or constant named `Tool` found for enum `pi_ai::index::Message` in the current scope"
+  ],
+  [
+   1369,
+   "E0560",
+   "struct `session_stats::SessionStats` has no field named `usage`"
+  ],
+  [
+   1369,
+   "E0609",
+   "no field `total` on type `std::option::Option<usage::SessionUsageSummary>`"
+  ],
+  [
+   1370,
+   "E0560",
+   "struct `session_stats::SessionStats` has no field named `tokens_before`"
+  ],
+  [
+   1382,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1385,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1391,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1393,
+   "E0369",
+   "cannot divide `ContextUsageEstimate` by `f64`"
+  ],
+  [
+   1412,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1431,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1431,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1464,
+   "E0599",
+   "no method named `get` found for struct `std::sync::Arc<ExtensionRunnerRef>` in the current scope"
+  ],
+  [
+   837,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/agent_session.rs": [
+  [
+   1857,
+   "E0599",
+   "no method named `map_err` found for type parameter `T` in the current scope"
+  ],
+  [
+   1864,
+   "E0599",
+   "no method named `map_err` found for type parameter `T` in the current scope"
+  ],
+  [
+   2541,
+   "E0599",
+   "no method named `can_release_acp_servers` found for struct `std::sync::Arc<std::sync::Mutex<McpManager>>` in the current scope"
+  ],
+  [
+   2544,
+   "E0599",
+   "no method named `replace_acp_servers` found for struct `std::sync::Arc<std::sync::Mutex<McpManager>>` in the current scope"
+  ],
+  [
+   2563,
+   "E0308",
+   "arguments to this method are incorrect"
+  ],
+  [
+   2583,
+   "E0277",
+   "the `?` operator can only be applied to values that implement `Try`"
+  ],
+  [
+   2584,
+   "E0277",
+   "`MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>` is not a future"
+  ],
+  [
+   2612,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2611,
+   "E0277",
+   "`?` couldn't convert the error to `std::string::String`"
+  ],
+  [
+   2696,
+   "E0609",
+   "no field `ok` on type `impl futures::Future<Output = ResolvedRequestAuth>`"
+  ],
+  [
+   2697,
+   "E0609",
+   "no field `error` on type `impl futures::Future<Output = ResolvedRequestAuth>`"
+  ],
+  [
+   2703,
+   "E0609",
+   "no field `api_key` on type `impl futures::Future<Output = ResolvedRequestAuth>`"
+  ],
+  [
+   2707,
+   "E0609",
+   "no field `headers` on type `impl futures::Future<Output = ResolvedRequestAuth>`"
+  ],
+  [
+   3768,
+   "E0599",
+   "no method named `threshold_context_tokens` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   3774,
+   "E0599",
+   "no method named `compaction_settings` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   3781,
+   "E0599",
+   "no method named `maybe_auto_refine` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   3783,
+   "E0599",
+   "no method named `schedule_auto_refine_after_compaction` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   3784,
+   "E0599",
+   "no method named `compact` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   4401,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4404,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4732,
+   "E0609",
+   "no field `relationship` on type `&&AgentSessionMessageAgentSummary`"
+  ],
+  [
+   4814,
+   "E0277",
+   "`MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>` is not a future"
+  ],
+  [
+   4867,
+   "E0277",
+   "`MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>` is not a future"
+  ],
+  [
+   5288,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5301,
+   "E0277",
+   "the trait bound `std::collections::HashSet<usize>: Extend<std::string::String>` is not satisfied"
+  ],
+  [
+   5306,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5422,
+   "E0599",
+   "no method named `maybe_start_serialized_background_plan` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   5450,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5451,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5473,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5523,
+   "E0061",
+   "this method takes 1 argument but 3 arguments were supplied"
+  ],
+  [
+   5522,
+   "E0277",
+   "the `?` operator can only be applied to values that implement `Try`"
+  ],
+  [
+   5524,
+   "E0277",
+   "the `?` operator can only be used in an async function that returns `Result` or `Option` (or another type that implements `FromResidual`)"
+  ],
+  [
+   5531,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5531,
+   "E0277",
+   "the `?` operator can only be used in an async function that returns `Result` or `Option` (or another type that implements `FromResidual`)"
+  ],
+  [
+   5622,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5628,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5633,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5645,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5656,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5664,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5674,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5686,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5701,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5717,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5836,
+   "E0599",
+   "no method named `run_serialized_refine` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   5864,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5884,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5894,
+   "E0599",
+   "no method named `run_serialized_refine_checkpoint` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   5896,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5921,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6457,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6461,
+   "E0599",
+   "no method named `compaction_settings` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   6463,
+   "E0061",
+   "this method takes 1 argument but 2 arguments were supplied"
+  ],
+  [
+   6479,
+   "E0599",
+   "no method named `wait_for_refine_idle` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   6496,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6514,
+   "E0599",
+   "no method named `wait_for_refine_idle` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   6582,
+   "E0609",
+   "no field `return_after_accepted` on type `PromptOptions`"
+  ],
+  [
+   6724,
+   "E0277",
+   "the `?` operator can only be applied to values that implement `Try`"
+  ],
+  [
+   6738,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6954,
+   "E0061",
+   "this method takes 0 arguments but 1 argument was supplied"
+  ],
+  [
+   7063,
+   "E0609",
+   "no field `return_after_accepted` on type `PromptOptions`"
+  ],
+  [
+   7111,
+   "E0061",
+   "this method takes 0 arguments but 1 argument was supplied"
+  ],
+  [
+   7505,
+   "E0277",
+   "the `?` operator can only be applied to values that implement `Try`"
+  ],
+  [
+   7548,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7627,
+   "E0560",
+   "struct `PreparedTurnActionOptions` has no field named `records`"
+  ],
+  [
+   8026,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8039,
+   "E0599",
+   "no method named `await_agent_event_queue` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8046,
+   "E0599",
+   "no method named `wait_for_refine_idle` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8111,
+   "E0609",
+   "no field `execution_policy` on type `SessionTurnPayload`"
+  ],
+  [
+   8111,
+   "E0609",
+   "no field `execution_policy` on type `SessionTurnPayload`"
+  ],
+  [
+   8130,
+   "E0599",
+   "no method named `replace_lifecycle` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in th"
+  ],
+  [
+   8139,
+   "E0599",
+   "no method named `action_state_of` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8145,
+   "E0599",
+   "no method named `mark_delivery_record_durable` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8146,
+   "E0599",
+   "no method named `replace_lifecycle` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in th"
+  ],
+  [
+   8154,
+   "E0599",
+   "no method named `action_state_of` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8155,
+   "E0599",
+   "no method named `replace_lifecycle` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in th"
+  ],
+  [
+   8173,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8177,
+   "E0599",
+   "no method named `mark_matching_records_durable` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8178,
+   "E0599",
+   "no method named `filter_records_after_dispatch_failure` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8188,
+   "E0599",
+   "no method named `action_state_of` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8221,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8224,
+   "E0599",
+   "no method named `action_state_of` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8226,
+   "E0599",
+   "no method named `replace_lifecycle` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in th"
+  ],
+  [
+   8252,
+   "E0609",
+   "no field `queue_visible` on type `SessionTurnPayload`"
+  ],
+  [
+   8261,
+   "E0599",
+   "no method named `action_state_of` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8306,
+   "E0599",
+   "no method named `action_state_of` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8311,
+   "E0599",
+   "no method named `wait_for_refine_idle` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8328,
+   "E0599",
+   "no method named `replace_lifecycle` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in th"
+  ],
+  [
+   8342,
+   "E0599",
+   "no method named `replace_lifecycle` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in th"
+  ],
+  [
+   8353,
+   "E0599",
+   "no method named `replace_lifecycle` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in th"
+  ],
+  [
+   8385,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8459,
+   "E0599",
+   "no method named `action_state_of` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8471,
+   "E0609",
+   "no field `execution_policy` on type `SessionTurnPayload`"
+  ],
+  [
+   8491,
+   "E0277",
+   "`{closure@crates\\pi-coding-agent\\src\\core\\agent_session.rs:8495:21: 8495:68}` is not a future"
+  ],
+  [
+   8489,
+   "E0061",
+   "this method takes 3 arguments but 2 arguments were supplied"
+  ],
+  [
+   8488,
+   "E0277",
+   "`{closure@crates\\pi-coding-agent\\src\\core\\agent_session.rs:8495:21: 8495:68}` is not a future"
+  ],
+  [
+   8506,
+   "E0277",
+   "`{closure@crates\\pi-coding-agent\\src\\core\\agent_session.rs:8495:21: 8495:68}` is not a future"
+  ],
+  [
+   8512,
+   "E0599",
+   "no method named `strip_next_turn_records` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8517,
+   "E0600",
+   "cannot apply unary operator `!` to type `std::option::Option<PreparedPromptPreparation>`"
+  ],
+  [
+   8555,
+   "E0599",
+   "no method named `strip_next_turn_records` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8563,
+   "E0599",
+   "no method named `await_agent_event_queue` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8567,
+   "E0599",
+   "no method named `action_state_of` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8606,
+   "E0599",
+   "no method named `action_state_of` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8619,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8648,
+   "E0599",
+   "no method named `insert_records` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the c"
+  ],
+  [
+   8670,
+   "E0061",
+   "this method takes 1 argument but 2 arguments were supplied"
+  ],
+  [
+   8671,
+   "E0061",
+   "this method takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   8682,
+   "E0599",
+   "no method named `replace_lifecycle` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in th"
+  ],
+  [
+   8722,
+   "E0599",
+   "no method named `refine_with_options` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8727,
+   "E0599",
+   "no method named `emit_refine_failed` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   8723,
+   "E0277",
+   "the size for values of type `str` cannot be known at compilation time"
+  ],
+  [
+   8724,
+   "E0277",
+   "the size for values of type `str` cannot be known at compilation time"
+  ],
+  [
+   8724,
+   "E0277",
+   "the size for values of type `str` cannot be known at compilation time"
+  ],
+  [
+   8722,
+   "E0277",
+   "the size for values of type `str` cannot be known at compilation time"
+  ],
+  [
+   8728,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8745,
+   "E0061",
+   "this method takes 1 argument but 2 arguments were supplied"
+  ],
+  [
+   8748,
+   "E0599",
+   "no method named `is_empty` found for enum `std::option::Option<T>` in the current scope"
+  ],
+  [
+   8749,
+   "E0277",
+   "`std::option::Option<std::string::String>` doesn't implement `std::fmt::Display`"
+  ],
+  [
+   8893,
+   "E0277",
+   "the trait bound `messages::CustomMessage: std::default::Default` is not satisfied"
+  ],
+  [
+   8901,
+   "E0599",
+   "no method named `content_as_parts` found for struct `messages::CustomMessage` in the current scope"
+  ],
+  [
+   8923,
+   "E0599",
+   "no method named `content_as_parts` found for struct `messages::CustomMessage` in the current scope"
+  ],
+  [
+   8962,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8998,
+   "E0599",
+   "no method named `prompt_with_options` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   9004,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9609,
+   "E0599",
+   "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied"
+  ],
+  [
+   9778,
+   "E0599",
+   "no method named `emit_model_select_value` found for struct `std::sync::Arc<runner::ExtensionRunner>` in the current scope"
+  ],
+  [
+   9824,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9854,
+   "E0599",
+   "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied"
+  ],
+  [
+   9884,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9892,
+   "E0063",
+   "missing fields `is_scoped` and `service_tier` in initializer of `ModelCycleResult`"
+  ],
+  [
+   9911,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9916,
+   "E0063",
+   "missing fields `is_scoped` and `service_tier` in initializer of `ModelCycleResult`"
+  ],
+  [
+   10074,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10310,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10311,
+   "E0560",
+   "struct `AutoRefineReviewRequest` has no field named `branch_version`"
+  ],
+  [
+   10312,
+   "E0560",
+   "struct `AutoRefineReviewRequest` has no field named `instructions`"
+  ],
+  [
+   10335,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10341,
+   "E0609",
+   "no field `approved` on type `&AutoRefineReview`"
+  ],
+  [
+   10349,
+   "E0560",
+   "struct `PlanRefinementRequest<'_>` has no field named `instructions`"
+  ],
+  [
+   10349,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10350,
+   "E0560",
+   "struct `PlanRefinementRequest<'_>` has no field named `source`"
+  ],
+  [
+   10350,
+   "E0599",
+   "no associated function or constant named `Auto` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   10352,
+   "E0277",
+   "`?` couldn't convert the error to `std::string::String`"
+  ],
+  [
+   10353,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10353,
+   "E0277",
+   "the `?` operator can only be applied to values that implement `Try`"
+  ],
+  [
+   10354,
+   "E0061",
+   "this function takes 3 arguments but 1 argument was supplied"
+  ],
+  [
+   10354,
+   "E0277",
+   "the `?` operator can only be applied to values that implement `Try`"
+  ],
+  [
+   10373,
+   "E0560",
+   "struct `AutoRefineReview` has no field named `approved`"
+  ],
+  [
+   10514,
+   "E0369",
+   "binary operation `<` cannot be applied to type `ContextUsageEstimate`"
+  ],
+  [
+   11139,
+   "E0609",
+   "no field `id` on type `std::option::Option<pi_ai::index::Model>`"
+  ],
+  [
+   11142,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   11144,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   11208,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   11228,
+   "E0061",
+   "this function takes 3 arguments but 2 arguments were supplied"
+  ],
+  [
+   11243,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   11256,
+   "E0061",
+   "this method takes 8 arguments but 7 arguments were supplied"
+  ],
+  [
+   2691,
+   "E0592",
+   "duplicate definitions with name `get_required_request_auth`"
+  ],
+  [
+   1349,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2182,
+   "E0609",
+   "no field `rlm_depth` on type `serde_json::Map<std::string::String, serde_json::Value>`"
+  ],
+  [
+   2210,
+   "E0599",
+   "no method named `as_str` found for enum `std::option::Option<T>` in the current scope"
+  ],
+  [
+   2444,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2454,
+   "E0593",
+   "closure is expected to take 2 arguments, but it takes 1 argument"
+  ],
+  [
+   2469,
+   "E0599",
+   "no method named `ensure_harness_digest_context` found for struct `std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   2477,
+   "E0599",
+   "no method named `refresh` found for reference `&std::sync::Arc<std::sync::Mutex<McpManager>>` in the current scope"
+  ],
+  [
+   2522,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2524,
+   "E0599",
+   "no method named `replace_acp_servers` found for reference `&std::sync::Arc<std::sync::Mutex<McpManager>>` in the current scope"
+  ],
+  [
+   2663,
+   "E0599",
+   "no method named `get_acp_servers` found for reference `&std::sync::Arc<std::sync::Mutex<McpManager>>` in the current scope"
+  ],
+  [
+   2673,
+   "E0599",
+   "no method named `build_runtime` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   2735,
+   "E0593",
+   "closure is expected to take 2 arguments, but it takes 1 argument"
+  ],
+  [
+   2746,
+   "E0277",
+   "`MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>` is not a future"
+  ],
+  [
+   2749,
+   "E0061",
+   "this method takes 1 argument but 3 arguments were supplied"
+  ],
+  [
+   2748,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2760,
+   "E0593",
+   "closure is expected to take 2 arguments, but it takes 1 argument"
+  ],
+  [
+   2772,
+   "E0061",
+   "this method takes 1 argument but 6 arguments were supplied"
+  ],
+  [
+   2780,
+   "E0277",
+   "the `?` operator can only be used on `Result`s, not `Option`s, in an async block that returns `Result`"
+  ],
+  [
+   2783,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2784,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2799,
+   "E0631",
+   "type mismatch in closure arguments"
+  ],
+  [
+   2919,
+   "E0599",
+   "no method named `push_agent_event_task` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   3145,
+   "E0599",
+   "`ActionLifecycleState` doesn't implement `std::fmt::Display`"
+  ],
+  [
+   3155,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3159,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3161,
+   "E0609",
+   "no field `id` on type `&Vec<SessionAction<agent_session::QueuedActionPayload>>`"
+  ],
+  [
+   3173,
+   "E0599",
+   "no method named `replace_payload` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the "
+  ],
+  [
+   3178,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3179,
+   "E0609",
+   "no field `id` on type `&Vec<SessionAction<agent_session::QueuedActionPayload>>`"
+  ],
+  [
+   3180,
+   "E0609",
+   "no field `payload` on type `&Vec<SessionAction<agent_session::QueuedActionPayload>>`"
+  ],
+  [
+   3186,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3189,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3194,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3199,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3203,
+   "E0609",
+   "no field `payload` on type `&Vec<SessionAction<agent_session::QueuedActionPayload>>`"
+  ],
+  [
+   3204,
+   "E0609",
+   "no field `payload` on type `&Vec<SessionAction<agent_session::QueuedActionPayload>>`"
+  ],
+  [
+   3211,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3222,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3236,
+   "E0609",
+   "no field `payload` on type `Vec<SessionAction<agent_session::QueuedActionPayload>>`"
+  ],
+  [
+   3243,
+   "E0277",
+   "a value of type `std::collections::HashSet<std::string::String>` cannot be built from an iterator over elements of type `usize`"
+  ],
+  [
+   3246,
+   "E0599",
+   "no method named `replace_payload` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the "
+  ],
+  [
+   3246,
+   "E0609",
+   "no field `id` on type `&Vec<SessionAction<agent_session::QueuedActionPayload>>`"
+  ],
+  [
+   3246,
+   "E0609",
+   "no field `payload` on type `Vec<SessionAction<agent_session::QueuedActionPayload>>`"
+  ],
+  [
+   3250,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3259,
+   "E0599",
+   "no method named `is_empty` found for enum `Result<T, E>` in the current scope"
+  ],
+  [
+   3262,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3551,
+   "E0599",
+   "no method named `append_durable_status_message` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   3637,
+   "E0599",
+   "no variant, associated function, or constant named `from_str` found for enum `GoalContextKind` in the current scope"
+  ],
+  [
+   3648,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3687,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3690,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3693,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3698,
+   "E0560",
+   "struct `GoalUsage` has no field named `cache_read`"
+  ],
+  [
+   3699,
+   "E0560",
+   "struct `GoalUsage` has no field named `cache_write`"
+  ],
+  [
+   3700,
+   "E0560",
+   "struct `GoalUsage` has no field named `total_tokens`"
+  ],
+  [
+   3817,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3823,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3827,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3827,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3853,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3856,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3962,
+   "E0599",
+   "no method named `compaction_settings` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   4048,
+   "E0308",
+   "`match` arms have incompatible types"
+  ],
+  [
+   4064,
+   "E0599",
+   "no method named `maybe_start_serialized_background_plan` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   4066,
+   "E0599",
+   "no method named `maybe_start_serialized_background_plan` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   4135,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4161,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4189,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4265,
+   "E0061",
+   "this method takes 0 arguments but 1 argument was supplied"
+  ],
+  [
+   4276,
+   "E0599",
+   "no method named `snapshot` found for struct `std::sync::Arc<dyn AgentObserveController>` in the current scope"
+  ],
+  [
+   4299,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4476,
+   "E0609",
+   "no field `tasks` on type `std::sync::MutexGuard<'_, agent_session::RlmContinuationState>`"
+  ],
+  [
+   4635,
+   "E0599",
+   "no method named `queue_pending_rlm_continuation` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   4656,
+   "E0599",
+   "no method named `queue_pending_rlm_continuation` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   5003,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5023,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5062,
+   "E0599",
+   "no method named `replace_payload` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the "
+  ],
+  [
+   5071,
+   "E0277",
+   "the trait bound `std::collections::HashSet<usize>: Extend<std::string::String>` is not satisfied"
+  ],
+  [
+   5078,
+   "E0599",
+   "no method named `replace_payload` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the "
+  ],
+  [
+   5084,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5114,
+   "E0599",
+   "no method named `replace_payload` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the "
+  ],
+  [
+   5117,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5147,
+   "E0599",
+   "no method named `replace_payload` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the "
+  ],
+  [
+   5148,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5166,
+   "E0599",
+   "no method named `push_agent_event_task` found for reference `&std::sync::Arc<agent_session::AgentSession>` in the current scope"
+  ],
+  [
+   5569,
+   "E0599",
+   "no method named `schedule_session_input_pump` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   5770,
+   "E0593",
+   "closure is expected to take 2 arguments, but it takes 1 argument"
+  ],
+  [
+   6279,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6355,
+   "E0599",
+   "no method named `model_visible_skills` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   6429,
+   "E0599",
+   "no method named `execute_extension_command` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   6444,
+   "E0308",
+   "arguments to this method are incorrect"
+  ],
+  [
+   7403,
+   "E0609",
+   "no field `handler` on type `ResolvedCommand`"
+  ],
+  [
+   7438,
+   "E0615",
+   "attempted to take value of method `name` on type `&&Skill`"
+  ],
+  [
+   7453,
+   "E0615",
+   "attempted to take value of method `name` on type `Skill`"
+  ],
+  [
+   7463,
+   "E0599",
+   "no method named `emit_error_value` found for struct `std::sync::Arc<runner::ExtensionRunner>` in the current scope"
+  ],
+  [
+   7974,
+   "E0560",
+   "struct `RuntimeActivity` has no field named `is_streaming`"
+  ],
+  [
+   7975,
+   "E0560",
+   "struct `RuntimeActivity` has no field named `is_compacting`"
+  ],
+  [
+   7976,
+   "E0560",
+   "struct `RuntimeActivity` has no field named `is_retrying`"
+  ],
+  [
+   7977,
+   "E0560",
+   "struct `RuntimeActivity` has no field named `is_bash_running`"
+  ],
+  [
+   7978,
+   "E0560",
+   "struct `RuntimeActivity` has no field named `queued_work_paused`"
+  ],
+  [
+   7979,
+   "E0560",
+   "struct `RuntimeActivity` has no field named `session_input_pump_suspended`"
+  ],
+  [
+   8005,
+   "E0061",
+   "this method takes 1 argument but 0 arguments were supplied"
+  ],
+  [
+   8437,
+   "E0599",
+   "no method named `emit_error_value` found for struct `std::sync::Arc<runner::ExtensionRunner>` in the current scope"
+  ],
+  [
+   8794,
+   "E0063",
+   "missing field `command_entry_id` in initializer of `SessionSlashCommandResultDetails`"
+  ],
+  [
+   8793,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8804,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8806,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8823,
+   "E0063",
+   "missing field `command_entry_id` in initializer of `SessionSlashCommandResultDetails`"
+  ],
+  [
+   8822,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8842,
+   "E0061",
+   "this function takes 4 arguments but 2 arguments were supplied"
+  ],
+  [
+   8851,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8856,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8859,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8861,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9022,
+   "E0609",
+   "no field `queue_visible` on type `SessionTurnPayload`"
+  ],
+  [
+   9027,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9045,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9073,
+   "E0599",
+   "no method named `clear_prepared` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the c"
+  ],
+  [
+   9094,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9095,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9111,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9112,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9113,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9114,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9131,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9137,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9171,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9193,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9289,
+   "E0609",
+   "no field `content` on type `SessionTurnPayload`"
+  ],
+  [
+   9290,
+   "E0609",
+   "no field `content` on type `SessionTurnPayload`"
+  ],
+  [
+   9297,
+   "E0609",
+   "no field `content` on type `SessionTurnPayload`"
+  ],
+  [
+   9304,
+   "E0609",
+   "no field `content` on type `SessionTurnPayload`"
+  ],
+  [
+   9338,
+   "E0599",
+   "no method named `replace_payload` found for struct `std::sync::MutexGuard<'_, ActionStore<SessionAction<agent_session::QueuedActionPayload>>>` in the "
+  ],
+  [
+   9400,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9400,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9400,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9400,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9409,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9410,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9479,
+   "E0560",
+   "struct `SessionActionRecoverySnapshot` has no field named `version`"
+  ],
+  [
+   9516,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9648,
+   "E0599",
+   "no method named `schedule_session_input_pump` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   9654,
+   "E0599",
+   "no method named `schedule_session_input_pump` found for reference `&agent_session::AgentSession` in the current scope"
+  ],
+  [
+   9791,
+   "E0599",
+   "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied"
+  ],
+  [
+   9841,
+   "E0599",
+   "the method `clone` exists for struct `MutexGuard<'_, Pin<Box<dyn Future<Output = Result<(), ...>> + Send>>>`, but its trait bounds were not satisfied"
+  ],
+  [
+   9849,
+   "E0609",
+   "no field `defer_emit` on type `&ModelSelectOptions`"
+  ],
+  [
+   9924,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9934,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9949,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9951,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9968,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9971,
+   "E0599",
+   "no variant, associated function, or constant named `Standard` found for enum `std::option::Option<T>` in the current scope"
+  ],
+  [
+   9993,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9993,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10011,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10033,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10041,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10415,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   10416,
+   "E0599",
+   "no associated function or constant named `default` found for struct `HarnessState` in the current scope"
+  ],
+  [
+   10418,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   10427,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10428,
+   "E0061",
+   "this function takes 1 argument but 0 arguments were supplied"
+  ],
+  [
+   10429,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   10445,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10478,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10487,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10494,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10498,
+   "E0599",
+   "no method named `unwrap_or` found for type `f64` in the current scope"
+  ],
+  [
+   10536,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10547,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10659,
+   "E0599",
+   "no associated function or constant named `default` found for struct `messages::CustomMessage` in the current scope"
+  ],
+  [
+   10683,
+   "E0615",
+   "attempted to take value of method `file_path` on type `&Skill`"
+  ],
+  [
+   10688,
+   "E0615",
+   "attempted to take value of method `file_path` on type `&Skill`"
+  ],
+  [
+   10759,
+   "E0277",
+   "the trait bound `messages::CustomMessage: std::default::Default` is not satisfied"
+  ],
+  [
+   10761,
+   "E0599",
+   "no associated function or constant named `default` found for struct `messages::CustomMessage` in the current scope"
+  ],
+  [
+   10783,
+   "E0599",
+   "no variant, associated function, or constant named `Completed` found for enum `GoalStatus` in the current scope"
+  ],
+  [
+   10784,
+   "E0599",
+   "no variant, associated function, or constant named `Failed` found for enum `GoalStatus` in the current scope"
+  ],
+  [
+   10785,
+   "E0599",
+   "no variant, associated function, or constant named `Cleared` found for enum `GoalStatus` in the current scope"
+  ],
+  [
+   10808,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10811,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10816,
+   "E0599",
+   "no method named `unwrap_or` found for type `f64` in the current scope"
+  ],
+  [
+   10822,
+   "E0609",
+   "no field `service_tiers` on type `&pi_ai::index::Model`"
+  ],
+  [
+   10840,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10873,
+   "E0609",
+   "no field `content` on type `SessionTurnPayload`"
+  ],
+  [
+   10878,
+   "E0609",
+   "no field `queue_visible` on type `SessionTurnPayload`"
+  ],
+  [
+   10850,
+   "E0063",
+   "missing field `execution_policy` in initializer of `SessionActionRecoveryPayload`"
+  ],
+  [
+   10890,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10891,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10892,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   11012,
+   "E0277",
+   "`(dyn Fn() -> Result<(), std::string::String> + std::marker::Send + Sync + 'static)` doesn't implement `Debug`"
+  ],
+  [
+   11323,
+   "E0609",
+   "no field `delivery_mode` on type `&agent_session::AgentCronJob`"
+  ],
+  [
+   11330,
+   "E0609",
+   "no field `label` on type `&agent_session::AgentCronJob`"
+  ],
+  [
+   11334,
+   "E0609",
+   "no field `created_at` on type `&agent_session::AgentCronJob`"
+  ],
+  [
+   11335,
+   "E0609",
+   "no field `updated_at` on type `&agent_session::AgentCronJob`"
+  ],
+  [
+   11403,
+   "E0063",
+   "missing fields `custom_instructions` and `harness_digest` in initializer of `CompactionSessionEntry`"
+  ],
+  [
+   9894,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9918,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/auth_storage.rs": [
+  [
+   240,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   241,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1263,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   490,
+   "E0063",
+   "missing field `before_rename` in initializer of `atomic_file::WriteFileAtomicOptions`"
+  ],
+  [
+   1856,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   621,
+   null,
+   "lifetime may not live long enough"
+  ],
+  [
+   695,
+   "E0507",
+   "cannot move out of `serialized`, a captured variable in an `FnMut` closure"
+  ]
+ ],
+ "core/autonomous.rs": [
+  [
+   698,
+   "E0599",
+   "no method named `as_bytes` found for enum `Result<T, E>` in the current scope"
+  ],
+  [
+   844,
+   "E0282",
+   "type annotations needed for `std::option::Option<_>`"
+  ]
+ ],
+ "core/compaction/compaction.rs": [
+  [
+   1297,
+   "E0599",
+   "the method `as_deref` exists for enum `std::option::Option<pi_agent_core::types::ThinkingLevel>`, but its trait bounds were not satisfied"
+  ],
+  [
+   1435,
+   "E0609",
+   "no field `api_key` on type `SimpleStreamOptions`"
+  ],
+  [
+   1436,
+   "E0609",
+   "no field `signal` on type `SimpleStreamOptions`"
+  ],
+  [
+   1438,
+   "E0609",
+   "no field `headers` on type `SimpleStreamOptions`"
+  ],
+  [
+   1462,
+   "E0631",
+   "type mismatch in function arguments"
+  ],
+  [
+   1462,
+   "E0271",
+   "expected `{closure@compaction.rs:1460:27}` to return `Pin<Box<dyn Future<Output = Result<Option<...>, ...>> + Send>>`, but it returns `Pin<Box<...>>`"
+  ],
+  [
+   1464,
+   "E0277",
+   "`?` couldn't convert the error to `std::string::String`"
+  ],
+  [
+   1511,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1555,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/kernel/bootstrap.rs": [
+  [
+   1313,
+   "E0282",
+   "type annotations needed"
+  ],
+  [
+   1843,
+   "E0382",
+   "borrow of moved value: `python`"
+  ]
+ ],
+ "core/kernel/repl_manager.rs": [
+  [
+   708,
+   "E0277",
+   "the `?` operator can only be applied to values that implement `Try`"
+  ],
+  [
+   1165,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1256,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1768,
+   "E0061",
+   "this method takes 3 arguments but 2 arguments were supplied"
+  ],
+  [
+   1980,
+   "E0063",
+   "missing field `error` in initializer of `ActiveExecution`"
+  ],
+  [
+   2061,
+   "E0599",
+   "no method named `notify_abort_listeners` found for reference `&kernel::shared::AbortSignal` in the current scope"
+  ],
+  [
+   2377,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2393,
+   "E0599",
+   "no method named `wait` found for struct `std::sync::Arc<Notify>` in the current scope"
+  ],
+  [
+   2873,
+   "E0599",
+   "no method named `notified` found for struct `std::sync::Arc<Latch>` in the current scope"
+  ],
+  [
+   636,
+   "E0599",
+   "no method named `as_ref` found for struct `std::sync::MutexGuard<'_, std::sync::Weak<ReplKernelManager>>` in the current scope"
+  ],
+  [
+   1623,
+   "E0061",
+   "this method takes 0 arguments but 1 argument was supplied"
+  ]
+ ],
+ "core/prime_inference_model_catalog.rs": [
+  [
+   469,
+   "E0277",
+   "`Arc<Shared<Pin<Box<dyn Future<Output = Option<Vec<Model>>> + Send>>>>` is not a future"
+  ],
+  [
+   487,
+   "E0624",
+   "associated function `new` is private"
+  ],
+  [
+   493,
+   "E0277",
+   "`Arc<Shared<Pin<Box<dyn Future<Output = Option<Vec<Model>>> + Send>>>>` is not a future"
+  ],
+  [
+   355,
+   "E0063",
+   "missing field `before_rename` in initializer of `atomic_file::WriteFileAtomicOptions`"
+  ]
+ ],
+ "core/prompt_admission.rs": [
+  [
+   74,
+   "E0310",
+   "the parameter type `F` may not live long enough"
+  ]
+ ],
+ "core/sdk.rs": [
+  [
+   582,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   623,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   628,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   699,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   700,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   713,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/tools/acp_mcp.rs": [
+  [
+   95,
+   "E0599",
+   "no method named `ensure` found for reference `&IpythonKernelProvisioner` in the current scope"
+  ]
+ ],
+ "core/tools/ipython.rs": [
+  [
+   634,
+   null,
+   "future cannot be sent between threads safely"
+  ]
+ ],
+ "main_entry.rs": [
+  [
+   471,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1223,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1246,
+   "E0061",
+   "this method takes 1 argument but 0 arguments were supplied"
+  ],
+  [
+   1294,
+   "E0061",
+   "this method takes 1 argument but 0 arguments were supplied"
+  ],
+  [
+   1305,
+   "E0609",
+   "no field `id` on type `&SessionContextModel`"
+  ],
+  [
+   1314,
+   "E0609",
+   "no field `id` on type `&SessionContextModel`"
+  ],
+  [
+   1335,
+   "E0277",
+   "the trait bound `InitialModelResult: std::default::Default` is not satisfied"
+  ],
+  [
+   1414,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1495,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1533,
+   "E0277",
+   "the trait bound `DaemonClient: daemon_agent_connection::DaemonTransportClient` is not satisfied"
+  ],
+  [
+   1589,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1976,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   2037,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   2251,
+   "E0599",
+   "no method named `clone` found for struct `session_manager::SessionManager` in the current scope"
+  ],
+  [
+   2261,
+   "E0599",
+   "no method named `clone` found for struct `session_manager::SessionManager` in the current scope"
+  ],
+  [
+   2309,
+   "E0277",
+   "the trait bound `settings_manager::SettingsManager: OnboardingSettingsReader` is not satisfied"
+  ],
+  [
+   2310,
+   "E0277",
+   "the trait bound `model_registry::ModelRegistry: OnboardingModelRegistryReader` is not satisfied"
+  ],
+  [
+   2490,
+   "E0599",
+   "no method named `dispose` found for struct `std::sync::Arc<DaemonAgentConnection>` in the current scope"
+  ],
+  [
+   2502,
+   "E0599",
+   "no method named `dispose` found for struct `std::sync::Arc<DaemonAgentConnection>` in the current scope"
+  ],
+  [
+   2555,
+   "E0599",
+   "no method named `clone` found for struct `session_manager::SessionManager` in the current scope"
+  ],
+  [
+   2644,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2804,
+   "E0631",
+   "type mismatch in closure arguments"
+  ],
+  [
+   837,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   845,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1039,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1040,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1121,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1145,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1398,
+   "E0609",
+   "no field `message` on type `&MissingSessionCwdError`"
+  ],
+  [
+   1399,
+   "E0609",
+   "no field `message` on type `&SessionImportFileNotFoundError`"
+  ],
+  [
+   1400,
+   "E0609",
+   "no field `message` on type `&SessionAlreadyActiveError`"
+  ],
+  [
+   1401,
+   "E0615",
+   "attempted to take value of method `message` on type `&DaemonSessionRecoveringError`"
+  ]
+ ],
+ "modes/acp/acp_mode.rs": [
+  [
+   124,
+   "E0597",
+   "`rx` does not live long enough"
+  ],
+  [
+   1366,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2582,
+   null,
+   "future cannot be sent between threads safely"
+  ],
+  [
+   2582,
+   null,
+   "future cannot be sent between threads safely"
+  ],
+  [
+   469,
+   "E0658",
+   "use of unstable library feature `windows_by_handle`"
+  ],
+  [
+   469,
+   "E0658",
+   "use of unstable library feature `windows_by_handle`"
+  ],
+  [
+   976,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   977,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   978,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   979,
+   "E0277",
+   "can't compare `f64` with `{integer}`"
+  ],
+  [
+   979,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   979,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1002,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1002,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/agents_view/agents_view_mode.rs": [
+  [
+   1186,
+   null,
+   "lifetime may not live long enough"
+  ],
+  [
+   1186,
+   null,
+   "lifetime may not live long enough"
+  ],
+  [
+   1556,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2133,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2416,
+   "E0599",
+   "no method named `unwrap` found for opaque type `impl Future<Output = MutexGuard<'_, Option<String>>>` in the current scope"
+  ],
+  [
+   3225,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3243,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3276,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/daemon/daemon_catalog_entry.rs": [
+  [
+   12,
+   "E0061",
+   "this function takes 1 argument but 0 arguments were supplied"
+  ]
+ ],
+ "modes/daemon/daemon_client.rs": [
+  [
+   774,
+   null,
+   "future cannot be sent between threads safely"
+  ],
+  [
+   817,
+   "E0599",
+   "no method named `notify_closed` found for reference `&DaemonClient` in the current scope"
+  ],
+  [
+   454,
+   "E0521",
+   "borrowed data escapes outside of function"
+  ]
+ ],
+ "modes/daemon/daemon_mode.rs": [
+  [
+   1823,
+   "E0609",
+   "no field `path` on type `ResolvedSession`"
+  ],
+  [
+   1857,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2522,
+   "E0061",
+   "this function takes 4 arguments but 7 arguments were supplied"
+  ],
+  [
+   2540,
+   "E0599",
+   "no method named `connect` found for struct `DaemonClient` in the current scope"
+  ],
+  [
+   2579,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   2580,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2581,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2584,
+   "E0599",
+   "no variant, associated function, or constant named `Failed` found for enum `dir_lock::DirLockAttempt` in the current scope"
+  ],
+  [
+   2624,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2632,
+   "E0599",
+   "no method named `pid` found for struct `ChildProcessHandle` in the current scope"
+  ],
+  [
+   3373,
+   "E0599",
+   "no method named `clone` found for struct `std::sync::Mutex<T>` in the current scope"
+  ],
+  [
+   3948,
+   "E0599",
+   "no method named `contains_key` found for reference `&serde_json::Value` in the current scope"
+  ],
+  [
+   3964,
+   "E0308",
+   "arguments to this method are incorrect"
+  ],
+  [
+   3979,
+   "E0061",
+   "this function takes 3 arguments but 2 arguments were supplied"
+  ],
+  [
+   3981,
+   "E0599",
+   "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope"
+  ],
+  [
+   3983,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3985,
+   "E0599",
+   "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope"
+  ],
+  [
+   3987,
+   "E0308",
+   "arguments to this method are incorrect"
+  ],
+  [
+   4010,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4074,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4084,
+   "E0599",
+   "no associated function or constant named `list_with_callbacks` found for struct `session_manager::SessionManager` in the current scope"
+  ],
+  [
+   4088,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4089,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4095,
+   "E0599",
+   "no associated function or constant named `list_all_with_callbacks` found for struct `session_manager::SessionManager` in the current scope"
+  ],
+  [
+   4097,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4098,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4108,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4124,
+   "E0631",
+   "type mismatch in function arguments"
+  ],
+  [
+   4124,
+   "E0599",
+   "the method `collect` exists for struct `Map<Iter<'_, SessionInfo>, ...>`, but its trait bounds were not satisfied"
+  ],
+  [
+   4163,
+   "E0277",
+   "a value of type `&std::collections::HashSet<std::string::String>` cannot be built from an iterator over elements of type `std::string::String`"
+  ],
+  [
+   4187,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4217,
+   "E0369",
+   "binary operation `!=` cannot be applied to type `std::option::Option<&std::sync::Arc<DaemonSessionState>>`"
+  ],
+  [
+   4241,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4421,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4419,
+   "E0063",
+   "missing field `parent_session_id` in initializer of `AgentSessionNameAvailabilityInput`"
+  ],
+  [
+   4437,
+   "E0061",
+   "this function takes 3 arguments but 1 argument was supplied"
+  ],
+  [
+   4438,
+   "E0599",
+   "no method named `lock` found for enum `Result<T, E>` in the current scope"
+  ],
+  [
+   4428,
+   "E0593",
+   "closure is expected to take 1 argument, but it takes 0 arguments"
+  ],
+  [
+   4429,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4428,
+   "E0593",
+   "closure is expected to take 1 argument, but it takes 0 arguments"
+  ],
+  [
+   4444,
+   "E0593",
+   "closure is expected to take 1 argument, but it takes 0 arguments"
+  ],
+  [
+   4479,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4490,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4489,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4498,
+   "E0615",
+   "attempted to take value of method `ok` on type `Result<(), std::string::String>`"
+  ],
+  [
+   4756,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4758,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4759,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   4750,
+   "E0063",
+   "missing field `sender` in initializer of `SendAgentMessageInput`"
+  ],
+  [
+   4990,
+   "E0599",
+   "the method `clone` exists for struct `Pin<Box<dyn Future<Output = Result<Value, String>> + Send>>`, but its trait bounds were not satisfied"
+  ],
+  [
+   5026,
+   "E0599",
+   "no method named `lock` found for reference `&std::sync::Arc<DaemonSessionState>` in the current scope"
+  ],
+  [
+   5229,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5232,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5258,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   5409,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5448,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5533,
+   "E0277",
+   "the trait bound `ModelIdentity: serde::Serialize` is not satisfied"
+  ],
+  [
+   5551,
+   "E0277",
+   "the trait bound `ModelIdentity: serde::Serialize` is not satisfied"
+  ],
+  [
+   5598,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   5717,
+   "E0599",
+   "no method named `runtime_switch_session` found for reference `&std::sync::Arc<AgentDaemon>` in the current scope"
+  ],
+  [
+   5740,
+   "E0599",
+   "no method named `runtime_fork` found for reference `&std::sync::Arc<AgentDaemon>` in the current scope"
+  ],
+  [
+   5785,
+   "E0599",
+   "no method named `runtime_import_from_jsonl` found for reference `&std::sync::Arc<AgentDaemon>` in the current scope"
+  ],
+  [
+   5875,
+   "E0277",
+   "the trait bound `SessionTreeFlatNode: serde::Serialize` is not satisfied"
+  ],
+  [
+   5927,
+   "E0277",
+   "the trait bound `tool_definition::ToolDefinition: serde::de::DeserializeOwned` is not satisfied"
+  ],
+  [
+   5935,
+   "E0599",
+   "no method named `append_label_change` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+  ],
+  [
+   6146,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6148,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   6150,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6152,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6147,
+   "E0308",
+   "`if` and `else` have incompatible types"
+  ],
+  [
+   6155,
+   "E0061",
+   "this function takes 3 arguments but 2 arguments were supplied"
+  ],
+  [
+   6155,
+   "E0277",
+   "`Result<std::option::Option<SessionLease>, AcquireSessionLeaseError>` is not a future"
+  ],
+  [
+   6208,
+   "E0596",
+   "cannot borrow `lease` as mutable, as it is not declared as mutable"
+  ],
+  [
+   6331,
+   "E0609",
+   "no field `kind` on type `std::option::Option<active_session_state::AgentSessionRuntimeMetadata>`"
+  ],
+  [
+   6336,
+   "E0061",
+   "this method takes 1 argument but 2 arguments were supplied"
+  ],
+  [
+   6363,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6361,
+   "E0631",
+   "type mismatch in closure arguments"
+  ],
+  [
+   6472,
+   "E0061",
+   "this method takes 2 arguments but 0 arguments were supplied"
+  ],
+  [
+   6474,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6478,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8020,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8122,
+   "E0615",
+   "attempted to take value of method `role` on type `&pi_agent_core::types::AgentMessage`"
+  ],
+  [
+   8122,
+   "E0615",
+   "attempted to take value of method `role` on type `&pi_agent_core::types::AgentMessage`"
+  ],
+  [
+   8122,
+   "E0609",
+   "no field `timestamp` on type `&pi_agent_core::types::AgentMessage`"
+  ],
+  [
+   8122,
+   "E0609",
+   "no field `timestamp` on type `&pi_agent_core::types::AgentMessage`"
+  ],
+  [
+   8129,
+   "E0061",
+   "this function takes 1 argument but 2 arguments were supplied"
+  ],
+  [
+   8454,
+   "E0658",
+   "use of unstable library feature `iter_next_chunk`"
+  ],
+  [
+   8454,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8467,
+   "E0277",
+   "the size for values of type `[u8]` cannot be known at compilation time"
+  ],
+  [
+   8468,
+   "E0277",
+   "the size for values of type `[u8]` cannot be known at compilation time"
+  ],
+  [
+   8468,
+   "E0277",
+   "the size for values of type `[u8]` cannot be known at compilation time"
+  ],
+  [
+   8500,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8954,
+   "E0599",
+   "no method named `acquire` found for struct `MutationDrainLatch` in the current scope"
+  ],
+  [
+   9158,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9363,
+   "E0599",
+   "no method named `abort_for_update_restart` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+  ],
+  [
+   9392,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9403,
+   "E0609",
+   "no field `state` on type `&std::sync::Arc<DaemonSocketClient>`"
+  ],
+  [
+   9408,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9447,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9449,
+   "E0277",
+   "`session_file_actions::DeleteSessionFileResult` is not a future"
+  ],
+  [
+   9639,
+   "E0382",
+   "the type `Arc` does not implement `Copy`"
+  ],
+  [
+   9642,
+   "E0382",
+   "use of moved value: `runnable_job`"
+  ],
+  [
+   10071,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10073,
+   "E0277",
+   "`session_file_actions::DeleteSessionFileResult` is not a future"
+  ],
+  [
+   10193,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10408,
+   "E0599",
+   "no method named `rlm_spawn_ledger` found for reference `&AgentDaemon` in the current scope"
+  ],
+  [
+   10482,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   10636,
+   "E0507",
+   "cannot move out of an `Arc`"
+  ],
+  [
+   10875,
+   "E0609",
+   "no field `entry` on type `RlmSubagentDisplayEntry`"
+  ],
+  [
+   11109,
+   "E0308",
+   "arguments to this function are incorrect"
+  ],
+  [
+   11239,
+   "E0507",
+   "cannot move out of an `Arc`"
+  ],
+  [
+   11666,
+   "E0609",
+   "no field `last_activity_at` on type `SessionPassivationSnapshot`"
+  ],
+  [
+   11667,
+   "E0609",
+   "no field `last_activity_at` on type `SessionPassivationSnapshot`"
+  ],
+  [
+   12314,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   12316,
+   "E0599",
+   "no method named `unwrap_or_default` found for struct `Vec<session_manager::SessionInfo>` in the current scope"
+  ],
+  [
+   12431,
+   "E0599",
+   "no method named `in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope"
+  ],
+  [
+   12438,
+   "E0599",
+   "no method named `set_in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope"
+  ],
+  [
+   12440,
+   "E0599",
+   "no method named `set_in_flight_catchup` found for struct `std::sync::Arc<DaemonClientHandle>` in the current scope"
+  ],
+  [
+   12551,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   12589,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   12617,
+   "E0308",
+   "arguments to this function are incorrect"
+  ],
+  [
+   12638,
+   "E0277",
+   "the trait bound `pi_agent_core::types::AgentMessage: std::default::Default` is not satisfied"
+  ],
+  [
+   12674,
+   "E0308",
+   "arguments to this function are incorrect"
+  ],
+  [
+   12839,
+   "E0277",
+   "the trait bound `pi_agent_core::types::AgentMessage: std::default::Default` is not satisfied"
+  ],
+  [
+   13223,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   13281,
+   "E0277",
+   "the trait bound `active_session_state::AgentSessionRuntimeMetadata: serde::de::DeserializeOwned` is not satisfied"
+  ],
+  [
+   13288,
+   "E0277",
+   "the trait bound `active_session_state::AgentSessionRuntimeMetadata: serde::Serialize` is not satisfied"
+  ],
+  [
+   13613,
+   "E0599",
+   "no method named `as_deref` found for enum `SessionStateStatus` in the current scope"
+  ],
+  [
+   13616,
+   "E0599",
+   "no method named `cancel_scheduled_jobs_for_session_file` found for reference `&AgentDaemon` in the current scope"
+  ],
+  [
+   13496,
+   "E0599",
+   "no method named `as_deref` found for enum `SessionStateStatus` in the current scope"
+  ],
+  [
+   13826,
+   "E0507",
+   "cannot move out of an `Arc`"
+  ],
+  [
+   13981,
+   null,
+   "lifetime may not live long enough"
+  ],
+  [
+   14210,
+   "E0599",
+   "no method named `edges` found for opaque type `impl futures::Future<Output = std::sync::Arc<RlmSpawnLedger>>` in the current scope"
+  ],
+  [
+   14241,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   14243,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14251,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14256,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14260,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14263,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14266,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14269,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14272,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14276,
+   "E0599",
+   "no method named `as_ref` found for struct `RlmSubagentDisplayEntry` in the current scope"
+  ],
+  [
+   14302,
+   "E0277",
+   "`?` couldn't convert the error to `std::string::String`"
+  ],
+  [
+   14313,
+   "E0599",
+   "no method named `to_passive_entry` found for struct `LegacyRlmSubagentRegistryEntry` in the current scope"
+  ],
+  [
+   14341,
+   "E0599",
+   "no method named `append_delete` found for opaque type `impl futures::Future<Output = std::sync::Arc<RlmSpawnLedger>>` in the current scope"
+  ],
+  [
+   14347,
+   "E0609",
+   "no field `removed_agent_ids` on type `std::sync::Mutex<WorkerRosterReporterState>`"
+  ],
+  [
+   14350,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   14445,
+   "E0599",
+   "no method named `is_destroyed` found for reference `&std::sync::Arc<DaemonClientHandle>` in the current scope"
+  ],
+  [
+   14448,
+   "E0061",
+   "this method takes 3 arguments but 5 arguments were supplied"
+  ],
+  [
+   728,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1599,
+   "E0599",
+   "the method `to_string` exists for reference `&DaemonClientCapability`, but its trait bounds were not satisfied"
+  ],
+  [
+   1603,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1660,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2048,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2095,
+   "E0061",
+   "this function takes 3 arguments but 2 arguments were supplied"
+  ],
+  [
+   2721,
+   "E0599",
+   "no method named `lock` found for reference `&std::sync::Arc<DaemonSessionState>` in the current scope"
+  ],
+  [
+   2727,
+   "E0277",
+   "a value of type `Vec<std::sync::Arc<std::sync::Mutex<ActiveSessionState>>>` cannot be built from an iterator over elements of type `std::sync::Arc<Dae"
+  ],
+  [
+   2816,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3925,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6404,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6415,
+   "E0609",
+   "no field `kind` on type `std::option::Option<active_session_state::AgentSessionRuntimeMetadata>`"
+  ],
+  [
+   6439,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   6457,
+   "E0609",
+   "no field `kind` on type `std::option::Option<active_session_state::AgentSessionRuntimeMetadata>`"
+  ],
+  [
+   6560,
+   "E0599",
+   "no method named `set_exec_env_provider` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+  ],
+  [
+   6567,
+   "E0599",
+   "no method named `set_runtime_env_scope` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+  ],
+  [
+   6571,
+   "E0599",
+   "no method named `set_subagent_runtime_host` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+  ],
+  [
+   6579,
+   "E0277",
+   "`dyn FnOnce() + std::marker::Send` cannot be shared between threads safely"
+  ],
+  [
+   6583,
+   "E0599",
+   "no method named `set_rebind_session` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+  ],
+  [
+   6590,
+   "E0599",
+   "no method named `bind_extensions` found for struct `std::sync::Arc<(dyn DaemonSession + 'static)>` in the current scope"
+  ],
+  [
+   6622,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   6622,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7089,
+   "E0599",
+   "no variant, associated function, or constant named `default` found for enum `pi_agent_core::types::AgentMessage` in the current scope"
+  ],
+  [
+   7137,
+   "E0599",
+   "no method named `clone_arc` found for reference `&AgentDaemon` in the current scope"
+  ],
+  [
+   7169,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7233,
+   "E0599",
+   "no method named `begin_replacement_snapshot` found for reference `&AgentDaemon` in the current scope"
+  ],
+  [
+   7362,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7457,
+   "E0599",
+   "no method named `clone_arc` found for reference `&AgentDaemon` in the current scope"
+  ],
+  [
+   7642,
+   "E0599",
+   "no method named `schedule_roster_flush` found for reference `&AgentDaemon` in the current scope"
+  ],
+  [
+   7673,
+   "E0599",
+   "no method named `schedule_roster_flush` found for reference `&AgentDaemon` in the current scope"
+  ],
+  [
+   7724,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7725,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7726,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7727,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7777,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7778,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7818,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   7849,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8301,
+   "E0277",
+   "the trait bound `pi_agent_core::types::AgentMessage: std::default::Default` is not satisfied"
+  ],
+  [
+   8362,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8531,
+   "E0308",
+   "arguments to this function are incorrect"
+  ],
+  [
+   8537,
+   "E0599",
+   "no method named `as_object_mut` found for struct `agent_connection::types::AgentConnectionState` in the current scope"
+  ],
+  [
+   8547,
+   "E0599",
+   "no method named `as_object_mut` found for struct `agent_connection::types::AgentConnectionState` in the current scope"
+  ],
+  [
+   8551,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   8592,
+   "E0061",
+   "this function takes 11 arguments but 9 arguments were supplied"
+  ],
+  [
+   8801,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9082,
+   "E0277",
+   "the trait bound `active_session_state::AgentSessionRuntimeMetadata: serde::Serialize` is not satisfied"
+  ],
+  [
+   9279,
+   "E0061",
+   "this method takes 1 argument but 2 arguments were supplied"
+  ],
+  [
+   9515,
+   "E0609",
+   "no field `state` on type `&std::sync::Arc<DaemonSocketClient>`"
+  ],
+  [
+   9747,
+   "E0599",
+   "no method named `cwd` found for struct `std::sync::Arc<DaemonSessionState>` in the current scope"
+  ],
+  [
+   9780,
+   "E0599",
+   "no method named `cwd` found for struct `std::sync::Arc<DaemonSessionState>` in the current scope"
+  ],
+  [
+   9837,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9845,
+   "E0609",
+   "no field `active_session_id` on type `Result<cron_jobs::AgentCronJob, std::string::String>`"
+  ],
+  [
+   9850,
+   "E0609",
+   "no field `session_id` on type `Result<cron_jobs::AgentCronJob, std::string::String>`"
+  ],
+  [
+   9851,
+   "E0609",
+   "no field `session_file` on type `Result<cron_jobs::AgentCronJob, std::string::String>`"
+  ],
+  [
+   9852,
+   "E0609",
+   "no field `cwd` on type `Result<cron_jobs::AgentCronJob, std::string::String>`"
+  ],
+  [
+   9852,
+   "E0599",
+   "no method named `cwd` found for struct `std::sync::Arc<DaemonSessionState>` in the current scope"
+  ],
+  [
+   9853,
+   "E0609",
+   "no field `runtime_kind` on type `Result<cron_jobs::AgentCronJob, std::string::String>`"
+  ],
+  [
+   9855,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9866,
+   "E0061",
+   "this method takes 3 arguments but 1 argument was supplied"
+  ],
+  [
+   9873,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9883,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   9892,
+   "E0061",
+   "this method takes 3 arguments but 1 argument was supplied"
+  ],
+  [
+   9921,
+   "E0599",
+   "no method named `get` found for struct `daemon_session_list::SessionSummary` in the current scope"
+  ],
+  [
+   9926,
+   "E0599",
+   "no method named `get` found for struct `daemon_session_list::SessionSummary` in the current scope"
+  ],
+  [
+   9979,
+   "E0599",
+   "no method named `cwd` found for struct `std::sync::Arc<DaemonSessionState>` in the current scope"
+  ],
+  [
+   12133,
+   "E0599",
+   "no method named `cwd` found for struct `std::sync::Arc<DaemonSessionState>` in the current scope"
+  ],
+  [
+   12144,
+   "E0609",
+   "no field `session_dir` on type `&active_session_state::AgentSessionRuntimeMetadata`"
+  ],
+  [
+   14127,
+   "E0599",
+   "no method named `rlm_spawn_ledger` found for reference `&AgentDaemon` in the current scope"
+  ],
+  [
+   2475,
+   null,
+   "future cannot be sent between threads safely"
+  ],
+  [
+   8270,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   12751,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   12739,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ]
+ ],
+ "C:/Users/openclawuser/optimus-rust-toolchain/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_json-1.0.151/src/macros.rs": [
+  [
+   279,
+   "E0277",
+   "the trait bound `ModelIdentity: serde::Serialize` is not satisfied"
+  ]
+ ],
+ "modes/daemon/daemon_supervisor_ownership.rs": [
+  [
+   487,
+   "E0382",
+   "use of moved value"
+  ],
+  [
+   765,
+   "E0505",
+   "cannot move out of `registry_dir` because it is borrowed"
+  ],
+  [
+   880,
+   "E0382",
+   "use of moved value: `guard_error`"
+  ],
+  [
+   999,
+   "E0382",
+   "use of moved value"
+  ],
+  [
+   1038,
+   "E0505",
+   "cannot move out of `registry_dir` because it is borrowed"
+  ],
+  [
+   515,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   634,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1461,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1496,
+   "E0063",
+   "missing field `before_rename` in initializer of `atomic_file::WriteFileAtomicOptions`"
+  ],
+  [
+   1237,
+   "E0382",
+   "borrow of moved value: `candidate`"
+  ]
+ ],
+ "modes/daemon/rlm_ledger.rs": [
+  [
+   1189,
+   "E0599",
+   "no method named `ok` found for enum `std::option::Option<T>` in the current scope"
+  ],
+  [
+   388,
+   "E0382",
+   "borrow of moved value: `candidate`"
+  ]
+ ],
+ "modes/interactive/auth_flows.rs": [
+  [
+   529,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   559,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   647,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   651,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   663,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   668,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   681,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   703,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   726,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   824,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   847,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   864,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/interactive_mode.rs": [
+  [
+   3026,
+   "E0507",
+   "cannot move out of `self.agents_view_request` which is behind a mutable reference"
+  ],
+  [
+   3053,
+   "E0599",
+   "no method named `get_fullscreen` found for reference `&std::sync::Arc<interactive_mode_services::SettingsManager>` in the current scope"
+  ],
+  [
+   374,
+   "E0599",
+   "no method named `get_model_id` found for reference `&BrandSplashHeader` in the current scope"
+  ],
+  [
+   375,
+   "E0599",
+   "no method named `get_cwd` found for reference `&BrandSplashHeader` in the current scope"
+  ],
+  [
+   1152,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1409,
+   "E0599",
+   "no method named `get_hide_thinking_block` found for reference `&std::sync::Arc<interactive_mode_services::SettingsManager>` in the current scope"
+  ],
+  [
+   1548,
+   "E0609",
+   "no field `git_ref` on type `GitSource`"
+  ],
+  [
+   1647,
+   "E0599",
+   "no method named `get_onboarding_shown` found for reference `&std::sync::Arc<interactive_mode_services::SettingsManager>` in the current scope"
+  ],
+  [
+   1648,
+   "E0599",
+   "no method named `set_onboarding_shown` found for reference `&std::sync::Arc<interactive_mode_services::SettingsManager>` in the current scope"
+  ],
+  [
+   2191,
+   "E0599",
+   "no variant, associated function, or constant named `Priority` found for enum `std::option::Option<T>` in the current scope"
+  ],
+  [
+   2418,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2598,
+   "E0599",
+   "no method named `get_code_block_indent` found for reference `&std::sync::Arc<interactive_mode_services::SettingsManager>` in the current scope"
+  ],
+  [
+   2772,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2772,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   3236,
+   "E0615",
+   "attempted to take value of method `role` on type `&CustomAgentMessage`"
+  ],
+  [
+   1468,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   1498,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   1501,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   1516,
+   "E0596",
+   "cannot borrow data in an `Arc` as mutable"
+  ],
+  [
+   3453,
+   "E0507",
+   "cannot move out of `*service_tier` which is behind a shared reference"
+  ]
+ ],
+ "modes/rpc/rpc_client.rs": [
+  [
+   472,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   330,
+   "E0599",
+   "no method named `clone` found for struct `std::sync::Mutex<T>` in the current scope"
+  ],
+  [
+   348,
+   "E0599",
+   "no method named `clone` found for struct `std::sync::Mutex<T>` in the current scope"
+  ]
+ ],
+ "modes/rpc/rpc_mode.rs": [
+  [
+   89,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1060,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1065,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1070,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   386,
+   "E0599",
+   "no method named `arc_handle` found for reference `&RpcModeState` in the current scope"
+  ]
+ ],
+ "modes/telegram/bridge.rs": [
+  [
+   478,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   502,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   58,
+   "E0609",
+   "no field `text` on type `&str`"
+  ]
+ ],
+ "/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/macros.rs": [
+  [
+   114,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   113,
+   "E0716",
+   "temporary value dropped while borrowed"
+  ]
+ ],
+ "modes/telegram/commands.rs": [
+  [
+   201,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   200,
+   "E0277",
+   "`pi_agent_core::types::ThinkingLevel` doesn't implement `std::fmt::Display`"
+  ],
+  [
+   273,
+   "E0277",
+   "`pi_agent_core::types::ThinkingLevel` doesn't implement `std::fmt::Display`"
+  ],
+  [
+   278,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   288,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   300,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   305,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   331,
+   "E0609",
+   "no field `name` on type `Result<ParsedNewSessionCommand, std::string::String>`"
+  ],
+  [
+   336,
+   "E0609",
+   "no field `prompt` on type `Result<ParsedNewSessionCommand, std::string::String>`"
+  ],
+  [
+   465,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   477,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   491,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   502,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   47,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   645,
+   "E0599",
+   "no associated function or constant named `Off` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   646,
+   "E0599",
+   "no associated function or constant named `Minimal` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   647,
+   "E0599",
+   "no associated function or constant named `Low` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   648,
+   "E0599",
+   "no associated function or constant named `Medium` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   649,
+   "E0599",
+   "no associated function or constant named `High` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   650,
+   "E0599",
+   "no associated function or constant named `Xhigh` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   651,
+   "E0599",
+   "no associated function or constant named `Max` found for struct `std::string::String` in the current scope"
+  ]
+ ],
+ "modes/telegram/worker.rs": [
+  [
+   997,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "package_manager_cli.rs": [
+  [
+   566,
+   "E0061",
+   "this function takes 2 arguments but 1 argument was supplied"
+  ],
+  [
+   995,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1010,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1108,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1188,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1200,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1239,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1300,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1342,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1373,
+   "E0599",
+   "no variant, associated function, or constant named `new` found for enum `DaemonCommand` in the current scope"
+  ],
+  [
+   1624,
+   "E0599",
+   "no method named `message` found for struct `std::string::String` in the current scope"
+  ],
+  [
+   1688,
+   "E0599",
+   "no method named `message` found for struct `DaemonShutdownAdmissionError` in the current scope"
+  ],
+  [
+   1762,
+   "E0599",
+   "no method named `message` found for struct `DaemonShutdownAdmissionError` in the current scope"
+  ],
+  [
+   1907,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2015,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2077,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   135,
+   "E0609",
+   "no field `stack` on type `SettingsErrorValue`"
+  ]
+ ],
+ "bun/restore_sandbox_env.rs": [
+  [
+   38,
+   "E0599",
+   "no method named `insert` found for reference `&Mutex<BTreeMap<String, String>>` in the current scope"
+  ]
+ ],
+ "cli/list_models.rs": [
+  [
+   258,
+   "E0277",
+   "cannot subtract `i64` from `f64`"
+  ]
+ ],
+ "core/agent_messages.rs": [
+  [
+   244,
+   "E0277",
+   "the trait bound `f64: Eq` is not satisfied"
+  ],
+  [
+   254,
+   "E0277",
+   "the trait bound `f64: Eq` is not satisfied"
+  ],
+  [
+   363,
+   "E0308",
+   "arguments to this function are incorrect"
+  ],
+  [
+   394,
+   "E0308",
+   "arguments to this function are incorrect"
+  ]
+ ],
+ "core/agent_traces.rs": [
+  [
+   956,
+   "E0277",
+   "the trait bound `f64: Eq` is not satisfied"
+  ]
+ ],
+ "core/cron_jobs.rs": [
+  [
+   587,
+   "E0277",
+   "expected an `Fn()` closure, found `std::sync::Mutex<std::sync::Arc<dyn Fn() + std::marker::Send + Sync>>`"
+  ],
+  [
+   589,
+   "E0599",
+   "`std::sync::MutexGuard<'_, std::sync::Arc<dyn Fn() + std::marker::Send + Sync>>` is not an iterator"
+  ],
+  [
+   1625,
+   "E0599",
+   "no method named `lock` found for struct `std::sync::Arc<dyn Fn() + std::marker::Send + Sync>` in the current scope"
+  ],
+  [
+   1371,
+   "E0596",
+   "cannot borrow `updated` as mutable, as it is a captured variable in a `Fn` closure"
+  ],
+  [
+   1419,
+   "E0596",
+   "cannot borrow `recovered` as mutable, as it is a captured variable in a `Fn` closure"
+  ],
+  [
+   1434,
+   "E0596",
+   "cannot borrow `recovered` as mutable, as it is a captured variable in a `Fn` closure"
+  ]
+ ],
+ "core/export_html/tool_renderer.rs": [
+  [
+   181,
+   "E0560",
+   "struct `pi_ai::index::ImageContent` has no field named `r#type`"
+  ]
+ ],
+ "core/extensions/builtin/memory.rs": [
+  [
+   33,
+   "E0609",
+   "no field `max_retry_delay_ms` on type `ResolvedRetrySettings`"
+  ],
+  [
+   634,
+   "E0382",
+   "the type `Arc` does not implement `Copy`"
+  ],
+  [
+   793,
+   "E0382",
+   "the type `Arc` does not implement `Copy`"
+  ]
+ ],
+ "core/footer_data_provider.rs": [
+  [
+   163,
+   "E0599",
+   "no method named `clone` found for struct `std::sync::Mutex<T>` in the current scope"
+  ]
+ ],
+ "core/legacy_rlm_continuation.rs": [
+  [
+   72,
+   "E0277",
+   "can't compare `f64` with `std::option::Option<f64>`"
+  ],
+  [
+   89,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/model_registry.rs": [
+  [
+   1344,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2923,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/model_tool_output_policy.rs": [
+  [
+   286,
+   "E0063",
+   "missing field `before_rename` in initializer of `atomic_file::WriteFileAtomicOptions`"
+  ],
+  [
+   464,
+   "E0560",
+   "struct `TextContent` has no field named `content_type`"
+  ]
+ ],
+ "core/performance_metrics.rs": [
+  [
+   113,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   380,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   532,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   557,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/prime_inference_auth.rs": [
+  [
+   71,
+   "E0277",
+   "`dyn Fn(HttpRequest) -> Pin<Box<...>> + Send + Sync` doesn't implement `Debug`"
+  ]
+ ],
+ "core/rlm_runtime.rs": [
+  [
+   182,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/semantic_edges.rs": [
+  [
+   522,
+   "E0063",
+   "missing field `last_request_id` in initializer of `FoldSession`"
+  ],
+  [
+   774,
+   "E0599",
+   "the method `clone` exists for struct `Pin<Box<dyn futures::Future<Output = AssistantMessageEventStream> + std::marker::Send>>`, but its trait bounds w"
+  ],
+  [
+   794,
+   "E0271",
+   "expected `{async block@crates\\pi-coding-agent\\src\\core\\semantic_edges.rs:794:18: 794:28}` to be a future that resolves to `AssistantMessageEventStream"
+  ]
+ ],
+ "core/session_lease.rs": [
+  [
+   110,
+   "E0609",
+   "no field `token` on type `LeaseOwnerState`"
+  ],
+  [
+   391,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/side_question.rs": [
+  [
+   47,
+   "E0277",
+   "the trait bound `dyn futures::Future<Output = ()> + std::marker::Send: Clone` is not satisfied"
+  ],
+  [
+   129,
+   "E0277",
+   "the trait bound `dyn Fn(ShouldStopAfterTurnContext) -> bool + std::marker::Send + Sync: std::default::Default` is not satisfied"
+  ]
+ ],
+ "core/telemetry.rs": [
+  [
+   515,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "core/tools/bash.rs": [
+  [
+   127,
+   "E0599",
+   "no method named `process_group` found for struct `tokio::process::Command` in the current scope"
+  ],
+  [
+   465,
+   "E0599",
+   "no method named `unwrap_or` found for type `usize` in the current scope"
+  ],
+  [
+   336,
+   "E0515",
+   "cannot return reference to temporary value"
+  ]
+ ],
+ "modes/agents_view/agents_view_state.rs": [
+  [
+   332,
+   "E0277",
+   "the trait bound `AgentsViewSection: std::default::Default` is not satisfied"
+  ]
+ ],
+ "modes/agents_view/roster_store.rs": [
+  [
+   31,
+   "E0277",
+   "the trait bound `agents_view_state::AgentRosterStatus: std::default::Default` is not satisfied"
+  ]
+ ],
+ "modes/daemon/command_recovery_journal.rs": [
+  [
+   324,
+   "E0063",
+   "missing field `before_rename` in initializer of `atomic_file::WriteFileAtomicOptions`"
+  ]
+ ],
+ "modes/daemon/daemon_errors.rs": [
+  [
+   41,
+   "E0277",
+   "the trait bound `SessionCwdIssue: serde::Serialize` is not satisfied"
+  ],
+  [
+   41,
+   "E0277",
+   "the trait bound `SessionCwdIssue: serde::Deserialize<'de>` is not satisfied"
+  ],
+  [
+   41,
+   "E0277",
+   "the trait bound `SessionCwdIssue: serde::Deserialize<'de>` is not satisfied"
+  ],
+  [
+   37,
+   "E0277",
+   "the trait bound `SessionCwdIssue: serde::Deserialize<'de>` is not satisfied"
+  ]
+ ],
+ "modes/daemon/daemon_protocol.rs": [
+  [
+   216,
+   "E0277",
+   "the trait bound `f64: Eq` is not satisfied"
+  ],
+  [
+   674,
+   "E0369",
+   "binary operation `==` cannot be applied to type `SessionActionRecoverySnapshot`"
+  ],
+  [
+   1032,
+   "E0369",
+   "binary operation `==` cannot be applied to type `&SessionActionRecoverySnapshot`"
+  ],
+  [
+   2806,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   733,
+   null,
+   "lifetime may not live long enough"
+  ],
+  [
+   1468,
+   null,
+   "lifetime may not live long enough"
+  ],
+  [
+   1476,
+   null,
+   "lifetime may not live long enough"
+  ],
+  [
+   2176,
+   "E0521",
+   "borrowed data escapes outside of function"
+  ]
+ ],
+ "modes/daemon/daemon_supervisor.rs": [
+  [
+   154,
+   "E0599",
+   "the method `to_string` exists for reference `&DaemonServerCapability`, but its trait bounds were not satisfied"
+  ]
+ ],
+ "modes/daemon/rlm_subagent_display.rs": [
+  [
+   148,
+   "E0063",
+   "missing field `before_rename` in initializer of `atomic_file::WriteFileAtomicOptions`"
+  ]
+ ],
+ "modes/daemon/saved_session_info.rs": [
+  [
+   15,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   20,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   23,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   26,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   33,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   63,
+   "E0599",
+   "no method named `get` found for reference `&agent_connection::types::AgentConnectionSavedSessionState` in the current scope"
+  ],
+  [
+   66,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   69,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   74,
+   "E0599",
+   "no method named `get` found for reference `&agent_connection::types::AgentConnectionAgentStatus` in the current scope"
+  ],
+  [
+   79,
+   "E0599",
+   "no method named `get` found for reference `&agent_connection::types::AgentConnectionAgentStatus` in the current scope"
+  ],
+  [
+   83,
+   "E0599",
+   "no method named `get` found for reference `&agent_connection::types::AgentConnectionAgentStatus` in the current scope"
+  ],
+  [
+   87,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/daemon/snapshot_transcript_cache.rs": [
+  [
+   423,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/daemon/worker_recovery_journal.rs": [
+  [
+   63,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/assistant_message.rs": [
+  [
+   63,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   64,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   65,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   66,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   67,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   68,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   69,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   70,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   71,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   72,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   73,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   74,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   75,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   76,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   81,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   82,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/branch_summary_message.rs": [
+  [
+   27,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   28,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   29,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   30,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   31,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   32,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   33,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   34,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   35,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   36,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   37,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   38,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   39,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   40,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   45,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   46,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/compaction_summary_message.rs": [
+  [
+   70,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/custom_message.rs": [
+  [
+   95,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   136,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   45,
+   "E0515",
+   "cannot return value referencing temporary value"
+  ]
+ ],
+ "modes/interactive/components/dynamic_border.rs": [
+  [
+   38,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/extension_editor.rs": [
+  [
+   76,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   95,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   98,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   102,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   110,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   148,
+   "E0277",
+   "the trait bound `RefMut<'_, Editor>: pi_tui::r#mod::Component` is not satisfied"
+  ]
+ ],
+ "modes/interactive/components/heartbeat_manager.rs": [
+  [
+   323,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   580,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   587,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   591,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/injected_prompt_message.rs": [
+  [
+   141,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   142,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   143,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   144,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   145,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   146,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   147,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   148,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   149,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   150,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   151,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   152,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   153,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   154,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/mermaid.rs": [
+  [
+   276,
+   "E0599",
+   "no method named `as_deref` found for struct `std::string::String` in the current scope"
+  ]
+ ],
+ "modes/interactive/components/model_selector.rs": [
+  [
+   371,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   733,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   739,
+   "E0599",
+   "no method named `handle_input` found for struct `Input` in the current scope"
+  ],
+  [
+   785,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/oauth_selector.rs": [
+  [
+   207,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   224,
+   "E0277",
+   "the trait bound `oauth_selector::AuthSelectorCategory: Hash` is not satisfied"
+  ],
+  [
+   230,
+   "E0599",
+   "the method `contains` exists for struct `std::collections::HashSet<oauth_selector::AuthSelectorCategory>`, but its trait bounds were not satisfied"
+  ],
+  [
+   459,
+   "E0599",
+   "no method named `handle_input` found for struct `Input` in the current scope"
+  ],
+  [
+   477,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/refinement_outcome_message.rs": [
+  [
+   84,
+   "E0631",
+   "type mismatch in function arguments"
+  ],
+  [
+   85,
+   "E0631",
+   "type mismatch in function arguments"
+  ]
+ ],
+ "modes/interactive/components/side_question.rs": [
+  [
+   24,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   25,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   26,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   27,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   28,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   29,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   30,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   31,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   32,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   33,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   34,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   35,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   36,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   37,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/skill_invocation_message.rs": [
+  [
+   66,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/subagent_summary_line.rs": [
+  [
+   79,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/thinking_selector.rs": [
+  [
+   85,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/components/tree_selector.rs": [
+  [
+   1099,
+   "E0599",
+   "no method named `is_empty` found for reference `&std::option::Option<std::option::Option<std::string::String>>` in the current scope"
+  ],
+  [
+   1102,
+   "E0599",
+   "no method named `as_str` found for reference `&std::option::Option<std::option::Option<std::string::String>>` in the current scope"
+  ],
+  [
+   1544,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1545,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1633,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1634,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1635,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1636,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1637,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1642,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1643,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1650,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   1651,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2122,
+   "E0599",
+   "no method named `is_empty` found for reference `&std::option::Option<std::option::Option<std::string::String>>` in the current scope"
+  ],
+  [
+   2125,
+   "E0308",
+   "mismatched types"
+  ],
+  [
+   2127,
+   "E0277",
+   "can't compare `std::option::Option<std::option::Option<std::string::String>>` with `str`"
+  ],
+  [
+   1738,
+   "E0502",
+   "cannot borrow `*self` as mutable because it is also borrowed as immutable"
+  ],
+  [
+   1740,
+   "E0502",
+   "cannot borrow `*self` as mutable because it is also borrowed as immutable"
+  ]
+ ],
+ "modes/interactive/components/user_message.rs": [
+  [
+   120,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "modes/interactive/interactive_mode_services.rs": [
+  [
+   710,
+   "E0277",
+   "the trait bound `AuthStorage: std::default::Default` is not satisfied"
+  ],
+  [
+   927,
+   "E0277",
+   "`(dyn Fn() -> std::string::String + std::marker::Send + Sync + 'static)` doesn't implement `Debug`"
+  ],
+  [
+   990,
+   "E0615",
+   "attempted to take value of method `get_cwd` on type `interactive_mode_services::SessionManager`"
+  ]
+ ],
+ "modes/interactive/onboarding.rs": [
+  [
+   28,
+   "E0308",
+   "mismatched types"
+  ]
+ ],
+ "themes/optimus_logo.rs": [
+  [
+   39,
+   "E0277",
+   "the trait bound `{float}: std::cmp::Ord` is not satisfied"
+  ],
+  [
+   44,
+   "E0277",
+   "the trait bound `{float}: std::cmp::Ord` is not satisfied"
+  ]
+ ],
+ "core/tools/edit.rs": [
+  [
+   463,
+   "E0502",
+   "cannot borrow `*component` as mutable because it is also borrowed as immutable"
+  ]
+ ],
+ "modes/daemon/compact_session_stream.rs": [
+  [
+   242,
+   "E0502",
+   "cannot borrow `*self` as immutable because it is also borrowed as mutable"
+  ],
+  [
+   248,
+   "E0502",
+   "cannot borrow `*self` as immutable because it is also borrowed as mutable"
+  ],
+  [
+   269,
+   "E0502",
+   "cannot borrow `*self` as immutable because it is also borrowed as mutable"
+  ]
+ ],
+ "modes/interactive/components/daxnuts.rs": [
+  [
+   114,
+   null,
+   "future cannot be sent between threads safely"
+  ]
+ ],
+ "modes/rpc/rpc_extension_ui_context.rs": [
+  [
+   101,
+   "E0382",
+   "use of moved value: `payload`"
+  ]
+ ]
+}

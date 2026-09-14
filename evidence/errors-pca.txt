@@ -1,0 +1,156 @@
+crates\pi-ai\src\providers\register_builtins.rs:254:4: warning: function `create_lazy_load_error_message` is never used
+crates\pi-coding-agent\src\modes\agent_connection\daemon_agent_connection.rs:695:1: error[E0428]: the name `DaemonSnapshotAssembly` is defined multiple times: `DaemonSnapshotAssembly` redefined here
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:723:9: error: `self` parameter is only allowed in associated functions: not semantically valid as function parameter
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:837:9: error: `self` parameter is only allowed in associated functions: not semantically valid as function parameter
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:863:9: error: `self` parameter is only allowed in associated functions: not semantically valid as function parameter
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:890:41: error: `self` parameter is only allowed in associated functions: not semantically valid as function parameter
+crates\pi-coding-agent\src\modes\daemon\daemon_session_summarizer.rs:13:64: error[E0432]: unresolved imports `pi_agent_core::types::ImageOrTextContent`, `pi_agent_core::types::UserContent`: no `ImageOrTextContent` in `types`, no `UserContent` in `types`
+crates\pi-coding-agent\src\modes\interactive\auth_flows.rs:15:5: error[E0432]: unresolved import `crate::core::provider_display_names::BUILT_IN_PROVIDER_DISPLAY_NAMES`
+crates\pi-coding-agent\src\cli\daemon_command.rs:16:42: error[E0432]: unresolved import `crate::modes::daemon::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\core\extensions\loader.rs:21:47: error[E0432]: unresolved import `super::types::ExtensionUIContext`: no `ExtensionUIContext` in `core::extensions::types`
+crates\pi-coding-agent\src\core\extensions\runner.rs:17:42: error[E0432]: unresolved import `super::types::ExtensionUIContext`: no `ExtensionUIContext` in `core::extensions::types`
+crates\pi-coding-agent\src\modes\agent_connection\mod.rs:16:53: error[E0432]: unresolved imports `types::AgentConnectionBranchSummaryEntry`, `types::AgentConnectionChildUsageAttributionEntry`, `types::AgentConnectionCompactionEntry`, `types::AgentConnectionCustomEntry`, `types::AgentConnectionCustomMessageEntry`, `types::AgentConnectionLabelEntry`, `types::AgentConnectionModelChangeEntry`, `types::AgentConnectionServiceTierChangeEntry`, `types::AgentConnectionSessionInfoEntry`, `types::AgentConnectionSessionMessageEntry`, `types::AgentConnectionSessionStateEntry`, `types::AgentConnectionThinkingLevelChangeEntry`: no `AgentConnectionBranchSummaryEntry` in `modes::agent_connection::types`, no `AgentConnectionChildUsageAttributionEntry` in `modes::agent_connection::types`, no `AgentConnectionCompactionEntry` in `modes::agent_connection::types`, no `AgentConnectionCustomEntry` in `modes::agent_connection::types`, no `AgentConnectionCustomMessageEntry` in `modes::agent_connection::types`, no `AgentConnectionLabelEntry` in `modes::agent_connection::types`, no `AgentConnectionModelChangeEntry` in `modes::agent_connection::types`, no `AgentConnectionServiceTierChangeEntry` in `modes::agent_connection::types`, no `AgentConnectionSessionInfoEntry` in `modes::agent_connection::types`, no `AgentConnectionSessionMessageEntry` in `modes::agent_connection::types`
+crates\pi-coding-agent\src\modes\agents_view\agents_view_mode.rs:34:5: error[E0432]: unresolved import `super::session_view_search::matches_search_text`
+crates\pi-coding-agent\src\modes\daemon\command_recovery_journal.rs:10:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\compact_session_stream.rs:10:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_client_env.rs:9:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_extension_binding.rs:22:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:106:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_routed_client.rs:11:53: error[E0432]: unresolved import `super::daemon_client::DaemonCommand`: no `DaemonCommand` in `modes::daemon::daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_routed_client.rs:14:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:57:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:67:5: error[E0432]: unresolved import `super::daemon_session_list::classify_session_roster_status`: no `classify_session_roster_status` in `modes::daemon::daemon_session_list`
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:16:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_protocol.rs:10:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\saved_session_info.rs:5:27: error[E0432]: unresolved import `super::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\rpc\rpc_mode.rs:18:40: error[E0432]: unresolved import `crate::modes::rpc::rpc_types::RpcExtensionUIRequest`: no `RpcExtensionUIRequest` in `modes::rpc::rpc_types`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:15:5: error[E0432]: unresolved import `crate::modes::agent_connection::daemon_agent_connection::DaemonSessionStreamKind`: no `DaemonSessionStreamKind` in `modes::agent_connection::daemon_agent_connection`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:17:42: error[E0432]: unresolved import `crate::modes::daemon::daemon_client::protocol`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\core\package_manager.rs:288:22: error[E0433]: cannot find module or crate `ignore` in this scope: use of unresolved module or unlinked crate `ignore`
+crates\pi-coding-agent\src\core\package_manager.rs:299:27: error[E0433]: cannot find module or crate `ignore` in this scope: use of unresolved module or unlinked crate `ignore`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:7363:58: error[E0433]: cannot find `protocol` in `daemon_client`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:8021:58: error[E0433]: cannot find `protocol` in `daemon_client`: could not find `protocol` in `daemon_client`
+crates\pi-coding-agent\src\modes\daemon\daemon_socket.rs:400:31: error[E0433]: cannot find `UnixStream` in `net`: could not find `UnixStream` in `net`
+crates\pi-coding-agent\src\cli\daemon_command.rs:1493:34: error[E0425]: cannot find function `matches_session_id_suffix` in this scope: not found in this scope
+crates\pi-coding-agent\src\cli\daemon_command.rs:1498:38: error[E0425]: cannot find function `matches_session_id_suffix` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_messages.rs:988:17: error[E0425]: cannot find type `Arc` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:3628:14: error[E0425]: cannot find function `now_iso` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:3717:51: error[E0425]: cannot find value `image_to_value` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:3858:33: error[E0422]: cannot find struct, variant or union type `CompactOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4039:44: error[E0425]: cannot find value `compaction_entry_from_session_entry` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4175:26: error[E0425]: cannot find value `rlm_heartbeat_host_response` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4198:37: error[E0425]: cannot find function `normalize_heartbeat_delivery_mode` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4243:37: error[E0425]: cannot find function `normalize_heartbeat_delivery_mode` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4651:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4683:17: error[E0425]: cannot find type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4709:25: error[E0422]: cannot find struct, variant or union type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4730:14: error[E0422]: cannot find struct, variant or union type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5542:38: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5908:58: error[E0425]: cannot find value `REFINEMENT_SOURCE_SELF` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6257:36: error[E0425]: cannot find function `agent_message_timestamp` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6800:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6814:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6898:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7082:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7374:30: error[E0422]: cannot find struct, variant or union type `TurnExecutionPolicyOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7384:26: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7581:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7624:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7694:30: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7757:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7851:25: error[E0425]: cannot find type `TurnExecutionPolicyOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7910:25: error[E0425]: cannot find type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8267:46: error[E0422]: cannot find struct, variant or union type `RollbackProof` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8490:21: error[E0425]: cannot find value `DEFERRED_SESSION_INPUT_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8681:24: error[E0425]: cannot find value `DEFERRED_SESSION_INPUT_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8849:21: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8866:17: error[E0422]: cannot find struct, variant or union type `SessionSlashCommandResultDetails` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8895:17: error[E0422]: cannot find struct, variant or union type `SessionSlashCommandResultDetails` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8983:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:9001:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:9477:53: error[E0433]: cannot find type `SessionActionSnapshotKind` in this scope: use of undeclared type `SessionActionSnapshotKind`
+crates\pi-coding-agent\src\core\agent_session.rs:9478:63: error[E0433]: cannot find type `SessionActionSnapshotKind` in this scope: use of undeclared type `SessionActionSnapshotKind`
+crates\pi-coding-agent\src\core\agent_session.rs:9481:36: error[E0433]: cannot find type `SessionActionPhase` in this scope: use of undeclared type `SessionActionPhase`
+crates\pi-coding-agent\src\core\agent_session.rs:9482:37: error[E0433]: cannot find type `SessionActionPhase` in this scope: use of undeclared type `SessionActionPhase`
+crates\pi-coding-agent\src\core\agent_session.rs:9483:26: error[E0433]: cannot find type `SessionActionPhase` in this scope: use of undeclared type `SessionActionPhase`
+crates\pi-coding-agent\src\core\agent_session.rs:9485:17: error[E0422]: cannot find struct, variant or union type `SessionActionSnapshotActive` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10099:49: error[E0425]: cannot find type `RestoreResult` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10655:29: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10703:20: error[E0425]: cannot find type `ResourceExtensionEntry` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10763:65: error[E0425]: cannot find function `builtin_tool_registry` in module `crate::core::extensions::types`: not found in `crate::core::extensions::types`
+crates\pi-coding-agent\src\core\agent_session.rs:10818:41: error[E0425]: cannot find function `create_builtin_tools` in module `crate::core::tools`
+crates\pi-coding-agent\src\core\agent_session.rs:10818:82: error[E0422]: cannot find struct, variant or union type `BuiltinToolOptions` in module `crate::core::tools`
+crates\pi-coding-agent\src\core\agent_session.rs:10833:57: error[E0425]: cannot find type `HostRequestHandlers` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10834:28: error[E0433]: cannot find type `HostRequestHandlers` in this scope: use of undeclared type `HostRequestHandlers`
+crates\pi-coding-agent\src\core\agent_session.rs:11000:17: error[E0425]: cannot find type `RlmCreateSubagentRuntimeOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:11005:12: error[E0422]: cannot find struct, variant or union type `RlmCreateSubagentRuntimeOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:11826:50: error[E0425]: cannot find function `execute_bash` in module `crate::core::bash_executor`: not found in `crate::core::bash_executor`
+crates\pi-coding-agent\src\core\agent_session.rs:11826:91: error[E0422]: cannot find struct, variant or union type `BashExecutionOptions` in module `crate::core::bash_executor`
+crates\pi-coding-agent\src\core\agent_session.rs:12428:38: error[E0425]: cannot find type `RestoreResult` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12695:77: error[E0425]: cannot find value `COMPACTION_CANCELLED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12696:40: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12812:32: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12815:24: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12840:24: error[E0425]: cannot find value `COMPACTION_CANCELLED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:13133:25: error[E0425]: cannot find type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:104:25: error[E0425]: cannot find function `now_millis` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:723:20: error[E0411]: cannot find type `Self` in this scope: `Self` is only available in impls, traits, and type definitions
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:771:47: error[E0422]: cannot find struct, variant or union type `ScopedModel` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:798:37: error[E0425]: cannot find function `now_millis` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:843:28: error[E0425]: cannot find value `SUBAGENT_BIND_EXTENSIONS_NOT_LANDED` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:849:42: error[E0425]: cannot find value `RLM_CHILD_AGENT_STATUS_CANCELLED` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:917:36: error[E0425]: cannot find value `REPLACED_SESSION_CONTEXT_NOT_LANDED` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\extensions\loader.rs:72:26: error[E0425]: cannot find function `resolve_absolute` in module `crate::utils::paths`: not found in `crate::utils::paths`
+crates\pi-coding-agent\src\core\extensions\loader.rs:647:66: error[E0425]: cannot find function `resolve_absolute` in module `crate::utils::paths`: not found in `crate::utils::paths`
+crates\pi-coding-agent\src\core\extensions\loader.rs:745:49: error[E0425]: cannot find function `resolve_absolute` in module `crate::utils::paths`: not found in `crate::utils::paths`
+crates\pi-coding-agent\src\core\extensions\types.rs:1321:16: error[E0425]: cannot find type `CustomMessage` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\extensions\types.rs:1765:45: error[E0425]: cannot find type `PendingProviderRegistration` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\extensions\types.rs:1894:55: error[E0422]: cannot find struct, variant or union type `PendingProviderRegistration` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\extensions\types.rs:1920:62: error[E0425]: cannot find type `PendingProviderRegistration` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\model_registry.rs:1368:26: error[E0433]: cannot find type `AuthCredential` in this scope: use of undeclared type `AuthCredential`
+crates\pi-coding-agent\src\core\model_registry.rs:2169:58: error[E0425]: cannot find value `default_fetch` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\model_registry.rs:2774:63: error[E0433]: cannot find type `AuthCredential` in this scope: use of undeclared type `AuthCredential`
+crates\pi-coding-agent\src\core\model_registry.rs:2980:29: error[E0433]: cannot find type `AuthCredential` in this scope: use of undeclared type `AuthCredential`
+crates\pi-coding-agent\src\core\prompt_templates.rs:338:26: error[E0425]: cannot find function `resolve_absolute` in module `crate::utils::paths`: not found in `crate::utils::paths`
+crates\pi-coding-agent\src\core\prompt_templates.rs:347:48: error[E0425]: cannot find function `resolve_absolute` in module `crate::utils::paths`: not found in `crate::utils::paths`
+crates\pi-coding-agent\src\modes\agents_view\agents_view_mode.rs:434:25: error[E0425]: cannot find function `resolve_absolute` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\agents_view\agents_view_mode.rs:443:25: error[E0425]: cannot find function `resolve_absolute` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\interactive\components\armin.rs:620:6: error[E0404]: expected trait, found struct `Drop`: not a trait
+crates\pi-coding-agent\src\modes\interactive\interactive_mode_services.rs:755:46: error[E0425]: cannot find function `get_provider_display_name` in module `crate::core::provider_display_names`
+crates\pi-coding-agent\src\modes\rpc\rpc_client.rs:471:22: error[E0425]: cannot find type `RpcModelsPayload` in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_session_summarizer.rs:13:84: error[E0603]: enum `Message` is private: private enum
+crates\pi-coding-agent\src\modes\daemon\daemon_routed_client.rs:11:68: error[E0603]: struct import `DaemonResponse` is private: private struct import
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:67:73: error[E0603]: function import `is_session_summary_busy` is private: private function import
+crates\pi-coding-agent\src\core\extensions\loader.rs:739:56: error[E0603]: function `get_agent_dir` is private: private function
+crates\pi-coding-agent\src\modes\daemon\daemon_protocol.rs:758:41: error[E0603]: enum import `CustomMessageContent` is private: private enum import
+crates\pi-coding-agent\src\modes\headless_completion.rs:77:53: error[E0603]: enum `Message` is private: private enum
+crates\pi-coding-agent\src\modes\interactive\interactive_mode_services.rs:771:73: error[E0603]: struct import `OAuthProviderInterface` is private: private struct import
+crates\pi-coding-agent\src\modes\interactive\interactive_mode_services.rs:797:98: error[E0603]: struct import `PrimeTeam` is private: private struct import
+crates\pi-coding-agent\src\modes\interactive\interactive_mode_services.rs:801:98: error[E0603]: struct import `PrimeTeam` is private: private struct import
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:23:5: warning: unused import: `crate::core::session_import_errors::SessionImportFileNotFoundError`
+crates\pi-coding-agent\src\core\tools\ipython.rs:12:5: warning: unused imports: `ExecuteOptions` and `create_kernel_startup_abort_error`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:116:5: warning: unused imports: `DaemonErrorInfo` and `deserialize_daemon_error`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:64:28: warning: unused imports: `DaemonSessionRecoveringError`, `deserialize_daemon_error`, and `serialize_daemon_error`
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:145:20: error[E0107]: type alias takes 0 lifetime arguments but 1 lifetime argument was supplied: expected 0 lifetime arguments
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:146:12: error[E0107]: type alias takes 0 lifetime arguments but 1 lifetime argument was supplied: expected 0 lifetime arguments
+crates\pi-coding-agent\src\core\auth_storage.rs:386:35: error[E0107]: type alias takes 0 lifetime arguments but 1 lifetime argument was supplied: expected 0 lifetime arguments
+crates\pi-coding-agent\src\core\tools\mod.rs:143:24: error[E0091]: type parameter `TDetails` is never used: unused type parameter
+crates\pi-coding-agent\src\modes\agent_connection\daemon_agent_connection.rs:3174:1: error[E0119]: conflicting implementations of trait `agent_connection::types::AgentConnection` for type `DaemonAgentConnection`: conflicting implementation for `DaemonAgentConnection`
+crates\pi-coding-agent\src\modes\session_worker\private_framing.rs:28:38: error[E0091]: type parameter `THeader` is never used: unused type parameter
+crates\pi-coding-agent\src\modes\telegram\manager.rs:171:34: error[E0107]: type alias takes 0 lifetime arguments but 1 lifetime argument was supplied: expected 0 lifetime arguments
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:534:36: error[E0433]: cannot find type `SessionRuntimeHostAdapter` in this scope: use of undeclared type `SessionRuntimeHostAdapter`
+crates\pi-coding-agent\src\core\agent_session_runtime.rs:535:30: error[E0433]: cannot find type `SessionRuntimeHostAdapter` in this scope: use of undeclared type `SessionRuntimeHostAdapter`
+crates\pi-coding-agent\src\core\tools\bash.rs:266:9: error[E0433]: cannot find module or crate `libc` in this scope: use of unresolved module or unlinked crate `libc`
+crates\pi-coding-agent\src\core\tools\bash.rs:266:35: error[E0433]: cannot find module or crate `libc` in this scope: use of unresolved module or unlinked crate `libc`
+crates\pi-coding-agent\src\core\tools\bash.rs:267:9: error[E0433]: cannot find module or crate `libc` in this scope: use of unresolved module or unlinked crate `libc`
+crates\pi-coding-agent\src\core\tools\bash.rs:267:32: error[E0433]: cannot find module or crate `libc` in this scope: use of unresolved module or unlinked crate `libc`
+crates\pi-coding-agent\src\core\tools\edit.rs:597:17: error[E0433]: cannot find module or crate `strip_bom` in this scope: function `strip_bom` is not a crate or module
+crates\pi-coding-agent\src\cli\daemon_command.rs:1106:42: error[E0425]: cannot find function `print_json_line` in this scope
+crates\pi-coding-agent\src\cli\daemon_command.rs:1166:42: error[E0425]: cannot find function `print_json_line` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:2895:17: error[E0425]: cannot find function `block_on` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5123:29: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5178:36: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5211:36: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10065:9: error[E0425]: cannot find function `get_supported_thinking_levels` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12396:21: error[E0425]: cannot find function `get_supported_thinking_levels` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\side_question.rs:186:24: error[E0425]: cannot find function `usage_zero` in this scope: not found in this scope

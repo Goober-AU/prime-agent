@@ -1,0 +1,76 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/pi-ai",
+    "crates/pi-agent-core",
+    "crates/pi-tui",
+    "crates/pi-coding-agent",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "MIT"
+
+[workspace.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading", "Win32_Storage_FileSystem", "Win32_Security"] }
+# requested by port slices
+indexmap = { version = "2", features = ["serde"] }
+once_cell = "1"
+parking_lot = "0.12"
+futures-util = "0.3"
+
+# async / runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full"] }
+futures = "0.3"
+async-trait = "0.1"
+# serialization
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+serde_yaml = "0.9"
+toml = "0.8"
+# errors / logging
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+# time / ids / rand
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.8"
+# fs / paths / text
+globset = "0.4"
+walkdir = "2"
+ignore = "0.4"
+regex = "1"
+tempfile = "3"
+dirs = "5"
+which = "6"
+# http / network
+reqwest = { version = "0.12", features = ["json", "stream", "multipart", "socks", "gzip", "brotli", "deflate"] }
+url = "2"
+bytes = "1"
+# tui
+crossterm = "0.28"
+unicode-width = "0.1"
+unicode-segmentation = "1"
+unicode-general-category = "1"
+# content helpers
+pulldown-cmark = "0.12"
+similar = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+infer = "0.19"
+zip = "2"
+sha2 = "0.10"
+rsa = { version = "0.9", features = ["sha2", "pem"] }
+base64 = "0.22"
+flate2 = "1"
+# cli / process
+ctrlc = "3"
+sysinfo = "0.32"
+# workspace crates
+pi-ai = { path = "crates/pi-ai" }
+pi-agent-core = { path = "crates/pi-agent-core" }
+pi-tui = { path = "crates/pi-tui" }
+pi-coding-agent = { path = "crates/pi-coding-agent" }

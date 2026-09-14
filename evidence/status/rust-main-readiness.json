@@ -1,0 +1,166 @@
+{
+  "slice": "rust-main-readiness",
+  "validated_at": "2026-09-14T03:06:27.962716+00:00",
+  "reference": "9f547ceaba079dee45ee415a430d57fb86fa940d",
+  "pr_15_starting_head": "df5137353346a2d91f8b354d012f3979ce09471c",
+  "branch_coverage": {
+    "rust-port/current-windows-20260911": "855646113",
+    "PR12": "e322de90e",
+    "PR13": "f34aafb5f",
+    "PR14": "1819c65ed",
+    "result": "All checkpoints are ancestors of PR 15; no separate cherry-picks required."
+  },
+  "source_sha256": {
+    "crates/pi-ai/src/test_env.rs": "ff7c213a038a1ac0f80165d62380cc8823f9bfc881e5f31b5722f9d48ddf854f",
+    "crates/pi-ai/src/cli_entry.rs": "ca9c4fbd32fd3cb0ef72881158066b6a880c3f91174df1f05efe7917ccf9a900",
+    "crates/pi-ai/src/mcp/catalog.rs": "9dd8e653da344f174f0c6cf46831b59b43ad051469da2239be039238e27a4642",
+    "crates/pi-ai/src/utils/oauth/mod.rs": "b85f015a7271c97303c69b76d48a8698085127dd3b763615d2d5ac301d2bbf74",
+    "crates/pi-ai/src/session_resources.rs": "069c846b21339569425f2c4861e39204b9b92a41639a57166ba6e167f43875b7",
+    "package.json": "73003f903a3b3f2690d8793ca4a8d46115cf08b45daee762c6525bf8a5daea2b",
+    "packages/agent/package.json": "bd304826ebb3829870b0c41266c9b2e03580a48cfbb66fa213b769399044be54",
+    "packages/coding-agent/package.json": "1460e17ee3cdf318c7b1e522657fda9ddfa7b8d5a3276aec9371f5aa9283d910",
+    "package-lock.json": "56f619b4e3f55664ba3fd2fdbb47dbc209ce49d42b09b60a5f1beda8c529c13a",
+    "crates/pi-coding-agent/src/core/cron_jobs.rs": "87bd801bb2de16ea1cdc0d1d715c2223bbf50aa1695edbe41aa7bbff43f102d9",
+    "crates/pi-coding-agent/src/core/agent_session_services.rs": "e0cc1bc500628f895167b453e8448f3689532c65fcb8a64275d8d3856f6c4f33",
+    "crates/pi-coding-agent/src/core/tools/path_utils.rs": "7d51d1a7e58bc227dbb92d1c581b6f8f7264dffca7f784114564c74fe10fb13f",
+    "crates/pi-coding-agent/tests/native_cli.rs": "cd518e0fd1e7143dd4e6eb0d149da3474fcd500f9c1b14093b37d04f2dff03b2",
+    "biome.json": "3a8e835c46f7b676661098c6807041b3b67451130f7f6275f80040b5bb253d1a",
+    "crates/pi-ai/src/providers/openai_completions.rs": "060b5d0bd7964f5697f310648f28df0d3e023340e770a6adce2af0f48055da1f",
+    "scripts/pack-prime-agent-release.mjs": "c562ded6ffba96609ed2964cf4eee9252235850603efbd7de55923ab25ca98fe"
+  },
+  "binary_sha256": "13e24374574708e0e55d85e12b429708bb1c5a93bb90acfa48889cffc1238689",
+  "build": {
+    "check": "cargo check --workspace --tests --locked: exit 0",
+    "tests": "cargo test --workspace --tests --no-run --locked: exit 0; exact Cargo-emitted test executables then run in isolation",
+    "diagnostics": {
+      "errors": 0,
+      "warnings_including_duplicate_lib_and_test_diagnostics": 676
+    },
+    "environment": {
+      "os": "Linux x86_64",
+      "rust": "1.95.0",
+      "cargo": "1.95.0",
+      "node": "25.5.0",
+      "npm": "11.10.0",
+      "CARGO_BUILD_JOBS": "1",
+      "CARGO_INCREMENTAL": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0",
+      "CARGO_PROFILE_TEST_DEBUG": "0"
+    }
+  },
+  "tests": {
+    "total_passed": 3088,
+    "failed": 0,
+    "ignored": 0,
+    "filtered_out": 0,
+    "threads_per_binary": 4,
+    "results": [
+      {
+        "name": "native_cli",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.567,
+        "summaries": [
+          "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s"
+        ]
+      },
+      {
+        "name": "pi_coding_agent",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 22.227,
+        "summaries": [
+          "ok. 2165 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.19s"
+        ]
+      },
+      {
+        "name": "pi_tui",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.271,
+        "summaries": [
+          "ok. 217 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s"
+        ]
+      },
+      {
+        "name": "pi_agent_core",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.022,
+        "summaries": [
+          "ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s"
+        ]
+      },
+      {
+        "name": "pi_ai",
+        "exitCode": 0,
+        "signal": null,
+        "seconds": 0.187,
+        "summaries": [
+          "ok. 668 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s"
+        ]
+      }
+    ],
+    "parallel_stress": {
+      "runs": 20,
+      "tests_per_run": 668,
+      "threads": 8,
+      "failed_runs": 0
+    },
+    "timezone_checks": [
+      {
+        "label": "cron-zone-0",
+        "zone": "Australia/Melbourne",
+        "exitCode": 0,
+        "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2164 filtered out; finished in 0.00s"
+      },
+      {
+        "label": "cron-zone-1",
+        "zone": "America/New_York",
+        "exitCode": 0,
+        "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2164 filtered out; finished in 0.00s"
+      },
+      {
+        "label": "cron-zone-2",
+        "zone": "UTC",
+        "exitCode": 0,
+        "summary": "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2164 filtered out; finished in 0.00s"
+      }
+    ],
+    "typescript_reference": "Pinned parseAgentCronSchedule matched Melbourne local 09:00 in March (22:00Z previous day) and July (23:00Z previous day)."
+  },
+  "runtime": {
+    "native_cli": "Text and JSON print modes through the actual supervisor/worker and loopback HTTP fixture passed.",
+    "terminal": {
+      "passed": true,
+      "requests": 2,
+      "checks": [
+        "80x24 startup",
+        "typed prompt",
+        "HTTP response rendered",
+        "Escape interruption",
+        "quit",
+        "terminal restored",
+        "roster navigation"
+      ]
+    },
+    "python": "Default Rust IPython tool with unchanged Python runtime: startup, Unicode, persistent variables, async host request/reply, namespace query and shutdown passed.",
+    "help_and_version": "Both exit 0; version 0.1.0."
+  },
+  "typescript_checks": {
+    "npm_run_check": "exit 0: Biome, type check, installer check and browser smoke; no diagnostics with npm 11.10.0",
+    "targeted_tests": "release-pack.test.ts (3) and builtin-skills.test.ts (22): 25 passed; 0 failed",
+    "lockfile": "npm ci --dry-run --ignore-scripts: exit 0; only workspace versions/ranges changed; no external dependency version changes"
+  },
+  "isolation": "Synthetic keys/providers only; real runtime probes and tests run in bwrap with external network and PID isolation, hidden real home, private agent/session/temp roots. No production agent or sessions touched.",
+  "evidence": "evidence/diagnostics/rust-main-readiness.txt; detailed raw logs and probe scripts retained locally under .port-env/tmp/readiness/",
+  "remaining_scope": [
+    "Rust remains opt-in; the TypeScript launcher and Python implementation remain available.",
+    "Existing Rust compiler warnings remain.",
+    "No fresh Windows/macOS execution or live-provider validation in this Linux run.",
+    "Historical REVIEW-NOTE-freeze.md capability, adapter, markdown, AWS credential-chain, telemetry and refinement audit gaps remain except the fixed registry/cleanup races.",
+    "No minimum Rust version claim: workspace rust-version 1.98 metadata is not inherited by member crates.",
+    "Use short Unix socket/temp directories."
+  ],
+  "blocked_on": null
+}

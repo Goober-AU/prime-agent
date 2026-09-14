@@ -1,0 +1,31 @@
+{
+ "slice": "ca-daemon-a",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-errors.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_errors.rs",
+   "status": "ported",
+   "functions_mapped": 5,
+   "notes": "All 5 exported functions/classes mapped: DaemonSessionRecoveringError (+CODE), serializeDaemonError, DaemonSessionCreateError, deserializeDaemonCreateError, deserializeDaemonError, plus the DaemonErrorInfo union (5 tagged variants incl. command_result_uncertain). Replaced the previous local mirrors with the real core types (core::session_cwd::{SessionCwdIssue,MissingSessionCwdError,format_missing_session_cwd_error}, core::session_import_errors::SessionImportFileNotFoundError, core::session_lease::SessionAlreadyActiveError). SIGNATURE CHANGE for other slices: deserialize_daemon_error/deserialize_daemon_create_error now take &daemon_protocol::DaemonResponse (the TS takes Extract<DaemonResponse,{success:false}>); the old local DaemonErrorResponse struct is gone. Callers seen: heartbeat_catalog.rs, saved_session_catalog.rs (also maps error_info via Into), daemon_mode.rs, daemon_supervisor.rs - they import the protocol+error items from daemon_client::protocol, so they may still resolve to the ca-daemon-b copies."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-protocol.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_protocol.rs",
+   "status": "ported",
+   "functions_mapped": 31,
+   "notes": "All 31 exported values mapped (15 constants incl. DAEMON_PROTOCOL_INFO/DEFAULT+SUPPORTED client caps/DEFAULT server caps/CLIENT_ENV_KEYS/COMMAND_COMPATIBILITY/COMMAND_PLANE/OUTBOUND_COMPATIBILITY/UPDATE_RESTART_DRAIN_COMMANDS, 16 functions) plus every exported type. DaemonCommand is a serde-tagged enum with all 106 union arms; DaemonOutbound has all 20 arms. Schema digest rule (sha256 over the DaemonCommand + DaemonSavedSessionInfo + DaemonOutbound source slices -> c16da0e12d5a) is asserted in tests and matches. Extra gates (telemetry 14, recoveryConfig 17, admissionId 8, quiescence 18, cancelOwned 20) implemented. 16 tests mirror daemon-protocol.test.ts."
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-runtime-identity.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_runtime_identity.rs",
+   "status": "ported",
+   "functions_mapped": 3,
+   "notes": "getDaemonRuntimeIdentity + PRIME_AGENT_BUILD_ID_ENV/PRIME_AGENT_LAUNCHER_PATH_ENV mapped; private bundledBuildId (option_env!(\"PI_BUILD_ID\"), absent like typeof __PI_BUILD_ID__===\"undefined\") and private resolvePath/normalizeLexically plumbing (utils/paths.ts has no Node path.resolve port). Identity is injectable (env lookup + argv[1] + execPath) with a _from_process wrapper. 2 tests cover ?? precedence and dropped falsy paths."
+  }
+ ],
+ "build": "cargo check -p pi-coding-agent: blocked (pi-agent-core does not compile: 63 errors, 62 in crates/pi-agent-core/src/agent_loop.rs, 1 in types.rs; zero errors reported inside pi-coding-agent because the crate never gets past its dependency). Command used: MSYS_NO_PATHCONV=1 cmd /c \"call scripts\\rust-env.cmd && cargo check -p pi-coding-agent --message-format short\" with CARGO_BUILD_JOBS=4 set in the environment (the inline `set CARGO_BUILD_JOBS=4 &&` form fails: cargo parses '4 ').",
+ "tests": "cargo test -p pi-coding-agent: not run - blocked at the same pi-agent-core compile stage, so no test binary is produced. Slice tests are written (16 in daemon_protocol.rs, 4 in daemon_errors.rs, 2 in daemon_runtime_identity.rs) and mirror packages/coding-agent/test/daemon-protocol.test.ts and daemon-errors.test.ts.",
+ "blocked_on": "1) pi-agent-core has 63 compile errors (agent_loop.rs/types.rs), which blocks all of pi-coding-agent; no error in my slice can be observed until that repair lands. 2) ca-daemon-b's daemon_client.rs defines its own pub(crate) mod protocol that duplicates the protocol identity/command/compat/response/saved-session items, and other daemon files import the wire primitives from there instead of from my daemon_protocol.rs; my slice's file compiles alongside it but the crate will end up with two copies until the lead repoints those imports. 3) My daemon-errors signature change (DaemonResponse instead of the removed local DaemonErrorResponse) may require one-line edits in heartbeat_catalog.rs and saved_session_catalog.rs (out of my file ownership) - the lead should decide. 4) rustfmt --check shows formatting diffs in my files; not applied yet because it is unverified whether the landed slices are rustfmt-clean in this repo.",
+ "honest_summary": "All three files of ca-daemon-a are written as 1:1 ports: daemon_protocol.rs carries the whole protocol surface (constants, capability sets, compatibility/plane tables, 106-arm DaemonCommand, 20-arm DaemonOutbound, envelopes, replay, success/failure), daemon_errors.rs rebased onto the real core error types, and daemon_runtime_identity.rs adds the identity function with private path plumbing. I could not verify compilation: pi-coding-agent never builds because pi-agent-core fails with 63 errors (62 in agent_loop.rs), and my only cargo runs were baselines, so no error in my slice has been observed and none of my tests have executed. Two interface risks are recorded: ca-daemon-b's duplicated protocol module in daemon_client.rs, and my removal of the local DaemonErrorResponse in favour of the real DaemonResponse, which two other slices' files may need one-line follow-ups for."
+}

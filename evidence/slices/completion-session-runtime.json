@@ -1,0 +1,11 @@
+{
+  "slice": "completion-session-runtime",
+  "crate": "pi-coding-agent",
+  "files": [
+    {"src":"packages/coding-agent/src/core/agent-session.ts", "rust":"crates/pi-coding-agent/src/core/agent_session/runtime_members.rs"},
+    {"src":"packages/coding-agent/src/core/rlm-runtime.ts", "rust":"crates/pi-coding-agent/src/core/rlm_runtime.rs"},
+    {"src":"packages/coding-agent/src/core/rlm-continuation.ts", "rust":"crates/pi-coding-agent/src/core/rlm_continuation.rs"},
+    {"src":"packages/coding-agent/src/core/rlm-max-depth.ts", "rust":"crates/pi-coding-agent/src/core/rlm_max_depth.rs"},
+    {"src":"packages/coding-agent/src/core/bash-executor.ts", "rust":"crates/pi-coding-agent/src/core/bash_executor.rs"}
+  ]
+}

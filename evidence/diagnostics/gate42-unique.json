@@ -1,0 +1,12 @@
+[
+ [
+  "core/agent_session.rs",
+  4071,
+  "type `GitWorktreeSnapshot` is private"
+ ],
+ [
+  "modes/daemon/daemon_extension_binding.rs",
+  276,
+  "non-binding let on a synchronization lock"
+ ]
+]

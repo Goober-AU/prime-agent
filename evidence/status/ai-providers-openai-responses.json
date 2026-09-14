@@ -1,0 +1,67 @@
+{
+  "slice": "ai-providers-openai-responses",
+  "files": [
+    {
+      "src": "packages/ai/src/providers/openai-responses-shared.ts",
+      "rust": "crates/pi-ai/src/providers/openai_responses_shared.rs",
+      "status": "ported",
+      "functions_mapped": 18,
+      "notes": "encodeTextSignatureV1/parseTextSignature/convertResponsesMessages/convertResponsesTools/processResponsesStream + all event handlers. processResponsesStream takes ResponsesEventStream = Pin<Box<dyn Stream<Item=Value>+Send>> (pre-parsed SSE JSON) and returns Result<(),ResponsesStreamError{StreamFailure|Message}> because Rust has no throw inside a loop; the same StreamFailureError text/kind is produced. convertResponsesMessages returns Result<Vec<Value>,String> (uses try_transform_messages)."
+    },
+    {
+      "src": "packages/ai/src/providers/openai-responses.ts",
+      "rust": "crates/pi-ai/src/providers/openai_responses.rs",
+      "status": "ported",
+      "functions_mapped": 13,
+      "notes": "streamOpenAIResponses/streamSimpleOpenAIResponses/compactOpenAIResponses/try_compact_openai_responses/createClient/buildParams/getCompat/getPromptCacheRetention/resolveCacheRetention/applyServiceTierPricing/getServiceTierCostMultiplier + local SSE buffer. The OpenAI SDK is replaced by reqwest: base URL + /responses, same headers (session_id, x-client-request-id, copilot, cloudflare cf-aig-authorization, opencode), same JSON body keys/defaults."
+    },
+    {
+      "src": "packages/ai/src/providers/openai-codex-responses.ts",
+      "rust": "crates/pi-ai/src/providers/openai_codex_responses.rs",
+      "status": "ported",
+      "functions_mapped": 34,
+      "notes": "Whole file: streamOpenAICodexResponses/streamSimpleOpenAICodexResponses/compactOpenAICodexResponses/buildRequestBody/mapCodexEvents/parseSSE/parseWebSocket/acquireWebSocket/connectWebSocket/processWebSocketStream/buildCachedWebSocketRequestBody/getCachedWebSocketInputDelta/startWebSocketOutputOnFirstEvent/debug-stats + cache API/resolveCodexUrl/resolveCodexWebSocketUrl/parseErrorResponse/extractAccountId/createCodexRequestId/buildBaseCodexHeaders/buildSSEHeaders/buildWebSocketHeaders/codexUsageLimitMessage/resolveCodexServiceTier/applyServiceTierPricing/normalizeCodexStatus. reqwest only. One gap: no WebSocket crate exists in the workspace, so the socket comes from set_web_socket_constructor (None by default). With no constructor connectWebSocket fails with the exact TS message 'WebSocket transport is not available in this runtime', which drives the real fallback path (diagnostic + recordWebSocketFailure + recordWebSocketSseFallback) and then SSE. mapCodexEvents throws via an Arc<Mutex<Option<CodexThrown>>> slot because a Rust stream cannot reject; the caller re-raises it at the same point in the catch boundary."
+    },
+    {
+      "src": "packages/ai/src/providers/azure-openai-responses.ts",
+      "rust": "crates/pi-ai/src/providers/azure_openai_responses.rs",
+      "status": "ported",
+      "functions_mapped": 12,
+      "notes": "NOT written by me: the lead took this file over while I was mid-write (I stopped at 201 lines so it could overwrite instead of merging). Final file is the lead's 856-line port; not my work, so not verified by me."
+    }
+  ],
+  "build": "not run (lead builds)",
+  "blocked_on": "openai_compaction.rs is now on disk (lead). Post-build fixes I applied to my files: (1) BoxFuture has no lifetime parameter -> BoxFuture<Result<Value, CompactionRequestError>>; (2) parse_sse_response / map_codex_events / parse_web_socket / start_web_socket_output_on_first_event now return Pin<Box<dyn Stream<..> + Send>> so the Unfold combinator is Unpin and the Item types line up with ResponsesEventStream; (3) process_web_socket_stream takes on_start: Arc<dyn Fn() + Send + Sync> (was an impl-Fn parameter that could not outlive the async body); (4) openai_responses_shared.rs: parse_streaming_json returns Value, so ToolCall::new now receives match args { Value::Object(map) => map, _ => Map::new() }.",
+  "honest_summary": "openai_responses_shared.rs, openai_responses.rs and openai_codex_responses.rs are complete 1:1 ports with unit tests (parsing, serialisation, ordering, error mapping, thresholds, header building, defaults, cached-context delta, fallback diagnostics) and no real network calls. azure_openai_responses.rs is the lead's file, not mine. The one real functional gap is the WebSocket transport in the Codex provider: no WebSocket crate exists in the workspace, so the socket is injectable and defaults to 'unavailable', reproducing the TypeScript's no-WebSocket runtime path exactly (same error message, same reconnect/fallback bookkeeping) and landing on SSE. I applied the lead's reported compile fixes but did not run cargo, so the files are still compiler-unverified by me.",
+  "build_status": {
+    "check": "cargo check -p pi-ai (read-only, run by me at the lead's request)",
+    "openai_responses_shared.rs": "clean - 0 errors, 0 warnings",
+    "openai_responses.rs": "clean - 0 errors, 0 warnings",
+    "openai_codex_responses.rs": "clean - 0 errors, 0 warnings",
+    "remaining_crate_error": "crates/pi-ai/src/mcp/oauth.rs:936 E0384 (not my file)",
+    "fixes_i_applied": [
+      "BoxFuture<Result<Value, CompactionRequestError>> (BoxFuture has no lifetime parameter)",
+      "parse_sse_response / map_codex_events / parse_web_socket / start_web_socket_output_on_first_event return Pin<Box<dyn Stream<..> + Send>> (Unfold is not Unpin; Item types line up)",
+      "process_web_socket_stream takes on_start: Arc<dyn Fn() + Send + Sync>",
+      "start_web_socket_output_on_first_event takes S: Stream<Item = Value>",
+      "parse_web_socket scopes the MutexGuard so it is not held across the await (future must be Send)",
+      "fn as_arguments(Value) -> Map<String, Value> used at the three ToolCall.arguments sites",
+      "five js_display uses wrapped as map(|value| js_display(Some(value)))"
+    ],
+    "test_compile": {
+      "check": "cargo test -p pi-ai --no-run (read-only, run by me at the lead's request)",
+      "my_files": "openai_responses_shared.rs, openai_responses.rs, openai_codex_responses.rs -> 0 errors, 0 warnings",
+      "fixes_i_applied": [
+        "shared.rs test module: imported UserMessage; `allowed` now takes &'static [&'static str] and returns impl Fn(&str)->bool + 'static (E0106)",
+        "openai_responses.rs test: replaced unwrap_err() with a match (ResponsesClient is not Debug)",
+        "codex.rs tests: replaced both unwrap_err() calls with matches (dyn WebSocketLike / AcquiredWebSocket are not Debug); FakeSocket::emit clones the event per listener; dropped the unused ResponsesEventStream import; bound the must-use cleanup Fn"
+      ],
+      "remaining_errors_outside_my_files": [
+        "amazon_bedrock_responses.rs:614,624,650,651,656",
+        "azure_openai_responses.rs:624",
+        "transform_messages.rs:339",
+        "openai_completions.rs:2934,3030"
+      ]
+    }
+  }
+}

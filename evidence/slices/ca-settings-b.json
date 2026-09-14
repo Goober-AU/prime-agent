@@ -1,0 +1,22 @@
+{
+ "slice": "ca-settings-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/telemetry.ts",
+   "rust": "crates/pi-coding-agent/src/core/telemetry.rs",
+   "loc": 781
+  },
+  {
+   "src": "packages/coding-agent/src/core/performance-metrics.ts",
+   "rust": "crates/pi-coding-agent/src/core/performance_metrics.rs",
+   "loc": 483
+  },
+  {
+   "src": "packages/coding-agent/src/core/keybindings.ts",
+   "rust": "crates/pi-coding-agent/src/core/keybindings.rs",
+   "loc": 402
+  }
+ ],
+ "loc": 1666
+}

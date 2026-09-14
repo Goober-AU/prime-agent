@@ -1,0 +1,141 @@
+{
+  "slice": "runnable-interactive",
+  "status": "partial",
+  "files": [
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/heartbeat_scope.rs",
+      "src": "packages/coding-agent/src/modes/interactive/heartbeat-scope.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode.rs",
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/prompt_stash_state.rs",
+      "src": "packages/coding-agent/src/modes/interactive/prompt-stash-state.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/mod.rs",
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/agent_activity.rs",
+      "src": "packages/coding-agent/src/modes/interactive/agent-activity.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/resume_hint.rs",
+      "src": "packages/coding-agent/src/modes/interactive/resume-hint.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/feature_hints.rs",
+      "src": "packages/coding-agent/src/modes/interactive/feature-hints.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/queue_selection.rs",
+      "src": "packages/coding-agent/src/modes/interactive/queue-selection.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/auth_flows.rs",
+      "src": "packages/coding-agent/src/modes/interactive/auth-flows.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/onboarding.rs",
+      "src": "packages/coding-agent/src/modes/interactive/onboarding.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/image_markers.rs",
+      "src": "packages/coding-agent/src/modes/interactive/image-markers.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode_services.rs",
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode-services.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/theme/code_highlighter.rs",
+      "src": "packages/coding-agent/src/modes/interactive/theme/code-highlighter.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/theme/working_icon.rs",
+      "src": "packages/coding-agent/src/modes/interactive/theme/working-icon.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/theme/theme.rs",
+      "src": "packages/coding-agent/src/modes/interactive/theme/theme.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/theme/mod.rs",
+      "src": "packages/coding-agent/src/modes/interactive/theme/theme.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/themes/optimus_logo.rs",
+      "src": "packages/coding-agent/src/themes/optimus-logo.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/themes/mod.rs",
+      "src": "packages/coding-agent/src/themes/optimus-logo.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/themes/optimus_logo_data.rs",
+      "src": "packages/coding-agent/src/themes/optimus-logo-data.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/themes/prime_logo.rs",
+      "src": "packages/coding-agent/src/themes/prime-logo.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/core/keybindings.rs",
+      "src": "packages/coding-agent/src/core/keybindings.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "scope": "Native terminal adapter connecting existing InteractiveMode and components to AgentConnection"
+    },
+    {
+      "rust": "crates/pi-tui/src/terminal.rs",
+      "src": "packages/tui/src/terminal.ts"
+    },
+    {
+      "rust": "crates/pi-tui/src/components/editor.rs",
+      "src": "packages/tui/src/components/editor.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/cli/daemon_command.rs",
+      "src": "packages/coding-agent/src/cli/daemon-command.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/cli/daemon_list_format.rs",
+      "src": "packages/coding-agent/src/cli/daemon-list-format.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/cli/daemon_ps_format.rs",
+      "src": "packages/coding-agent/src/cli/daemon-ps-format.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/config.rs",
+      "src": "packages/coding-agent/src/config.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/migrations.rs",
+      "src": "packages/coding-agent/src/migrations.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/package_manager_cli.rs",
+      "src": "packages/coding-agent/src/package-manager-cli.ts"
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/main_entry.rs",
+      "src": "packages/coding-agent/src/main.ts",
+      "scope": "three baseline tests and typed interactive exit/roster return contract, summary/scope propagation"
+    },
+    {
+      "rust": "crates/pi-ai/src/providers/anthropic.rs",
+      "src": "packages/ai/src/providers/anthropic.ts",
+      "scope": "ten baseline anthropic provider failures assigned by root; shared StreamOptions owned by root"
+    }
+  ],
+  "build": "Final source-stable workspace --tests check: 1 test compile error in repl_manager.rs; see global handoff. Earlier check and executable build passed before final fixes.",
+  "tests": "Final edits not rerun; exact prior results and blockers in evidence/diagnostics/runnable-cli-handoff.json.",
+  "blocked_on": "First-response/Python proof, roster service, remaining runtime parity; user requested checkpoint and PR handoff.",
+  "handoff": "docs/RUST_CLI_NEXT_STEPS.md"
+}

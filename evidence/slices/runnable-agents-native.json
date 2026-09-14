@@ -1,0 +1,13 @@
+{
+  "slice": "runnable-agents-native",
+  "reference": "9f547ceaba079dee45ee415a430d57fb86fa940d",
+  "files": [
+    "crates/pi-coding-agent/src/modes/agents_view/native_host.rs",
+    "crates/pi-coding-agent/src/modes/agents_view/mod.rs",
+    "crates/pi-coding-agent/src/modes/agents_view/agents_view_mode.rs",
+    "evidence/slices/runnable-agents-native.json",
+    "evidence/status/runnable-agents-native.json",
+    "crates/pi-coding-agent/tests/native_cli.rs"
+  ],
+  "notes": "Root assigned native agents view; mode hooks and baseline five failures accepted after whole-file read; roster_store remains daemon_integration-owned. Root additionally authorized offline actual CLI/provider/daemon integration test."
+}

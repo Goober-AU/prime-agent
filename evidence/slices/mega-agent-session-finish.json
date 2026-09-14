@@ -1,0 +1,13 @@
+{
+ "slice": "mega-agent-session-finish",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/agent-session.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_session.rs",
+   "loc": 13194
+  }
+ ],
+ "loc": 13194,
+ "note": "FINISH-THE-FILE slice. THIS IS THE MOST IMPORTANT SLICE IN THE PORT RIGHT NOW.\nFACTS (lead-verified): crates/pi-coding-agent/src/core/agent_session.rs is 334524 bytes but does NOT PARSE. The compiler reports 'unclosed delimiter' at line 8022. A brace audit shows the file ends INSIDE an impl block with 13 unclosed braces. The TS file is 13194 lines / 475173 bytes. The Rust ends with the body of `schedule_session_input_pump` (a private method) only about 20-48 percent of the way through the TS class body. The file is TRUNCATED: the previous worker ran out of output budget mid-file.\nRELATED BUG IN THE SAME CRATE (do NOT fix unless you own the file, just report it): crates/pi-coding-agent/src/cli/daemon_command.rs line 1511 has a broken escape where a backslash-double-quote was written as double-backslash-double-quote, so the format! literal terminates early. That is the other compile error in pi-coding-agent.\nYOUR JOB, in APPEND-ONLY passes, never rewriting what already exists:\n  PASS A: find your continuation point (search the Rust for the last `fn <name>` present, find that member in the TS, continue from the NEXT TS member) and append the Rust for the next ~1500 TS lines. Keep the impl block OPEN - do not close it - and keep appending methods into it.\n  PASSES B..N: repeat, ~1500 TS lines per pass, in order, until the end of the TS file.\n  LAST PASS: close the impl block and all remaining module braces so the brace depth at end-of-file is 0.\nNever re-read what you already ported. Never dump a whole file into context.\nCOMPLETENESS PROOF (required before you stop): (a) the file parses with no unclosed delimiter; (b) brace depth at end-of-file is 0; (c) for every class member in agent-session.ts there is a fn in snake_case in the Rust - report the TS member count, the count found, and any you could not port; (d) no todo!() or unimplemented!() bodies.\nThen ONE `cargo check -p pi-coding-agent` and report. Expect the daemon_command.rs escape error to remain - that is not yours; any other error in agent_session.rs IS yours. Write evidence/status/mega-agent-session-finish.json."
+}

@@ -1,0 +1,13 @@
+{
+ "slice": "mega-tui-editor",
+ "crate": "pi-tui",
+ "files": [
+  {
+   "src": "packages/tui/src/components/editor.ts",
+   "rust": "crates/pi-tui/src/components/editor.rs",
+   "loc": 2410
+  }
+ ],
+ "loc": 2410,
+ "note": "Write in APPENDED CHUNKS of ~300-400 lines."
+}

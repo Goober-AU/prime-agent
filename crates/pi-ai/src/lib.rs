@@ -1,0 +1,25 @@
+//! Port of packages/ai/src (see docs/MIGRATION-MAP.md).
+pub mod api_registry;
+pub mod bedrock_provider;
+pub mod cache_pricing;
+pub mod cli_entry;
+pub mod compaction;
+pub mod copilot_client_version;
+pub mod env_api_keys;
+#[path = "mod.rs"]
+pub mod index;
+pub mod log;
+pub mod mcp;
+pub mod mcp_api;
+pub mod models;
+pub mod models_generated;
+pub mod oauth_api;
+pub mod openrouter_reasoning;
+pub mod prime_inference_model_catalog;
+pub mod providers;
+pub mod session_resources;
+pub mod stream;
+#[cfg(test)]
+pub(crate) mod test_env;
+pub mod types;
+pub mod utils;

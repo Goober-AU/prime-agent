@@ -1,0 +1,169 @@
+{
+  "slice": "runnable-ui-components",
+  "reference": "9f547ceaba079dee45ee415a430d57fb86fa940d",
+  "files": [
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/agent_message.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/agent-message.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Restore default preview ellipsis. Leading spacer regression now compares all remaining rendered lines at both wrapped and unwrapped widths, as TS adds exactly one leading Spacer."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/assistant_message.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/assistant-message.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Resolve file URLs lexically using native path semantics, ignore empty cwd, encode reserved URL characters via url::Url; native-path and escaped filename regression replaces a Windows-path assertion incorrectly run on Unix."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/bash_execution.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/bash-execution.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Run timer-creating tests inside Tokio, the native equivalent of the JS event loop. No rendering expectations weakened."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/bordered_loader.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/bordered-loader.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Run timer-creating tests inside Tokio; compare ANSI-stripped border geometry rather than raw styled bytes."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/compaction_outcome_message.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/compaction-outcome-message.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Check both wrapped and unwrapped malformed labels with exact line counts. Text wrapping at inner Box width is intentional in TS."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/config_selector.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/config-selector.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Synchronize enabled state across owned flat/filtered/group item copies, and pass updated state to on_toggle. Test repeated toggles. Fixture corrections preserve TS folder-prefixed names, selectable item index after headers, and cancellation-before-ctrl+c behavior, including rebound exit branch."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/context_tree_format.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/context-tree-format.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Measure tree prefixes in UTF-16 code units like TS string.length, not UTF-8 bytes. Assert the TS done-status icon in the child label."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/conversation_components.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/conversation-components.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Use valid session command compact in custom message fixtures; help is not a SessionSlashCommand in the pinned reference. Component-kind factory remains as inherited, with native host integration separately owned."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/countdown_timer.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/countdown-timer.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Queue each distinct tick value so delayed owner polling delivers 2,1,0 in order and expires once. Tokio test waits let interval tasks run. Disposed timers ignore pending ticks."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_editor.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/custom-editor.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Install application and TUI defaults as TS application startup does; send actual ctrl+o/ctrl+d/Escape terminal bytes and separately assert their configured key identifiers."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/custom_message.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/custom-message.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Assert intentional leading Spacer and full Text/Box padding, including custom-renderer spacing."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/diff.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/diff.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Use the TS diff-line regex with backtracking instead of a greedy hand parser that consumed the required separator. Existing exact parsing regressions retained."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/earendil_announcement.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/earendil-announcement.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Reconstruct wrapped URL from rendered lines before comparison; narrow-width wrapping is intentional."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/edit_summary.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/edit-summary.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Exact fixture has two added lines (+1 a and +++), not three; retain plus/minus classification coverage."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/ipython_cell.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/ipython-cell.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Queued nonempty code displays its preview; separately check empty waiting placeholder. Mark live running fixture is_partial=true, matching TS done/rehydration status rule."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/keybinding_hints.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Assert TS key label Esc capitalization."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/login_dialog.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/login-dialog.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Render the actual shared input in prompt/manual fields, resolve typed text on submit, close pending input on cancellation. Add offline regressions. Install app bindings in tests, move cursor via typed input, and assert provider display name and append-only progress behavior."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/menu_panel.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/menu-panel.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Include total_items for the scrollbar-reserved compact fixture; TS only reserves a scrollbar when total count exceeds visibility."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/modal_back.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/modal-back.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Install app defaults and pass actual left-arrow terminal sequence rather than key identifier text."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_onboarding_splash.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/prime-onboarding-splash.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Assert separately styled plain and bold runs per TS tone/bold/italic grouping, not an invented combined ANSI string."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/scoped_models_selector.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/scoped-models-selector.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Assert null/None when all models enabled regardless of count; retain partial-subset selection coverage."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/settings_selector.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/settings-selector.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Assert parseInt empty/sign-only => NaN and fractional truncation; compare ANSI-stripped border geometry."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/tool_panel.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/tool-panel.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Keep exact width padding and clipping expectations dictated by TS header/body inset."
+    },
+    {
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/visual_truncate.rs",
+      "src": "packages/coding-agent/src/modes/interactive/components/visual-truncate.ts",
+      "status": "implemented_pending_shared_tests",
+      "notes": "Keep Text.render full-width padding in expected visible-line strings."
+    },
+    {
+      "rust": "crates/pi-tui/src/components/loader.rs",
+      "src": "packages/tui/src/components/loader.ts",
+      "status": "verified",
+      "notes": "Refresh displayed Text when timer advances shared frame; stop animation on Drop. Add actual timed animation and drop regression."
+    }
+  ],
+  "verification": {
+    "rustfmt": "PASS: rustfmt --edition 2021 over all 25 owned Rust files (syntax parse and formatting)",
+    "cargo": "Not run by this agent; root coordinates shared builds/tests while writers are live.",
+    "baseline": ".port-env/tmp/pr13-verification/local-failures.json; 47 component failures identified",
+    "shared_check": "Parent reports shared check3 exit 0, no errors, coding-agent warnings remain.",
+    "pi_tui": "PASS: parent shared isolated pi_tui suite, 176 passed, 0 failed; includes loader animation/drop regression."
+  },
+  "remaining": [
+    "Await root coding-agent test execution and focused failures; shared check3 and all 176 pi-tui tests pass.",
+    "Native event loop must render/poll animation components periodically; coordinated with session_runtime_members terminal/TUI owner.",
+    "Existing login copy-key dispatch remains an async-host integration seam; this slice did not exercise real OAuth, clipboard or provider APIs."
+  ],
+  "scope": "No TypeScript/Python edits, commits, providers, credentials or whole-workspace Cargo runs by this agent."
+}

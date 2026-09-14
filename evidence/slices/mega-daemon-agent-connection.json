@@ -1,0 +1,13 @@
+{
+ "slice": "mega-daemon-agent-connection",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/agent-connection/daemon-agent-connection.ts",
+   "rust": "crates/pi-coding-agent/src/modes/agent_connection/daemon_agent_connection.rs",
+   "loc": 2483
+  }
+ ],
+ "loc": 2483,
+ "note": "Write in APPENDED CHUNKS of ~300-400 lines."
+}

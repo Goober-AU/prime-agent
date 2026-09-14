@@ -1,0 +1,1710 @@
+{
+ "agent": {
+  "src_root": "packages/agent/src",
+  "files": [
+   {
+    "path": "agent-loop.ts",
+    "loc": 1287
+   },
+   {
+    "path": "agent.ts",
+    "loc": 605
+   },
+   {
+    "path": "index.ts",
+    "loc": 5
+   },
+   {
+    "path": "performance-metrics.ts",
+    "loc": 187
+   },
+   {
+    "path": "proxy.ts",
+    "loc": 348
+   },
+   {
+    "path": "types.ts",
+    "loc": 409
+   }
+  ],
+  "total_loc": 2841,
+  "count": 6
+ },
+ "ai": {
+  "src_root": "packages/ai/src",
+  "files": [
+   {
+    "path": "api-registry.ts",
+    "loc": 112
+   },
+   {
+    "path": "bedrock-provider.ts",
+    "loc": 9
+   },
+   {
+    "path": "cache-pricing.ts",
+    "loc": 63
+   },
+   {
+    "path": "cli.ts",
+    "loc": 133
+   },
+   {
+    "path": "compaction.ts",
+    "loc": 66
+   },
+   {
+    "path": "copilot-client-version.ts",
+    "loc": 13
+   },
+   {
+    "path": "env-api-keys.ts",
+    "loc": 221
+   },
+   {
+    "path": "index.ts",
+    "loc": 47
+   },
+   {
+    "path": "log.ts",
+    "loc": 88
+   },
+   {
+    "path": "mcp.ts",
+    "loc": 1
+   },
+   {
+    "path": "mcp/catalog.ts",
+    "loc": 53
+   },
+   {
+    "path": "mcp/index.ts",
+    "loc": 4
+   },
+   {
+    "path": "mcp/oauth.ts",
+    "loc": 583
+   },
+   {
+    "path": "models.generated.ts",
+    "loc": 22884
+   },
+   {
+    "path": "models.ts",
+    "loc": 123
+   },
+   {
+    "path": "oauth.ts",
+    "loc": 1
+   },
+   {
+    "path": "openrouter-reasoning.ts",
+    "loc": 67
+   },
+   {
+    "path": "prime-inference-model-catalog.ts",
+    "loc": 93
+   },
+   {
+    "path": "providers/amazon-bedrock-responses.ts",
+    "loc": 144
+   },
+   {
+    "path": "providers/amazon-bedrock.ts",
+    "loc": 968
+   },
+   {
+    "path": "providers/anthropic.ts",
+    "loc": 1288
+   },
+   {
+    "path": "providers/azure-openai-responses.ts",
+    "loc": 284
+   },
+   {
+    "path": "providers/bedrock-responses-client.ts",
+    "loc": 106
+   },
+   {
+    "path": "providers/cloudflare.ts",
+    "loc": 32
+   },
+   {
+    "path": "providers/faux.ts",
+    "loc": 499
+   },
+   {
+    "path": "providers/github-copilot-headers.ts",
+    "loc": 34
+   },
+   {
+    "path": "providers/google-shared.ts",
+    "loc": 340
+   },
+   {
+    "path": "providers/google-vertex.ts",
+    "loc": 543
+   },
+   {
+    "path": "providers/google.ts",
+    "loc": 469
+   },
+   {
+    "path": "providers/mistral.ts",
+    "loc": 634
+   },
+   {
+    "path": "providers/openai-codex-responses.ts",
+    "loc": 1388
+   },
+   {
+    "path": "providers/openai-compaction.ts",
+    "loc": 229
+   },
+   {
+    "path": "providers/openai-completions.ts",
+    "loc": 1254
+   },
+   {
+    "path": "providers/openai-responses-shared.ts",
+    "loc": 576
+   },
+   {
+    "path": "providers/openai-responses.ts",
+    "loc": 335
+   },
+   {
+    "path": "providers/opencode-headers.ts",
+    "loc": 16
+   },
+   {
+    "path": "providers/register-builtins.ts",
+    "loc": 454
+   },
+   {
+    "path": "providers/simple-options.ts",
+    "loc": 49
+   },
+   {
+    "path": "providers/transform-messages.ts",
+    "loc": 219
+   },
+   {
+    "path": "session-resources.ts",
+    "loc": 24
+   },
+   {
+    "path": "stream.ts",
+    "loc": 74
+   },
+   {
+    "path": "types.ts",
+    "loc": 501
+   },
+   {
+    "path": "utils/diagnostics.ts",
+    "loc": 45
+   },
+   {
+    "path": "utils/event-stream.ts",
+    "loc": 84
+   },
+   {
+    "path": "utils/hash.ts",
+    "loc": 12
+   },
+   {
+    "path": "utils/headers.ts",
+    "loc": 7
+   },
+   {
+    "path": "utils/json-parse.ts",
+    "loc": 124
+   },
+   {
+    "path": "utils/oauth/anthropic.ts",
+    "loc": 402
+   },
+   {
+    "path": "utils/oauth/github-copilot.ts",
+    "loc": 378
+   },
+   {
+    "path": "utils/oauth/index.ts",
+    "loc": 128
+   },
+   {
+    "path": "utils/oauth/oauth-page.ts",
+    "loc": 115
+   },
+   {
+    "path": "utils/oauth/openai-codex.ts",
+    "loc": 458
+   },
+   {
+    "path": "utils/oauth/pkce.ts",
+    "loc": 29
+   },
+   {
+    "path": "utils/oauth/types.ts",
+    "loc": 71
+   },
+   {
+    "path": "utils/overflow.ts",
+    "loc": 147
+   },
+   {
+    "path": "utils/sanitize-unicode.ts",
+    "loc": 25
+   },
+   {
+    "path": "utils/stream-failure.ts",
+    "loc": 271
+   },
+   {
+    "path": "utils/typebox-helpers.ts",
+    "loc": 24
+   },
+   {
+    "path": "utils/validation.ts",
+    "loc": 324
+   }
+  ],
+  "total_loc": 37665,
+  "count": 59
+ },
+ "coding-agent": {
+  "src_root": "packages/coding-agent/src",
+  "files": [
+   {
+    "path": "bun/cli.ts",
+    "loc": 12
+   },
+   {
+    "path": "bun/register-bedrock.ts",
+    "loc": 4
+   },
+   {
+    "path": "bun/restore-sandbox-env.ts",
+    "loc": 32
+   },
+   {
+    "path": "cli-main.ts",
+    "loc": 46
+   },
+   {
+    "path": "cli.ts",
+    "loc": 15
+   },
+   {
+    "path": "cli/args.ts",
+    "loc": 346
+   },
+   {
+    "path": "cli/command-registry.ts",
+    "loc": 378
+   },
+   {
+    "path": "cli/config-selector.ts",
+    "loc": 46
+   },
+   {
+    "path": "cli/daemon-command.ts",
+    "loc": 1688
+   },
+   {
+    "path": "cli/daemon-launch.ts",
+    "loc": 607
+   },
+   {
+    "path": "cli/daemon-list-format.ts",
+    "loc": 125
+   },
+   {
+    "path": "cli/daemon-ps-format.ts",
+    "loc": 90
+   },
+   {
+    "path": "cli/daemon-ps.ts",
+    "loc": 1286
+   },
+   {
+    "path": "cli/daemon-stop-confirm.ts",
+    "loc": 76
+   },
+   {
+    "path": "cli/daemon-update-restart.ts",
+    "loc": 602
+   },
+   {
+    "path": "cli/file-processor.ts",
+    "loc": 87
+   },
+   {
+    "path": "cli/initial-message.ts",
+    "loc": 43
+   },
+   {
+    "path": "cli/list-models.ts",
+    "loc": 96
+   },
+   {
+    "path": "cli/node-version-check.ts",
+    "loc": 59
+   },
+   {
+    "path": "cli/owned-session-worker.ts",
+    "loc": 533
+   },
+   {
+    "path": "cli/public-command.ts",
+    "loc": 447
+   },
+   {
+    "path": "cli/session-resolver.ts",
+    "loc": 1
+   },
+   {
+    "path": "cli/subprocess-launch.ts",
+    "loc": 61
+   },
+   {
+    "path": "config.ts",
+    "loc": 634
+   },
+   {
+    "path": "core/agent-messages.ts",
+    "loc": 648
+   },
+   {
+    "path": "core/agent-observe.ts",
+    "loc": 216
+   },
+   {
+    "path": "core/agent-session-config.ts",
+    "loc": 157
+   },
+   {
+    "path": "core/agent-session-runtime.ts",
+    "loc": 774
+   },
+   {
+    "path": "core/agent-session-services.ts",
+    "loc": 287
+   },
+   {
+    "path": "core/agent-session.ts",
+    "loc": 13194
+   },
+   {
+    "path": "core/agent-traces.ts",
+    "loc": 1170
+   },
+   {
+    "path": "core/auth-guidance.ts",
+    "loc": 61
+   },
+   {
+    "path": "core/auth-storage.ts",
+    "loc": 1177
+   },
+   {
+    "path": "core/autonomous.ts",
+    "loc": 592
+   },
+   {
+    "path": "core/bash-executor.ts",
+    "loc": 114
+   },
+   {
+    "path": "core/compaction/branch-summarization.ts",
+    "loc": 327
+   },
+   {
+    "path": "core/compaction/checkpoint.ts",
+    "loc": 54
+   },
+   {
+    "path": "core/compaction/compaction.ts",
+    "loc": 1031
+   },
+   {
+    "path": "core/compaction/index.ts",
+    "loc": 7
+   },
+   {
+    "path": "core/compaction/utils.ts",
+    "loc": 149
+   },
+   {
+    "path": "core/context-tree.ts",
+    "loc": 321
+   },
+   {
+    "path": "core/cron-jobs.ts",
+    "loc": 1719
+   },
+   {
+    "path": "core/defaults.ts",
+    "loc": 3
+   },
+   {
+    "path": "core/diagnostics.ts",
+    "loc": 15
+   },
+   {
+    "path": "core/event-bus.ts",
+    "loc": 33
+   },
+   {
+    "path": "core/event-log.ts",
+    "loc": 173
+   },
+   {
+    "path": "core/exec.ts",
+    "loc": 130
+   },
+   {
+    "path": "core/export-html/ansi-to-html.ts",
+    "loc": 230
+   },
+   {
+    "path": "core/export-html/index.ts",
+    "loc": 301
+   },
+   {
+    "path": "core/export-html/template.css",
+    "loc": 1020
+   },
+   {
+    "path": "core/export-html/template.html",
+    "loc": 49
+   },
+   {
+    "path": "core/export-html/template.js",
+    "loc": 1692
+   },
+   {
+    "path": "core/export-html/tool-renderer.ts",
+    "loc": 167
+   },
+   {
+    "path": "core/extensions/builtin/herdr-agent-state.ts",
+    "loc": 471
+   },
+   {
+    "path": "core/extensions/builtin/memory.ts",
+    "loc": 314
+   },
+   {
+    "path": "core/extensions/builtin/telegram.ts",
+    "loc": 163
+   },
+   {
+    "path": "core/extensions/bundled-modules.ts",
+    "loc": 39
+   },
+   {
+    "path": "core/extensions/index.ts",
+    "loc": 148
+   },
+   {
+    "path": "core/extensions/loader.ts",
+    "loc": 593
+   },
+   {
+    "path": "core/extensions/runner.ts",
+    "loc": 1074
+   },
+   {
+    "path": "core/extensions/types.ts",
+    "loc": 1434
+   },
+   {
+    "path": "core/extensions/wrapper.ts",
+    "loc": 38
+   },
+   {
+    "path": "core/footer-data-provider.ts",
+    "loc": 312
+   },
+   {
+    "path": "core/goals.ts",
+    "loc": 290
+   },
+   {
+    "path": "core/index.ts",
+    "loc": 84
+   },
+   {
+    "path": "core/kernel/boot-gate.ts",
+    "loc": 34
+   },
+   {
+    "path": "core/kernel/bootstrap-cli.ts",
+    "loc": 13
+   },
+   {
+    "path": "core/kernel/bootstrap.ts",
+    "loc": 962
+   },
+   {
+    "path": "core/kernel/index.ts",
+    "loc": 2
+   },
+   {
+    "path": "core/kernel/repl-manager.ts",
+    "loc": 1913
+   },
+   {
+    "path": "core/kernel/shared.ts",
+    "loc": 358
+   },
+   {
+    "path": "core/kernel/state-snapshot.ts",
+    "loc": 116
+   },
+   {
+    "path": "core/keybindings.ts",
+    "loc": 402
+   },
+   {
+    "path": "core/legacy-rlm-continuation.ts",
+    "loc": 115
+   },
+   {
+    "path": "core/logging.ts",
+    "loc": 23
+   },
+   {
+    "path": "core/mcp/acp-mcp-types.ts",
+    "loc": 15
+   },
+   {
+    "path": "core/mcp/mcp-command.ts",
+    "loc": 235
+   },
+   {
+    "path": "core/mcp/mcp-manager.ts",
+    "loc": 249
+   },
+   {
+    "path": "core/memory/evidence.ts",
+    "loc": 85
+   },
+   {
+    "path": "core/memory/jobs.ts",
+    "loc": 200
+   },
+   {
+    "path": "core/memory/project.ts",
+    "loc": 65
+   },
+   {
+    "path": "core/memory/search.ts",
+    "loc": 136
+   },
+   {
+    "path": "core/memory/server.ts",
+    "loc": 102
+   },
+   {
+    "path": "core/memory/service.ts",
+    "loc": 326
+   },
+   {
+    "path": "core/memory/sharing.ts",
+    "loc": 155
+   },
+   {
+    "path": "core/memory/store.ts",
+    "loc": 331
+   },
+   {
+    "path": "core/messages.ts",
+    "loc": 685
+   },
+   {
+    "path": "core/model-registry.ts",
+    "loc": 1803
+   },
+   {
+    "path": "core/model-resolver.ts",
+    "loc": 639
+   },
+   {
+    "path": "core/model-tool-output-policy.ts",
+    "loc": 283
+   },
+   {
+    "path": "core/new-session-command.ts",
+    "loc": 54
+   },
+   {
+    "path": "core/orphan-process-journal.ts",
+    "loc": 176
+   },
+   {
+    "path": "core/output-guard.ts",
+    "loc": 74
+   },
+   {
+    "path": "core/package-manager.ts",
+    "loc": 2443
+   },
+   {
+    "path": "core/performance-metrics.ts",
+    "loc": 483
+   },
+   {
+    "path": "core/prime-inference-auth.ts",
+    "loc": 736
+   },
+   {
+    "path": "core/prime-inference-model-catalog.ts",
+    "loc": 170
+   },
+   {
+    "path": "core/prime-inference-model-selection.ts",
+    "loc": 34
+   },
+   {
+    "path": "core/prime-inference-models.ts",
+    "loc": 88
+   },
+   {
+    "path": "core/prompt-admission.ts",
+    "loc": 42
+   },
+   {
+    "path": "core/prompt-templates.ts",
+    "loc": 286
+   },
+   {
+    "path": "core/prompts/index.ts",
+    "loc": 7
+   },
+   {
+    "path": "core/prompts/rlm.ts",
+    "loc": 230
+   },
+   {
+    "path": "core/provider-display-names.ts",
+    "loc": 33
+   },
+   {
+    "path": "core/provider-retry.ts",
+    "loc": 226
+   },
+   {
+    "path": "core/refinement/index.ts",
+    "loc": 1
+   },
+   {
+    "path": "core/refinement/refinement.ts",
+    "loc": 1292
+   },
+   {
+    "path": "core/resolve-config-value.ts",
+    "loc": 142
+   },
+   {
+    "path": "core/resource-loader.ts",
+    "loc": 938
+   },
+   {
+    "path": "core/rlm-continuation.ts",
+    "loc": 169
+   },
+   {
+    "path": "core/rlm-max-depth.ts",
+    "loc": 13
+   },
+   {
+    "path": "core/rlm-runtime.ts",
+    "loc": 320
+   },
+   {
+    "path": "core/sdk.ts",
+    "loc": 465
+   },
+   {
+    "path": "core/semantic-edges.ts",
+    "loc": 579
+   },
+   {
+    "path": "core/session-action-store.ts",
+    "loc": 435
+   },
+   {
+    "path": "core/session-cwd.ts",
+    "loc": 59
+   },
+   {
+    "path": "core/session-file-actions.ts",
+    "loc": 74
+   },
+   {
+    "path": "core/session-id.ts",
+    "loc": 34
+   },
+   {
+    "path": "core/session-import-errors.ts",
+    "loc": 9
+   },
+   {
+    "path": "core/session-lease.ts",
+    "loc": 359
+   },
+   {
+    "path": "core/session-manager.ts",
+    "loc": 2761
+   },
+   {
+    "path": "core/session-resolver.ts",
+    "loc": 147
+   },
+   {
+    "path": "core/session-stats.ts",
+    "loc": 20
+   },
+   {
+    "path": "core/settings-manager.ts",
+    "loc": 1357
+   },
+   {
+    "path": "core/side-question.ts",
+    "loc": 187
+   },
+   {
+    "path": "core/skill-blocks.ts",
+    "loc": 22
+   },
+   {
+    "path": "core/skills.ts",
+    "loc": 623
+   },
+   {
+    "path": "core/slash-commands.ts",
+    "loc": 281
+   },
+   {
+    "path": "core/source-info.ts",
+    "loc": 40
+   },
+   {
+    "path": "core/system-prompt.ts",
+    "loc": 211
+   },
+   {
+    "path": "core/telemetry.ts",
+    "loc": 781
+   },
+   {
+    "path": "core/thinking-levels.ts",
+    "loc": 3
+   },
+   {
+    "path": "core/timings.ts",
+    "loc": 36
+   },
+   {
+    "path": "core/tools/acp-mcp.ts",
+    "loc": 99
+   },
+   {
+    "path": "core/tools/bash.ts",
+    "loc": 455
+   },
+   {
+    "path": "core/tools/code-preview.ts",
+    "loc": 539
+   },
+   {
+    "path": "core/tools/edit-diff.ts",
+    "loc": 424
+   },
+   {
+    "path": "core/tools/edit.ts",
+    "loc": 533
+   },
+   {
+    "path": "core/tools/file-mutation-queue.ts",
+    "loc": 39
+   },
+   {
+    "path": "core/tools/index.ts",
+    "loc": 57
+   },
+   {
+    "path": "core/tools/ipython-cell-code.ts",
+    "loc": 13
+   },
+   {
+    "path": "core/tools/ipython.ts",
+    "loc": 810
+   },
+   {
+    "path": "core/tools/output-accumulator.ts",
+    "loc": 261
+   },
+   {
+    "path": "core/tools/path-utils.ts",
+    "loc": 90
+   },
+   {
+    "path": "core/tools/render-utils.ts",
+    "loc": 68
+   },
+   {
+    "path": "core/tools/tool-definition-wrapper.ts",
+    "loc": 45
+   },
+   {
+    "path": "core/tools/truncate.ts",
+    "loc": 258
+   },
+   {
+    "path": "core/usage.ts",
+    "loc": 76
+   },
+   {
+    "path": "core/websearch-credential.ts",
+    "loc": 6
+   },
+   {
+    "path": "index.ts",
+    "loc": 418
+   },
+   {
+    "path": "main.ts",
+    "loc": 1780
+   },
+   {
+    "path": "migrations.ts",
+    "loc": 449
+   },
+   {
+    "path": "modes/acp/acp-events.ts",
+    "loc": 323
+   },
+   {
+    "path": "modes/acp/acp-mcp.ts",
+    "loc": 95
+   },
+   {
+    "path": "modes/acp/acp-meta.ts",
+    "loc": 132
+   },
+   {
+    "path": "modes/acp/acp-mode.ts",
+    "loc": 1109
+   },
+   {
+    "path": "modes/acp/acp-stop-reason.ts",
+    "loc": 29
+   },
+   {
+    "path": "modes/acp/index.ts",
+    "loc": 4
+   },
+   {
+    "path": "modes/agent-connection/daemon-agent-connection.ts",
+    "loc": 2483
+   },
+   {
+    "path": "modes/agent-connection/in-process-agent-connection.ts",
+    "loc": 697
+   },
+   {
+    "path": "modes/agent-connection/index.ts",
+    "loc": 80
+   },
+   {
+    "path": "modes/agent-connection/snapshot.ts",
+    "loc": 198
+   },
+   {
+    "path": "modes/agent-connection/tool-definition.ts",
+    "loc": 23
+   },
+   {
+    "path": "modes/agent-connection/types.ts",
+    "loc": 803
+   },
+   {
+    "path": "modes/agents-view/agents-view-mode.ts",
+    "loc": 3003
+   },
+   {
+    "path": "modes/agents-view/agents-view-state.ts",
+    "loc": 1156
+   },
+   {
+    "path": "modes/agents-view/roster-store.ts",
+    "loc": 131
+   },
+   {
+    "path": "modes/agents-view/session-view-search.ts",
+    "loc": 142
+   },
+   {
+    "path": "modes/daemon/active-session-state.ts",
+    "loc": 142
+   },
+   {
+    "path": "modes/daemon/agent-roster.ts",
+    "loc": 234
+   },
+   {
+    "path": "modes/daemon/command-recovery-journal.ts",
+    "loc": 208
+   },
+   {
+    "path": "modes/daemon/compact-session-stream.ts",
+    "loc": 213
+   },
+   {
+    "path": "modes/daemon/daemon-catalog-entry.ts",
+    "loc": 7
+   },
+   {
+    "path": "modes/daemon/daemon-catalog-process.ts",
+    "loc": 484
+   },
+   {
+    "path": "modes/daemon/daemon-client-env.ts",
+    "loc": 97
+   },
+   {
+    "path": "modes/daemon/daemon-client.ts",
+    "loc": 750
+   },
+   {
+    "path": "modes/daemon/daemon-errors.ts",
+    "loc": 65
+   },
+   {
+    "path": "modes/daemon/daemon-extension-binding.ts",
+    "loc": 254
+   },
+   {
+    "path": "modes/daemon/daemon-mode.ts",
+    "loc": 7949
+   },
+   {
+    "path": "modes/daemon/daemon-protocol.ts",
+    "loc": 1496
+   },
+   {
+    "path": "modes/daemon/daemon-routed-client.ts",
+    "loc": 275
+   },
+   {
+    "path": "modes/daemon/daemon-runtime-identity.ts",
+    "loc": 23
+   },
+   {
+    "path": "modes/daemon/daemon-session-id.ts",
+    "loc": 1
+   },
+   {
+    "path": "modes/daemon/daemon-session-list.ts",
+    "loc": 466
+   },
+   {
+    "path": "modes/daemon/daemon-session-summarizer.ts",
+    "loc": 427
+   },
+   {
+    "path": "modes/daemon/daemon-socket.ts",
+    "loc": 332
+   },
+   {
+    "path": "modes/daemon/daemon-supervisor-ownership.ts",
+    "loc": 961
+   },
+   {
+    "path": "modes/daemon/daemon-supervisor.ts",
+    "loc": 7389
+   },
+   {
+    "path": "modes/daemon/daemon-worker-client.ts",
+    "loc": 354
+   },
+   {
+    "path": "modes/daemon/daemon-worker-protocol.ts",
+    "loc": 280
+   },
+   {
+    "path": "modes/daemon/heartbeat-catalog.ts",
+    "loc": 25
+   },
+   {
+    "path": "modes/daemon/mutation-drain-latch.ts",
+    "loc": 37
+   },
+   {
+    "path": "modes/daemon/rlm-ledger.ts",
+    "loc": 823
+   },
+   {
+    "path": "modes/daemon/rlm-subagent-display.ts",
+    "loc": 100
+   },
+   {
+    "path": "modes/daemon/saved-session-catalog.ts",
+    "loc": 77
+   },
+   {
+    "path": "modes/daemon/saved-session-info.ts",
+    "loc": 41
+   },
+   {
+    "path": "modes/daemon/snapshot-transcript-cache.ts",
+    "loc": 290
+   },
+   {
+    "path": "modes/daemon/worker-recovery-journal.ts",
+    "loc": 114
+   },
+   {
+    "path": "modes/headless-completion.ts",
+    "loc": 137
+   },
+   {
+    "path": "modes/index.ts",
+    "loc": 126
+   },
+   {
+    "path": "modes/interactive/agent-activity.ts",
+    "loc": 135
+   },
+   {
+    "path": "modes/interactive/assets/clankolas.png",
+    "loc": 12733
+   },
+   {
+    "path": "modes/interactive/auth-flows.ts",
+    "loc": 877
+   },
+   {
+    "path": "modes/interactive/components/agent-message.ts",
+    "loc": 111
+   },
+   {
+    "path": "modes/interactive/components/armin.ts",
+    "loc": 382
+   },
+   {
+    "path": "modes/interactive/components/assistant-message.ts",
+    "loc": 388
+   },
+   {
+    "path": "modes/interactive/components/bash-execution.ts",
+    "loc": 211
+   },
+   {
+    "path": "modes/interactive/components/bordered-loader.ts",
+    "loc": 67
+   },
+   {
+    "path": "modes/interactive/components/branch-summary-message.ts",
+    "loc": 56
+   },
+   {
+    "path": "modes/interactive/components/centered-overlay.ts",
+    "loc": 125
+   },
+   {
+    "path": "modes/interactive/components/collapsible-error.ts",
+    "loc": 125
+   },
+   {
+    "path": "modes/interactive/components/compaction-outcome-message.ts",
+    "loc": 27
+   },
+   {
+    "path": "modes/interactive/components/compaction-summary-message.ts",
+    "loc": 47
+   },
+   {
+    "path": "modes/interactive/components/config-selector.ts",
+    "loc": 603
+   },
+   {
+    "path": "modes/interactive/components/configuration-menu.ts",
+    "loc": 258
+   },
+   {
+    "path": "modes/interactive/components/context-tree-format.ts",
+    "loc": 200
+   },
+   {
+    "path": "modes/interactive/components/conversation-components.ts",
+    "loc": 182
+   },
+   {
+    "path": "modes/interactive/components/countdown-timer.ts",
+    "loc": 34
+   },
+   {
+    "path": "modes/interactive/components/custom-editor.ts",
+    "loc": 332
+   },
+   {
+    "path": "modes/interactive/components/custom-message.ts",
+    "loc": 88
+   },
+   {
+    "path": "modes/interactive/components/daxnuts.ts",
+    "loc": 164
+   },
+   {
+    "path": "modes/interactive/components/diff.ts",
+    "loc": 294
+   },
+   {
+    "path": "modes/interactive/components/dynamic-border.ts",
+    "loc": 25
+   },
+   {
+    "path": "modes/interactive/components/earendil-announcement.ts",
+    "loc": 53
+   },
+   {
+    "path": "modes/interactive/components/edit-summary.ts",
+    "loc": 135
+   },
+   {
+    "path": "modes/interactive/components/expandable-custom-message.ts",
+    "loc": 33
+   },
+   {
+    "path": "modes/interactive/components/extension-editor.ts",
+    "loc": 133
+   },
+   {
+    "path": "modes/interactive/components/extension-input.ts",
+    "loc": 87
+   },
+   {
+    "path": "modes/interactive/components/extension-selector.ts",
+    "loc": 172
+   },
+   {
+    "path": "modes/interactive/components/feature-hint.ts",
+    "loc": 46
+   },
+   {
+    "path": "modes/interactive/components/footer.ts",
+    "loc": 42
+   },
+   {
+    "path": "modes/interactive/components/heartbeat-manager.ts",
+    "loc": 326
+   },
+   {
+    "path": "modes/interactive/components/index.ts",
+    "loc": 51
+   },
+   {
+    "path": "modes/interactive/components/injected-prompt-message.ts",
+    "loc": 180
+   },
+   {
+    "path": "modes/interactive/components/ipython-cell.ts",
+    "loc": 774
+   },
+   {
+    "path": "modes/interactive/components/keybinding-hints.ts",
+    "loc": 76
+   },
+   {
+    "path": "modes/interactive/components/login-dialog.ts",
+    "loc": 418
+   },
+   {
+    "path": "modes/interactive/components/menu-panel.ts",
+    "loc": 433
+   },
+   {
+    "path": "modes/interactive/components/mermaid.ts",
+    "loc": 77
+   },
+   {
+    "path": "modes/interactive/components/modal-back.ts",
+    "loc": 31
+   },
+   {
+    "path": "modes/interactive/components/model-selector.ts",
+    "loc": 601
+   },
+   {
+    "path": "modes/interactive/components/oauth-selector.ts",
+    "loc": 416
+   },
+   {
+    "path": "modes/interactive/components/prime-onboarding-splash.ts",
+    "loc": 379
+   },
+   {
+    "path": "modes/interactive/components/prime-team-selector.ts",
+    "loc": 203
+   },
+   {
+    "path": "modes/interactive/components/prompt-highlight.ts",
+    "loc": 199
+   },
+   {
+    "path": "modes/interactive/components/refinement-outcome-message.ts",
+    "loc": 117
+   },
+   {
+    "path": "modes/interactive/components/scoped-models-selector.ts",
+    "loc": 336
+   },
+   {
+    "path": "modes/interactive/components/settings-selector.ts",
+    "loc": 526
+   },
+   {
+    "path": "modes/interactive/components/show-images-selector.ts",
+    "loc": 43
+   },
+   {
+    "path": "modes/interactive/components/side-question.ts",
+    "loc": 152
+   },
+   {
+    "path": "modes/interactive/components/skill-invocation-message.ts",
+    "loc": 36
+   },
+   {
+    "path": "modes/interactive/components/slash-command-message.ts",
+    "loc": 47
+   },
+   {
+    "path": "modes/interactive/components/slash-command-result-message.ts",
+    "loc": 15
+   },
+   {
+    "path": "modes/interactive/components/subagent-summary-line.ts",
+    "loc": 161
+   },
+   {
+    "path": "modes/interactive/components/theme-selector.ts",
+    "loc": 59
+   },
+   {
+    "path": "modes/interactive/components/thinking-selector.ts",
+    "loc": 68
+   },
+   {
+    "path": "modes/interactive/components/tool-execution.ts",
+    "loc": 534
+   },
+   {
+    "path": "modes/interactive/components/tool-panel.ts",
+    "loc": 93
+   },
+   {
+    "path": "modes/interactive/components/tree-selector.ts",
+    "loc": 1238
+   },
+   {
+    "path": "modes/interactive/components/user-message-selector.ts",
+    "loc": 125
+   },
+   {
+    "path": "modes/interactive/components/user-message.ts",
+    "loc": 72
+   },
+   {
+    "path": "modes/interactive/components/visual-truncate.ts",
+    "loc": 50
+   },
+   {
+    "path": "modes/interactive/feature-hints.ts",
+    "loc": 137
+   },
+   {
+    "path": "modes/interactive/heartbeat-scope.ts",
+    "loc": 31
+   },
+   {
+    "path": "modes/interactive/image-markers.ts",
+    "loc": 80
+   },
+   {
+    "path": "modes/interactive/interactive-mode-services.ts",
+    "loc": 116
+   },
+   {
+    "path": "modes/interactive/interactive-mode.ts",
+    "loc": 10352
+   },
+   {
+    "path": "modes/interactive/onboarding.ts",
+    "loc": 45
+   },
+   {
+    "path": "modes/interactive/prompt-stash-state.ts",
+    "loc": 38
+   },
+   {
+    "path": "modes/interactive/queue-selection.ts",
+    "loc": 91
+   },
+   {
+    "path": "modes/interactive/resume-hint.ts",
+    "loc": 15
+   },
+   {
+    "path": "modes/interactive/theme/code-highlighter.ts",
+    "loc": 7
+   },
+   {
+    "path": "modes/interactive/theme/dark.json",
+    "loc": 91
+   },
+   {
+    "path": "modes/interactive/theme/light.json",
+    "loc": 90
+   },
+   {
+    "path": "modes/interactive/theme/prime.json",
+    "loc": 92
+   },
+   {
+    "path": "modes/interactive/theme/theme-schema.json",
+    "loc": 355
+   },
+   {
+    "path": "modes/interactive/theme/theme.ts",
+    "loc": 1365
+   },
+   {
+    "path": "modes/interactive/theme/working-icon.ts",
+    "loc": 21
+   },
+   {
+    "path": "modes/model-autocomplete.ts",
+    "loc": 28
+   },
+   {
+    "path": "modes/print-mode.ts",
+    "loc": 172
+   },
+   {
+    "path": "modes/rpc/jsonl.ts",
+    "loc": 117
+   },
+   {
+    "path": "modes/rpc/rpc-client.ts",
+    "loc": 672
+   },
+   {
+    "path": "modes/rpc/rpc-extension-ui-context.ts",
+    "loc": 157
+   },
+   {
+    "path": "modes/rpc/rpc-mode.ts",
+    "loc": 553
+   },
+   {
+    "path": "modes/rpc/rpc-types.ts",
+    "loc": 356
+   },
+   {
+    "path": "modes/session-worker/private-framing.ts",
+    "loc": 200
+   },
+   {
+    "path": "modes/shared/startup-notices.ts",
+    "loc": 128
+   },
+   {
+    "path": "modes/telegram/api.ts",
+    "loc": 163
+   },
+   {
+    "path": "modes/telegram/bridge.ts",
+    "loc": 387
+   },
+   {
+    "path": "modes/telegram/commands.ts",
+    "loc": 324
+   },
+   {
+    "path": "modes/telegram/manager.ts",
+    "loc": 111
+   },
+   {
+    "path": "modes/telegram/store.ts",
+    "loc": 173
+   },
+   {
+    "path": "modes/telegram/worker.ts",
+    "loc": 174
+   },
+   {
+    "path": "package-manager-cli.ts",
+    "loc": 1630
+   },
+   {
+    "path": "postinstall.ts",
+    "loc": 32
+   },
+   {
+    "path": "themes/optimus-logo-data.ts",
+    "loc": 401
+   },
+   {
+    "path": "themes/optimus-logo.ts",
+    "loc": 53
+   },
+   {
+    "path": "themes/prime-logo.ts",
+    "loc": 18
+   },
+   {
+    "path": "utils/atomic-file.ts",
+    "loc": 298
+   },
+   {
+    "path": "utils/changelog.ts",
+    "loc": 99
+   },
+   {
+    "path": "utils/child-process.ts",
+    "loc": 281
+   },
+   {
+    "path": "utils/clipboard-image.ts",
+    "loc": 285
+   },
+   {
+    "path": "utils/clipboard-native.ts",
+    "loc": 22
+   },
+   {
+    "path": "utils/clipboard.ts",
+    "loc": 127
+   },
+   {
+    "path": "utils/daemon-socket-path.ts",
+    "loc": 9
+   },
+   {
+    "path": "utils/dir-lock.ts",
+    "loc": 207
+   },
+   {
+    "path": "utils/exif-orientation.ts",
+    "loc": 184
+   },
+   {
+    "path": "utils/file-lines.ts",
+    "loc": 102
+   },
+   {
+    "path": "utils/frontmatter.ts",
+    "loc": 43
+   },
+   {
+    "path": "utils/fs-watch.ts",
+    "loc": 30
+   },
+   {
+    "path": "utils/git.ts",
+    "loc": 272
+   },
+   {
+    "path": "utils/image-convert.ts",
+    "loc": 41
+   },
+   {
+    "path": "utils/image-resize.ts",
+    "loc": 176
+   },
+   {
+    "path": "utils/mime.ts",
+    "loc": 30
+   },
+   {
+    "path": "utils/paths.ts",
+    "loc": 57
+   },
+   {
+    "path": "utils/photon.ts",
+    "loc": 139
+   },
+   {
+    "path": "utils/pi-user-agent.ts",
+    "loc": 4
+   },
+   {
+    "path": "utils/semaphore.ts",
+    "loc": 63
+   },
+   {
+    "path": "utils/shell.ts",
+    "loc": 252
+   },
+   {
+    "path": "utils/sleep.ts",
+    "loc": 18
+   },
+   {
+    "path": "utils/tools-manager.ts",
+    "loc": 384
+   },
+   {
+    "path": "utils/update-source.ts",
+    "loc": 3
+   },
+   {
+    "path": "utils/version-check.ts",
+    "loc": 178
+   }
+  ],
+  "total_loc": 152857,
+  "count": 323
+ },
+ "tui": {
+  "src_root": "packages/tui/src",
+  "files": [
+   {
+    "path": "autocomplete.ts",
+    "loc": 749
+   },
+   {
+    "path": "components/box.ts",
+    "loc": 150
+   },
+   {
+    "path": "components/cancellable-loader.ts",
+    "loc": 40
+   },
+   {
+    "path": "components/editor.ts",
+    "loc": 2410
+   },
+   {
+    "path": "components/image.ts",
+    "loc": 135
+   },
+   {
+    "path": "components/input.ts",
+    "loc": 462
+   },
+   {
+    "path": "components/loader.ts",
+    "loc": 84
+   },
+   {
+    "path": "components/markdown.ts",
+    "loc": 979
+   },
+   {
+    "path": "components/select-list.ts",
+    "loc": 296
+   },
+   {
+    "path": "components/settings-list.ts",
+    "loc": 235
+   },
+   {
+    "path": "components/spacer.ts",
+    "loc": 26
+   },
+   {
+    "path": "components/text.ts",
+    "loc": 94
+   },
+   {
+    "path": "components/truncated-text.ts",
+    "loc": 59
+   },
+   {
+    "path": "editor-component.ts",
+    "loc": 68
+   },
+   {
+    "path": "fullscreen.ts",
+    "loc": 715
+   },
+   {
+    "path": "fuzzy.ts",
+    "loc": 146
+   },
+   {
+    "path": "index.ts",
+    "loc": 136
+   },
+   {
+    "path": "keybindings.ts",
+    "loc": 296
+   },
+   {
+    "path": "keys.ts",
+    "loc": 1381
+   },
+   {
+    "path": "kill-ring.ts",
+    "loc": 44
+   },
+   {
+    "path": "latex.ts",
+    "loc": 834
+   },
+   {
+    "path": "mouse.ts",
+    "loc": 54
+   },
+   {
+    "path": "render-cache.ts",
+    "loc": 25
+   },
+   {
+    "path": "selection-metadata.ts",
+    "loc": 184
+   },
+   {
+    "path": "slash-command-context.ts",
+    "loc": 46
+   },
+   {
+    "path": "stdin-buffer.ts",
+    "loc": 399
+   },
+   {
+    "path": "terminal-colors.ts",
+    "loc": 206
+   },
+   {
+    "path": "terminal-image.ts",
+    "loc": 423
+   },
+   {
+    "path": "terminal.ts",
+    "loc": 614
+   },
+   {
+    "path": "tui.ts",
+    "loc": 1992
+   },
+   {
+    "path": "undo-stack.ts",
+    "loc": 27
+   },
+   {
+    "path": "utils.ts",
+    "loc": 1382
+   }
+  ],
+  "total_loc": 14691,
+  "count": 32
+ }
+}

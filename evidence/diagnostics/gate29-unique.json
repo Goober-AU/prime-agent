@@ -1,0 +1,182 @@
+[
+ [
+  "/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/macros.rs",
+  113,
+  "temporary value dropped while borrowed"
+ ],
+ [
+  "core/agent_session.rs",
+  8798,
+  "future cannot be sent between threads safely"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  86,
+  "missing fields `compat`, `context_window`, `cost` and 9 other fields in initializer of `pi_ai::index::Model`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  154,
+  "not all trait items implemented, missing: `runtime`, `settings_manager`, `session_dir`, `set_exec_env_provider`, `set_runtime_env_scope`, `set_subagent_runtime_host`, `set_rebind_session`, `bind_extensions`, `abort_for_update_restart`, `connection_view`, `connection_state`, `register_rlm_child_session`, `subscribe`, `prompt_until_accepted`, `prompt_and_wait`, `prompt_heartbeat`, `accept_agent_message_prompt`, `steer`, `follow_up`, `restore_steering_message`, `restore_follow_up_message`, `restore_pending_next_turn_messages`, `restore_session_actions`, `send_custom_message`, `resume_queued_work`, `clear_queued_agent_messages`, `clear_queue`, `mutate_queued_message`, `get_steering_message_previews`, `get_follow_up_message_previews`, `cancel_rlm_child_run`, `delete_inactive_rlm_subagent`, `wait_for_headless_completion`, `refresh_available_models`, `refresh_model_catalog`, `set_model`, `cycle_model`, `set_scoped_models`, `set_transport`, `compact`, `refine`, `reload`, `set_rlm_max_depth`, `get_context_tree`, `get_rlm_child_snapshots`, `export_to_html`, `export_to_jsonl`, `get_last_assistant_text`, `navigate_tree`, `start_side_question`, `abort_side_question`, `new_session`, `release_rlm_child_session`, `switch_session`, `fork`, `import_from_jsonl`, `dispose`"
+ ],
+ [
+  "core/agent_session_runtime/in_process_adapter.rs",
+  276,
+  "not all trait items implemented, missing: `snapshot_source`, `session_subscribe`, `session_wait_for_headless_completion`, `session_model_catalog`, `session_context_tree`, `session_rlm_children`, `session_cancel_rlm_child`, `session_set_scoped_models`, `session_set_transport`, `session_compact`, `session_refine`, `session_navigate_tree`, `session_export_to_html`, `session_export_to_jsonl`, `session_watch_child`"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  97,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  100,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  110,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  121,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  124,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  127,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  136,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  137,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  142,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  613,
+  "no method named `as_deref` found for enum `SessionStateStatus` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  613,
+  "no method named `as_deref` found for enum `session_manager::SessionStateStatus` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  1126,
+  "the trait bound `session_manager::SessionInfo: std::default::Default` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  1152,
+  "struct `session_manager::SessionInfo` has no field named `created_ms`"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  1153,
+  "struct `session_manager::SessionInfo` has no field named `modified_ms`"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  1155,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  1159,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  1169,
+  "no field `modified_ms` on type `session_manager::SessionInfo`"
+ ],
+ [
+  "modes/daemon/daemon_catalog_process.rs",
+  1171,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  532,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  563,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  568,
+  "the trait bound `session_manager::AgentTaskState: std::default::Default` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  609,
+  "no method named `as_deref` found for enum `SessionStateStatus` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  609,
+  "no method named `as_deref` found for enum `session_manager::SessionStateStatus` in the current scope"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  716,
+  "struct `cron_jobs::AgentCronJob` has no field named `heartbeat`"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  722,
+  "struct `cron_jobs::AgentCronJob` has no field named `heartbeat`"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  728,
+  "struct `cron_jobs::AgentCronJob` has no field named `heartbeat`"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  757,
+  "the trait bound `session_manager::SessionInfo: std::default::Default` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  763,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  777,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  780,
+  "the trait bound `session_manager::SessionInfo: std::default::Default` is not satisfied"
+ ],
+ [
+  "modes/daemon/daemon_session_list.rs",
+  790,
+  "mismatched types"
+ ]
+]

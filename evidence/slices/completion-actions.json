@@ -1,0 +1,22 @@
+{
+  "slice": "completion-actions",
+  "owned_paths": [
+    "crates/pi-coding-agent/src/core/session_action_store.rs",
+    "crates/pi-coding-agent/src/core/extensions/types.rs",
+    "crates/pi-coding-agent/src/core/tools/mod.rs",
+    "crates/pi-coding-agent/src/core/tools/tool_definition_wrapper.rs",
+    "crates/pi-coding-agent/src/core/extensions/wrapper.rs",
+    "crates/pi-coding-agent/src/core/tools/bash.rs",
+    "crates/pi-coding-agent/src/core/tools/edit.rs",
+    "crates/pi-coding-agent/src/core/tools/ipython.rs",
+    "crates/pi-coding-agent/src/core/tools/acp_mcp.rs",
+    "evidence/slices/completion-actions.json",
+    "evidence/status/completion-actions.json",
+    "crates/pi-coding-agent/src/core/extensions/runner.rs",
+    "crates/pi-coding-agent/src/core/extensions/builtin/herdr_agent_state.rs",
+    "crates/pi-coding-agent/src/core/extensions/builtin/memory.rs",
+    "crates/pi-coding-agent/src/core/extensions/builtin/telegram.rs",
+    "crates/pi-coding-agent/src/core/system_prompt.rs"
+  ],
+  "notes": "Canonical generic action and extension/tool contract integration. Parent owns agent_session.rs and coordinates cargo checks."
+}

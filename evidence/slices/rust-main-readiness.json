@@ -1,0 +1,29 @@
+{
+  "slice": "rust-main-readiness",
+  "files": [
+    "crates/pi-ai/src/test_env.rs",
+    "crates/pi-ai/src/cli_entry.rs",
+    "crates/pi-ai/src/mcp/catalog.rs",
+    "crates/pi-ai/src/utils/oauth/mod.rs",
+    "crates/pi-ai/src/session_resources.rs",
+    "package.json",
+    "packages/agent/package.json",
+    "packages/coding-agent/package.json",
+    "package-lock.json",
+    "README.md",
+    "docs/RUST_MAIN_READINESS.md",
+    "crates/pi-coding-agent/src/core/cron_jobs.rs",
+    "crates/pi-coding-agent/src/core/agent_session_services.rs",
+    "crates/pi-coding-agent/src/core/tools/path_utils.rs",
+    "crates/pi-coding-agent/tests/native_cli.rs",
+    "biome.json",
+    "evidence/status/rust-main-readiness.json",
+    "crates/pi-ai/src/providers/openai_completions.rs",
+    "packages/ai/.changes/rust-main-readiness.md",
+    "packages/agent/.changes/rust-main-readiness.md",
+    "packages/coding-agent/.changes/rust-main-readiness.md",
+    "scripts/pack-prime-agent-release.mjs",
+    "evidence/diagnostics/rust-main-readiness.txt"
+  ],
+  "purpose": "Fix PR 15 runtime defects and global-state test races, and validate cumulative main integration"
+}

@@ -1,0 +1,50 @@
+{
+ "pack1": [
+  "crates\\pi-coding-agent\\src\\core\\agent_session.rs",
+  "crates\\pi-coding-agent\\src\\core\\agent_session_runtime.rs",
+  "crates\\pi-coding-agent\\src\\core\\extensions\\types.rs",
+  "crates\\pi-coding-agent\\src\\modes\\agents_view\\agents_view_mode.rs",
+  "crates\\pi-coding-agent\\src\\core\\prompt_templates.rs",
+  "crates\\pi-coding-agent\\src\\mod.rs",
+  "crates\\pi-coding-agent\\src\\modes\\rpc\\rpc_mode.rs",
+  "crates\\pi-coding-agent\\src\\modes\\interactive\\components\\armin.rs",
+  "crates\\pi-coding-agent\\src\\core\\tools\\ipython.rs",
+  "crates\\pi-coding-agent\\src\\modes\\session_worker\\private_framing.rs"
+ ],
+ "pack2": [
+  "crates\\pi-coding-agent\\src\\package_manager_cli.rs",
+  "crates\\pi-coding-agent\\src\\core\\extensions\\loader.rs",
+  "crates\\pi-coding-agent\\src\\core\\model_registry.rs",
+  "crates\\pi-coding-agent\\src\\modes\\agent_connection\\daemon_agent_connection.rs",
+  "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_routed_client.rs",
+  "crates\\pi-coding-agent\\src\\modes\\agent_connection\\mod.rs",
+  "crates\\pi-coding-agent\\src\\modes\\telegram\\worker.rs",
+  "crates\\pi-coding-agent\\src\\modes\\rpc\\rpc_client.rs",
+  "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_mode.rs",
+  "crates\\pi-coding-agent\\src\\modes\\telegram\\manager.rs"
+ ],
+ "pack3": [
+  "crates\\pi-coding-agent\\src\\main_entry.rs",
+  "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_supervisor.rs",
+  "crates\\pi-coding-agent\\src\\modes\\interactive\\interactive_mode_services.rs",
+  "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_session_summarizer.rs",
+  "crates\\pi-coding-agent\\src\\modes\\interactive\\auth_flows.rs",
+  "crates\\pi-coding-agent\\src\\modes\\daemon\\heartbeat_catalog.rs",
+  "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_socket.rs",
+  "crates\\pi-coding-agent\\src\\modes\\daemon\\daemon_protocol.rs",
+  "crates\\pi-coding-agent\\src\\core\\auth_storage.rs",
+  "crates\\pi-coding-agent\\src\\core\\tools\\edit.rs"
+ ],
+ "pack4": [
+  "crates\\pi-coding-agent\\src\\core\\performance_metrics.rs",
+  "crates\\pi-coding-agent\\src\\cli\\daemon_command.rs",
+  "crates\\pi-coding-agent\\src\\core\\tools\\bash.rs",
+  "crates\\pi-coding-agent\\src\\core\\package_manager.rs",
+  "crates\\pi-coding-agent\\src\\core\\extensions\\runner.rs",
+  "crates\\pi-coding-agent\\src\\modes\\daemon\\saved_session_catalog.rs",
+  "crates\\pi-coding-agent\\src\\core\\agent_messages.rs",
+  "crates\\pi-coding-agent\\src\\modes\\headless_completion.rs",
+  "crates\\pi-coding-agent\\src\\core\\tools\\mod.rs",
+  "crates\\pi-coding-agent\\src\\core\\side_question.rs"
+ ]
+}

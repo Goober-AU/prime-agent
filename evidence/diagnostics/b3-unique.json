@@ -1,0 +1,54 @@
+{
+ "pack": "B3 extension-bindings Value-vs-typed seam",
+ "gate": "cargo check -p pi-coding-agent --tests --message-format=json (COMPLETE, 168 warnings>0)",
+ "before_total_unique": 38,
+ "after_total_unique": 36,
+ "my_targets_before": [
+  494,
+  495,
+  496,
+  539,
+  540
+ ],
+ "my_targets_after": [],
+ "my_targets_file": "core/agent_session/runtime_members.rs",
+ "my_files_new_errors": 0,
+ "my_conn_file_errors_before_after": [
+  0,
+  0
+ ],
+ "agent_session_rs_error_unchanged": {
+  "before": 8787,
+  "after": 8798,
+  "msg": "future cannot be sent between threads safely",
+  "pre_existing": true
+ },
+ "induced_in_packH_offlimits": {
+  "before": [
+   276
+  ],
+  "after": [
+   276
+  ],
+  "note": "the 2 transient errors at 827/830 were resolved by pack H itself"
+ },
+ "total_delta": "-2 (38 -> 36)",
+ "arithmetic": "38 - 5 mine + 3 pack C (daemon_mode 28 -> 31 across its 2 files) = 36",
+ "after_by_file": {
+  "daemon_session_list.rs": 13,
+  "daemon_catalog_process.rs": 18,
+  "macros.rs": 1,
+  "in_process_adapter.rs": 1,
+  "daemon_adapter.rs": 2,
+  "agent_session.rs": 1
+ },
+ "edits": [
+  "agent_session.rs ExtensionBindings -> canonical owners (4 fields)",
+  "agent_session.rs AgentSession fields (3) retyped",
+  "agent_session.rs imports + extension_shutdown_handler accessor/setter",
+  "in_process_agent_connection.rs session_bind_extensions trait takes typed ExtensionBindings",
+  "in_process_agent_connection.rs bind_current_session_extensions builds typed bindings + inline commandContextActions (TS :655-672)",
+  "in_process_agent_connection.rs InProcessHeadlessExtensionOptions retyped + emit_to_listeners helper"
+ ],
+ "not_done": "assert_session_name_available: no impl of AgentSessionMessageController exists in the crate (TS member is optional, daemon-only), so adding it would reach no caller."
+}

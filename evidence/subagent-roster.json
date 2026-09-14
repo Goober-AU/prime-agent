@@ -1,0 +1,152 @@
+[
+ {
+  "name": "port-ai-core",
+  "id": "sub-034fd12d",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ai-providers",
+  "id": "sub-82353826",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ai-mcp",
+  "id": "sub-70c7d0e4",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-agent-core",
+  "id": "sub-ae223928",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-utils",
+  "id": "sub-1bf16cdd",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-kernel",
+  "id": "sub-1a7c23e7",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-tui-core",
+  "id": "sub-35379474",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-tui-components",
+  "id": "sub-38ac0bf6",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-session",
+  "id": "sub-b086a646",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-compaction",
+  "id": "sub-119e0960",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-tools",
+  "id": "sub-abac937f",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-memory",
+  "id": "sub-eea5e5ae",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-extensions",
+  "id": "sub-2b613149",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-models",
+  "id": "sub-7373fc34",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-settings",
+  "id": "sub-78cd4e9c",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-daemon-a",
+  "id": "sub-527d0bd5",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-daemon-b",
+  "id": "sub-8f2cda6e",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-session-core",
+  "id": "sub-ad65f9fb",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-cli",
+  "id": "sub-cf13320d",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-root",
+  "id": "sub-247967bc",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-interactive-a",
+  "id": "sub-052dab56",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-interactive-b",
+  "id": "sub-cde03de3",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-modes-rest",
+  "id": "sub-f6f6f509",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-agents-view",
+  "id": "sub-a5bc0544",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ },
+ {
+  "name": "port-ca-misc",
+  "id": "sub-3a2cc06a",
+  "model": "ollama-cloud/deepseek-v4.1-flash",
+  "status": "running"
+ }
+]

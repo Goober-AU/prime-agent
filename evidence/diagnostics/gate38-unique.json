@@ -1,0 +1,122 @@
+[
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  59,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  59,
+  "cannot find type `PromptOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  60,
+  "cannot find struct, variant or union type `PromptOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  570,
+  "cannot find trait `DaemonRuntimeApi` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  588,
+  "cannot find type `HashMap` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  592,
+  "cannot find type `HashMap` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  604,
+  "cannot find type `ExtensionBindingInput` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  613,
+  "cannot find type `DaemonConnectionView` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  616,
+  "cannot find type `DaemonConnectionView` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  636,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  647,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  657,
+  "cannot find type `AgentCronJob` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  658,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  669,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  681,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  704,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  727,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  744,
+  "cannot find type `PromptInvocation` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  824,
+  "cannot find type `HeadlessCompletionOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  859,
+  "cannot find struct, variant or union type `ModelSelectOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1067,
+  "cannot find type `RefineOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1069,
+  "cannot find type `RefineOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1071,
+  "cannot find struct, variant or union type `RefineOptions` in this scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1091,
+  "cannot find trait `DaemonRuntimeApi` in this scope"
+ ]
+]

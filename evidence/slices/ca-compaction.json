@@ -1,0 +1,72 @@
+{
+ "slice": "ca-compaction",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/compaction/branch-summarization.ts",
+   "rust": "crates/pi-coding-agent/src/core/compaction/branch_summarization.rs",
+   "loc": 327
+  },
+  {
+   "src": "packages/coding-agent/src/core/compaction/checkpoint.ts",
+   "rust": "crates/pi-coding-agent/src/core/compaction/checkpoint.rs",
+   "loc": 54
+  },
+  {
+   "src": "packages/coding-agent/src/core/compaction/compaction.ts",
+   "rust": "crates/pi-coding-agent/src/core/compaction/compaction.rs",
+   "loc": 1031
+  },
+  {
+   "src": "packages/coding-agent/src/core/compaction/index.ts",
+   "rust": "crates/pi-coding-agent/src/core/compaction/mod.rs",
+   "loc": 7
+  },
+  {
+   "src": "packages/coding-agent/src/core/compaction/utils.ts",
+   "rust": "crates/pi-coding-agent/src/core/compaction/utils.rs",
+   "loc": 149
+  },
+  {
+   "src": "packages/coding-agent/src/core/agent-messages.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_messages.rs",
+   "loc": 648
+  },
+  {
+   "src": "packages/coding-agent/src/core/agent-observe.ts",
+   "rust": "crates/pi-coding-agent/src/core/agent_observe.rs",
+   "loc": 216
+  },
+  {
+   "src": "packages/coding-agent/src/core/context-tree.ts",
+   "rust": "crates/pi-coding-agent/src/core/context_tree.rs",
+   "loc": 321
+  },
+  {
+   "src": "packages/coding-agent/src/core/event-bus.ts",
+   "rust": "crates/pi-coding-agent/src/core/event_bus.rs",
+   "loc": 33
+  },
+  {
+   "src": "packages/coding-agent/src/core/event-log.ts",
+   "rust": "crates/pi-coding-agent/src/core/event_log.rs",
+   "loc": 173
+  },
+  {
+   "src": "packages/coding-agent/src/core/messages.ts",
+   "rust": "crates/pi-coding-agent/src/core/messages.rs",
+   "loc": 685
+  },
+  {
+   "src": "packages/coding-agent/src/core/semantic-edges.ts",
+   "rust": "crates/pi-coding-agent/src/core/semantic_edges.rs",
+   "loc": 579
+  },
+  {
+   "src": "packages/coding-agent/src/core/footer-data-provider.ts",
+   "rust": "crates/pi-coding-agent/src/core/footer_data_provider.rs",
+   "loc": 312
+  }
+ ],
+ "loc": 4535
+}

@@ -1,0 +1,17 @@
+
+running 12 tests
+test tests::a_bad_header_payload_is_rejected ... ok
+test tests::a_partial_frame_stays_buffered_until_it_completes ... ok
+test tests::an_empty_header_is_rejected_on_encode_and_decode ... ok
+test tests::a_validator_that_accepts_an_incompatible_typed_header_returns_an_error ... ok
+test tests::an_oversized_length_is_rejected ... ok
+test tests::finish_reports_incomplete_bytes ... ok
+test tests::an_invalid_routing_header_is_rejected ... ok
+test tests::a_decode_failure_destroys_the_stream ... ok
+test tests::frames_round_trip_through_the_decoder ... ok
+test tests::listener_registration_is_unique_and_unsubscribe_removes_it ... ok
+test tests::two_frames_in_one_chunk_decode_in_order ... ok
+test tests::the_channel_delivers_frames_and_closes ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

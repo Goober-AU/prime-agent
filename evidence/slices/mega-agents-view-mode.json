@@ -1,0 +1,13 @@
+{
+ "slice": "mega-agents-view-mode",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/agents-view/agents-view-mode.ts",
+   "rust": "crates/pi-coding-agent/src/modes/agents_view/agents_view_mode.rs",
+   "loc": 3003
+  }
+ ],
+ "loc": 3003,
+ "note": "Write in APPENDED CHUNKS of ~300-400 lines."
+}

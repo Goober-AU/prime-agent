@@ -1,0 +1,12 @@
+{
+  "slice": "runnable-google-providers",
+  "reference": "9f547ceaba079dee45ee415a430d57fb86fa940d",
+  "files": [
+    "crates/pi-ai/src/providers/google.rs",
+    "crates/pi-ai/src/providers/google_shared.rs",
+    "crates/pi-ai/src/providers/google_vertex.rs",
+    "evidence/slices/runnable-google-providers.json",
+    "evidence/status/runnable-google-providers.json"
+  ],
+  "notes": "Parent assigned seven Google-family pi-ai failures after native UI slice. Read complete files and pinned TS references; no live APIs, credentials, Cargo runs, or edits outside exact ownership."
+}

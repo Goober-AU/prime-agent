@@ -1,0 +1,85 @@
+pub trait InProcessRuntimeHost: Send + Sync {
+    fn snapshot_source(&self) -> AgentSessionRuntimeSnapshotSource;
+    fn session_header(&self) -> Option<AgentConnectionSessionHeader>;
+    fn session_subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync>;
+    fn session_wait_for_headless_completion(
+        &self,
+        options: Option<AgentConnectionHeadlessCompletionOptions>,
+    ) -> BoxFuture<Result<AgentAutonomousStatus, String>>;
+    fn session_messages(&self) -> Vec<AgentMessage>;
+    fn session_state_messages(&self) -> Vec<AgentMessage>;
+    fn session_commands(&self) -> Vec<AgentConnectionSlashCommand>;
+    fn session_resource_snapshot(&self) -> AgentConnectionResourceSnapshot;
+    fn session_model_catalog(&self) -> AgentConnectionModelCatalog;
+    fn session_available_models(&self) -> Vec<AgentConnectionModel>;
+    fn session_stats(&self) -> Value;
+    fn session_context_tree(&self) -> Value;
+    fn session_context(&self) -> AgentConnectionSessionContext;
+    fn session_tree(&self) -> AgentConnectionWatchSessionTree;
+    fn session_rlm_children(&self) -> Vec<AgentConnectionRlmChildAgentSnapshot>;
+    fn session_queue(&self) -> AgentConnectionQueueState;
+    fn session_mutate_queued_message(&self, lane: &str, index: i64, expected_text: &str, mutation: Value) -> String;
+    fn session_clear_queue(&self) -> AgentConnectionQueueState;
+    fn session_request_abort(&self);
+    fn session_acquire_input_pause(&self) -> AgentConnectionSessionInputPause;
+    fn session_get_user_messages_for_forking(&self) -> Vec<AgentConnectionUserMessage>;
+    fn session_last_assistant_text(&self) -> Option<String>;
+    fn session_system_prompt(&self) -> String;
+    fn session_tool_definition(&self, name: &str) -> Option<crate::modes::agent_connection::tool_definition::ToolDefinition>;
+    fn session_append_label_change(&self, entry_id: &str, label: Option<&str>);
+    fn session_prompt(&self, message: &str, options: Value) -> BoxFuture<Result<(), String>>;
+    fn session_prompt_and_wait(&self, message: &str, options: Value) -> BoxFuture<Result<(), String>>;
+    fn session_steer(&self, message: &str, images: Option<Vec<ImageContent>>) -> BoxFuture<Result<(), String>>;
+    fn session_follow_up(&self, message: &str, images: Option<Vec<ImageContent>>) -> BoxFuture<Result<(), String>>;
+    fn session_cancel_rlm_child(&self, child_id: &str) -> bool;
+    fn session_wait_for_idle(&self) -> BoxFuture<()>;
+    fn session_run_user_bash(&self, command: &str, options: Option<AgentConnectionExecuteBashOptions>) -> BoxFuture<Result<(), String>>;
+    fn session_execute_bash(&self, command: &str) -> BoxFuture<Result<Value, String>>;
+    fn session_abort_bash(&self);
+    fn session_set_model(&self, model: Model) -> BoxFuture<Result<(), String>>;
+    fn session_model_registry_available_models(&self) -> BoxFuture<Vec<AgentConnectionModel>>;
+    fn session_model_registry_provider_auth_source(&self, provider: &str) -> String;
+    fn session_model_registry_find(&self, provider: &str, model_id: &str) -> Option<Model>;
+    fn session_cycle_model(&self, direction: &str) -> BoxFuture<Result<Option<AgentConnectionModelCycleResult>, String>>;
+    fn session_set_scoped_models(&self, scoped_models: Vec<AgentConnectionScopedModel>);
+    fn session_set_thinking_level(&self, level: ThinkingLevel);
+    fn session_set_service_tier(&self, service_tier: ServiceTier);
+    fn session_cycle_thinking_level(&self) -> Option<ThinkingLevel>;
+    fn session_set_transport(&self, transport: Transport);
+    fn session_set_steering_mode(&self, mode: &str);
+    fn session_set_follow_up_mode(&self, mode: &str);
+    fn session_set_auto_compaction_enabled(&self, enabled: bool);
+    fn session_set_auto_retry_enabled(&self, enabled: bool);
+    fn session_compact(&self, custom_instructions: Option<&str>) -> BoxFuture<Result<Value, String>>;
+    fn session_refine(&self, options: Value) -> BoxFuture<Result<Value, String>>;
+    fn session_abort_compaction(&self);
+    fn session_abort_branch_summary(&self);
+    fn session_abort_retry(&self);
+    fn session_reload(&self) -> BoxFuture<Result<(), String>>;
+    fn session_navigate_tree(
+        &self,
+        target_id: &str,
+        options: Option<AgentConnectionNavigateTreeOptions>,
+    ) -> BoxFuture<Result<AgentConnectionNavigateTreeResult, String>>;
+    fn session_export_to_html(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>>;
+    fn session_export_to_jsonl(&self, output_path: Option<&str>) -> BoxFuture<Result<String, String>>;
+    fn session_set_session_name(&self, name: &str);
+    fn session_get_rlm_max_depth_status(&self) -> Value;
+    fn session_set_rlm_max_depth(&self, max_depth: f64, options: Option<Value>) -> BoxFuture<Result<Value, String>>;
+    fn session_bind_extensions(&self, options: Value) -> BoxFuture<Result<(), String>>;
+    fn session_watch_child(&self, child_id: &str) -> Option<Box<dyn AgentConnectionSessionWatcher>>;
+    fn runtime_new_session(&self, options: Option<AgentConnectionNewSessionOptions>) -> BoxFuture<Result<bool, String>>;
+    fn runtime_switch_session(
+        &self,
+        session_path: &str,
+        options: Option<AgentConnectionSwitchSessionOptions>,
+    ) -> BoxFuture<Result<bool, String>>;
+    fn runtime_fork(&self, entry_id: &str, options: Option<AgentConnectionForkOptions>) -> BoxFuture<Result<Value, String>>;
+    fn runtime_import_from_jsonl(
+        &self,
+        input_path: &str,
+        cwd_override: Option<&str>,
+    ) -> BoxFuture<Result<bool, String>>;
+    fn runtime_set_before_session_invalidate(&self, listener: Option<Arc<dyn Fn() + Send + Sync>>);
+    fn runtime_set_rebind_session(&self, listener: Option<Arc<dyn Fn() -> BoxFuture<()> + Send + Sync>>);
+    fn runtime_dispose(&self) -> BoxFuture<()>;

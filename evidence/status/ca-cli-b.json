@@ -1,0 +1,23 @@
+{
+  "slice": "ca-cli-b",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/cli/owned-session-worker.ts",
+      "rust": "crates/pi-coding-agent/src/cli/owned_session_worker.rs",
+      "status": "ported",
+      "functions_mapped": 18,
+      "notes": "All 18 TS functions have named Rust counterparts (isOwnedSessionWorkerProcess, classifyOwnedSessionWorkerInvocation, createOwnedWorkerLaunchSpec, readOwnedRecoveryDescriptor, writeOwnedRecoveryDescriptor, installOwnedSessionRecoveryTracking, createRpcRecoveryArgs, exitCodeForSignal, forwardSignal, runOwnedSessionWorkerFrontend plus its prepareRpcInput / observeRpcOutput / failPendingRpcCommands / reapWorkerResources / spawnWorker inner functions, maybeRunOwnedSessionWorkerFrontend, installOwnedSessionWorkerOwnerWatch, closeOwnedSessionWorkerOwnerWatch). Node process/child-process/signal access goes through the OwnedSessionWorkerHost + OwnedWorkerChild*/OwnedWorkerChildStd{in,out,err} seam - the same pattern as RpcModeHost in modes/rpc/rpc-mode.ts; every host method mirrors exactly one Node call, no function is invented. Env names, the 0o600 temp+rename descriptor write, the 60_000ms recovery reset, the [250,1000,5000] retry delays, the 5000ms force timer, exit codes 129/130/143/1 and the pending-command error text are all identical to the TypeScript."
+    },
+    {
+      "src": "packages/coding-agent/src/cli/public-command.ts",
+      "rust": "crates/pi-coding-agent/src/cli/public_command.rs",
+      "status": "ported",
+      "functions_mapped": 23,
+      "notes": "All 23 TS functions mapped. console.log / console.error / process.exitCode go through PublicCommandIo, the same callback shape cli/daemon-command.ts and cli/daemon-ps.ts already use. runMcp wraps AuthStorage::create() in a private OwnedMcpCredentialStore because core/auth-storage.ts (another slice) does not implement McpCredentialStore; it only forwards to AuthStorage::remove_verified, the same disk-verified removal the TypeScript performs. INTERNAL_RUNTIME_COMMAND_MARKER, APP_NAME, SELF_UPDATE_INTERACTIVE_CHILD_ENV and DAEMON_UPDATE_RESTART_COORDINATOR_FLAG come from the port's real modules. Only the two mapped files were written."
+    }
+  ],
+  "build": "cargo check -p pi-coding-agent: failed (143 errors, 0 in this slice)",
+  "tests": "cargo test -p pi-coding-agent: 0 passed / 0 failed - the test binary never built (lib: 141 errors, lib test: 43 errors, 0 in this slice)",
+  "blocked_on": "pi-coding-agent does not compile. cargo check reports 143 errors across 42 files and cargo test 141 (lib) + 43 (lib test) errors; NONE of them are in cli/owned_session_worker.rs or cli/public_command.rs. Largest sources: core/agent_session.rs, cli/daemon_command.rs, core/agent_session_runtime.rs, core/extensions/loader.rs, core/extensions/types.rs, core/model_registry.rs, plus core/sdk.rs and core/side_question.rs which were already broken before this slice ran. rustc stops at name resolution, so the crate build never type-checked this slice. Error counts also drift between runs because other agents are editing neighbouring files at the same time.",
+  "honest_summary": "Both mapped files are written and ported 1:1 (2662 new lines); nothing outside them was touched. The crate is still broken by other ca-* slices: cargo check fails with 143 errors and cargo test cannot build, and zero diagnostics mention my two files - but because rustc aborts at name resolution that is NOT proof that my files type-check. To get real evidence I built a throwaway isolated harness in .port-env/tmp/slicecheck that re-includes the two real files with stand-ins for their imports: there cargo check passes and all 36 unit tests ported from public-command.test.ts and owned-session-worker.test.ts pass (36 passed / 0 failed). That is harness evidence, not crate evidence, and it must be re-run once pi-coding-agent compiles. One thing is not 1:1 yet: runMcp wraps AuthStorage in a private OwnedMcpCredentialStore because core/auth-storage.ts does not implement McpCredentialStore; it only forwards to the existing AuthStorage::remove_verified."
+}

@@ -1,0 +1,18 @@
+{
+ "slice": "ca-modes-telegram-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/telegram/bridge.ts",
+   "rust": "crates/pi-coding-agent/src/modes/telegram/bridge.rs",
+   "loc": 387
+  },
+  {
+   "src": "packages/coding-agent/src/modes/telegram/worker.ts",
+   "rust": "crates/pi-coding-agent/src/modes/telegram/worker.rs",
+   "loc": 174
+  }
+ ],
+ "note": "Remaining telegram files from ca-modes-rest (the others are written). RE-SPAWN RECON (from a worker that ran out of budget before writing): bridge.ts is 387 lines, worker.ts 174 lines. telegram/{api,store,commands,manager}.rs are COMPLETE already. The AgentConnection trait exists, and DaemonAgentConnection::attach(client, id, options) exists. TRAP: daemon_agent_connection.rs defines its OWN LOCAL DaemonTransportClient (request(Value, Option<u64>)) which is DIFFERENT from the one in daemon_client.rs. worker.rs must use the agent_connection one, not the daemon_client one. Start writing EARLY: write bridge.rs and worker.rs in ~150-200 line chunks as you go, do not read everything first.",
+ "loc": 561
+}

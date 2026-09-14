@@ -1,0 +1,161 @@
+{
+  "slice": "ca-interactive-components-3",
+  "crate": "pi-coding-agent",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/config-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/config_selector.rs",
+      "status": "ported",
+      "loc_ts": 603,
+      "loc_rust": 1336,
+      "functions_mapped": 17,
+      "tests": 13,
+      "notes": "grouped resource list (extensions/skills/prompts/themes), package + top-level toggles, flat-list navigation; MenuPanel internals are a private local stand-in (login_dialog.rs), DynamicBorder is the private stand-in in show_images_selector.rs"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/settings-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/settings_selector.rs",
+      "status": "ported",
+      "loc_ts": 526,
+      "loc_rust": 1195,
+      "functions_mapped": 5,
+      "tests": 11,
+      "notes": "SettingsConfig/SettingsCallbacks/SettingsSelectorComponent plus warning and select submenus; callbacks live in a shared Rc<RefCell<..>> because Rust closure fields cannot be aliased; private to_tui_settings_list_theme/to_tui_select_list_theme converters"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/login-dialog.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/login_dialog.rs",
+      "status": "ported",
+      "loc_ts": 418,
+      "loc_rust": 1108,
+      "functions_mapped": 23,
+      "tests": 14,
+      "notes": "LoginDialogComponent plus private MenuPanel/MenuSearchInput/shouldTreatAsBack stand-ins; copyAuthUrl records a request flag because the caller awaits copy_to_clipboard asynchronously"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/prime-onboarding-splash.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_onboarding_splash.rs",
+      "status": "ported",
+      "loc_ts": 379,
+      "loc_rust": 774,
+      "functions_mapped": 22,
+      "tests": 10,
+      "notes": "splash renderer (logo block, lab field, panel, backdrop, progress); animation frame is an Arc<AtomicI64> advanced by a tokio task because requestRender is not Send"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/configuration-menu.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/configuration_menu.rs",
+      "status": "ported",
+      "loc_ts": 258,
+      "loc_rust": 624,
+      "functions_mapped": 19,
+      "tests": 10,
+      "notes": "ConfigurationMenuComponent, tab bar, search input, plus private OAuthSelectorBody/ModelSelectorBody/AuthSelectorProvider injection traits for the other-slice bodies"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/injected-prompt-message.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/injected_prompt_message.rs",
+      "status": "ported",
+      "loc_ts": 180,
+      "loc_rust": 605,
+      "functions_mapped": 7,
+      "tests": 8,
+      "notes": "InjectedPromptMessageComponent, isInjectedPromptMessage, header/meta text builders; agent_message_summary_line is a private stand-in for components/agent-message.rs"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/side-question.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/side_question.rs",
+      "status": "ported",
+      "loc_ts": 152,
+      "loc_rust": 382,
+      "functions_mapped": 10,
+      "tests": 5,
+      "notes": "SideQuestionComponent (turns, hint, bash entries) with a private to_tui_markdown_theme converter"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/centered-overlay.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/centered_overlay.rs",
+      "status": "ported",
+      "loc_ts": 125,
+      "loc_rust": 304,
+      "functions_mapped": 9,
+      "tests": 6,
+      "notes": "CenteredOverlayComponent and showFullPaneOverlay with place/blank geometry helpers"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/user-message-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/user_message_selector.rs",
+      "status": "ported",
+      "loc_ts": 125,
+      "loc_rust": 222,
+      "functions_mapped": 5,
+      "tests": 0,
+      "notes": "UserMessageSelectorComponent over a SelectList; the TS file has no tests"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/keybinding_hints.rs",
+      "status": "ported",
+      "loc_ts": 76,
+      "loc_rust": 172,
+      "functions_mapped": 6,
+      "tests": 5,
+      "notes": "keyText/formatKeyText/keyHint/rawKeyHint/expandCollapseHint and KeyTextOptions; platform defaults to std::env::consts::OS mapped to Node spellings"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/bordered-loader.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/bordered_loader.rs",
+      "status": "ported",
+      "loc_ts": 67,
+      "loc_rust": 285,
+      "functions_mapped": 5,
+      "tests": 5,
+      "notes": "BorderedLoader over Loader/CancellableLoader with onAbort hooking and dispose"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/visual-truncate.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/visual_truncate.rs",
+      "status": "ported",
+      "loc_ts": 50,
+      "loc_rust": 92,
+      "functions_mapped": 2,
+      "tests": 4,
+      "notes": "truncateToVisualLines and VisualTruncateResult"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/show-images-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/show_images_selector.rs",
+      "status": "ported",
+      "loc_ts": 43,
+      "loc_rust": 140,
+      "functions_mapped": 2,
+      "tests": 0,
+      "notes": "ShowImagesSelectorComponent; also hosts the shared private DynamicBorder and to_tui_select_list_theme stand-ins used by sibling slice files"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/footer.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/footer.rs",
+      "status": "ported",
+      "loc_ts": 42,
+      "loc_rust": 84,
+      "functions_mapped": 5,
+      "tests": 2,
+      "notes": "FooterComponent (git branch, token usage, auto-compact flag) over FooterDataProvider"
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/slash-command-result-message.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/slash_command_result_message.rs",
+      "status": "ported",
+      "loc_ts": 15,
+      "loc_rust": 92,
+      "functions_mapped": 2,
+      "tests": 1,
+      "notes": "SlashCommandResultMessageComponent with expand/collapse"
+    }
+  ],
+  "build": "cargo check -p pi-coding-agent: FAILED, entirely outside my slice. 62 errors in 34 other files, e.g. modes/acp/acp_mode.rs:2634 (expected expression), core/agent_session.rs:12639/12950 (duplicate `compact`/`CompactionResult`, `self` outside an associated fn), modes/daemon/snapshot_transcript_cache.rs:64/364 (unmatched `}` in format string), modes/agent_connection/daemon_agent_connection.rs:695 (duplicate type). Zero diagnostics (error or warning) name any of my 15 files. Log: .port-env/tmp/cic3-final-check2.log. Input coverage proof: target/debug/deps/pi_coding_agent-07f03025335d0978.d lists all 15 of my files as build inputs, so they really were fed to rustc. Isolated proof: .port-env/tmp/cic3-check mirrors the real module tree with #[path] reads of the 58-file dependency closure plus a local pi-agent-core path shim; there my 15 files give 0 errors and 0 warnings with cargo check --all-targets, while other slices still produce 62 messages at 54 sites in 12 files (.port-env/tmp/cic3-mirror13.log).",
+  "tests": "cargo test -p pi-coding-agent: NOT RUN (dependency failure). `cargo test -p pi-coding-agent --no-run` fails with 66 errors in other files only (.port-env/tmp/cic3-final-test2.log); no diagnostic names my files. My slice has 94 #[test] cases in 13 of the 15 files, and they compile in the isolated crate. I did not execute them because 12 other-slice dependency files in the closure still fail to compile, and copying stubbed versions of those files into a scratch crate would test stand-ins instead of the real ports.",
+  "blocked_on": "1) crates/pi-coding-agent/src/core/extensions/mod.rs (E0753: inner doc comment after items) and crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs:14407 (unexpected closing delimiter): syntax errors that stop the whole crate.\n2) In the isolated closure, 62 messages at 54 distinct sites remain in 12 files owned by other slices: crates/pi-coding-agent/src/core/auth_storage.rs (10), crates/pi-coding-agent/src/modes/interactive/theme/theme.rs (10), crates/pi-coding-agent/src/modes/interactive/auth_flows.rs (9), crates/pi-coding-agent/src/modes/interactive/interactive_mode_services.rs (9), crates/pi-coding-agent/src/core/model_registry.rs (6), crates/pi-coding-agent/src/core/package_manager.rs (5), crates/pi-coding-agent/src/core/prime_inference_model_catalog.rs (4), crates/pi-coding-agent/src/modes/agent_connection/types.rs (3), crates/pi-coding-agent/src/core/footer_data_provider.rs (2), crates/pi-coding-agent/src/core/model_tool_output_policy.rs (2), crates/pi-coding-agent/src/core/prime_inference_auth.rs (1), crates/pi-coding-agent/src/core/messages.rs (1). Full log: .port-env/tmp/cic3-mirror13.log.\n3) Other slices' files are still empty, so private stand-ins were written into my own files: dynamic_border.rs, menu_panel.rs, modal_back.rs, agent_message.rs, oauth_selector.rs/model_selector.rs (bodies and injection traits).",
+  "verification": "rustfmt --edition 2021 --check over the 15 files after formatting: 15 checked, 0 pending diffs. No file outside my slice was edited; the scratch crate and the mirror only read other slices' sources, and the pi-agent-core shim is a separate package under .port-env/tmp so crates/pi-agent-core was not touched. git status confirms no commit/push/checkout was performed.",
+  "honest_summary": "All 15 files exist at the mapped paths and are 1:1 ports: 139 TypeScript exports/members have Rust counterparts with the same names, constants, error strings and ordering, including the exact panel/loader/markdown theme converters. They type-check clean under an isolated build of the real dependency closure, and all 94 in-file tests compile. I could NOT run those tests or the workspace cargo check/test because other slices' files still fail to compile (2 syntax errors in the real tree, 54 semantic errors in the isolated closure). Those failures are outside my slice and are reported, not fixed. Behaviour that depends on the still-empty other-slice files (menu panel chrome, modal back handling, agent-message summary lines) runs against my private stand-ins, which mirror the TypeScript shapes but have not been cross-checked against the real ports once those land."
+}

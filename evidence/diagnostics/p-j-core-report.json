@@ -1,0 +1,32 @@
+{
+ "pack": "p-j-core",
+ "status": "DONE - 0 errors, gate-valid",
+ "baseline_run0": {
+  "jsonl": ".port-env/tmp/w-p-j-core-run0.jsonl",
+  "complete": true,
+  "pi_coding_agent_warnings": 326,
+  "pack_errors": 32,
+  "repo_unique": 482
+ },
+ "final_run": {
+  "jsonl": ".port-env/tmp/w-p-j-core-final.jsonl",
+  "complete": true,
+  "pi_coding_agent_warnings": 318,
+  "total_warnings": 332,
+  "pack_errors": 0,
+  "repo_unique": 267,
+  "profile": "--tests"
+ },
+ "discarded_invalid_runs": {
+  "run1-run4": "COMPLETE but pi-coding-agent warnings = 0 (rustc aborted on out-of-pack parse errors) => discarded per gate"
+ },
+ "this_turn_fixes": [
+  "core/tools/bash.rs: capture child.id() before child.wait() (mutable borrow lived across the loop)",
+  "core/kernel/repl_manager.rs: enqueue_request and ensure_kernel_rebootstrapped now return boxed Send futures; the queue path is mutually recursive (enqueue_request -> execute_queued -> execute_in_queue_slot -> enqueue_request) and a recursive async fn needs indirection, which is also what proves the spawned bootstrap future Send",
+  "core/kernel/repl_manager.rs: removed the stale REPAIR CURSOR comment (root cause fixed in bootstrap.rs by the lead)"
+ ],
+ "owned_files_parse_clean": 19,
+ "todo_or_unimplemented": 0,
+ "tests_deleted": 0,
+ "edited_outside_files_list": []
+}

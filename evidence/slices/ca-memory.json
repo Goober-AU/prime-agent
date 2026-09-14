@@ -1,0 +1,82 @@
+{
+ "slice": "ca-memory",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/memory/evidence.ts",
+   "rust": "crates/pi-coding-agent/src/core/memory/evidence.rs",
+   "loc": 85
+  },
+  {
+   "src": "packages/coding-agent/src/core/memory/jobs.ts",
+   "rust": "crates/pi-coding-agent/src/core/memory/jobs.rs",
+   "loc": 200
+  },
+  {
+   "src": "packages/coding-agent/src/core/memory/project.ts",
+   "rust": "crates/pi-coding-agent/src/core/memory/project.rs",
+   "loc": 65
+  },
+  {
+   "src": "packages/coding-agent/src/core/memory/search.ts",
+   "rust": "crates/pi-coding-agent/src/core/memory/search.rs",
+   "loc": 136
+  },
+  {
+   "src": "packages/coding-agent/src/core/memory/server.ts",
+   "rust": "crates/pi-coding-agent/src/core/memory/server.rs",
+   "loc": 102
+  },
+  {
+   "src": "packages/coding-agent/src/core/memory/service.ts",
+   "rust": "crates/pi-coding-agent/src/core/memory/service.rs",
+   "loc": 326
+  },
+  {
+   "src": "packages/coding-agent/src/core/memory/sharing.ts",
+   "rust": "crates/pi-coding-agent/src/core/memory/sharing.rs",
+   "loc": 155
+  },
+  {
+   "src": "packages/coding-agent/src/core/memory/store.ts",
+   "rust": "crates/pi-coding-agent/src/core/memory/store.rs",
+   "loc": 331
+  },
+  {
+   "src": "packages/coding-agent/src/core/refinement/index.ts",
+   "rust": "crates/pi-coding-agent/src/core/refinement/mod.rs",
+   "loc": 1
+  },
+  {
+   "src": "packages/coding-agent/src/core/refinement/refinement.ts",
+   "rust": "crates/pi-coding-agent/src/core/refinement/refinement.rs",
+   "loc": 1292
+  },
+  {
+   "src": "packages/coding-agent/src/core/goals.ts",
+   "rust": "crates/pi-coding-agent/src/core/goals.rs",
+   "loc": 290
+  },
+  {
+   "src": "packages/coding-agent/src/core/prompts/index.ts",
+   "rust": "crates/pi-coding-agent/src/core/prompts/mod.rs",
+   "loc": 7
+  },
+  {
+   "src": "packages/coding-agent/src/core/prompts/rlm.ts",
+   "rust": "crates/pi-coding-agent/src/core/prompts/rlm.rs",
+   "loc": 230
+  },
+  {
+   "src": "packages/coding-agent/src/core/skill-blocks.ts",
+   "rust": "crates/pi-coding-agent/src/core/skill_blocks.rs",
+   "loc": 22
+  },
+  {
+   "src": "packages/coding-agent/src/core/skills.ts",
+   "rust": "crates/pi-coding-agent/src/core/skills.rs",
+   "loc": 623
+  }
+ ],
+ "loc": 3865
+}

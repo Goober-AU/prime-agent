@@ -1,0 +1,258 @@
+    Blocking waiting for file lock on build directory
+crates\pi-ai\src\mcp\oauth.rs:516:17: warning: unused variable: `state`: help: if this is intentional, prefix it with an underscore: `_state`
+crates\pi-ai\src\mcp\oauth.rs:885:25: warning: unused variable: `state`: help: if this is intentional, prefix it with an underscore: `_state`
+crates\pi-ai\src\providers\amazon_bedrock.rs:1944:6: warning: variable does not need to be mutable
+crates\pi-ai\src\providers\amazon_bedrock.rs:1900:1: warning: type `BlockMeta` is more private than the item `handle_content_block_start`: function `handle_content_block_start` is reachable at visibility `pub`
+crates\pi-ai\src\providers\amazon_bedrock.rs:1936:1: warning: type `BlockMeta` is more private than the item `handle_content_block_delta`: function `handle_content_block_delta` is reachable at visibility `pub`
+crates\pi-ai\src\providers\amazon_bedrock.rs:2068:1: warning: type `BlockMeta` is more private than the item `handle_content_block_stop`: function `handle_content_block_stop` is reachable at visibility `pub`
+crates\pi-ai\src\providers\openai_completions.rs:527:1: warning: type `ResolvedCompat` is more private than the item `openai_completions::convert_messages`: function `openai_completions::convert_messages` is reachable at visibility `pub(crate)`
+crates\pi-ai\src\providers\anthropic.rs:482:5: warning: method `message` is never used
+crates\pi-ai\src\providers\anthropic.rs:2106:5: warning: method `get` is never used
+crates\pi-ai\src\providers\register_builtins.rs:254:4: warning: function `create_lazy_load_error_message` is never used
+warning: `pi-ai` (lib) generated 10 warnings (run `cargo fix --lib -p pi-ai` to apply 3 suggestions)
+crates\pi-tui\src\components\editor.rs:452:5: warning: field `theme` is never read
+crates\pi-tui\src\components\editor.rs:791:8: warning: method `render_autocomplete_overlay` is never used
+crates\pi-tui\src\components\markdown.rs:26:7: warning: constant `STRICT_STRIKETHROUGH_REGEX` is never used
+crates\pi-tui\src\components\markdown.rs:369:26: warning: field `text` is never read
+warning: `pi-tui` (lib) generated 4 warnings
+    Checking pi-coding-agent v0.9.3 (C:\Users\openclawuser\optimus-rust-port\crates\pi-coding-agent)
+crates\pi-coding-agent\src\core\extensions\runner.rs:17:42: error[E0432]: unresolved import `super::types::ExtensionUIContext`: no `ExtensionUIContext` in `core::extensions::types`
+crates\pi-coding-agent\src\modes\agents_view\agents_view_mode.rs:34:5: error[E0432]: unresolved import `super::session_view_search::matches_search_text`
+crates\pi-coding-agent\src\modes\rpc\rpc_mode.rs:18:40: error[E0432]: unresolved import `crate::modes::rpc::rpc_types::RpcExtensionUIRequest`: no `RpcExtensionUIRequest` in `modes::rpc::rpc_types`
+crates\pi-coding-agent\src\core\package_manager.rs:288:22: error[E0433]: cannot find module or crate `ignore` in this scope: use of unresolved module or unlinked crate `ignore`
+crates\pi-coding-agent\src\core\package_manager.rs:299:27: error[E0433]: cannot find module or crate `ignore` in this scope: use of unresolved module or unlinked crate `ignore`
+crates\pi-coding-agent\src\cli\daemon_command.rs:1493:34: error[E0425]: cannot find function `matches_session_id_suffix` in this scope: not found in this scope
+crates\pi-coding-agent\src\cli\daemon_command.rs:1498:38: error[E0425]: cannot find function `matches_session_id_suffix` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_messages.rs:988:17: error[E0425]: cannot find type `Arc` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:3628:14: error[E0425]: cannot find function `now_iso` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:3717:51: error[E0425]: cannot find value `image_to_value` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:3858:33: error[E0422]: cannot find struct, variant or union type `CompactOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4039:44: error[E0425]: cannot find value `compaction_entry_from_session_entry` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4175:26: error[E0425]: cannot find value `rlm_heartbeat_host_response` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4198:37: error[E0425]: cannot find function `normalize_heartbeat_delivery_mode` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4243:37: error[E0425]: cannot find function `normalize_heartbeat_delivery_mode` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4651:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4683:17: error[E0425]: cannot find type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4709:25: error[E0422]: cannot find struct, variant or union type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:4730:14: error[E0422]: cannot find struct, variant or union type `RlmChildTurnOutcome` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5542:38: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5908:58: error[E0425]: cannot find value `REFINEMENT_SOURCE_SELF` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6257:36: error[E0425]: cannot find function `agent_message_timestamp` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6800:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6814:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:6898:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7082:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7374:30: error[E0422]: cannot find struct, variant or union type `TurnExecutionPolicyOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7384:26: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7581:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7624:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7694:30: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7757:18: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7851:25: error[E0425]: cannot find type `TurnExecutionPolicyOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:7910:25: error[E0425]: cannot find type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8267:46: error[E0422]: cannot find struct, variant or union type `RollbackProof` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8490:21: error[E0425]: cannot find value `DEFERRED_SESSION_INPUT_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8681:24: error[E0425]: cannot find value `DEFERRED_SESSION_INPUT_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8849:21: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8866:17: error[E0422]: cannot find struct, variant or union type `SessionSlashCommandResultDetails` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8895:17: error[E0422]: cannot find struct, variant or union type `SessionSlashCommandResultDetails` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:8983:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:9001:22: error[E0422]: cannot find struct, variant or union type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:9477:53: error[E0433]: cannot find type `SessionActionSnapshotKind` in this scope: use of undeclared type `SessionActionSnapshotKind`
+crates\pi-coding-agent\src\core\agent_session.rs:9478:63: error[E0433]: cannot find type `SessionActionSnapshotKind` in this scope: use of undeclared type `SessionActionSnapshotKind`
+crates\pi-coding-agent\src\core\agent_session.rs:9481:36: error[E0433]: cannot find type `SessionActionPhase` in this scope: use of undeclared type `SessionActionPhase`
+crates\pi-coding-agent\src\core\agent_session.rs:9482:37: error[E0433]: cannot find type `SessionActionPhase` in this scope: use of undeclared type `SessionActionPhase`
+crates\pi-coding-agent\src\core\agent_session.rs:9483:26: error[E0433]: cannot find type `SessionActionPhase` in this scope: use of undeclared type `SessionActionPhase`
+crates\pi-coding-agent\src\core\agent_session.rs:9485:17: error[E0422]: cannot find struct, variant or union type `SessionActionSnapshotActive` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10099:49: error[E0425]: cannot find type `RestoreResult` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10655:29: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10703:20: error[E0425]: cannot find type `ResourceExtensionEntry` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10763:65: error[E0425]: cannot find function `builtin_tool_registry` in module `crate::core::extensions::types`: not found in `crate::core::extensions::types`
+crates\pi-coding-agent\src\core\agent_session.rs:10818:41: error[E0425]: cannot find function `create_builtin_tools` in module `crate::core::tools`
+crates\pi-coding-agent\src\core\agent_session.rs:10818:82: error[E0422]: cannot find struct, variant or union type `BuiltinToolOptions` in module `crate::core::tools`
+crates\pi-coding-agent\src\core\agent_session.rs:10833:57: error[E0425]: cannot find type `HostRequestHandlers` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10834:28: error[E0433]: cannot find type `HostRequestHandlers` in this scope: use of undeclared type `HostRequestHandlers`
+crates\pi-coding-agent\src\core\agent_session.rs:11000:17: error[E0425]: cannot find type `RlmCreateSubagentRuntimeOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:11005:12: error[E0422]: cannot find struct, variant or union type `RlmCreateSubagentRuntimeOptions` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:11826:50: error[E0425]: cannot find function `execute_bash` in module `crate::core::bash_executor`: not found in `crate::core::bash_executor`
+crates\pi-coding-agent\src\core\agent_session.rs:11826:91: error[E0422]: cannot find struct, variant or union type `BashExecutionOptions` in module `crate::core::bash_executor`
+crates\pi-coding-agent\src\core\agent_session.rs:12428:38: error[E0425]: cannot find type `RestoreResult` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12695:77: error[E0425]: cannot find value `COMPACTION_CANCELLED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12696:40: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12812:32: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12815:24: error[E0425]: cannot find value `COMPACTION_SKIPPED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12840:24: error[E0425]: cannot find value `COMPACTION_CANCELLED_ERROR_MESSAGE` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:13133:25: error[E0425]: cannot find type `PreparedTurnActionOptions` in this scope
+crates\pi-coding-agent\src\core\extensions\types.rs:1321:16: error[E0425]: cannot find type `CustomMessage` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\extensions\types.rs:1765:45: error[E0425]: cannot find type `PendingProviderRegistration` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\extensions\types.rs:1894:55: error[E0422]: cannot find struct, variant or union type `PendingProviderRegistration` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\extensions\types.rs:1920:62: error[E0425]: cannot find type `PendingProviderRegistration` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\prompt_templates.rs:338:26: error[E0425]: cannot find function `resolve_absolute` in module `crate::utils::paths`: not found in `crate::utils::paths`
+crates\pi-coding-agent\src\core\prompt_templates.rs:347:48: error[E0425]: cannot find function `resolve_absolute` in module `crate::utils::paths`: not found in `crate::utils::paths`
+crates\pi-coding-agent\src\modes\agents_view\agents_view_mode.rs:434:25: error[E0425]: cannot find function `resolve_absolute` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\agents_view\agents_view_mode.rs:443:25: error[E0425]: cannot find function `resolve_absolute` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:12532:34: error[E0574]: expected struct, variant or union type, found enum `DaemonCommand`: not a struct, variant or union type
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:12776:23: error[E0574]: expected struct, variant or union type, found enum `DaemonCommand`: not a struct, variant or union type
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:13428:23: error[E0574]: expected struct, variant or union type, found enum `DaemonCommand`: not a struct, variant or union type
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:13494:23: error[E0574]: expected struct, variant or union type, found enum `DaemonCommand`: not a struct, variant or union type
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:154:52: error[E0425]: cannot find type `DaemonResponse` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:159:49: error[E0425]: cannot find type `DaemonResponse` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:393:29: error[E0425]: cannot find type `DaemonResponse` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:401:29: error[E0425]: cannot find type `DaemonResponse` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:410:29: error[E0425]: cannot find type `DaemonResponse` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:491:97: error[E0425]: cannot find type `DaemonResponse` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:585:41: error[E0425]: cannot find function `is_daemon_response` in this scope: not found in this scope
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:586:35: error[E0433]: cannot find type `DaemonResponse` in this scope: use of undeclared type `DaemonResponse`
+crates\pi-coding-agent\src\modes\interactive\components\armin.rs:620:6: error[E0404]: expected trait, found struct `Drop`: not a trait
+crates\pi-coding-agent\src\modes\headless_completion.rs:77:53: error[E0603]: enum `Message` is private: private enum
+crates\pi-coding-agent\src\cli\daemon_launch.rs:14:24: warning: unused import: `BTreeMap`
+crates\pi-coding-agent\src\cli\daemon_ps.rs:11:44: warning: unused import: `HashSet`
+crates\pi-coding-agent\src\cli\daemon_ps.rs:1793:49: warning: unused imports: `OpenProcess` and `PROCESS_TERMINATE`
+crates\pi-coding-agent\src\core\agent_messages.rs:959:59: warning: unused import: `HostRequestHandlers`
+crates\pi-coding-agent\src\core\agent_session.rs:24:52: warning: unused import: `VecDeque`
+crates\pi-coding-agent\src\core\agent_session.rs:27:29: warning: unused imports: `OnceLock` and `Weak`
+crates\pi-coding-agent\src\core\agent_session.rs:34:66: warning: unused imports: `STOP_REASON_STOP` and `StopReason`
+crates\pi-coding-agent\src\core\agent_session.rs:42:5: warning: unused imports: `AGENT_MESSAGE_CUSTOM_TYPE`, `AgentFamilyCatalogEntry`, `AgentSessionNameAvailabilityInput`, `AgentSessionNameScope`, `DEFAULT_AGENT_MESSAGE_MAX_PENDING_PER_SESSION`, `assert_agent_message_queue_capacity`, `assert_agent_session_name_available`, and `create_agent_message_host_handlers`
+crates\pi-coding-agent\src\core\agent_session.rs:52:5: warning: unused imports: `AGENT_OBSERVE_SKILL_NAME`, `AgentObserveAgentSnapshot`, `AgentObserveListResult`, `AgentObserveRecentMessagesResult`, `ORCHESTRATION_HEARTBEAT_SKILL_NAME`, and `create_agent_observe_host_handlers`
+crates\pi-coding-agent\src\core\agent_session.rs:63:5: warning: unused imports: `BranchSummaryResult` and `collect_entries_for_branch_summary`
+crates\pi-coding-agent\src\core\agent_session.rs:68:31: warning: unused imports: `COMPACT_SKILL_NAME`, `CompactionPreparation`, `compact`, and `estimate_tokens`
+crates\pi-coding-agent\src\core\agent_session.rs:72:5: warning: unused import: `crate::core::compaction::utils::serialize_conversation`
+crates\pi-coding-agent\src\core\agent_session.rs:74:34: warning: unused imports: `ContextTreeNode`, `load_context_tree_child_from_disk`, and `load_context_tree_children_from_disk`
+crates\pi-coding-agent\src\core\agent_session.rs:81:5: warning: unused import: `GOAL_SKILL_NAME`
+crates\pi-coding-agent\src\core\agent_session.rs:84:5: warning: unused imports: `AsyncBashCompletionDetails`, `CompactionOutcomeReason`, `CompactionOutcome`, `HarnessDigestDetails`, `RlmChildFailureDetails`, `RlmChildTerminalNoticeDetails`, `SESSION_SLASH_COMMAND_CUSTOM_TYPE`, `SESSION_SLASH_COMMAND_RESULT_CUSTOM_TYPE`, `convert_to_llm`, `create_async_bash_completion_message`, `create_refinement_notice_message`, `create_rlm_child_failure_message`, `create_rlm_child_terminal_notice_message`, `is_compaction_outcome_message`, `is_session_slash_command_message`, `is_session_slash_command`, and `without_harness_digests_for_compaction`
+crates\pi-coding-agent\src\core\agent_session.rs:100:5: warning: unused imports: `ModelToolOutputPolicyOptions`, `ModelToolOutputPolicy`, `ModelToolOutputScope`, and `apply_model_tool_output_policy`
+crates\pi-coding-agent\src\core\agent_session.rs:105:5: warning: unused imports: `AutoRefineReviewContext`, `REFINEMENT_FAILURE_CUSTOM_TYPE`, `REFINE_SKILL_NAME`, `RefinementFailureError`, `append_global_refinement`, `generate_refinement_id`, `get_global_harness_state_dir`, `infer_refinement_result_scope`, `merge_harness_states`, `review_auto_refine`, and `save_harness_state`
+crates\pi-coding-agent\src\core\agent_session.rs:116:35: warning: unused imports: `ActionTicket` and `SessionActionPayload`
+crates\pi-coding-agent\src\core\agent_session.rs:123:5: warning: unused import: `CURRENT_SESSION_VERSION`
+crates\pi-coding-agent\src\core\agent_session.rs:128:26: warning: unused import: `SlashCommandInfo`
+crates\pi-coding-agent\src\core\agent_session.rs:133:26: warning: unused imports: `SessionUsageSummary`, `clone_usage`, and `empty_usage`
+crates\pi-coding-agent\src\core\agent_traces.rs:3:24: warning: unused import: `HashMap`
+crates\pi-coding-agent\src\core\agent_traces.rs:10:5: warning: unused import: `regex::Regex`
+crates\pi-coding-agent\src\core\auth_storage.rs:21:23: warning: unused import: `OAuthProviderId`
+crates\pi-coding-agent\src\core\compaction\branch_summarization.rs:10:42: warning: unused imports: `CustomAgentMessage` and `ThinkingLevel`
+crates\pi-coding-agent\src\core\compaction\branch_summarization.rs:11:5: warning: unused import: `pi_ai::models::get_model_input_limit`
+crates\pi-coding-agent\src\core\compaction\compaction.rs:18:5: warning: unused import: `std::collections::BTreeSet`
+crates\pi-coding-agent\src\core\compaction\compaction.rs:29:5: warning: unused imports: `Api` and `StopReason`
+crates\pi-coding-agent\src\core\compaction\compaction.rs:32:5: warning: unused import: `pi_ai::utils::event_stream::AssistantMessageEventStream`
+crates\pi-coding-agent\src\core\cron_jobs.rs:3:24: warning: unused import: `BTreeMap`
+crates\pi-coding-agent\src\core\extensions\builtin\herdr_agent_state.rs:20:5: warning: unused import: `std::pin::Pin`
+crates\pi-coding-agent\src\core\extensions\runner.rs:11:5: warning: unused import: `crate::core::slash_commands::SlashCommandInfo`
+crates\pi-coding-agent\src\core\extensions\runner.rs:15:27: warning: unused imports: `ExtensionHandler`, `Extension`, `MessageEndEventResult`, `SessionBeforeCompactResult`, `SessionBeforeForkResult`, `SessionBeforeRefineResult`, `SessionBeforeSwitchResult`, `SessionBeforeTreeResult`, `ToolInfo`, and `WidgetPlacement`
+crates\pi-coding-agent\src\core\extensions\runner.rs:26:5: warning: unused imports: `AutocompleteItem` and `ReadonlyFooterDataProvider`
+crates\pi-coding-agent\src\core\extensions\types.rs:8:5: warning: unused import: `std::collections::HashMap`
+crates\pi-coding-agent\src\core\extensions\types.rs:16:5: warning: unused import: `crate::core::diagnostics::ResourceDiagnostic`
+crates\pi-coding-agent\src\core\memory\search.rs:8:57: warning: unused import: `HarnessScope`
+crates\pi-coding-agent\src\core\memory\search.rs:11:20: warning: unused import: `record`
+crates\pi-coding-agent\src\core\memory\server.rs:6:5: warning: unused import: `std::collections::HashMap`
+crates\pi-coding-agent\src\core\memory\service.rs:6:23: warning: unused import: `PathBuf`
+crates\pi-coding-agent\src\core\memory\service.rs:21:40: warning: unused import: `ProjectIdentity`
+crates\pi-coding-agent\src\core\package_manager.rs:5:34: warning: unused imports: `BTreeSet` and `HashMap`
+crates\pi-coding-agent\src\core\package_manager.rs:16:37: warning: unused imports: `FilteredPackageSource` and `PackageSource`
+crates\pi-coding-agent\src\core\refinement\refinement.rs:9:23: warning: unused import: `PathBuf`
+crates\pi-coding-agent\src\core\sdk.rs:17:70: warning: unused import: `is_no_models_available_message`
+crates\pi-coding-agent\src\core\side_question.rs:7:38: warning: unused imports: `Model` and `ServiceTier`
+crates\pi-coding-agent\src\core\side_question.rs:8:5: warning: unused import: `serde_json::Value`
+crates\pi-coding-agent\src\core\skills.rs:2:23: warning: unused import: `PathBuf`
+crates\pi-coding-agent\src\core\tools\bash.rs:12:73: warning: unused import: `RenderContentBlock`
+crates\pi-coding-agent\src\core\tools\edit.rs:20:59: warning: unused import: `str_value`
+crates\pi-coding-agent\src\core\tools\ipython.rs:12:5: warning: unused imports: `ExecuteOptions` and `create_kernel_startup_abort_error`
+crates\pi-coding-agent\src\modes\agents_view\agents_view_mode.rs:17:5: warning: unused imports: `AgentsViewRecursiveRollup`, `AgentsViewScopeBackResult`, and `build_unified_session_index`
+crates\pi-coding-agent\src\modes\agents_view\agents_view_mode.rs:398:45: warning: unnecessary parentheses around type
+crates\pi-coding-agent\src\modes\daemon\agent_roster.rs:5:17: warning: unused imports: `Arc` and `Mutex as StdMutex`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:16:23: warning: unused import: `PathBuf`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:18:41: warning: unused import: `Weak`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:27:25: warning: unused import: `oneshot`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:46:5: warning: unused imports: `FAMILY_RELATIONSHIP_PARENT` and `FAMILY_STATUS_RUNNING`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:59:5: warning: unused imports: `AgentHeartbeatManagementAction`, `AgentHeartbeatUpdateAction`, and `DEFAULT_HEARTBEAT_SCHEDULE`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:64:37: warning: unused import: `wait_for_prompt_admission`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:69:31: warning: unused imports: `DeleteSessionFileResult` and `delete_session_file`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:76:5: warning: unused import: `resolve_session_rlm_depth`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:85:5: warning: unused import: `crate::modes::agent_connection::types::AgentConnectionHeartbeat`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:86:5: warning: unused import: `crate::modes::rpc::jsonl::JsonlLineReader`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:88:37: warning: unused import: `wait_for_child_process`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:95:54: warning: unused import: `AgentSessionRuntime`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:103:5: warning: unused import: `super::compact_session_stream::create_compact_assistant_delta`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:106:305: warning: unused imports: `DAEMON_DEFAULT_SERVER_CAPABILITIES`, `DAEMON_SCHEMA_ID`, and `DAEMON_SCHEMA_REVISION`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:110:5: warning: unused imports: `DaemonErrorInfo` and `deserialize_daemon_error`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:116:25: warning: unused import: `has_live_session_work`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:128:35: warning: unused import: `encode_private_frame`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:130:5: warning: unused imports: `DAEMON_WORKER_ACTIVE_SESSION_ID_ENV`, `DAEMON_WORKER_ROLE_ENV`, `DAEMON_WORKER_TOKEN_ENV`, `DaemonWorkerFrameHeader`, and `is_daemon_worker_frame_header`
+crates\pi-coding-agent\src\modes\daemon\daemon_mode.rs:246:5: warning: unused import: `super::daemon_session_summarizer::provider_retry_policy`
+crates\pi-coding-agent\src\modes\daemon\daemon_protocol.rs:32:64: warning: unused import: `AgentConnectionSessionTree`
+crates\pi-coding-agent\src\modes\daemon\daemon_routed_client.rs:16:56: warning: unused imports: `DAEMON_PROTOCOL_NAME`, `DAEMON_PROTOCOL_VERSION`, `DAEMON_SCHEMA_REVISION`, and `DaemonProtocolInfo`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:10:24: warning: unused imports: `HashMap` and `HashSet`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:11:5: warning: unused import: `std::path::Path`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:12:25: warning: unused imports: `AtomicBool`, `AtomicU64`, and `Ordering`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:13:17: warning: unused imports: `Arc` and `Mutex as StdMutex`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:15:13: warning: unused imports: `Deserialize` and `Serialize`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:16:18: warning: unused imports: `Map` and `Value`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:17:12: warning: unused imports: `Digest` and `Sha256`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:18:19: warning: unused imports: `Mutex as TokioMutex` and `Notify`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:21:5: warning: unused imports: `AgentFamilyCatalogEntry`, `AgentSessionMessageAgentSummary`, `AgentSessionNameScope`, `assert_agent_family_reach`, `assert_agent_session_name_available`, `format_agent_session_name_unavailable`, and `session_name_reservation_key`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:26:5: warning: unused imports: `ORPHAN_PROCESS_JOURNAL_ENV`, `clear_orphan_process_journal`, `kill_orphan_process`, `read_active_orphan_processes`, and `should_reap_orphan_process`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:30:5: warning: unused imports: `IdleEvictionMinutes`, `SessionEvictionSnapshot`, `WorkerEvictionSnapshot`, `WorkerLifecycle`, and `can_evict_worker`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:33:34: warning: unused imports: `SessionAlreadyActiveError`, `canonical_session_path`, and `get_process_start_id`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:34:36: warning: unused imports: `SessionInfo`, `get_session_artifact_path_for_file`, and `read_session_info`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:35:5: warning: unused import: `crate::core::session_resolver::looks_like_session_path`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:36:5: warning: unused import: `crate::core::settings_manager::SettingsManager`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:37:5: warning: unused import: `crate::modes::agent_connection::types::AgentConnectionHeartbeat`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:38:5: warning: unused import: `crate::modes::rpc::jsonl::serialize_json_line`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:40:5: warning: unused imports: `AtomicFileWriteCoordinator`, `WriteFileAtomicOptions`, `remove_file_durably`, and `write_file_atomic_sync`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:43:5: warning: unused imports: `Signal`, `SpawnOptions`, `is_process_alive`, `process_id_exists`, `signal_process_group_or_process`, and `spawn_hidden`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:46:35: warning: unused imports: `DaemonSocketClient` and `create_active_session_id`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:48:5: warning: unused imports: `AgentRosterEntry`, `AgentRosterMutation`, `AgentRoster`, `RegisteredHeartbeatFlags`, `RosterSessionSummary`, `WorkerRosterEntry`, `passivated_worker_roster_entry`, `roster_agent_id_for_summary`, `session_summary_from_roster_entry`, and `worker_roster_entry_from_summary`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:52:39: warning: unused imports: `CommandRecoveryJournal` and `create_command_idempotency_key`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:54:5: warning: unused imports: `CompactAssistantStreamReconstructor`, `create_compact_assistant_delta`, and `is_compact_assistant_delta`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:56:37: warning: unused imports: `DAEMON_CATALOG_ROLE_ENV` and `DaemonCatalogClient`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:57:30: warning: unused imports: `DAEMON_COMMAND_ENVELOPE_MIN_PROTOCOL_VERSION`, `DAEMON_DEFAULT_CLIENT_CAPABILITIES`, `DAEMON_SCHEMA_ID`, `DAEMON_SCHEMA_REVISION`, `DAEMON_UPDATE_RESTART_FORMAT_VERSION`, `DaemonAttachResult`, `DaemonResponse`, `collect_daemon_client_env`, `create_daemon_event_meta`, `is_daemon_command_envelope`, `is_daemon_mutating_command`, and `salvage_daemon_command_id`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:58:28: warning: unused import: `DaemonHello`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:59:28: warning: unused imports: `DaemonSessionRecoveringError`, `deserialize_daemon_error`, and `serialize_daemon_error`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:60:5: warning: unused import: `super::daemon_session_id::matches_session_id_suffix`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:61:27: warning: unused imports: `classify_session_roster_status` and `is_session_summary_busy`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:63:5: warning: unused imports: `SessionSummary`, `is_evictable_empty_session_summary`, and `summary_for_inactive_session`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:66:5: warning: unused imports: `DaemonSocketIdentity`, `DaemonSocketPathLease`, `acquire_daemon_socket_path_lease`, `cleanup_daemon_socket_path`, `default_daemon_socket_dir`, `default_daemon_socket_path`, `get_daemon_socket_identity`, `normalize_socket_path_for_daemon`, `prepare_daemon_socket_path`, and `restrict_daemon_socket_path`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:71:5: warning: unused imports: `DaemonWorkerAuthenticationError` and `DaemonWorkerClient`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:74:5: warning: unused imports: `DAEMON_WORKER_ACTIVE_SESSION_ID_ENV`, `DAEMON_WORKER_INSTANCE_ID_ENV`, `DAEMON_WORKER_PEER_TRANSPORT_CAPABILITY`, `DAEMON_WORKER_RECOVERY_JOURNAL_ENV`, `DAEMON_WORKER_ROLE_ENV`, `DAEMON_WORKER_ROSTER_CAPABILITY`, `DAEMON_WORKER_STARTUP_GATE_COMMIT`, `DAEMON_WORKER_STARTUP_GATE_FD_ENV`, `DAEMON_WORKER_SUPERVISOR_SOCKET_ENV`, `DAEMON_WORKER_TOKEN_ENV`, `DaemonWorkerDescriptor`, `DaemonWorkerLifecycle`, `DaemonWorkerRosterOutbound`, `DurableDaemonCreateCommand`, `SESSION_LEASES_ENABLED_ENV`, `SESSION_LEASE_OWNER_ID_ENV`, `durable_daemon_create_command`, and `durable_daemon_worker_descriptor`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:82:5: warning: unused import: `super::mutation_drain_latch::MutationDrainLatch`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:84:5: warning: unused imports: `RlmLedgerEdge`, `RlmSpawnLedger`, `create_rlm_ledger_registry_seed_source`, `tombstone_saved_session_delete`, and `with_passive_rlm_descendant_infos`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:87:5: warning: unused import: `super::saved_session_info::serialize_saved_session_info`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:88:40: warning: unused imports: `SNAPSHOT_TARGET_CHUNK_BYTES` and `SnapshotTranscriptCache`
+crates\pi-coding-agent\src\modes\daemon\daemon_supervisor.rs:89:5: warning: unused import: `super::worker_recovery_journal::WorkerRecoveryJournal`
+crates\pi-coding-agent\src\modes\daemon\daemon_worker_client.rs:24:63: warning: unused import: `DaemonWorkerFrameHeader`
+crates\pi-coding-agent\src\modes\headless_completion.rs:14:5: warning: unused import: `autonomous_limit_reason_at`
+crates\pi-coding-agent\src\modes\interactive\interactive_mode.rs:15:34: warning: unused import: `Model`
+crates\pi-coding-agent\src\modes\interactive\interactive_mode.rs:21:5: warning: unused import: `super::auth_flows::ProviderAuthFlows`
+crates\pi-coding-agent\src\modes\interactive\interactive_mode.rs:28:34: warning: unused imports: `AgentConnectionSnapshot`, `OverlayHandle`, and `Theme`
+crates\pi-coding-agent\src\modes\interactive\interactive_mode.rs:33:46: warning: unused import: `QueueSelectionItem`
+crates\pi-coding-agent\src\modes\interactive\interactive_mode.rs:34:5: warning: unused import: `super::resume_hint::format_resume_hint`
+crates\pi-coding-agent\src\modes\interactive\interactive_mode.rs:36:59: warning: unused import: `WORKING_ICON_INTERVAL_MS`
+crates\pi-coding-agent\src\modes\interactive\interactive_mode_services.rs:13:20: warning: unused import: `ImageContent`
+crates\pi-coding-agent\src\modes\rpc\rpc_client.rs:24:38: warning: unused import: `RpcExtensionUiRequest`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:6:18: warning: unused imports: `Map` and `Value`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:9:5: warning: unused import: `pi_agent_core::types::AgentMessage`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:13:5: warning: unused imports: `DaemonAgentConnectionOptions`, `DaemonAgentConnection`, `DaemonEventCursor as ConnectionEventCursor`, `DaemonOutbound as ConnectionOutbound`, `DaemonResponse as ConnectionResponse`, `DaemonSessionSnapshot`, `DaemonSessionSummary as ConnectionSessionSummary`, and `DaemonTransportClient`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:17:45: warning: unused import: `DaemonCommand`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:18:43: warning: unused import: `DaemonHello`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:20:5: warning: unused imports: `DaemonClientError`, `DaemonClientMessageListener`, `DaemonClientRequestOptions`, and `DaemonClient`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:23:5: warning: unused imports: `DaemonEventCursor`, `DaemonOutbound as ProtocolOutbound`, and `DaemonSessionClosedReason`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:25:5: warning: unused import: `crate::modes::daemon::daemon_session_list::SessionSummary`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:27:38: warning: unused imports: `TelegramBridge` and `accept_telegram_pairing`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:29:5: warning: unused imports: `TELEGRAM_WORKER_LOCK_OPTIONS`, `TelegramFileLock`, `TelegramLockError`, and `telegram_stop_requested`
+crates\pi-coding-agent\src\modes\telegram\worker.rs:32:5: warning: unused imports: `TelegramConnectionSettings`, `TelegramDelivery`, `TelegramState`, `TelegramStore`, `TelegramWorkerStatus`, and `is_record`
+crates\pi-coding-agent\src\core\tools\mod.rs:143:24: error[E0091]: type parameter `TDetails` is never used: unused type parameter
+crates\pi-coding-agent\src\modes\agent_connection\daemon_agent_connection.rs:3168:1: error[E0119]: conflicting implementations of trait `agent_connection::types::AgentConnection` for type `DaemonAgentConnection`: conflicting implementation for `DaemonAgentConnection`
+crates\pi-coding-agent\src\modes\session_worker\private_framing.rs:28:38: error[E0091]: type parameter `THeader` is never used: unused type parameter
+crates\pi-coding-agent\src\core\tools\bash.rs:266:9: error[E0433]: cannot find module or crate `libc` in this scope: use of unresolved module or unlinked crate `libc`
+crates\pi-coding-agent\src\core\tools\bash.rs:266:35: error[E0433]: cannot find module or crate `libc` in this scope: use of unresolved module or unlinked crate `libc`
+crates\pi-coding-agent\src\core\tools\bash.rs:267:9: error[E0433]: cannot find module or crate `libc` in this scope: use of unresolved module or unlinked crate `libc`
+crates\pi-coding-agent\src\core\tools\bash.rs:267:32: error[E0433]: cannot find module or crate `libc` in this scope: use of unresolved module or unlinked crate `libc`
+crates\pi-coding-agent\src\cli\daemon_command.rs:1106:42: error[E0425]: cannot find function `print_json_line` in this scope
+crates\pi-coding-agent\src\cli\daemon_command.rs:1166:42: error[E0425]: cannot find function `print_json_line` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:2895:17: error[E0425]: cannot find function `block_on` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5123:29: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5178:36: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:5211:36: error[E0425]: cannot find function `agent_message_key_of_delivery` in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:10065:9: error[E0425]: cannot find function `get_supported_thinking_levels` in this scope: not found in this scope
+crates\pi-coding-agent\src\core\agent_session.rs:12396:21: error[E0425]: cannot find function `get_supported_thinking_levels` in this scope: not found in this scope
+warning: `pi-coding-agent` (lib) generated 134 warnings
+error: could not compile `pi-coding-agent` (lib) due to 104 previous errors; 134 warnings emitted

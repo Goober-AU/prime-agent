@@ -1,0 +1,23 @@
+{
+ "finding": "agent_session.rs truncated at ~20-48% of the TS class body",
+ "evidence": {
+  "rust_bytes": 334524,
+  "rust_lines": 8023,
+  "brace_depth_at_eof": 13,
+  "compiler": "error: this file contains an unclosed delimiter at agent_session.rs:8022",
+  "ts_bytes": 475173,
+  "ts_lines": 13194,
+  "last_ported_member": "schedule_session_input_pump (private)"
+ },
+ "why": "previous worker hit its output limit mid-file; its completion message never arrived, so a truncated file sat on disk looking 'written' (334KB is a plausible size)",
+ "remedy": "mega-agent-session-finish slice: append-only passes until EOF, then close braces; required completeness proof (parse, brace depth 0, member reconciliation)",
+ "class_scan": {
+  "method": "custom brace-depth counter over every .rs file",
+  "raw_hits": 11,
+  "true_positives": 1,
+  "false_positives": 10,
+  "authority": "rustc: `cargo check -p pi-ai|pi-tui|pi-agent-core` all finish clean, and `cargo check -p pi-coding-agent` reports exactly ONE syntax error (agent_session.rs unclosed delimiter). So the 10 other brace flags are artifacts of my heuristic (raw strings, lifetimes, char literals), not real truncation.",
+  "conclusion": "agent_session.rs is the only truncated/unsyntactic file in the workspace",
+  "lesson": "a brace counter is a hint, not a verdict; confirm with the compiler before reporting a defect"
+ }
+}

@@ -1,0 +1,175 @@
+warning: unused variable: `state`
+   --> crates/pi-ai/src/mcp/oauth.rs:516:17
+    |
+516 |             let state = state.clone();
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `state`
+   --> crates/pi-ai/src/mcp/oauth.rs:885:25
+    |
+885 |                     let state = state.clone();
+    |                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_state`
+
+warning: variable does not need to be mutable
+    --> crates/pi-ai/src/providers/amazon_bedrock.rs:1944:6
+     |
+1944 |     let mut block_exists = index.is_some();
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: type `BlockMeta` is more private than the item `handle_content_block_start`
+    --> crates/pi-ai/src/providers/amazon_bedrock.rs:1900:1
+     |
+1900 | / pub fn handle_content_block_start(
+1901 | |     content_block_index: usize,
+1902 | |     start: &Value,
+1903 | |     blocks: &mut Vec<BlockMeta>,
+1904 | |     output: &mut AssistantMessage,
+1905 | |     stream: &AssistantMessageEventStream,
+1906 | | ) {
+     | |_^ function `handle_content_block_start` is reachable at visibility `pub`
+     |
+note: but type `BlockMeta` is only usable at visibility `pub(self)`
+    --> crates/pi-ai/src/providers/amazon_bedrock.rs:245:1
+     |
+ 245 | struct BlockMeta {
+     | ^^^^^^^^^^^^^^^^
+     = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `BlockMeta` is more private than the item `handle_content_block_delta`
+    --> crates/pi-ai/src/providers/amazon_bedrock.rs:1936:1
+     |
+1936 | / pub fn handle_content_block_delta(
+1937 | |     content_block_index: usize,
+1938 | |     delta: &Value,
+1939 | |     blocks: &mut Vec<BlockMeta>,
+1940 | |     output: &mut AssistantMessage,
+1941 | |     stream: &AssistantMessageEventStream,
+1942 | | ) {
+     | |_^ function `handle_content_block_delta` is reachable at visibility `pub`
+     |
+note: but type `BlockMeta` is only usable at visibility `pub(self)`
+    --> crates/pi-ai/src/providers/amazon_bedrock.rs:245:1
+     |
+ 245 | struct BlockMeta {
+     | ^^^^^^^^^^^^^^^^
+
+warning: type `BlockMeta` is more private than the item `handle_content_block_stop`
+    --> crates/pi-ai/src/providers/amazon_bedrock.rs:2068:1
+     |
+2068 | / pub fn handle_content_block_stop(
+2069 | |     content_block_index: usize,
+2070 | |     blocks: &mut Vec<BlockMeta>,
+2071 | |     output: &mut AssistantMessage,
+2072 | |     stream: &AssistantMessageEventStream,
+2073 | | ) {
+     | |_^ function `handle_content_block_stop` is reachable at visibility `pub`
+     |
+note: but type `BlockMeta` is only usable at visibility `pub(self)`
+    --> crates/pi-ai/src/providers/amazon_bedrock.rs:245:1
+     |
+ 245 | struct BlockMeta {
+     | ^^^^^^^^^^^^^^^^
+
+warning: type `ResolvedCompat` is more private than the item `openai_completions::convert_messages`
+   --> crates/pi-ai/src/providers/openai_completions.rs:527:1
+    |
+527 | pub(crate) fn convert_messages(model: &Model, context: &Context, compat: &ResolvedCompat) -> Result<Vec<Value>, String> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ function `openai_completions::convert_messages` is reachable at visibility `pub(crate)`
+    |
+note: but type `ResolvedCompat` is only usable at visibility `pub(self)`
+   --> crates/pi-ai/src/providers/openai_completions.rs:148:1
+    |
+148 | struct ResolvedCompat {
+    | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `message` is never used
+   --> crates/pi-ai/src/providers/anthropic.rs:482:5
+    |
+474 | impl AnthropicStreamError {
+    | ------------------------- method in this implementation
+...
+482 |     fn message(&self) -> String {
+    |        ^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `get` is never used
+    --> crates/pi-ai/src/providers/anthropic.rs:2106:5
+     |
+2093 | impl HeaderBag {
+     | -------------- method in this implementation
+...
+2106 |     fn get(&self, name: &str) -> Option<&str> {
+     |        ^^^
+
+warning: function `create_lazy_load_error_message` is never used
+   --> crates/pi-ai/src/providers/register_builtins.rs:254:4
+    |
+254 | fn create_lazy_load_error_message(model: &Model, error: &str) -> AssistantMessage {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `pi-ai` (lib) generated 10 warnings (run `cargo fix --lib -p pi-ai` to apply 3 suggestions)
+   Compiling pi-agent-core v0.9.3 (/home/anthony/optimus-rust-port/crates/pi-agent-core)
+    Finished `test` profile [unoptimized] target(s) in 3.77s
+     Running unittests src/lib.rs (.port-env/target/debug/deps/pi_agent_core-5e800ffd7815e966)
+
+running 37 tests
+test agent::tests::clear_all_queues_empties_both_queues ... ok
+test agent::tests::assigning_tools_and_messages_copies_the_array ... ok
+test agent::tests::default_state_matches_typescript ... ok
+test agent::tests::normalize_prompt_input_matches_typescript_shapes ... ok
+test agent::tests::pending_message_queue_drains_by_mode ... ok
+test agent::tests::default_convert_to_llm_filters_custom_messages ... ok
+test agent::tests::remove_queued_messages_drops_whole_batches ... ok
+test agent::tests::reset_clears_transcript_queues_and_runtime_state ... ok
+test agent::tests::subscribe_returns_a_working_unsubscribe_handle ... ok
+test agent_loop::tests::abort_error_message_matches_typescript ... ok
+test agent_loop::tests::aborted_assistant_message_keeps_partial_content_and_usage ... ok
+test agent::tests::async_stop_after_turn_true_waits_then_preserves_queued_work ... ok
+test agent_loop::tests::logical_request_settles_once_even_with_conflicting_outcomes ... ok
+test agent::tests::async_stop_after_turn_cancellation_settles_completed_turn ... ok
+test agent_loop::tests::terminal_batch_only_terminates_when_every_result_asks_for_it ... ok
+test agent_loop::tests::tool_execution_mode_sequential_forces_sequential_batches ... ok
+test agent_loop::tests::agent_stream_completes_on_agent_end_only ... ok
+test agent_loop::tests::agent_loop_continue_rejects_empty_and_assistant_tail_contexts ... ok
+test agent_loop::tests::request_metric_outcome_maps_stop_reasons ... ok
+test agent_loop::tests::prepared_tool_call_arguments_returns_the_same_call_when_nothing_changes ... ok
+test agent::tests::async_context_auth_tool_and_continuation_hooks_keep_turn_order ... ok
+test agent_loop::tests::tool_result_message_keeps_the_source_order_fields ... ok
+test agent_loop::tests::error_tool_result_uses_an_empty_details_object ... ok
+test agent_loop::tests::parallel_entries_keep_assistant_source_order_for_messages ... ok
+test agent::tests::async_stop_after_turn_false_waits_then_continues_tool_cycle ... ok
+test performance_metrics::tests::does_not_manufacture_provider_usage_from_all_zero_placeholders ... ok
+test performance_metrics::tests::does_not_promote_per_field_normalized_zero_placeholders ... ok
+test performance_metrics::tests::measurements_keep_explicit_null_distinct_from_absent ... ok
+test performance_metrics::tests::settlement_is_exactly_once ... ok
+test performance_metrics::tests::uses_monotonic_deltas_and_rejects_unavailable_or_backwards_clocks ... ok
+test types::tests::agent_event_type_names_match_typescript ... ok
+test types::tests::agent_message_role_matches_typescript_discriminants ... ok
+test types::tests::tool_execution_mode_defaults_to_parallel ... ok
+test agent::tests::agent_continue_reports_typed_precondition_codes ... ok
+test types::tests::thinking_level_serializes_lowercase ... ok
+test types::tests::agent_events_round_trip_the_flat_typescript_wire_shape ... FAILED
+test agent::tests::prompt_rejects_a_second_run_while_one_is_active ... ok
+
+failures:
+
+---- types::tests::agent_events_round_trip_the_flat_typescript_wire_shape stdout ----
+
+thread 'types::tests::agent_events_round_trip_the_flat_typescript_wire_shape' (1078692) panicked at crates/pi-agent-core/src/types.rs:796:68:
+called `Result::unwrap()` on an `Err` value: Error("data did not match any variant of untagged enum AgentMessage", line: 0, column: 0)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    types::tests::agent_events_round_trip_the_flat_typescript_wire_shape
+
+test result: FAILED. 36 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p pi-agent-core --lib`

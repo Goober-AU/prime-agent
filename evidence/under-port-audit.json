@@ -1,0 +1,32 @@
+{
+ "audited": "all files with content, comparing rust bytes / ts bytes for ts >= 3000 bytes",
+ "under_ported": 1,
+ "detail": [
+  {
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_supervisor.rs",
+   "ts_bytes": 287311,
+   "rust_bytes": 11412,
+   "ratio": 0.04,
+   "ts_functions": 29,
+   "rust_functions": 2,
+   "missing_class": "DaemonSupervisor",
+   "verdict": "stub in disguise - re-sliced into 7 sequential passes and re-queued"
+  }
+ ],
+ "false_positives": [
+  {
+   "rust": "crates/pi-coding-agent/src/modes/mod.rs",
+   "note": "barrel re-export module, correctly small"
+  },
+  {
+   "rust": "crates/pi-coding-agent/src/core/extensions/mod.rs",
+   "note": "barrel re-export module, correctly small"
+  }
+ ],
+ "also_flagged_but_kept": [
+  {
+   "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode.rs",
+   "note": "177KB / 10352 TS LOC with 278 fns - large and real, kept"
+  }
+ ]
+}

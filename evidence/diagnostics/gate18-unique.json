@@ -1,0 +1,172 @@
+[
+ [
+  "/rustc/48a229ceaefd4985c50990b14116b6d856af0985/library/alloc/src/macros.rs",
+  113,
+  "temporary value dropped while borrowed"
+ ],
+ [
+  "core/agent_session.rs",
+  8787,
+  "future cannot be sent between threads safely"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  494,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  495,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  496,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  539,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session/runtime_members.rs",
+  540,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  86,
+  "missing fields `compat`, `context_window`, `cost` and 9 other fields in initializer of `pi_ai::index::Model`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  154,
+  "not all trait items implemented, missing: `runtime`, `settings_manager`, `session_dir`, `set_exec_env_provider`, `set_runtime_env_scope`, `set_subagent_runtime_host`, `set_rebind_session`, `bind_extensions`, `abort_for_update_restart`, `connection_view`, `connection_state`, `register_rlm_child_session`, `subscribe`, `prompt_until_accepted`, `prompt_and_wait`, `prompt_heartbeat`, `accept_agent_message_prompt`, `steer`, `follow_up`, `restore_steering_message`, `restore_follow_up_message`, `restore_pending_next_turn_messages`, `restore_session_actions`, `send_custom_message`, `resume_queued_work`, `clear_queued_agent_messages`, `clear_queue`, `mutate_queued_message`, `get_steering_message_previews`, `get_follow_up_message_previews`, `cancel_rlm_child_run`, `delete_inactive_rlm_subagent`, `wait_for_headless_completion`, `refresh_available_models`, `refresh_model_catalog`, `set_model`, `cycle_model`, `set_scoped_models`, `set_transport`, `compact`, `refine`, `reload`, `set_rlm_max_depth`, `get_context_tree`, `get_rlm_child_snapshots`, `export_to_html`, `export_to_jsonl`, `get_last_assistant_text`, `navigate_tree`, `start_side_question`, `abort_side_question`, `new_session`, `release_rlm_child_session`, `switch_session`, `fork`, `import_from_jsonl`, `dispose`"
+ ],
+ [
+  "core/agent_session_runtime/in_process_adapter.rs",
+  276,
+  "not all trait items implemented, missing: `snapshot_source`, `session_subscribe`, `session_wait_for_headless_completion`, `session_model_catalog`, `session_context_tree`, `session_rlm_children`, `session_cancel_rlm_child`, `session_set_scoped_models`, `session_set_transport`, `session_compact`, `session_refine`, `session_navigate_tree`, `session_export_to_html`, `session_export_to_jsonl`, `session_watch_child`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  1692,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4037,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  4351,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  5054,
+  "use of moved value: `state_active_session_id`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6698,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  6819,
+  "future cannot be sent between threads safely"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  7506,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  7570,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8203,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8204,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8275,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  8794,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9244,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9629,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9871,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9882,
+  "no field `state` on type `&std::sync::Arc<DaemonSocketClient>`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  9893,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  10005,
+  "no field `state` on type `&std::sync::Arc<DaemonSocketClient>`"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  10998,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  11639,
+  "arguments to this function are incorrect"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13142,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  13186,
+  "mismatched types"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  15431,
+  "future cannot be sent between threads safely"
+ ],
+ [
+  "modes/daemon/daemon_mode.rs",
+  15453,
+  "future cannot be sent between threads safely"
+ ]
+]

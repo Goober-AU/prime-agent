@@ -1,0 +1,77 @@
+{
+ "slice": "ca-interactive-components-1",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/tree-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/tree_selector.rs",
+   "loc": 1238
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/armin.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/armin.rs",
+   "loc": 382
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/heartbeat-manager.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/heartbeat_manager.rs",
+   "loc": 326
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/prime-team-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/prime_team_selector.rs",
+   "loc": 203
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/prompt-highlight.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/prompt_highlight.rs",
+   "loc": 199
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/daxnuts.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/daxnuts.rs",
+   "loc": 164
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/extension-editor.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/extension_editor.rs",
+   "loc": 133
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/refinement-outcome-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/refinement_outcome_message.rs",
+   "loc": 117
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/mermaid.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/mermaid.rs",
+   "loc": 77
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/thinking-selector.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/thinking_selector.rs",
+   "loc": 68
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/index.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/mod.rs",
+   "loc": 51
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/slash-command-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/slash_command_message.rs",
+   "loc": 47
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/expandable-custom-message.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/expandable_custom_message.rs",
+   "loc": 33
+  },
+  {
+   "src": "packages/coding-agent/src/modes/interactive/components/modal-back.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/components/modal_back.rs",
+   "loc": 31
+  }
+ ],
+ "loc": 3069
+}

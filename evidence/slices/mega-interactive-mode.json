@@ -1,0 +1,13 @@
+{
+ "slice": "mega-interactive-mode",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+   "rust": "crates/pi-coding-agent/src/modes/interactive/interactive_mode.rs",
+   "loc": 10352
+  }
+ ],
+ "loc": 10352,
+ "note": "Write in APPENDED CHUNKS of ~300-400 lines."
+}

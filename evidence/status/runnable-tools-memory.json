@@ -1,0 +1,139 @@
+{
+  "slice": "runnable-tools-memory",
+  "status": "implemented-awaiting-coordinated-validation",
+  "baseline": "9f547ceaba079dee45ee415a430d57fb86fa940d",
+  "edited_paths": [
+    "crates/pi-coding-agent/src/core/extensions/loader.rs",
+    "crates/pi-coding-agent/src/core/extensions/runner.rs",
+    "crates/pi-coding-agent/src/core/extensions/types.rs",
+    "crates/pi-coding-agent/src/core/kernel/bootstrap.rs",
+    "crates/pi-coding-agent/src/core/kernel/repl_manager.rs",
+    "crates/pi-coding-agent/src/core/mcp/mcp_manager.rs",
+    "crates/pi-coding-agent/src/core/memory/jobs.rs",
+    "crates/pi-coding-agent/src/core/memory/project.rs",
+    "crates/pi-coding-agent/src/core/memory/search.rs",
+    "crates/pi-coding-agent/src/core/memory/sharing.rs",
+    "crates/pi-coding-agent/src/core/memory/store.rs",
+    "crates/pi-coding-agent/src/core/resource_loader.rs",
+    "crates/pi-coding-agent/src/core/tools/acp_mcp.rs",
+    "crates/pi-coding-agent/src/core/tools/bash.rs",
+    "crates/pi-coding-agent/src/core/tools/code_preview.rs",
+    "crates/pi-coding-agent/src/core/tools/edit.rs",
+    "crates/pi-coding-agent/src/core/tools/edit_diff.rs",
+    "crates/pi-coding-agent/src/core/tools/ipython.rs",
+    "crates/pi-coding-agent/src/core/tools/output_accumulator.rs",
+    "crates/pi-coding-agent/src/postinstall.rs",
+    "crates/pi-coding-agent/src/cli/native_owned_worker.rs",
+    "crates/pi-coding-agent/src/cli/owned_session_worker.rs",
+    "crates/pi-coding-agent/src/cli/mod.rs",
+    "crates/pi-coding-agent/src/modes/telegram/worker.rs",
+    "crates/pi-ai/src/providers/openai_codex_responses.rs",
+    "crates/pi-ai/src/api_registry.rs",
+    "crates/pi-ai/src/providers/register_builtins.rs",
+    "crates/pi-ai/src/providers/faux.rs",
+    "crates/pi-ai/src/stream.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_protocol.rs"
+  ],
+  "verification": {
+    "git_diff_check": "passed across all edited Rust files; additional kernel queue and Codex test fixes checked",
+    "cargo": "Not run: lead batches builds after active writers stop",
+    "live_python": {
+      "status": "passed",
+      "scope": "Existing read-only Python runtime, system /usr/bin/python3, private scratch cwd, no production venv. Rust bridge awaits coordinated build.",
+      "checks": [
+        "protocol 3 ready",
+        "persistent arithmetic namespace",
+        "Unicode stdout",
+        "list_names",
+        "local host request/reply",
+        "shutdown exit 0"
+      ],
+      "log": ".port-env/tmp/kernel-protocol-smoke/result.json"
+    },
+    "native_worker": "Five local-only tests added; not yet run. New native_owned_worker.rs rustfmt parse passed, scoped git diff --check passed.",
+    "rust_python_bridge": "Harness compiled against lead-built pi_coding_agent rlib. First real invocation timed out after 15 seconds; diagnosed unresolved initial execution queue versus TS Promise.resolve, fixed and added bounded first/follow-up execution regression. Updated library and harness rerun pending. Proof: .port-env/tmp/kernel-protocol-smoke/rust-result.json",
+    "websocket_oom": "Structurally identified and fixed with bounded next-event/EOF assertions plus abort/drop tests. Awaiting coordinated cargo batch; no real provider called."
+  },
+  "runtime_fixes": [
+    "Default ipython factory forwards to real ReplKernelManager lifecycle instead of panicking.",
+    "Fresh REPL execution queue starts resolved, matching TypeScript Promise.resolve(), allowing initial bootstrap and first user cell to run.",
+    "API provider registry uses IndexMap so listing and replacement retain TypeScript Map registration order; registry-mutating tests share a test-only mutex across registry, builtins, stream, and faux modules.",
+    "Memory project notes omit absent hostId; recall and rollback preserve project visibility and private host isolation.",
+    "Sharing compares url::Url schemes without colons; cleared sharing rejects queued writes.",
+    "Bash error outputs use empty fallback per TS catch path.",
+    "Extension commands preserve registration order with IndexMap.",
+    "Existing MCP handlers read live config after ACP clear/settings refresh; no stale session credentials.",
+    "Headless extension UI custom result can resolve None, matching TS undefined instead of a fake component or hanging future.",
+    "Legacy owned-worker route now uses native child processes, raw stdio pipes, OS signals, and an authenticated loopback owner channel whose disconnect triggers existing termination policy.",
+    "RPC native input callbacks serialize worker installation, buffered records, new records, and EOF to retain TypeScript event-loop ordering.",
+    "Codex WebSocket terminal errors yield once and exhaust the stream; dropped readers detach listeners, and abort wakes idle readers. Fixes unbounded collect allocation behind reported provider-test OOM.",
+    "Daemon session input pause commands now require schema revision19 and capability, matching pinned TS SESSION_INPUT_PAUSE_COMMAND; expanded both acquire/release acceptance/rejection coverage.",
+    "Daemon SessionEvent deserialization uses the shared connection helper to restore omitted nested partial snapshots from message_update.event.message."
+  ],
+  "test_corrections": [
+    {
+      "reference": "packages/ai/src/providers/faux.ts:184-242 and packages/ai/src/api-registry.ts:94-97",
+      "reason": "47-character system prompt serializes to ceil(47/4)=12 tokens, not 11; cache and total assertions strengthened. Compaction mismatch is asserted at the registered API's synchronous wrapper, matching TS."
+    },
+    {
+      "reference": "packages/ai/src/providers/openai-codex-responses.ts:542",
+      "reason": "Flat error events include the Codex error prefix. Global WebSocket factory/cache fixture tests now share a test lock so unavailable-transport cases cannot clear the reuse test constructor."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/tools/acp-mcp.ts:7",
+      "reason": "Pattern allows 49 server characters, yielding 64-character tool name; check accepts 49/rejects 50."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/memory/project.ts:13",
+      "reason": "Node URL treats Windows drive letter as scheme; pathname output matches Rust URL parser."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/memory/store.ts:53",
+      "reason": "JS numbers have no integer/float subtype; test numerical schema equality. Missing metadata fails record guard before schema guard, both checked."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/memory/store.ts:269",
+      "reason": "Host isolation fixture must expose same snapshot to another host before trying revision-1 update."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/memory/store.ts:278",
+      "reason": "Search fixture must create distinct content because store rejects exact duplicates."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/memory/jobs.ts:93",
+      "reason": "Source overhead can split each 40000-character entry into two chunks; validate progress per invocation until all chunks complete."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/tools/code-preview.ts:53",
+      "reason": "Redaction runs before descriptor truncation; preserve Bearer space; direct Path expression remains literal; selected effectful child excludes parent control header."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/tools/edit-diff.ts:253",
+      "reason": "Expected diffs now include preserved context and padded line numbers; full unchanged-gap output pinned."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/tools/edit.ts:484",
+      "reason": "Result updates call preview then suppresses duplicate diff output; test verifies call preview and summary."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/tools/truncate.ts:158",
+      "reason": "Trailing empty line counts against maxLines; output tail remains 4 newline for two-line cap."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/tools/ipython.ts:581",
+      "reason": "Erroring fixture first completes successful bootstrap so test reaches intended failing user cell."
+    },
+    {
+      "reference": "packages/coding-agent/src/core/kernel/bootstrap.ts:90",
+      "reason": "Harness list uses compact JSON.stringify; parse and assert complete method list plus protocol version."
+    },
+    {
+      "reference": "packages/coding-agent/src/postinstall.ts",
+      "reason": "Inject setup future into internal hook to assert uv flag before execution and caught failure without invoking real install or requiring Tokio reactor."
+    },
+    {
+      "reference": "packages/coding-agent/src/modes/telegram/store.ts:63 and bridge.ts:31",
+      "reason": "Pairing fixture must start at current time; epoch-zero fixture expired in 1970. Preserve acceptance and bad-hash checks and add correct-but-expired rejection."
+    }
+  ]
+}

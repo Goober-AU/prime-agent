@@ -1,0 +1,33 @@
+{
+ "slice": "ca-extensions-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/resource-loader.ts",
+   "rust": "crates/pi-coding-agent/src/core/resource_loader.rs",
+   "loc": 938
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/herdr-agent-state.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/herdr_agent_state.rs",
+   "loc": 471
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/memory.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/memory.rs",
+   "loc": 314
+  },
+  {
+   "src": "packages/coding-agent/src/core/extensions/builtin/telegram.ts",
+   "rust": "crates/pi-coding-agent/src/core/extensions/builtin/telegram.rs",
+   "loc": 163
+  },
+  {
+   "src": "packages/coding-agent/src/core/mcp/mcp-manager.ts",
+   "rust": "crates/pi-coding-agent/src/core/mcp/mcp_manager.rs",
+   "loc": 249
+  }
+ ],
+ "note": "Remaining files from the ca-extensions slice after its worker stopped. The other 11 files of that slice are already written.",
+ "loc": 2135
+}

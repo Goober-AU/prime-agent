@@ -43,3 +43,9 @@ collect.sh
 
 __pycache__/
 *.pyc
+
+# Rust port (optimus-rust) local artifacts
+/target/
+/.rust-port/
+/.port-env/
+crates/*/target/

@@ -1,0 +1,9 @@
+Command: npm run check
+Exit status: 127
+
+npm warn Unknown project config "min-release-age". This will stop working in the next major version of npm.
+
+> prime-agent@0.9.3 check
+> biome check --write --error-on-warnings . && tsgo --noEmit && npm run check:installer && npm run check:browser-smoke
+
+sh: 1: biome: not found

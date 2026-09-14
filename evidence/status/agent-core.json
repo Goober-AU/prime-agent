@@ -1,0 +1,51 @@
+{
+ "slice": "agent-core",
+ "files": [
+  {
+   "src": "packages/agent/src/types.ts",
+   "rust": "crates/pi-agent-core/src/types.rs",
+   "status": "partial",
+   "functions_mapped": 18,
+   "notes": "types + AgentEvent + AgentLoopConfig ported by worker; unverified compile"
+  },
+  {
+   "src": "packages/agent/src/agent-loop.ts",
+   "rust": "crates/pi-agent-core/src/agent_loop.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "not written; design notes captured from worker"
+  },
+  {
+   "src": "packages/agent/src/agent.ts",
+   "rust": "crates/pi-agent-core/src/agent.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "not written"
+  },
+  {
+   "src": "packages/agent/src/performance-metrics.ts",
+   "rust": "crates/pi-agent-core/src/performance_metrics.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "not written"
+  },
+  {
+   "src": "packages/agent/src/proxy.ts",
+   "rust": "crates/pi-agent-core/src/proxy.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "not written"
+  },
+  {
+   "src": "packages/agent/src/index.ts",
+   "rust": "crates/pi-agent-core/src/mod.rs",
+   "status": "blocked",
+   "functions_mapped": 0,
+   "notes": "not written"
+  }
+ ],
+ "build": "not run",
+ "tests": "not run",
+ "blocked_on": "worker output limit cut mid-slice; pi-ai crate still 0 LOC at the time",
+ "honest_summary": "Only types.ts was ported, and even that is unverified. Five files remain empty stubs. The slice needs a re-spawn with a smaller file budget."
+}

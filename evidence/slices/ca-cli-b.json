@@ -1,0 +1,18 @@
+{
+ "slice": "ca-cli-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/cli/owned-session-worker.ts",
+   "rust": "crates/pi-coding-agent/src/cli/owned_session_worker.rs",
+   "loc": 533
+  },
+  {
+   "src": "packages/coding-agent/src/cli/public-command.ts",
+   "rust": "crates/pi-coding-agent/src/cli/public_command.rs",
+   "loc": 447
+  }
+ ],
+ "note": "Remaining files from ca-cli (the other 16 are written).",
+ "loc": 980
+}

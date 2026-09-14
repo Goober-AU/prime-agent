@@ -1,0 +1,107 @@
+{
+ "slice": "tui-core",
+ "crate": "pi-tui",
+ "files": [
+  {
+   "src": "packages/tui/src/autocomplete.ts",
+   "rust": "crates/pi-tui/src/autocomplete.rs",
+   "loc": 749
+  },
+  {
+   "src": "packages/tui/src/editor-component.ts",
+   "rust": "crates/pi-tui/src/editor_component.rs",
+   "loc": 68
+  },
+  {
+   "src": "packages/tui/src/fullscreen.ts",
+   "rust": "crates/pi-tui/src/fullscreen.rs",
+   "loc": 715
+  },
+  {
+   "src": "packages/tui/src/fuzzy.ts",
+   "rust": "crates/pi-tui/src/fuzzy.rs",
+   "loc": 146
+  },
+  {
+   "src": "packages/tui/src/index.ts",
+   "rust": "crates/pi-tui/src/mod.rs",
+   "loc": 136
+  },
+  {
+   "src": "packages/tui/src/keybindings.ts",
+   "rust": "crates/pi-tui/src/keybindings.rs",
+   "loc": 296
+  },
+  {
+   "src": "packages/tui/src/keys.ts",
+   "rust": "crates/pi-tui/src/keys.rs",
+   "loc": 1381
+  },
+  {
+   "src": "packages/tui/src/kill-ring.ts",
+   "rust": "crates/pi-tui/src/kill_ring.rs",
+   "loc": 44
+  },
+  {
+   "src": "packages/tui/src/latex.ts",
+   "rust": "crates/pi-tui/src/latex.rs",
+   "loc": 834
+  },
+  {
+   "src": "packages/tui/src/mouse.ts",
+   "rust": "crates/pi-tui/src/mouse.rs",
+   "loc": 54
+  },
+  {
+   "src": "packages/tui/src/render-cache.ts",
+   "rust": "crates/pi-tui/src/render_cache.rs",
+   "loc": 25
+  },
+  {
+   "src": "packages/tui/src/selection-metadata.ts",
+   "rust": "crates/pi-tui/src/selection_metadata.rs",
+   "loc": 184
+  },
+  {
+   "src": "packages/tui/src/slash-command-context.ts",
+   "rust": "crates/pi-tui/src/slash_command_context.rs",
+   "loc": 46
+  },
+  {
+   "src": "packages/tui/src/stdin-buffer.ts",
+   "rust": "crates/pi-tui/src/stdin_buffer.rs",
+   "loc": 399
+  },
+  {
+   "src": "packages/tui/src/terminal-colors.ts",
+   "rust": "crates/pi-tui/src/terminal_colors.rs",
+   "loc": 206
+  },
+  {
+   "src": "packages/tui/src/terminal-image.ts",
+   "rust": "crates/pi-tui/src/terminal_image.rs",
+   "loc": 423
+  },
+  {
+   "src": "packages/tui/src/terminal.ts",
+   "rust": "crates/pi-tui/src/terminal.rs",
+   "loc": 614
+  },
+  {
+   "src": "packages/tui/src/tui.ts",
+   "rust": "crates/pi-tui/src/tui.rs",
+   "loc": 1992
+  },
+  {
+   "src": "packages/tui/src/undo-stack.ts",
+   "rust": "crates/pi-tui/src/undo_stack.rs",
+   "loc": 27
+  },
+  {
+   "src": "packages/tui/src/utils.ts",
+   "rust": "crates/pi-tui/src/utils.rs",
+   "loc": 1382
+  }
+ ],
+ "loc": 9721
+}

@@ -1,0 +1,47 @@
+{
+ "slice": "ca-session",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/core/session-action-store.ts",
+   "rust": "crates/pi-coding-agent/src/core/session_action_store.rs",
+   "loc": 435
+  },
+  {
+   "src": "packages/coding-agent/src/core/session-cwd.ts",
+   "rust": "crates/pi-coding-agent/src/core/session_cwd.rs",
+   "loc": 59
+  },
+  {
+   "src": "packages/coding-agent/src/core/session-file-actions.ts",
+   "rust": "crates/pi-coding-agent/src/core/session_file_actions.rs",
+   "loc": 74
+  },
+  {
+   "src": "packages/coding-agent/src/core/session-id.ts",
+   "rust": "crates/pi-coding-agent/src/core/session_id.rs",
+   "loc": 34
+  },
+  {
+   "src": "packages/coding-agent/src/core/session-import-errors.ts",
+   "rust": "crates/pi-coding-agent/src/core/session_import_errors.rs",
+   "loc": 9
+  },
+  {
+   "src": "packages/coding-agent/src/core/session-lease.ts",
+   "rust": "crates/pi-coding-agent/src/core/session_lease.rs",
+   "loc": 359
+  },
+  {
+   "src": "packages/coding-agent/src/core/session-resolver.ts",
+   "rust": "crates/pi-coding-agent/src/core/session_resolver.rs",
+   "loc": 147
+  },
+  {
+   "src": "packages/coding-agent/src/core/session-stats.ts",
+   "rust": "crates/pi-coding-agent/src/core/session_stats.rs",
+   "loc": 20
+  }
+ ],
+ "loc": 1137
+}

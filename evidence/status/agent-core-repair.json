@@ -1,0 +1,52 @@
+{
+ "slice": "agent-core-repair",
+ "crate": "pi-agent-core",
+ "files": [
+  {
+   "src": "packages/agent/src/agent-loop.ts",
+   "rust": "crates/pi-agent-core/src/agent_loop.rs",
+   "status": "ported",
+   "functions_mapped": 40,
+   "notes": "Removed the pi_ai_shim import; imports real pi_ai::types / pi_ai::utils (event_stream, validation). AgentMessage::Assistant/ToolResult variants replaced with AgentMessage::Message(Message::Assistant|ToolResult) + message.role(). AssistantMessage has no tool_calls field; tool calls come from content via ContentBlock::as_tool_call (message_tool_calls). StopReason/ServiceTier/Model/ProviderUsageObservation now come from pi-ai. agentLoop returns the real EventStream<AgentEvent, AgentMessage[]>; the sink pushes into it. streamFn is async-awaited. The two WeakMaps from TypeScript are process-local HashMaps keyed by the terminal message's serialized form (documented in the file). providerMetricUsage/safeRecordPerformanceMetric live in performance_metrics.rs (kept as written by the earlier worker). maybePromiseWithAbort -> maybe_abortable, maybePromiseWithAbort is 1:1."
+  },
+  {
+   "src": "packages/agent/src/agent.ts",
+   "rust": "crates/pi-agent-core/src/agent.rs",
+   "status": "ported",
+   "functions_mapped": 29,
+   "notes": "Agent/PendingMessageQueue/AgentContinueError/AgentOptions ported. createMutableAgentState -> AgentState::default() in types.rs (documented there). The TS accessor properties tools/messages are plain AgentState fields plus Agent::state()/set_state()/update_state(); assignment copies the top-level array. subscribe() returns UnsubscribeHandle. runWithLifecycle uses CancellationToken + Notify for waitForIdle. OnPayload/OnResponse are the real pi-ai callback types."
+  },
+  {
+   "src": "packages/agent/src/proxy.ts",
+   "rust": "crates/pi-agent-core/src/proxy.rs",
+   "status": "ported",
+   "functions_mapped": 4,
+   "notes": "ProxyMessageEventStream, ProxyAssistantMessageEvent, ProxySerializableStreamOptions, ProxyStreamOptions, buildProxyRequestOptions, processProxyEvent, streamProxy. fetch -> reqwest, ReadableStreamDefaultReader -> response.bytes_stream(), AbortSignal -> CancellationToken. The hidden tool-call partialJson is kept beside the partial message so toolcall_end can drop it, exactly like the TS 'delete content.partialJson'. No real network call is made by any test."
+  },
+  {
+   "src": "packages/agent/src/performance-metrics.ts",
+   "rust": "crates/pi-agent-core/src/performance_metrics.rs",
+   "status": "ported",
+   "functions_mapped": 9,
+   "notes": "Was 7 compile errors: provider_metric_usage read pi-ai's Option<Option<f64>>/Option<Option<bool>> as Option<f64>/Option<bool>. Fixed with the typeof-based token()/flag() helpers, preserving 'absent vs explicit null'. PerformanceMetricMeasurements moved BTreeMap -> IndexMap so the serialized key order matches the TS object literal. performanceMetricUsageFromAssistant uses AssistantMessage::new(...)."
+  },
+  {
+   "src": "packages/agent/src/types.ts",
+   "rust": "crates/pi-agent-core/src/types.rs",
+   "status": "ported",
+   "functions_mapped": 18,
+   "notes": "Deleted the whole 1122-line temporary `pub mod pi_ai_shim` (it was the root cause: 13 pi-ai paths resolved to it) and the `use self::pi_ai_shim as pi_ai;` alias. ContentBlock::text() now uses pi_ai TextContent::new (no r#type field). Added the TypeScript accessor fields to AgentState (tools: Option<Vec<AgentTool>>, messages: Vec<AgentMessage>) and its default from createMutableAgentState."
+  },
+  {
+   "src": "packages/agent/src/index.ts",
+   "rust": "crates/pi-agent-core/src/mod.rs",
+   "status": "ported",
+   "functions_mapped": 0,
+   "notes": "Was 0 bytes. Now re-exports agent, agent_loop, performance_metrics, proxy, types, matching the five `export * from` lines."
+  }
+ ],
+ "build": "cargo check -p pi-agent-core: ok",
+ "tests": "cargo test -p pi-agent-core: 32 passed / 0 failed",
+ "blocked_on": "Nothing in this slice. Two integration notes for the pi-coding-agent slice (not edited here): (1) crates/pi-coding-agent/src/core/agent_session.rs declares its own AgentHandle trait; my Agent::subscribe takes the TypeScript listener shape Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<'static, ()>>, and continue_ returns Result<(), AgentContinueError> (Display + Error) rather than Result<(), String>. (2) AgentState accessor semantics differ: the coding agent must call Agent::state()/set_state() instead of holding a live reference.",
+ "honest_summary": "All six files of the slice now exist and are real ports, not stubs: the shim is gone, agent_loop.rs/agent.rs/proxy.rs/mod.rs are written from the TypeScript, and the crate compiles clean with 32 passing tests. The repairs were 68 -> 0 errors, and cargo check/test are both green. Two honest caveats: the TypeScript WeakMaps in agent-loop.ts have no Rust identity map, so request correlations are keyed by the terminal message's serialized form (documented in the file, behavioural difference only for hosts that mutate a terminal message after receiving it); and the parallel tool batch in agent_loop.rs uses futures::future::join_all, which keeps the same completion/source-order result but is not a byte-for-byte copy of Promise.all scheduling. I did not touch any file outside the slice, ran git for nothing, and made no network calls."
+}

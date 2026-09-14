@@ -1,0 +1,46 @@
+{
+ "objective": "Rust port of the TS app layer; drive pi-coding-agent to compile, run tests, push, open PR",
+ "status": "DELIVERED",
+ "compile": {
+  "gate": "gate43",
+  "unique_errors": 0,
+  "warnings": 708,
+  "finished": true,
+  "commit": "30e90b9f3"
+ },
+ "workspace_check_locked": "exit 0",
+ "tests": {
+  "passed": 1890,
+  "failed": 178,
+  "executed": 2068,
+  "command": "cargo test -p pi-coding-agent --tests --no-fail-fast",
+  "first_ever": true
+ },
+ "pr": {
+  "number": 13,
+  "url": "https://github.com/telemusai/optimus-agent/pull/13",
+  "draft": true,
+  "head": "Goober-AU:fix/rust-port-completion",
+  "base": "main",
+  "files": 726
+ },
+ "head_commit": "94231756050e085848cd5f0d90b8b9accbdf3a34",
+ "fork": "Goober-AU/prime-agent",
+ "blocked_on_seams": {
+  "count": 26,
+  "where": [
+   "core/agent_session_runtime/daemon_adapter.rs",
+   "core/agent_session_runtime/in_process_adapter.rs"
+  ],
+  "reason": "owner lives on AgentSessionRuntime (not held) or is private"
+ },
+ "remaining_work": [
+  "178 failing tests",
+  "TS corpus parity (527 TS test files)",
+  "resume docs already written"
+ ],
+ "subagent_H": {
+  "name": "repairH-adapters",
+  "outcome": "stopped, zero project-file writes in ~6h; lead completed its file"
+ }
+}

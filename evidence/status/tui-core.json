@@ -1,0 +1,149 @@
+{
+ "slice": "tui-core",
+ "files": [
+  {
+   "src": "packages/tui/src/autocomplete.ts",
+   "rust": "crates/pi-tui/src/autocomplete.rs",
+   "status": "ported",
+   "functions_mapped": 47,
+   "notes": "Full port: PATH_DELIMITERS/escapeRegex/buildFdPathQuery/findLastDelimiter/extractQuotedPrefix/parsePathPrefix/buildCompletionValue/walkDirectoryWithFd/CombinedAutocompleteProvider. AbortSignal is a port-local struct (no JS AbortController); fd is invoked via std::process::Command instead of spawn()."
+  },
+  {
+   "src": "packages/tui/src/editor-component.ts",
+   "rust": "crates/pi-tui/src/editor_component.rs",
+   "status": "ported",
+   "functions_mapped": 25,
+   "notes": "EditorComponent trait mirrors the TS interface; every optional member is a defaulted trait method. Component::as_focusable() is the Rust stand-in for the `focused` property test."
+  },
+  {
+   "src": "packages/tui/src/fullscreen.ts",
+   "rust": "crates/pi-tui/src/fullscreen.rs",
+   "status": "ported",
+   "functions_mapped": 56,
+   "notes": "Full port of FullscreenViewport incl. transcript/table/frame selection, row-diff paint, scroll/follow state."
+  },
+  {
+   "src": "packages/tui/src/fuzzy.ts",
+   "rust": "crates/pi-tui/src/fuzzy.rs",
+   "status": "ported",
+   "functions_mapped": 8,
+   "notes": "Ported earlier in this slice."
+  },
+  {
+   "src": "packages/tui/src/index.ts",
+   "rust": "crates/pi-tui/src/mod.rs",
+   "status": "ported",
+   "functions_mapped": 1,
+   "notes": "index.ts is a pure re-export surface; mod.rs re-exports the same names from their modules."
+  },
+  {
+   "src": "packages/tui/src/keybindings.ts",
+   "rust": "crates/pi-tui/src/keybindings.rs",
+   "status": "ported",
+   "functions_mapped": 21,
+   "notes": "Full port incl. TUI_KEYBINDINGS, conflict detection, user overrides and thread-local get/setKeybindings."
+  },
+  {
+   "src": "packages/tui/src/keys.ts",
+   "rust": "crates/pi-tui/src/keys.rs",
+   "status": "ported",
+   "functions_mapped": 65,
+   "notes": "Full port of kitty + legacy key parsing; `Key` constant is exposed as the `key` module of &str consts (Rust cannot use `return` as a bare identifier)."
+  },
+  {
+   "src": "packages/tui/src/kill-ring.ts",
+   "rust": "crates/pi-tui/src/kill_ring.rs",
+   "status": "ported",
+   "functions_mapped": 9,
+   "notes": "Ported earlier in this slice."
+  },
+  {
+   "src": "packages/tui/src/latex.ts",
+   "rust": "crates/pi-tui/src/latex.rs",
+   "status": "ported",
+   "functions_mapped": 28,
+   "notes": "Full port: SYMBOLS/ESCAPES/SPACING/ACCENTS/SUPERSCRIPTS/SUBSCRIPTS/COMMON_FRACTIONS/OPERATOR_NAMES/TEXT_COMMANDS/MATH_FONT_COMMANDS/IGNORED_COMMANDS + recursive parser + collapse passes."
+  },
+  {
+   "src": "packages/tui/src/mouse.ts",
+   "rust": "crates/pi-tui/src/mouse.rs",
+   "status": "ported",
+   "functions_mapped": 7,
+   "notes": "Ported earlier in this slice."
+  },
+  {
+   "src": "packages/tui/src/render-cache.ts",
+   "rust": "crates/pi-tui/src/render_cache.rs",
+   "status": "ported",
+   "functions_mapped": 5,
+   "notes": "Ported earlier in this slice."
+  },
+  {
+   "src": "packages/tui/src/selection-metadata.ts",
+   "rust": "crates/pi-tui/src/selection_metadata.rs",
+   "status": "ported",
+   "functions_mapped": 13,
+   "notes": "Full port of the marker encode/parse + region extraction; `table: object` becomes a usize identity supplied by the caller."
+  },
+  {
+   "src": "packages/tui/src/slash-command-context.ts",
+   "rust": "crates/pi-tui/src/slash_command_context.rs",
+   "status": "ported",
+   "functions_mapped": 5,
+   "notes": "Ported earlier in this slice."
+  },
+  {
+   "src": "packages/tui/src/stdin-buffer.ts",
+   "rust": "crates/pi-tui/src/stdin_buffer.rs",
+   "status": "ported",
+   "functions_mapped": 29,
+   "notes": "Full port of sequence completeness, bracketed paste, raw multiline paste and kitty printable dedup. The TS EventEmitter + setTimeout flush becomes take_events()/flush_events() driven by the owner."
+  },
+  {
+   "src": "packages/tui/src/terminal-colors.ts",
+   "rust": "crates/pi-tui/src/terminal_colors.rs",
+   "status": "ported",
+   "functions_mapped": 27,
+   "notes": "Full port of rgbTo256/rgbToHex/blendColor/bestAnsiColor/OSC parsing/COLORFGBG detection + listener registry."
+  },
+  {
+   "src": "packages/tui/src/terminal-image.ts",
+   "rust": "crates/pi-tui/src/terminal_image.rs",
+   "status": "ported",
+   "functions_mapped": 30,
+   "notes": "Full port of capability detection, kitty/iTerm2 encoders, dimension parsers, renderImage, hyperlink, imageFallback."
+  },
+  {
+   "src": "packages/tui/src/terminal.ts",
+   "rust": "crates/pi-tui/src/terminal.rs",
+   "status": "ported",
+   "functions_mapped": 68,
+   "notes": "Terminal trait + ProcessTerminal. setRawMode uses crossterm; the resize/input callbacks are delivered through the TUI input queue (see tui.rs notes)."
+  },
+  {
+   "src": "packages/tui/src/tui.ts",
+   "rust": "crates/pi-tui/src/tui.rs",
+   "status": "ported",
+   "functions_mapped": 156,
+   "notes": "Full port of Component/Container/Focusable/CURSOR_MARKER/TUI incl. overlay stack, resolveOverlayLayout, compositeOverlays, fullscreen dock, inline differ, kitty image bookkeeping. OverlayHandle records intent in shared cells and TUI::sync_overlays() applies it (Rust cannot alias the owner); the nextTick/setTimeout render schedule is exposed as schedule_render()/run_pending_render() for the owner loop; terminal callbacks enqueue into a thread-local queue drained by TUI::drain_input()."
+  },
+  {
+   "src": "packages/tui/src/undo-stack.ts",
+   "rust": "crates/pi-tui/src/undo_stack.rs",
+   "status": "ported",
+   "functions_mapped": 9,
+   "notes": "Ported earlier in this slice."
+  },
+  {
+   "src": "packages/tui/src/utils.ts",
+   "rust": "crates/pi-tui/src/utils.rs",
+   "status": "ported",
+   "functions_mapped": 71,
+   "notes": "Full port of the width/ANSI/wrap/slice/extract helpers incl. AnsiCodeExtractor/AnsiCodeTracker, get-east-asian-width tables, and the URL/hyperlink helpers."
+  }
+ ],
+ "build": "cargo check -p pi-tui: exit 0, 0 errors, 11 warnings (all warnings are in port-tui-components' files: components/editor.rs, components/markdown.rs).",
+ "tests": "cargo test -p pi-tui: 174 passed, 0 failed, 0 ignored.",
+ "blocked_on": "None. Two interface notes for other slices: (1) crate::tui::OverlayHandle::hide() now takes &self and is applied by TUI::sync_overlays(); (2) show_overlay(component: Rc<RefCell<dyn Component>>, options) replaces the earlier (Box<dyn Component>, options) shape.",
+ "honest_summary": "All 20 tui-core files are ported and the crate compiles and passes 174 tests. Behaviour is preserved for the parsing, layout, diffing and rendering paths; the JavaScript runtime pieces that have no direct Rust equivalent are adapted rather than copied: the nextTick/setTimeout render schedule is exposed as explicit schedule_render()/run_pending_render() calls, terminal input/resize callbacks are queued and drained by the owner, overlay handles record intent in shared cells applied by sync_overlays(), and AbortSignal is a small port-local flag type. No TypeScript function is missing; a few helpers are private instead of public. Not verified: real terminal interaction and the fullscreen dock against a live terminal."
+}

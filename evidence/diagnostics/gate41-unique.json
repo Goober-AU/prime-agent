@@ -1,0 +1,62 @@
+[
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  785,
+  "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs:785:18: 785:28}` to be a future that resolves to `Result<f64, String>`, but it resolves to `Result<usize, String>`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  785,
+  "mismatched types"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  791,
+  "this method takes 3 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  821,
+  "arguments to this method are incorrect"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  929,
+  "this method takes 2 arguments but 1 argument was supplied"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  937,
+  "method `refine` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  957,
+  "expected `{async block@crates\\pi-coding-agent\\src\\core\\agent_session_runtime\\daemon_adapter.rs:957:18: 957:28}` to be a future that resolves to `Result<Value, String>`, but it resolves to `Result<SetRlmMaxDepthResult, String>`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  957,
+  "non-primitive cast: `serde_json::Value` as `i64`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1001,
+  "no method named `text` found for reference `&pi_ai::index::Message` in the current scope"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1011,
+  "method `navigate_tree` has an incompatible type for trait"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1017,
+  "no field `editor_text` on type `extensions::types::NavigateTreeOptions`"
+ ],
+ [
+  "core/agent_session_runtime/daemon_adapter.rs",
+  1092,
+  "`()` is not a future"
+ ]
+]

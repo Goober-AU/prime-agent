@@ -1,0 +1,29 @@
+{
+ "source": "worker port-ca-daemon-a report + lead verification",
+ "heads_up_1": {
+  "issue": "daemon_client.rs contains an 83KB inner `pub(crate) mod protocol` duplicating daemon_protocol.rs",
+  "verified": "yes - TS has ZERO export overlap between daemon-client.ts and daemon-protocol.ts; the client IMPORTS the protocol items",
+  "impact": "two competing definitions of DaemonCommand/DaemonResponse/constants in one crate",
+  "fix": "ca-daemon-consolidate slice: delete the inner module, repoint to super::daemon_protocol"
+ },
+ "heads_up_2": {
+  "issue": "heartbeat_catalog.rs and saved_session_catalog.rs construct a DaemonErrorResponse that does not exist",
+  "verified": "yes - daemon_errors.rs has no DaemonErrorResponse; deserialize_daemon_error already takes &DaemonResponse",
+  "fix": "ca-daemon-consolidate slice: call deserialize_daemon_error(response) directly"
+ },
+ "class_scan": {
+  "method": "count pub struct/enum/trait names declared in more than one file",
+  "duplicate_names": 209,
+  "within_single_crate": 172,
+  "top_offenders": [
+   "core/extensions/types.rs 38",
+   "modes/interactive/interactive_mode_services.rs 36",
+   "core/agent_session.rs 31",
+   "modes/agent_connection/types.rs 26",
+   "modes/daemon/daemon_protocol.rs 19"
+  ],
+  "why": "deliberate 'slice plumbing' seam: each slice declared local stand-ins because the owning slice was still empty",
+  "risk": "acceptable while files are not yet cross-referenced, but each seam MUST be collapsed onto the real module before the final build",
+  "action": "tracked as queue item ca-daemon-consolidate (daemon) and as a follow-up consolidation pass per seam"
+ }
+}

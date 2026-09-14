@@ -1,0 +1,22 @@
+{
+ "slice": "ca-daemon-a",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-errors.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_errors.rs",
+   "loc": 65
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-protocol.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_protocol.rs",
+   "loc": 1496
+  },
+  {
+   "src": "packages/coding-agent/src/modes/daemon/daemon-runtime-identity.ts",
+   "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_runtime_identity.rs",
+   "loc": 23
+  }
+ ],
+ "loc": 1584
+}

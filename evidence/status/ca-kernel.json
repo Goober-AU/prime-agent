@@ -1,0 +1,58 @@
+{
+  "slice": "ca-kernel",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/core/kernel/boot-gate.ts",
+      "rust": "crates/pi-coding-agent/src/core/kernel/boot_gate.rs",
+      "status": "ported",
+      "functions_mapped": 4,
+      "notes": "resolve_kernel_boot_concurrency, with_kernel_boot_permit, lazy semaphore. Local FIFO semaphore stand-in (utils/semaphore.ts not landed). Not compiled yet."
+    },
+    {
+      "src": "packages/coding-agent/src/core/kernel/bootstrap-cli.ts",
+      "rust": "crates/pi-coding-agent/src/core/kernel/bootstrap_cli.rs",
+      "status": "blocked",
+      "functions_mapped": 0,
+      "notes": "not written"
+    },
+    {
+      "src": "packages/coding-agent/src/core/kernel/bootstrap.ts",
+      "rust": "crates/pi-coding-agent/src/core/kernel/bootstrap.rs",
+      "status": "partial",
+      "functions_mapped": 33,
+      "notes": "ensure_kernel_python, batch shim, TOML dep graph, runtime identity hash (local SHA-256), venv bootstrap, lock. Local stand-ins: child-process, dir-lock, getPackageDir, sha2. Not compiled yet."
+    },
+    {
+      "src": "packages/coding-agent/src/core/kernel/index.ts",
+      "rust": "crates/pi-coding-agent/src/core/kernel/mod.rs",
+      "status": "ported",
+      "functions_mapped": 0,
+      "notes": "module list unchanged"
+    },
+    {
+      "src": "packages/coding-agent/src/core/kernel/repl-manager.ts",
+      "rust": "crates/pi-coding-agent/src/core/kernel/repl_manager.rs",
+      "status": "blocked",
+      "functions_mapped": 0,
+      "notes": "not written - largest file (1913 LOC)"
+    },
+    {
+      "src": "packages/coding-agent/src/core/kernel/shared.ts",
+      "rust": "crates/pi-coding-agent/src/core/kernel/shared.rs",
+      "status": "ported",
+      "functions_mapped": 22,
+      "notes": "constants, error, abort signal, deferred, parsers, KernelClient trait, live-kernel registry, metric helpers. Not compiled yet."
+    },
+    {
+      "src": "packages/coding-agent/src/core/kernel/state-snapshot.ts",
+      "rust": "crates/pi-coding-agent/src/core/kernel/state_snapshot.rs",
+      "status": "ported",
+      "functions_mapped": 8,
+      "notes": "paths, constants, result structs. Not compiled yet."
+    }
+  ],
+  "build": "not run (lead rule: one check at end; output limit hit before the single check)",
+  "tests": "not run; 30+ #[cfg(test)] cases written across the 4 finished files, never executed",
+  "blocked_on": "output limit: repl_manager.rs and bootstrap_cli.rs unwritten; needs pi-agent-core::performance_metrics, pi-ai::session_resources, pi-coding-agent::utils::{child_process,semaphore,dir_lock}, core::orphan_process_journal, config::get_package_dir, core::skills::PythonSkillRuntimeInfo; workspace lacks uuid/sha2/tokio-util deps",
+  "honest_summary": "4 of 7 files are written at their mapped paths with 1:1 function/constant mapping and inline unit tests; nothing has been compiled or tested, so compile status is unknown and errors are likely (bootstrap.rs has the highest risk). repl_manager.rs (1913 LOC) and bootstrap_cli.rs (13 LOC) are not written. No cargo check or cargo test was run in this turn."
+}

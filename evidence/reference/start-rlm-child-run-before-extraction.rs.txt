@@ -1,0 +1,101 @@
+// Reference only: incomplete PR #11 method moved out of AgentSession during
+// integration. No replacement was completed before the user stopped work.
+// This file is not compiled. Port the real TS child prompting/settlement flow;
+// do not treat this old placeholder as a working implementation.
+
+    /// `_startRlmChildRun(options)`.
+    async fn start_rlm_child_run(
+        self: &Arc<Self>,
+        options: RlmChildRunOptions,
+    ) -> Result<RlmChildAgentSnapshot, String> {
+        let child_id = uuid::Uuid::new_v4().to_string();
+        let session_dir = match options.session_dir.clone() {
+            Some(dir) => dir,
+            None => self.create_child_rlm_session_dir()?,
+        };
+        let run = RlmChildRun {
+            id: child_id.clone(),
+            prompt: options.prompt.clone(),
+            session_name: options
+                .session_name
+                .clone()
+                .unwrap_or_else(|| rlm_child_label(&options.prompt)),
+            session_dir: session_dir.clone(),
+            model: options.model.clone(),
+            status: RLM_CHILD_AGENT_STATUS_QUEUED.to_string(),
+            duration_ms: None,
+            answer_preview: None,
+            tool_use_count: 0.0,
+            activity: None,
+            error: None,
+            abort: Arc::new(noop_rlm_child_abort()),
+            publication: create_agent_message_deferred(),
+            settlement: create_agent_message_deferred(),
+            session: None,
+            settled: false,
+            suppress_terminal_notice: None,
+            abandoned_for_quiescence: None,
+            detached_deletion: None,
+            deletion_cleanup: None,
+            deletion_cleanup_observer: None,
+            deletion_reservation: create_agent_message_deferred(),
+            deletion_cleanup_failed: None,
+            deletion_run_finished: None,
+            deletion_notice: None,
+            deletion_failure_notice: None,
+            deletion_needs_completion_notice: None,
+            complete_deletion: None,
+            report_deletion_cleanup_failure: None,
+            emit_update: None,
+            last_emitted_update: None,
+            unsubscribe: None,
+        };
+        let shared = Arc::new(Mutex::new(run.clone()));
+        self.active_rlm_child_runs
+            .lock()
+            .unwrap()
+            .insert(child_id.clone(), Arc::clone(&shared));
+        self.unsettled_rlm_child_runs
+            .lock()
+            .unwrap()
+            .push(Arc::clone(&shared));
+        self.emit(AgentSessionEvent::RlmChildUpdate {
+            child: self.rlm_child_snapshot_for_run(&run),
+        });
+
+        let runtime = self
+            .create_rlm_subagent_runtime(RlmSubagentRuntimeOptionsInput {
+                prompt: options.prompt.clone(),
+                session_name: Some(run.session_name.clone()),
+                model: options
+                    .model
+                    .as_ref()
+                    .map(|model| model.id.clone()),
+                thinking_level: options.thinking_level.clone(),
+                session_dir: Some(session_dir.clone()),
+            })
+            .await;
+        match runtime {
+            Ok(runtime) => {
+                {
+                    let mut run = shared.lock().unwrap();
+                    run.status = RLM_CHILD_AGENT_STATUS_RUNNING.to_string();
+                    run.session_dir = runtime.handle.session_dir.clone();
+                }
+                let snapshot = self.rlm_child_snapshot_for_run(&shared.lock().unwrap().clone());
+                self.emit(AgentSessionEvent::RlmChildUpdate {
+                    child: snapshot.clone(),
+                });
+                Ok(snapshot)
+            }
+            Err(error) => {
+                {
+                    let mut run = shared.lock().unwrap();
+                    run.status = RLM_CHILD_AGENT_STATUS_ERROR.to_string();
+                    run.error = Some(error.clone());
+                }
+                self.remove_rlm_subagent_tracking(&child_id, None);
+                Err(error)
+            }
+        }
+    }

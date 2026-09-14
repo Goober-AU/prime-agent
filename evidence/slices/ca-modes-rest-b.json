@@ -1,0 +1,18 @@
+{
+ "slice": "ca-modes-rest-b",
+ "crate": "pi-coding-agent",
+ "files": [
+  {
+   "src": "packages/coding-agent/src/modes/acp/acp-mode.ts",
+   "rust": "crates/pi-coding-agent/src/modes/acp/acp_mode.rs",
+   "loc": 1109
+  },
+  {
+   "src": "packages/coding-agent/src/modes/print-mode.ts",
+   "rust": "crates/pi-coding-agent/src/modes/print_mode.rs",
+   "loc": 172
+  }
+ ],
+ "note": "Remaining files from ca-modes-rest (the other 24 are written). acp-mode.ts is 1109 LOC: work it in TWO sequential passes (read lines 1-600, append their Rust; then read 600-end, append the rest) instead of one giant pass, because workers that try the whole file at once die at their output limit with nothing written. print-mode.ts (172 LOC) is a single pass.",
+ "loc": 1281
+}

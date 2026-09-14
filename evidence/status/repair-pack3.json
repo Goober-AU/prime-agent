@@ -1,0 +1,37 @@
+{
+ "tag": "pack3",
+ "files": [
+  "crates/pi-coding-agent/src/main_entry.rs",
+  "crates/pi-coding-agent/src/modes/daemon/daemon_supervisor.rs",
+  "crates/pi-coding-agent/src/modes/interactive/interactive_mode_services.rs",
+  "crates/pi-coding-agent/src/modes/daemon/daemon_session_summarizer.rs",
+  "crates/pi-coding-agent/src/modes/interactive/auth_flows.rs",
+  "crates/pi-coding-agent/src/modes/daemon/heartbeat_catalog.rs",
+  "crates/pi-coding-agent/src/modes/daemon/daemon_socket.rs",
+  "crates/pi-coding-agent/src/modes/daemon/daemon_protocol.rs",
+  "crates/pi-coding-agent/src/core/auth_storage.rs",
+  "crates/pi-coding-agent/src/core/tools/edit.rs"
+ ],
+ "errors_before": 15,
+ "errors_after": 0,
+ "fixed": [
+  "daemon_session_summarizer.rs:13 - moved ImageOrTextContent, Message, UserContent from pi_agent_core::types to pi_ai::types (their real owner); pi_agent_core re-exports neither.",
+  "auth_flows.rs:15/306 - replaced the missing const BUILT_IN_PROVIDER_DISPLAY_NAMES with the owner's accessor built_in_provider_display_names() from core::provider_display_names.",
+  "auth_flows.rs:163-168 - removed the local duplicate PrimeTeam struct and re-exported the owner type core::prime_inference_auth::PrimeTeam.",
+  "interactive_mode_services.rs:755 - get_provider_display_name no longer calls a non-existent free function; it now reads the owner map built_in_provider_display_names() and falls back to the provider id.",
+  "interactive_mode_services.rs:771 - returned the owner type pi_ai::utils::oauth::types::OAuthProviderInterface instead of the non-public re-export path through core::auth_storage.",
+  "interactive_mode_services.rs:797/801 - aligned to the real auth_storage signatures: get returns Option<Option<PrimeTeamCredential>>, set takes Option<core::prime_inference_auth::PrimeTeam>.",
+  "daemon_supervisor.rs:57/58 - protocol imports now come from daemon_protocol (the owner of those items); DaemonHello still comes from daemon_client (its owner).",
+  "daemon_supervisor.rs:61-64 - classify_session_roster_status and is_session_summary_busy imported from agent_roster (their real owner); only the two genuinely daemon_session_list items stay in that import.",
+  "daemon_socket.rs:399 - can_connect_to_unix_socket is now cfg(unix); a cfg(not(unix)) stub returns false because Windows uses named pipes and every caller already returns early when process_platform() is win32.",
+  "daemon_protocol.rs:758 - DaemonCustomMessageBody.content uses pi_agent_core::types::CustomMessageContent; crate::core::messages only imports it privately.",
+  "auth_storage.rs:385 - LockFn no longer passes a lifetime to pi_ai::types::BoxFuture, which is already 'static and takes no lifetime parameter.",
+  "edit.rs:597 - StripBomResult destructuring now uses the path of the struct itself (super::edit_diff::StripBomResult) instead of the invalid strip_bom::StripBomResult module path."
+ ],
+ "not_mine": [
+  "All remaining crate errors live in files outside my list, mainly core/agent_session.rs (65), modes/daemon/daemon_worker_client.rs (8), cli/daemon_command.rs, core/extensions/types.rs, modes/daemon/daemon_mode.rs, core/tools/bash.rs, modes/agents_view/agents_view_mode.rs, core/package_manager.rs, core/prompt_templates.rs and others.",
+  "Several concurrent writers were editing my files during this task (main_entry.rs, heartbeat_catalog.rs, daemon_supervisor.rs and daemon_client.rs changed on disk mid-run); their edits already cleared some errors I had been assigned.",
+  "I also hit transient syntax errors in other agents' files (modes/daemon/daemon_mode.rs and modes/agent_connection/daemon_agent_connection.rs) that blocked the crate check; those are not mine and were not touched."
+ ],
+ "honest_summary": "I started with 15 errors in my ten files and ended with 0 errors in those files. Every fix was a small ownership or signature correction: I imported types from their real owner module instead of the private local re-export, aligned two auth_storage call signatures, added a cfg(not(unix)) stub for the Unix socket probe, and fixed one invalid struct-path pattern. I did not rewrite any file and I did not touch the 106 remaining errors, which are all in other files. Note that other agents edited several of my assigned files concurrently, so some of the 15 starting errors were already gone before I reached them; my report counts the before/after totals for my file set as measured at the start and at my last clean check."
+}
