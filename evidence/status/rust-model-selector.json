@@ -1,0 +1,104 @@
+{
+  "slice": "rust-model-selector",
+  "reference_commit": "9b158f794bfb2126617959827c7313ed3b9e5050",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/model-selector.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/model_selector.rs",
+      "status": "ported",
+      "notes": "Rendered panel/search/rows/focus and responsive layout connected; current, configured-provider and recent ordering; scope and exact/fuzzy ranking; refresh preserves query and selection. Uses injected connection catalog in the native host."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+      "status": "partial",
+      "notes": "Model picker integration and /model search/direct-reference handling completed, including login prompting, selection persistence and session-state update. This slice does not implement the entire TypeScript interactive mode or combined Providers/Models/MCP configuration tabs."
+    }
+  ],
+  "build": "cargo check --locked -p pi-coding-agent: passed; existing port warnings remain",
+  "rust_tests": [
+    {
+      "name": "native_cli",
+      "exitCode": 0,
+      "signal": null,
+      "seconds": 0.571,
+      "summaries": [
+        "ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s"
+      ]
+    },
+    {
+      "name": "pi_coding_agent",
+      "exitCode": 0,
+      "signal": null,
+      "seconds": 19.791,
+      "summaries": [
+        "ok. 2173 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 19.75s"
+      ]
+    },
+    {
+      "name": "pi_tui",
+      "exitCode": 0,
+      "signal": null,
+      "seconds": 0.271,
+      "summaries": [
+        "ok. 217 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s"
+      ]
+    },
+    {
+      "name": "pi_agent_core",
+      "exitCode": 0,
+      "signal": null,
+      "seconds": 0.049,
+      "summaries": [
+        "ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s"
+      ]
+    },
+    {
+      "name": "pi_ai",
+      "exitCode": 0,
+      "signal": null,
+      "seconds": 0.222,
+      "summaries": [
+        "ok. 668 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s"
+      ]
+    }
+  ],
+  "typescript_reference_tests": {
+    "command": "vitest run test/model-selector-actions.test.ts --configLoader runner --cache=false",
+    "passed": 11
+  },
+  "repository_checks": "npm run check: passed; Biome checked 1072 files with no fixes; type check, installer and browser-smoke source checks passed",
+  "terminal_smoke": {
+    "passed": true,
+    "requests": 1,
+    "checks": [
+      "search",
+      "scoped/all toggle",
+      "selected model used by HTTP",
+      "exact reference",
+      "prefill",
+      "cancellation",
+      "sign-in prompt",
+      "persisted defaults/recents",
+      "80x12 layout",
+      "terminal restore"
+    ]
+  },
+  "launcher_checks": [
+    "POSIX shell syntax",
+    "argument forwarding",
+    "caller working directory",
+    "installation paths containing spaces",
+    "isolated profile and socket directory",
+    "private socket-directory permissions",
+    "environment overrides"
+  ],
+  "protocol": "No wire changes. Uses the existing capability-gated get_model_catalog adapter, including its get_available_models fallback for older daemons.",
+  "surfaces": "Optimus terminal TUI changed. TypeScript implementation remains the reference. Telemus 3D/Web surfaces in vr-ai-chat are unaffected; no files in that repository were changed.",
+  "limits": [
+    "Only Linux runtime tested in this slice.",
+    "OAuth authorization itself was not exercised against a live provider; API-key login prompt and cancellation were verified.",
+    "Combined TypeScript Providers/Models/MCP tabs remain outside this model-picker repair."
+  ],
+  "blocked_on": null
+}

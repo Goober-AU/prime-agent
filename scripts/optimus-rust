@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+
+optimus_root="$HOME/.local/share/optimus-rust"
+if ! optimus_install=$(CDPATH= cd -- "$optimus_root/current" 2>/dev/null && pwd -P); then
+    echo "Optimus Rust is not installed at $optimus_root/current. See docs/RUST_LAUNCHER.md." >&2
+    exit 1
+fi
+export PI_PACKAGE_DIR="$optimus_install/packages/coding-agent"
+export PI_CODING_AGENT_MODULE_DIR="$PI_PACKAGE_DIR"
+export PRIME_AGENT_BUILD_ID="$(cat "$optimus_install/COMMIT")"
+export PRIME_AGENT_LAUNCHER_PATH="$HOME/.local/bin/optimus-rust"
+export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.config/optimus-rust}"
+export PRIME_AGENT_KERNEL_VENV="${PRIME_AGENT_KERNEL_VENV:-$optimus_install/kernel-venv}"
+
+# Keep the Rust daemon separate from Prime, with short Unix socket paths.
+optimus_runtime_dir="${OPTIMUS_RUST_TMPDIR:-${XDG_RUNTIME_DIR:-$HOME/.cache}/optimus-rust}"
+umask 077
+mkdir -p -- "$optimus_runtime_dir"
+export TMPDIR="$optimus_runtime_dir"
+exec "$optimus_install/bin/optimus-rust" "$@"
