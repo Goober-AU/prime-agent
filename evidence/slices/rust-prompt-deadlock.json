@@ -1,0 +1,9 @@
+{
+  "slice": "rust-prompt-deadlock",
+  "files": [
+    "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs",
+    "docs/RUST_PROMPT_DEADLOCK_FIX.md",
+    "evidence/slices/rust-prompt-deadlock.json",
+    "evidence/status/rust-prompt-deadlock.json"
+  ]
+}

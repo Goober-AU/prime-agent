@@ -12394,17 +12394,19 @@ impl AgentDaemon {
                         .contains_key(&resolve_path(&entry.session_file))
                 })
         });
+        // Read both counters under one guard. Two lock() temporaries in the
+        // addition live to the end of the expression and deadlock this session.
+        // Release the guard before the descendant walk below locks state again.
+        let attached_clients = {
+            let state = state.lock().expect("active session poisoned");
+            state.clients.len() as i64 + state.pending_attaches as i64
+        };
         SessionPassivationSnapshot {
             eviction: SessionEvictionSnapshot {
                 is_session_active: summary.is_session_active
                     || summary.has_running_rlm_children == Some(true)
                     || has_pending_admission,
-                attached_clients: (state.lock().expect("active session poisoned").clients.len()
-                    as i64)
-                    + state
-                        .lock()
-                        .expect("active session poisoned")
-                        .pending_attaches as i64,
+                attached_clients,
                 has_registered_cron_job: jobs.iter().any(|job| !is_heartbeat_cron_job(job)),
                 last_activity_at: summary
                     .last_activity_at
