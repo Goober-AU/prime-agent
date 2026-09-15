@@ -1,0 +1,9 @@
+{
+  "slice": "optimus-readme-branding",
+  "owner": "lead",
+  "files": [
+    "README.md",
+    "evidence/status/optimus-readme-branding.json"
+  ],
+  "scope": "Use Optimus consistently in the main README, retain upstream credits and working compatibility identifiers, and identify Rust as the installed application. Documentation only."
+}
