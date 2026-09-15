@@ -1935,6 +1935,53 @@ fn is_valid_session_file(file_path: &str) -> bool {
     }
 }
 
+fn session_has_conversation_history(file_path: &str) -> bool {
+    use std::io::{BufRead, BufReader, Read};
+
+    let Ok(file) = std::fs::File::open(file_path) else {
+        return false;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return false;
+    };
+    // Stop at the first conversation entry and at the captured file boundary.
+    // Opening a draft can persist settings/status without starting a conversation.
+    for line in BufReader::new(file.take(metadata.len())).split(b'\n') {
+        let Ok(line) = line else {
+            return false;
+        };
+        let Ok(Value::Object(entry)) =
+            serde_json::from_str::<Value>(&String::from_utf8_lossy(&line))
+        else {
+            continue;
+        };
+        match entry_type(&entry) {
+            "message" if !message_role(&entry).is_empty() => return true,
+            "custom_message" if entry.get("content").is_some_and(|content| {
+                content.is_string() || content.is_array()
+            }) => return true,
+            "compaction" | "branch_summary"
+                if entry
+                    .get("summary")
+                    .and_then(Value::as_str)
+                    .is_some_and(|summary| !summary.is_empty()) =>
+            {
+                return true;
+            }
+            "compaction"
+                if entry
+                    .get("details")
+                    .and_then(get_provider_checkpoint)
+                    .is_some() =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub fn find_most_recent_session(session_dir: &str) -> Option<String> {
     let dir_entries = std::fs::read_dir(session_dir).ok()?;
     let mut files: Vec<(String, std::time::SystemTime)> = Vec::new();
@@ -1957,7 +2004,10 @@ pub fn find_most_recent_session(session_dir: &str) -> Option<String> {
         }
     }
     files.sort_by(|a, b| b.1.cmp(&a.1));
-    files.into_iter().next().map(|(path, _)| path)
+    files
+        .into_iter()
+        .find(|(path, _)| session_has_conversation_history(path))
+        .map(|(path, _)| path)
 }
 
 fn normalize_cwd(cwd: &str) -> String {
@@ -2006,7 +2056,10 @@ pub fn find_most_recent_session_for_cwd(session_dir: &str, cwd: &str) -> Option<
         }
     }
     files.sort_by(|a, b| b.1.cmp(&a.1));
-    files.into_iter().next().map(|(path, _)| path)
+    files
+        .into_iter()
+        .find(|(path, _)| session_has_conversation_history(path))
+        .map(|(path, _)| path)
 }
 
 fn resolve_path(path: &str) -> String {
