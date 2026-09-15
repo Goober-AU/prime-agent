@@ -6,6 +6,7 @@ struct RefreshResult {
     generation: u64,
     revision: u64,
     session_id: String,
+    quiet: bool,
     result: Result<wire::AgentConnectionState, String>,
 }
 
@@ -15,6 +16,7 @@ pub(super) struct StateRefresh {
     send: mpsc::Sender<RefreshResult>,
     receive: mpsc::Receiver<RefreshResult>,
     task: Option<tokio::task::JoinHandle<()>>,
+    last_requested_at: std::time::Instant,
 }
 
 impl StateRefresh {
@@ -26,6 +28,7 @@ impl StateRefresh {
             send,
             receive,
             task: None,
+            last_requested_at: std::time::Instant::now(),
         }
     }
 
@@ -38,9 +41,34 @@ impl StateRefresh {
         connection: Arc<dyn wire::AgentConnection>,
         session_id: String,
     ) {
+        self.start(connection, session_id, false);
+    }
+
+    pub(super) fn reconcile_if_due(
+        &mut self,
+        connection: Arc<dyn wire::AgentConnection>,
+        session_id: String,
+        mode: &InteractiveMode,
+    ) {
+        if !(mode.is_agent_streaming() || mode.is_agent_compacting() || mode.is_bash_running())
+            || self.task.is_some()
+            || self.last_requested_at.elapsed() < Duration::from_secs(5)
+        {
+            return;
+        }
+        self.start(connection, session_id, true);
+    }
+
+    fn start(
+        &mut self,
+        connection: Arc<dyn wire::AgentConnection>,
+        session_id: String,
+        quiet: bool,
+    ) {
         if let Some(task) = self.task.take() {
             task.abort();
         }
+        self.last_requested_at = std::time::Instant::now();
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let revision = self.revision;
@@ -53,6 +81,7 @@ impl StateRefresh {
                 generation,
                 revision,
                 session_id,
+                quiet,
                 result,
             });
         }));
@@ -61,10 +90,11 @@ impl StateRefresh {
     pub(super) fn poll(&mut self, mode: &Rc<RefCell<InteractiveMode>>, session_id: &str) -> bool {
         let mut changed = false;
         while let Ok(reply) = self.receive.try_recv() {
-            if reply.generation != self.generation
-                || reply.revision != self.revision
-                || reply.session_id != session_id
-            {
+            if reply.generation != self.generation {
+                continue;
+            }
+            self.task = None;
+            if reply.revision != self.revision || reply.session_id != session_id {
                 continue;
             }
             match reply.result {
@@ -75,9 +105,11 @@ impl StateRefresh {
                 Ok(_) => {}
                 Err(error) => {
                     let mut mode = mode.borrow_mut();
-                    stop_on_worker_failure(&mut mode, &error);
-                    mode.show_error(&error);
-                    changed = true;
+                    let stopped = stop_on_worker_failure(&mut mode, &error);
+                    if stopped || !reply.quiet {
+                        mode.show_error(&error);
+                        changed = true;
+                    }
                 }
             }
         }
@@ -132,6 +164,12 @@ pub(super) fn apply_refresh(mode: &mut InteractiveMode, state: wire::AgentConnec
         state.retry_attempt = current.retry_attempt;
     }
     mode.apply_connection_state_snapshot(state);
+    if !mode.is_agent_streaming() {
+        mode.stop_working_loader();
+    }
+    if !mode.is_agent_compacting() {
+        mode.stop_compaction_loader();
+    }
     mode.sync_working_loader();
 }
 

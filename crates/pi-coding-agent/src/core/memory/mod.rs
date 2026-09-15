@@ -1,5 +1,6 @@
 //! Port of packages/coding-agent/src/core/memory (module index).
 pub mod evidence;
+pub(crate) mod extraction;
 pub mod jobs;
 pub mod project;
 pub mod search;

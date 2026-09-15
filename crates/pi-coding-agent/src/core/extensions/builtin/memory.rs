@@ -13,7 +13,8 @@ use crate::core::extensions::types::{
 use crate::core::memory::evidence::{
     collect_evidence, hash, message_evidence, Evidence, MEMORY_RECALL_TYPE,
 };
-use crate::core::memory::jobs::{ExtractionResult, MemoryExtractor};
+use crate::core::memory::jobs::MemoryExtractor;
+use crate::core::memory::extraction::completion_fn_for;
 use crate::core::memory::service::MemoryService;
 use crate::core::messages::without_harness_digests_for_compaction;
 use crate::core::refinement::refinement::{
@@ -132,114 +133,6 @@ fn evidence(ctx: &Arc<dyn ExtensionContext>) -> Vec<Evidence> {
     collected
 }
 
-/// Map the pi-ai `AssistantMessage` onto refinement's minimal local shape.
-fn to_refinement_assistant(
-    message: &pi_ai::types::AssistantMessage,
-) -> crate::core::refinement::refinement::AssistantMessage {
-    use crate::core::refinement::refinement::{
-        AssistantContent, AssistantMessage as LocalAssistant, AssistantUsage, StopReason,
-    };
-    let content = message
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            pi_ai::types::ContentBlock::Text(text) => Some(AssistantContent::Text {
-                text: text.text.clone(),
-            }),
-            pi_ai::types::ContentBlock::Thinking(thinking) => Some(AssistantContent::Thinking {
-                thinking: thinking.thinking.clone(),
-            }),
-            pi_ai::types::ContentBlock::ToolCall(_) => None,
-        })
-        .collect();
-    let stop_reason = match message.stop_reason.as_str() {
-        "length" => StopReason::Length,
-        "toolUse" => StopReason::ToolUse,
-        "error" => StopReason::Error,
-        "aborted" => StopReason::Aborted,
-        _ => StopReason::Stop,
-    };
-    LocalAssistant {
-        content,
-        usage: AssistantUsage {
-            input: message.usage.input,
-            output: message.usage.output,
-            cache_read: message.usage.cache_read,
-            cache_write: message.usage.cache_write,
-        },
-        stop_reason,
-        error_message: message.error_message.clone(),
-    }
-}
-
-/// `completeWithProviderRetry(() => completeSimple(model, context, options))`.
-///
-/// The TypeScript closes over `model`, `apiKey` and `headers` captured just
-/// before the completion; the port takes the same captured values.
-fn completion_fn_for(
-    model: pi_ai::types::Model,
-    api_key: String,
-    headers: Option<HashMap<String, String>>,
-) -> crate::core::refinement::refinement::CompletionFn {
-    Arc::new(move |request: crate::core::refinement::refinement::RefinementCompletionRequest| {
-        let model = model.clone();
-        let api_key = api_key.clone();
-        let headers = headers.clone();
-        Box::pin(async move {
-            let options = pi_ai::types::SimpleStreamOptions {
-                stream: pi_ai::types::StreamOptions {
-                    max_tokens: Some(request.max_tokens),
-                    api_key: Some(api_key),
-                    headers: headers
-                        .clone()
-                        .map(|headers| headers.into_iter().collect::<indexmap::IndexMap<String, String>>()),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
-            let context = pi_ai::types::Context {
-                system_prompt: Some(request.system_prompt),
-                messages: request
-                    .messages
-                    .iter()
-                    .filter_map(|message| local_message_to_pi_ai(message))
-                    .collect(),
-                tools: None,
-            };
-            let response = pi_ai::stream::complete_simple(&model, &context, Some(&options)).await;
-            to_refinement_assistant(&response)
-        })
-    })
-}
-
-/// `[{ type: "text", text: prompt }]` as a pi-ai user message.
-fn local_message_to_pi_ai(
-    message: &crate::core::memory::evidence::AgentMessage,
-) -> Option<pi_ai::types::Message> {
-    let crate::core::memory::evidence::AgentMessage::User { content, timestamp } = message else {
-        return None;
-    };
-    let text = match content {
-        Value::String(text) => text.clone(),
-        Value::Array(blocks) => blocks
-            .iter()
-            .filter_map(|block| {
-                if block.get("type").and_then(Value::as_str) == Some("text") {
-                    block.get("text").and_then(Value::as_str).map(str::to_string)
-                } else {
-                    None
-                }
-            })
-            .collect::<Vec<String>>()
-            .join(""),
-        _ => String::new(),
-    };
-    Some(pi_ai::types::Message::User(pi_ai::types::UserMessage::new(
-        pi_ai::types::UserContent::Text(text),
-        *timestamp as i64,
-    )))
-}
-
 /// `ctx.modelRegistry.getApiKeyAndHeaders(model)` - the captured apiKey + headers.
 async fn api_key_and_headers(
     ctx: &Arc<dyn ExtensionContext>,
@@ -309,10 +202,6 @@ fn split_action(args: &str) -> (String, String) {
 
 
 /// `extractor(ctx, memory)` - the `memory.request(...)` extraction callback.
-///
-/// blocked_on: `RefineOptions.onUsage` (core/refinement.ts, another slice) has no
-/// Rust counterpart, so `input`/`output` stay 0 exactly as a missing callback
-/// would leave them.
 fn extractor(
     ctx: Arc<dyn ExtensionContext>,
     memory: Arc<MemoryService>,
@@ -327,52 +216,16 @@ fn extractor(
                 return Err("Select a model before extracting memory".to_string());
             };
             let (api_key, headers) = api_key_and_headers(&ctx, &model).await?;
-            let completion_key = api_key.clone();
-            let state = memory.store.read()?.harness();
-            let plan = plan_refinement(PlanRefinementRequest {
-                messages: &[],
-                state: &state,
-                history: &[],
-                model: RefineModel {
-                    max_tokens: model.max_tokens,
-                },
-                api_key,
-                options: RefineOptions {
-                    evidence: Some(records.clone()),
-                    max_output_tokens: Some(memory.store.settings().max_extraction_tokens as f64),
+            crate::core::memory::extraction::extract(
+                &memory, records, model, api_key, headers,
+                RefineOptions {
                     retry: Some(refinement_retry_policy(&settings_manager)),
                     instructions: Some(
                         "Extract only durable project memory. Return create edits of kind memory with sourceIds. Do not update or delete existing entries. Exclude host facts, credentials, unsupported assistant assertions and transient task state. Raw sources remain available, so do not copy entire logs into memory.".to_string(),
                     ),
                     ..Default::default()
                 },
-                headers: headers.clone(),
-                thinking_level: None,
-                complete: completion_fn_for(model, completion_key, headers),
-            })
-            .await
-            .map_err(|error| error.message)?;
-            let edits: Vec<RefinementEdit> = plan
-                .proposal
-                .edits
-                .into_iter()
-                .filter(|edit| {
-                    edit.action == "create"
-                        && edit.kind == "memory"
-                        && edit
-                            .metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.get("evidenceStatus"))
-                            .and_then(Value::as_str)
-                            == Some("cited")
-                })
-                .collect();
-            let proposal = RefinementProposal { edits, ..plan.proposal };
-            Ok(ExtractionResult {
-                proposal,
-                input: 0.0,
-                output: 0.0,
-            })
+            ).await
         })
     })
 }
@@ -675,7 +528,7 @@ fn create_memory_extension_impl(
                     },
                     headers: headers.clone(),
                     thinking_level: None,
-                    complete: completion_fn_for(model, api_key, headers),
+                    complete: completion_fn_for(model, api_key, headers, Some(refinement_retry_policy(&settings_manager))),
                 })
                 .await
                 .ok()?;

@@ -892,18 +892,34 @@ impl DaemonAgentConnection {
     /// TypeScript constructor, and detached by `dispose`.
     fn bind_transport(&self, this: &Arc<Self>) {
         let weak: Weak<DaemonAgentConnection> = Arc::downgrade(this);
-        let message_handle = self.client.on_message(Arc::new(move |message| {
-            if let Some(connection) = weak.upgrade() {
-                let connection_clone = connection.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = connection_clone.handle_daemon_message(message).await {
+        // Advance the event cursor in transport order. Per-message tasks can
+        // otherwise advance past agent_end and discard it as stale.
+        let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(message) = receive.recv().await {
+                let Some(connection) = weak.upgrade() else { break };
+                if *connection.disposed.lock().unwrap() { break; }
+                let mut delivery = Box::pin(async move {
+                    if let Err(error) = connection.handle_daemon_message(message).await {
                         append_rotating_log(
                             &get_agent_log_path(),
                             &format!("[{}] daemon-message: ignored failure: {error}", now_iso()),
                         );
                     }
                 });
+                // JS runs each callback through its first suspension in arrival
+                // order. Poll that prefix here; let async listeners/recovery
+                // settle independently so they can await later socket messages.
+                let first_poll = futures::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(std::future::Future::poll(delivery.as_mut(), cx))
+                }).await;
+                if first_poll.is_pending() {
+                    tokio::spawn(delivery);
+                }
             }
+        });
+        let message_handle = self.client.on_message(Arc::new(move |message| {
+            let _ = send.send(message);
         }));
         *self.unsubscribe_daemon_messages.lock().unwrap() = Some(message_handle);
         let weak: Weak<DaemonAgentConnection> = Arc::downgrade(this);
@@ -2449,7 +2465,15 @@ impl AgentConnection for DaemonAgentConnection {
         let this = self.clone();
         if *this.latest_snapshot_is_fresh.lock().unwrap() {
             if let Some(snapshot) = this.latest_snapshot.lock().unwrap().clone() {
-                return Box::pin(async move { Ok(snapshot.state) });
+                // A busy attachment may precede run settlement without another
+                // event edge. Reconcile that state with the worker, not the cache.
+                if !snapshot.state.is_streaming
+                    && !snapshot.state.is_compacting
+                    && !snapshot.state.is_bash_running
+                    && snapshot.state.retry_attempt == 0.0
+                {
+                    return Box::pin(async move { Ok(snapshot.state) });
+                }
             }
         }
         let command = command_body(

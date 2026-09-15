@@ -1,15 +1,11 @@
 //! Port of packages/coding-agent/src/core/memory/service.ts
-//!
-//! Cross-crate gaps: `AuthStorage`, `ModelRegistry`, `SettingsManager`,
-//! `providerRetryPolicy` and the model-backed `planRefinement` extractor live in
-//! other slices, so the `import_run` path takes an injected extractor factory.
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::{Map, Value};
 
 use crate::core::kernel::shared::{
-    BoxFuture, HostRequestHandler, HostRequestHandlers, KernelError,
+    HostRequestHandler, HostRequestHandlers, KernelError,
 };
 use crate::core::refinement::refinement::{
     get_global_harness_state_dir, get_local_harness_state_dir, load_harness_state,
@@ -524,24 +520,18 @@ pub fn import_overview_value(job: &ImportJob) -> Value {
     import_overview(job)
 }
 
-/// The host-side factory the kernel uses to build the `import_run` extractor.
-/// blocked_on: needs crate::core::model_registry::ModelRegistry,
-/// crate::core::auth_storage::AuthStorage, crate::core::settings_manager::SettingsManager
-pub type MemoryExtractorFactory =
-    Arc<dyn Fn(MemoryService) -> BoxFuture<'static, Result<MemoryExtractor, String>> + Send + Sync>;
-
 pub fn create_memory_host_handlers(
     cwd: String,
     agent_dir: Option<String>,
     session_artifact_dir: Option<String>,
-    extractor_factory: Option<MemoryExtractorFactory>,
+    get_model_info: Option<HostRequestHandler>,
 ) -> HostRequestHandlers {
     let mut handlers: HostRequestHandlers = std::collections::HashMap::new();
     let handler: HostRequestHandler = Arc::new(move |payload: Value| {
         let cwd = cwd.clone();
         let agent_dir = agent_dir.clone();
         let session_artifact_dir = session_artifact_dir.clone();
-        let extractor_factory = extractor_factory.clone();
+        let get_model_info = get_model_info.clone();
         Box::pin(async move {
             let action = payload
                 .get("action")
@@ -556,14 +546,59 @@ pub fn create_memory_host_handlers(
             .map_err(KernelError::new)?;
             let mut extract = None;
             if action == "import_run" {
-                let factory = extractor_factory
-                    .clone()
+                let get_model_info = get_model_info
                     .ok_or_else(|| KernelError::new("The host did not supply a selected model"))?;
-                extract = Some(
-                    factory(service.clone())
-                        .await
-                        .map_err(KernelError::new)?,
+                let info = get_model_info(serde_json::json!({})).await?;
+                let (Some(provider), Some(id)) = (
+                    info.get("provider").and_then(Value::as_str),
+                    info.get("id").and_then(Value::as_str),
+                ) else {
+                    return Err(KernelError::new("The host did not supply a selected model"));
+                };
+                let directory = Path::new(&service.store.agent_dir);
+                let mut registry = crate::core::model_registry::ModelRegistry::create(
+                    crate::core::auth_storage::AuthStorage::create(
+                        Some(directory.join("auth.json").to_string_lossy().into_owned()), None,
+                    ),
+                    Some(directory.join("models.json").to_string_lossy().into_owned()),
                 );
+                let model = registry.find(provider, id).ok_or_else(|| KernelError::new(
+                    "Selected model is session-only; use /memory import-run in the owning session",
+                ))?;
+                let auth = registry.get_api_key_and_headers(&model).await;
+                let api_key = auth.api_key.filter(|key| auth.ok && !key.is_empty())
+                    .ok_or_else(|| KernelError::new("No credentials for the selected model"))?;
+                let headers: Option<std::collections::HashMap<String, String>> =
+                    auth.headers.map(|headers| headers.into_iter().collect());
+                let memory = service.clone();
+                let extraction_cwd = cwd.clone();
+                let extractor: MemoryExtractor = Arc::new(move |records| {
+                    let memory = memory.clone();
+                    let model = model.clone();
+                    let api_key = api_key.clone();
+                    let headers = headers.clone();
+                    let cwd = extraction_cwd.clone();
+                    Box::pin(async move {
+                        let settings = crate::core::settings_manager::SettingsManager::create(
+                            &cwd, Some(&memory.store.agent_dir),
+                        );
+                        let retry = crate::core::provider_retry::provider_retry_policy(&settings);
+                        super::extraction::extract(
+                            &memory, records, model, api_key, headers,
+                            crate::core::refinement::refinement::RefineOptions {
+                                retry: Some(crate::core::refinement::refinement::ProviderRetryPolicy {
+                                    enabled: retry.enabled,
+                                    max_retries: retry.max_retries.max(0.0) as u32,
+                                    base_delay_ms: retry.base_delay_ms,
+                                    max_retry_delay_ms: retry.max_retry_delay_ms,
+                                }),
+                                instructions: Some("Extract durable host-neutral project facts only. Only create edits of kind memory with cited sourceIds. Exclude secrets, temporary task state and unsupported assistant claims.".to_string()),
+                                ..Default::default()
+                            },
+                        ).await
+                    })
+                });
+                extract = Some(extractor);
             }
             let payload = match payload {
                 Value::Object(map) => map,

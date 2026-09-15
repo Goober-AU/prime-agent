@@ -1,0 +1,18 @@
+{
+  "slice": "memory-import-waiting",
+  "owner": "lead",
+  "files": [
+    "crates/pi-coding-agent/src/core/agent_session/runtime_members.rs",
+    "crates/pi-coding-agent/src/core/tools/ipython.rs",
+    "crates/pi-coding-agent/src/core/memory/service.rs",
+    "crates/pi-coding-agent/src/core/memory/mod.rs",
+    "crates/pi-coding-agent/src/core/memory/extraction.rs",
+    "crates/pi-coding-agent/src/core/extensions/builtin/memory.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_state.rs",
+    "crates/pi-coding-agent/src/modes/agent_connection/daemon_agent_connection.rs",
+    "docs/RUST_MEMORY_WAITING_FIX.md",
+    "evidence/status/memory-import-waiting.json"
+  ],
+  "scope": "Selected-model Python memory imports, import usage accounting, and truthful TUI idle reconciliation; no tests or provider calls."
+}

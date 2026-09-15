@@ -712,6 +712,19 @@ impl AgentSession {
         use crate::core::rlm_runtime::*;
         let mut handlers = HostRequestHandlers::new();
         let weak = Arc::downgrade(self);
+        handlers.insert("model.info".to_string(), Arc::new(move |_payload: Value| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let session = weak.upgrade().ok_or_else(|| KernelError::new("Session disposed"))?;
+                let model = session.model();
+                Ok(serde_json::json!({
+                    "id": model.as_ref().map(|model| &model.id),
+                    "provider": model.as_ref().map(|model| &model.provider),
+                    "input": model.as_ref().map(|model| model.input.clone()).unwrap_or_default(),
+                }))
+            })
+        }));
+        let weak = Arc::downgrade(self);
         handlers.insert("rlm.run".to_string(), create_rlm_run_host_handler(Arc::new(move |request| {
             let weak = weak.clone(); Box::pin(async move {
                 let session = weak.upgrade().ok_or("Parent session disposed")?;
