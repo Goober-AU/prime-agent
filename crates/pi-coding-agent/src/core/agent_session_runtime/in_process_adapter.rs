@@ -356,12 +356,7 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
                 // `sessionTree: { tree: sessionManager.getTree(), leafId: sessionManager.getLeafId() }`
                 // (snapshot.ts:73-76).
                 session_tree: Some(session_tree_value(&session)),
-                // blocked_on: `children: session.getRlmChildSnapshots()` (snapshot.ts:77) needs
-                // `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`
-                // (`core/agent_session/runtime_members.rs:1804/1854`), which are `pub(super)` and so
-                // unreachable from this module. Owner to add: drop `(super)` on both. Needs
-                // `runtime_members.rs` edited.
-                children: Vec::new(),
+                children: self.session_rlm_children(),
             },
         }
     }
@@ -425,32 +420,14 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
         Value::Null
     }
 
-    /// `this.session.getRlmChildSnapshots()` (`in-process-agent-connection.ts:150`,
-    /// `agent-session.ts:11171`).
-    ///
-    /// blocked_on: `rlm_child_snapshot_for_run` / `rlm_child_snapshot_for_session`
-    /// (`core/agent_session/runtime_members.rs:1804/1854`) are `pub(super)`, and no
-    /// `impl From<RlmChildAgentSnapshot> for AgentConnectionRlmChildAgentSnapshot`
-    /// exists (`RlmChildAgentSnapshot` at `core/agent_session.rs:438` is already the
-    /// same camelCase shape the connection layer reads; `AgentConnectionRlmChildAgentSnapshot`
-    /// at `modes/agent_connection/types.rs:902` is the projection). Owner to add:
-    /// drop `(super)` on both builders. Needs `runtime_members.rs` edited.
     fn session_rlm_children(&self) -> Vec<AgentConnectionRlmChildAgentSnapshot> {
-        Vec::new()
+        self.session().get_rlm_child_snapshots().into_iter()
+            .map(|child| serde_json::from_value(serde_json::to_value(child).expect("child snapshot serializes")).expect("child snapshot projection"))
+            .collect()
     }
 
-    /// `this.session.cancelRlmChildRun(childId)`
-    /// (`in-process-agent-connection.ts:427`, `agent-session.ts:11306`).
-    ///
-    /// blocked_on: owner `AgentSession::cancel_rlm_child_run(&self, run: &RlmChildRun,
-    /// reason: &str)` (`core/agent_session/runtime_members.rs:889`) takes the run and
-    /// is `pub(super)`; the by-id walk `rlm_subtree_sessions` (:1087) is
-    /// `pub(super)` too. Owner to add: `runtime_members.rs`, a
-    /// `pub fn cancel_rlm_child_run_by_id(&self, child_id: &str, reason: &str) -> bool`
-    /// matching `agent-session.ts:11306-11329`. Needs `runtime_members.rs` edited.
     fn session_cancel_rlm_child(&self, child_id: &str) -> bool {
-        let _ = child_id;
-        false
+        self.session().cancel_rlm_child_run_by_id(child_id, "Cancelled by user")
     }
 
     /// `this.session.setScopedModels(scopedModels)`
@@ -577,27 +554,10 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
         Box::pin(async { Err("blocked_on: no JSONL export owner".to_string()) })
     }
 
-    /// `this.session.getRlmChildSession(childId)` then the watcher built from the
-    /// child (`in-process-agent-connection.ts:604-628`).
-    ///
-    /// blocked_on: `AgentSession::get_rlm_child_session` does not exist. The
-    /// retained children live in `rlm_child_sessions`
-    /// (`core/agent_session.rs:2236`), whose only by-id accessors are the
-    /// `pub(super)` `rlm_child_snapshot_for_run`/`rlm_child_snapshot_for_session`
-    /// (`core/agent_session/runtime_members.rs:1804/1854`). Owner to add:
-    /// `core/agent_session/runtime_members.rs`, a
-    /// `pub fn get_rlm_child_session(&self, child_id: &str) -> Option<Arc<AgentSession>>`
-    /// matching `agent-session.ts:11289`. Needs `runtime_members.rs` edited.
     fn session_watch_child(&self, child_id: &str) -> Option<Box<dyn AgentConnectionSessionWatcher>> {
-        let _ = child_id;
-        None
+        let session = self.session().get_rlm_child_session(child_id)?;
+        Some(Box::new(ChildWatcher { session, subscriptions: Arc::new(Mutex::new(Vec::new())) }))
     }
-    // Members whose canonical owner is missing keep an explicit failure or an empty roster with an
-    // accurate `blocked_on:` note naming the owner to add. They are not omitted: the trait has no
-    // default bodies, so an omitted member is a hard E0046 that stops the whole crate from compiling
-    // and keeps every test from running.
-
-
 
     fn session_header(&self) -> Option<AgentConnectionSessionHeader> {
         let entry = self.session().session_manager.lock().unwrap().get_header()?;
@@ -615,42 +575,7 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
     }
 
     fn session_commands(&self) -> Vec<AgentConnectionSlashCommand> {
-        let session = self.session();
-        let registered_commands = match session.extension_runner() {
-            Some(runner) => runner
-                .get_registered_commands()
-                .into_iter()
-                .map(|resolved| RegisteredCommandEntry {
-                    invocation_name: resolved.invocation_name.clone(),
-                    name: resolved.command.name.clone(),
-                    description: resolved.command.description.clone(),
-                    source_info: connection_source_info(&resolved.command.source_info),
-                })
-                .collect::<Vec<_>>(),
-            None => Vec::new(),
-        };
-        let prompt_templates = session
-            .prompt_templates()
-            .into_iter()
-            .map(|entry| PromptTemplateEntry {
-                name: entry.name.clone(),
-                description: Some(entry.description.clone()),
-                argument_hint: entry.argument_hint.clone(),
-                source_info: connection_source_info(&entry.source_info),
-            })
-            .collect::<Vec<_>>();
-        let skills = session
-            .resource_loader()
-            .get_skills()
-            .skills
-            .iter()
-            .map(|skill| SkillEntry {
-                name: skill.name().to_string(),
-                description: Some(skill_base(skill).description.clone()),
-                source_info: connection_source_info(&skill_base(skill).source_info),
-            })
-            .collect::<Vec<_>>();
-        create_agent_connection_commands(&registered_commands, &prompt_templates, &skills)
+        child_commands(&self.session())
     }
 
     fn session_resource_snapshot(&self) -> AgentConnectionResourceSnapshot {
@@ -1188,4 +1113,87 @@ impl InProcessRuntimeHost for InProcessRuntimeHostAdapter {
         })
     }
 
+}
+
+fn child_commands(session: &Arc<AgentSession>) -> Vec<AgentConnectionSlashCommand> {
+        let registered_commands = match session.extension_runner() {
+            Some(runner) => runner
+                .get_registered_commands()
+                .into_iter()
+                .map(|resolved| RegisteredCommandEntry {
+                    invocation_name: resolved.invocation_name.clone(),
+                    name: resolved.command.name.clone(),
+                    description: resolved.command.description.clone(),
+                    source_info: connection_source_info(&resolved.command.source_info),
+                })
+                .collect::<Vec<_>>(),
+            None => Vec::new(),
+        };
+        let prompt_templates = session
+            .prompt_templates()
+            .into_iter()
+            .map(|entry| PromptTemplateEntry {
+                name: entry.name.clone(),
+                description: Some(entry.description.clone()),
+                argument_hint: entry.argument_hint.clone(),
+                source_info: connection_source_info(&entry.source_info),
+            })
+            .collect::<Vec<_>>();
+        let skills = session
+            .resource_loader()
+            .get_skills()
+            .skills
+            .iter()
+            .map(|skill| SkillEntry {
+                name: skill.name().to_string(),
+                description: Some(skill_base(skill).description.clone()),
+                source_info: connection_source_info(&skill_base(skill).source_info),
+            })
+            .collect::<Vec<_>>();
+        create_agent_connection_commands(&registered_commands, &prompt_templates, &skills)
+}
+
+struct ChildWatcher {
+    session: Arc<AgentSession>,
+    subscriptions: Arc<Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>>,
+}
+
+impl Drop for ChildWatcher {
+    fn drop(&mut self) {
+        let subscriptions = std::mem::take(&mut *self.subscriptions.lock().unwrap());
+        for unsubscribe in subscriptions { unsubscribe(); }
+    }
+}
+
+impl AgentConnectionSessionWatcher for ChildWatcher {
+    fn get_messages(&self) -> BoxFuture<Vec<AgentMessage>> {
+        let messages = self.session.messages();
+        Box::pin(async move { messages })
+    }
+    fn get_commands(&self) -> BoxFuture<Vec<AgentConnectionSlashCommand>> {
+        let commands = child_commands(&self.session);
+        Box::pin(async move { commands })
+    }
+    fn get_tool_definition(&self, name: &str) -> BoxFuture<Option<crate::modes::agent_connection::types::AgentConnectionToolDefinition>> {
+        let definition = self.session.get_tool_definition(name).map(|definition| connection_tool_definition(&definition));
+        let definition = crate::modes::agent_connection::tool_definition::create_agent_connection_tool_definition(definition.as_ref());
+        Box::pin(async move { definition })
+    }
+    fn subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync> {
+        let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move { while let Some(event) = receive.recv().await { listener(event).await; } });
+        let unsubscribe = self.session.subscribe(Arc::new(move |event| {
+            if let Ok(event) = serde_json::to_value(event).and_then(serde_json::from_value) {
+                let _ = send.send(crate::modes::agent_connection::types::AgentConnectionEvent::SessionEvent { event });
+            }
+        }));
+        let cleanup: Arc<dyn Fn() + Send + Sync> = Arc::new(move || { unsubscribe(); task.abort(); });
+        self.subscriptions.lock().unwrap().push(cleanup.clone());
+        Box::new(move || cleanup())
+    }
+    fn close(&self) -> BoxFuture<()> {
+        let subscriptions = std::mem::take(&mut *self.subscriptions.lock().unwrap());
+        for unsubscribe in subscriptions { unsubscribe(); }
+        Box::pin(async {})
+    }
 }

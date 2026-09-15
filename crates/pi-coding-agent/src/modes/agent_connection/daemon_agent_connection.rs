@@ -11,6 +11,9 @@
 //! cursor rule, snapshot-assembly rule and capability check from the
 //! TypeScript, and records the cross-slice needs in `blocked_on`.
 
+#[path = "roster_subscription.rs"]
+mod roster_subscription;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -3323,20 +3326,16 @@ impl AgentConnection for DaemonAgentConnection {
     fn subscribe_agent_roster(
         &self,
         listener: Arc<dyn Fn() + Send + Sync>,
-    ) -> BoxFuture<Result<(), String>> {
+    ) -> BoxFuture<Result<Arc<dyn AgentConnectionRosterStore>, String>> {
         let this = self.clone();
-        let store = this.roster_store.lock().unwrap().clone();
-        let client = this.client.clone();
+        let store = {
+            let mut slot = this.roster_store.lock().unwrap();
+            slot.get_or_insert_with(|| Arc::new(roster_subscription::RosterSubscription::new())).clone()
+        };
         Box::pin(async move {
-            let store = match store {
-                Some(store) => store,
-                None => return Err(STALE_ROSTER_DAEMON_MESSAGE.to_string()),
-            };
-            if !store.attach(client).await.unwrap_or(false) {
-                return Err(STALE_ROSTER_DAEMON_MESSAGE.to_string());
-            }
+            if !store.attach(this.client.clone()).await? { return Err(STALE_ROSTER_DAEMON_MESSAGE.to_string()); }
             let _ = store.on_update(listener);
-            Ok(())
+            Ok(store)
         })
     }
     fn prompt(&self, message: &str, options: Option<AgentConnectionPromptOptions>) -> BoxFuture<Result<(), String>> {

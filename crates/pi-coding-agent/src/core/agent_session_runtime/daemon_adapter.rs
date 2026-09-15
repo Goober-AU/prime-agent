@@ -182,6 +182,7 @@ fn tool_definition_value(definition: &crate::core::extensions::types::ToolDefini
 }
 
 impl DaemonSession for AgentSessionDaemonAdapter {
+    fn agent_session(&self) -> Option<Arc<AgentSession>> { Some(self.session()) }
     /// `session.model` as the daemon's `ModelIdentity` carries it.
     fn model_identity(&self) -> Option<ModelIdentity> {
         self.runtime.session().model().map(model_identity_of)
@@ -589,21 +590,8 @@ impl DaemonSession for AgentSessionDaemonAdapter {
             .expect("connection state serializes")
     }
 
-    /// `session.registerRlmChildSession(childId, session)`.
-    ///
-    /// `daemon-mode.ts:3333` uses the boolean to abort a spawn whose child could
-    /// not be retained. The daemon seam carries the child as `Arc<dyn DaemonSession>`;
-    /// only this adapter's own children carry the `AgentSession` the owner needs,
-    /// and its `AgentSessionDaemonAdapter` wrapper does not expose it, so the
-    /// registration stays blocked:
-    /// blocked_on: `AgentSession::register_rlm_child_session(child_id, session)`
-    /// does not exist. Owner to add: `core/agent_session/runtime_members.rs`
-    /// (beside `rlm_child_snapshot_for_run` at :1804), a `pub fn` over
-    /// `rlm_child_sessions` + `rlm_child_unsubscribes` matching
-    /// `agent-session.ts:11068-11086`. Needs `runtime_members.rs` edited.
     fn register_rlm_child_session(&self, child_id: &str, session: Arc<dyn DaemonSession>) -> bool {
-        let _ = (child_id, session);
-        false
+        session.agent_session().is_some_and(|child| self.session().register_rlm_child_session(child_id, child))
     }
 
     fn subscribe(&self, listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {
@@ -785,19 +773,8 @@ impl DaemonSession for AgentSessionDaemonAdapter {
             .collect()
     }
 
-    /// `session.cancelRlmChildRun(childId)` (`agent-session.ts:11306`).
-    ///
-    /// The owner walks `_rlmSubtreeSessions()` and cancels the matching live run.
-    /// blocked_on: `AgentSession::cancel_rlm_child_run(&self, run: &RlmChildRun,
-    /// reason: &str)` (`core/agent_session/runtime_members.rs:889`) takes the run
-    /// and is `pub(super)`, and the by-id walk (`rlm_subtree_sessions`, :1087) is
-    /// `pub(super)` too. Owner to add: `runtime_members.rs`, a
-    /// `pub fn cancel_rlm_child_run_by_id(&self, child_id: &str, reason: &str) -> bool`
-    /// matching `agent-session.ts:11306-11329`, plus `pub` on `rlm_subtree_sessions`.
-    /// Needs `runtime_members.rs` edited.
     fn cancel_rlm_child_run(&self, child_id: &str) -> bool {
-        let _ = child_id;
-        false
+        self.session().cancel_rlm_child_run_by_id(child_id, "Cancelled by user")
     }
 
     fn delete_inactive_rlm_subagent(
@@ -983,15 +960,8 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         Value::Null
     }
 
-    /// `session.getRlmChildSnapshots()` (`daemon-mode.ts:4896`).
-    ///
-    /// blocked_on: the two builders `rlm_child_snapshot_for_run` /
-    /// `rlm_child_snapshot_for_session` are `pub(super)` in
-    /// `core/agent_session/runtime_members.rs:1804/1854`, so no sibling module can
-    /// reach them. Owner to add: drop `(super)` on both (the walk itself is
-    /// `agent-session.ts:11171-11206`). Needs `runtime_members.rs` edited.
     fn get_rlm_child_snapshots(&self) -> Vec<Value> {
-        Vec::new()
+        self.session().get_rlm_child_snapshots().into_iter().map(|child| serde_json::to_value(child).expect("child snapshot serializes")).collect()
     }
 
     fn export_to_html(&self, output_path: Option<&str>) -> BoxFuture<'static, Result<String, String>> {
@@ -1099,25 +1069,10 @@ impl DaemonSession for AgentSessionDaemonAdapter {
 
     fn new_session(&self, options: Option<NewSessionRuntimeOptions>) -> BoxFuture<'static, Result<Value, String>> { self.runtime().new_session(options) }
 
-    /// `session.releaseRlmChildSession(childId, session)`
-    /// (`daemon-mode.ts:3043`, `:3341`).
-    ///
-    /// blocked_on: the owner `AgentSession::release_rlm_child_session`
-    /// (`core/agent_session/runtime_members.rs:1787`) is public, but it takes
-    /// `&Arc<AgentSession>` and returns `Box<dyn Fn() + Send + Sync>` (a value
-    /// implementing `FnOnce`), while this seam passes the child as
-    /// `Arc<dyn DaemonSession>`, which cannot be narrowed to the canonical
-    /// `AgentSession`, and returns `Box<dyn FnOnce() + Send>`. Owner to add: a
-    /// `DaemonSession::release_rlm_child_session(child_id, session)` signature that
-    /// matches `agent-session.ts:11088`, or a downcast hook on `DaemonSession` for
-    /// the daemon-created children. Needs `modes/daemon/daemon_mode.rs` edited.
-    fn release_rlm_child_session(
-        &self,
-        child_id: &str,
-        session: Arc<dyn DaemonSession>,
-    ) -> Option<Box<dyn FnOnce() + Send>> {
-        let _ = (child_id, session);
-        None
+    fn release_rlm_child_session(&self, child_id: &str, session: Arc<dyn DaemonSession>) -> Option<Box<dyn FnOnce() + Send>> {
+        let child = session.agent_session()?;
+        let release = self.session().release_rlm_child_session(child_id, &child)?;
+        Some(Box::new(move || release()))
     }
 
     fn switch_session(&self, path: &str, options: SessionPathOptions) -> BoxFuture<'static, Result<Value, String>> { self.runtime().switch_session(path, options) }
@@ -1198,6 +1153,24 @@ pub(crate) async fn run_native_daemon_mode(options: crate::main_entry::DaemonMod
         Box::pin(async move {
             let metadata = input.runtime_metadata.map(serde_json::from_value).transpose().map_err(|error| error.to_string())?;
             let model = input.session_options.model.map(serde_json::from_value).transpose().map_err(|error| error.to_string())?;
+            let mut creation = crate::core::agent_session_services::AgentSessionCreationOptions::default();
+            if let Some(options) = &input.session_options.subagent_options {
+                creation.thinking_level = Some(options.thinking_level);
+                creation.service_tier = Some(options.service_tier.clone());
+                creation.scoped_models = Some(options.scoped_models.iter().map(|item| crate::core::agent_session::ScopedModel { model: item.model.clone(), thinking_level: item.thinking_level }).collect());
+                creation.initial_active_tool_names = Some(options.active_tool_names.clone());
+                creation.allowed_tool_names = options.allowed_tool_names.clone();
+                creation.custom_tools = Some(options.custom_tools.clone());
+                creation.include_goals = Some(options.include_goals);
+                creation.include_compact_skill = Some(options.include_compact_skill);
+                creation.rlm_depth = Some(options.rlm_depth as i64);
+                creation.rlm_max_depth = Some(options.rlm_max_depth as i64);
+                creation.rlm_session_dir = Some(options.session_dir.clone());
+                creation.rlm_parent_node_id = Some(options.rlm_parent_node_id.clone());
+                creation.rlm_parent_agent = Some(options.parent_session.session_name().unwrap_or_else(|| options.parent_session.session_id()));
+                creation.semantic_parent_session_id = Some(options.parent_session.session_id());
+                creation.semantic_spawned_by_request_id = options.spawned_by_request_id.clone();
+            }
             let runtime = super::create_agent_session_runtime(factory, super::CreateAgentSessionRuntimeInput {
                 cwd: input.cwd,
                 agent_dir: input.agent_dir.or(default_config.agent_dir.clone()).unwrap_or_else(crate::config::get_agent_dir),
@@ -1209,7 +1182,7 @@ pub(crate) async fn run_native_daemon_mode(options: crate::main_entry::DaemonMod
                     agent_message_controller: input.session_options.agent_message_controller,
                     agent_observe_controller: input.session_options.agent_observe_controller,
                     rlm_heartbeat_controller: input.session_options.rlm_heartbeat_controller,
-                    ..Default::default()
+                    ..creation
                 }),
                 runtime_metadata: metadata,
                 session_lease: None,

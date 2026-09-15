@@ -411,7 +411,7 @@ pub fn acp_updates_for_session_event(
                 status: child.status.clone(),
                 model: child.model.clone(),
                 depth: None,
-                token_count: child.token_count,
+                token_count: child.token_count.filter(|tokens| tokens.is_finite() && *tokens >= 0.0).map(|tokens| tokens as i64),
                 error: child.error.clone(),
             }]);
             vec![update_with(
@@ -483,7 +483,10 @@ pub fn acp_updates_for_session_event(
                         .clone()
                         .unwrap_or_else(|| message.target.session_id.clone()),
                 ),
-                delivery_status: Some(message.delivery_status.clone()),
+                delivery_status: Some(match message.delivery_status {
+                    crate::core::kernel::shared::KernelDeliveryStatus::Delivered => "delivered",
+                    crate::core::kernel::shared::KernelDeliveryStatus::Queued => "queued",
+                }.into()),
             });
             vec![update_with(
                 "session_info_update",

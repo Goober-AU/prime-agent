@@ -149,6 +149,7 @@ pub(super) fn fullscreen(
     if enabled {
         let dock = Rc::new(RefCell::new(pi_tui::tui::Container::new()));
         dock.borrow_mut().add_child(editor.clone());
+        if let Some(bar) = &transcript.borrow().subagents { dock.borrow_mut().add_child(bar.clone()); }
         dock.borrow_mut()
             .add_child(Rc::new(RefCell::new(Tray(mode.clone(), editor.clone()))));
         let mouse = mode

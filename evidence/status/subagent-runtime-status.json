@@ -1,0 +1,66 @@
+{
+  "slice": "subagent-runtime-status",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/core/agent-session.ts",
+      "rust": "crates/pi-coding-agent/src/core/agent_session/subagent_runs.rs",
+      "status": "partial",
+      "notes": "Spawn lifecycle, child events, publication barrier, cancellation, retention, deletion settlement and durable usage attribution implemented. TypeScript usage batching/live parent folding deferred."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/daemon/daemon-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_subagents.rs",
+      "status": "partial",
+      "notes": "Daemon-owned child runtimes, inherited settings, messaging controllers, durable spawn admission and teardown wired; parent-side ledger lookup repaired."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_subagents.rs",
+      "status": "partial",
+      "notes": "Bottom summary mounted in both terminal layouts; snapshot/roster updates, waiting status, scoped handoff and sent/received message rendering wired. No live rendered validation."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/agent-connection/in-process-agent-connection.ts",
+      "rust": "crates/pi-coding-agent/src/core/agent_session_runtime/in_process_adapter.rs",
+      "status": "partial",
+      "notes": "Child snapshots, cancellation and child watcher now reach real sessions."
+    }
+  ],
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust: passed; final source hash manifest verified",
+  "buildProfile": {
+    "CARGO_BUILD_JOBS": "1",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_PROFILE_DEV_DEBUG": "0"
+  },
+  "staticChecks": [
+    "tsgo --noEmit: passed",
+    "biome check .: passed; 1072 files; no fixes",
+    "git diff --check: passed",
+    "Edited-file ownership and final source hashes: passed"
+  ],
+  "tests": "Not run by explicit user instruction. No test files modified and no real provider calls.",
+  "protocol": "Restores existing payload fields and commands. No new daemon wire surface; roster access uses the existing agent_roster capability.",
+  "limitations": [
+    "Live spawn/message/cancel/reconnect/rendering validation deferred to user.",
+    "Windows runtime not exercised.",
+    "Usage persistence is per completion; TypeScript batching and immediate in-memory parent usage folding deferred.",
+    "Existing background workers retain their loaded binary until restarted."
+  ],
+  "buildAttempts": "Compile errors corrected; one archive attempt failed from insufficient disk. User freed space, temporary compiler cache relocation was fully restored, and the final build passed.",
+  "warnings": [
+    [
+      "pi-ai",
+      "9"
+    ],
+    [
+      "pi-tui",
+      "5"
+    ],
+    [
+      "pi-coding-agent",
+      "325"
+    ]
+  ],
+  "binarySha256": "c009d2cbf7a903fe6cd83432df19f0ac26719c76fb0c90e728e9de313a9355e0",
+  "blocked_on": "No implementation blocker for the scoped runtime and status fix. Live validation remains deferred."
+}

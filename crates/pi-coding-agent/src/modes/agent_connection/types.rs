@@ -923,7 +923,7 @@ pub struct AgentConnectionRlmChildAgentSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_count: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_count: Option<i64>,
+    pub token_count: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub recap: Option<String>,
     pub session_dir: String,
@@ -1198,21 +1198,8 @@ pub struct RefinementAppliedEditSummary {
 /// canonical `GoalState` from `core/goals.js`, so this is a re-export, not a local copy.
 pub use crate::core::goals::GoalState;
 
-/// `KernelSentAgentMessage` fields the connection layer reads.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KernelSentAgentMessage {
-    pub delivery_status: String,
-    pub target: KernelSentAgentMessageTarget,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KernelSentAgentMessageTarget {
-    pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_name: Option<String>,
-}
+/// Preserve the complete sent-message receipt used by the tool renderer.
+pub use crate::core::kernel::shared::{KernelSentAgentMessage, KernelSentAgentMessageTarget};
 
 /// `AgentConnectionEvent` union.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1408,7 +1395,7 @@ pub trait AgentConnection: Send + Sync {
     fn subscribe_agent_roster(
         &self,
         listener: std::sync::Arc<dyn Fn() + Send + Sync>,
-    ) -> pi_ai::types::BoxFuture<Result<(), String>> {
+    ) -> pi_ai::types::BoxFuture<Result<std::sync::Arc<dyn crate::modes::agent_connection::daemon_agent_connection::AgentConnectionRosterStore>, String>> {
         let _ = listener;
         Box::pin(async { Err("subscribeAgentRoster is not supported by this connection".to_string()) })
     }

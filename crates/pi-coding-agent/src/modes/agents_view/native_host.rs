@@ -282,9 +282,9 @@ impl view::AgentsViewUiServices for UiServices {
     }
 }
 
-struct NativeTransport(Arc<DaemonClient>);
+pub(crate) struct NativeTransport(Arc<DaemonClient>);
 impl NativeTransport {
-    fn new(socket: &str) -> Self {
+    pub(crate) fn new(socket: &str) -> Self {
         Self(DaemonClient::create(socket))
     }
     fn hello_value(&self, hello: daemon_client::DaemonHello) -> roster::DaemonHello {

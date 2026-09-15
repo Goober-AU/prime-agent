@@ -952,6 +952,10 @@ impl AgentSessionMessageRateLimiter {
 /// members; the Rust trait keeps the same three members and lets each
 /// implementation decide whether the optional ones exist.
 pub trait AgentSessionMessageController: Send + Sync {
+    /// Internal catalog, including passive children; older hosts may omit it.
+    fn list_agents(&self) -> pi_ai::types::BoxFuture<Result<Option<AgentSessionMessageListResult>, String>> {
+        Box::pin(async { Ok(None) })
+    }
     fn roster(
         &self,
     ) -> std::pin::Pin<

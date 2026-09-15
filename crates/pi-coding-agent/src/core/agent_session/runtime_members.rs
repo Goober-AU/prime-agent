@@ -2,6 +2,9 @@
 
 use super::*;
 
+#[path = "subagent_runs.rs"]
+mod subagent_runs;
+
 use crate::core::extensions::types::{
     ProviderConfig as ExtensionProviderConfig, SessionEntry as ExtensionSessionEntry,
 };
@@ -729,7 +732,7 @@ impl AgentSession {
             let weak = weak.clone(); Box::pin(async move {
                 let session = weak.upgrade().ok_or("Parent session disposed")?;
                 let kwargs = request.kwargs.as_object().cloned().unwrap_or_default();
-                serde_json::to_value(session.run_rlm_child(&request.prompt, &kwargs).await?).map_err(|error| error.to_string())
+                serde_json::to_value(session.start_rlm_child_run(&request.prompt, &kwargs, request.cell_source_code).await?).map_err(|error| error.to_string())
             })
         })));
         let weak = Arc::downgrade(self);
@@ -739,6 +742,27 @@ impl AgentSession {
                     &request.kwargs.as_object().cloned().unwrap_or_default()).await
             })
         })));
+        let weak = Arc::downgrade(self);
+        handlers.insert("rlm.find_models".into(), create_rlm_find_models_host_handler(Arc::new(move |query, limit| {
+            let weak = weak.clone();
+            Box::pin(async move { weak.upgrade().ok_or("Parent session disposed")?.find_rlm_models(&query, limit as i64).await })
+        })));
+        let weak = Arc::downgrade(self);
+        handlers.insert("rlm.list_subagents".into(), create_rlm_list_subagents_host_handler(Arc::new(move || {
+            let weak = weak.clone();
+            Box::pin(async move { weak.upgrade().ok_or("Parent session disposed")?.list_rlm_subagents().await })
+        })));
+        let weak = Arc::downgrade(self);
+        handlers.insert("rlm.delete_subagent".into(), create_rlm_delete_subagent_host_handler(Arc::new(move |target| {
+            let weak = weak.clone();
+            Box::pin(async move { weak.upgrade().ok_or("Parent session disposed")?.delete_rlm_subagent(&target).await })
+        })));
+        if self.agent_message_controller.is_some() {
+            handlers.extend(create_agent_message_host_handlers(Arc::new(subagent_runs::SessionMessageController(Arc::downgrade(self)))));
+        }
+        if let Some(controller) = &self.agent_observe_controller {
+            handlers.extend(create_agent_observe_host_handlers(controller.clone()));
+        }
         for operation in ["goal.get", "goal.create", "goal.complete", "compact.run", "compact.status", "refine.run", "refine.status",
             "rlm_heartbeat.list", "rlm_heartbeat.create", "rlm_heartbeat.update", "rlm_heartbeat.delete"] {
             if operation.starts_with("goal.") && !self.include_goals { continue; }
@@ -978,19 +1002,16 @@ impl AgentSession {
 
     /// `_cancelRlmChildRun(run, reason)`.
     pub(super) fn cancel_rlm_child_run(&self, run: &RlmChildRun, reason: &str) -> bool {
-        let terminal = matches!(
-            run.status.as_str(),
-            "done" | "error" | "cancelled"
-        );
-        if terminal {
-            return false;
-        }
-        (run.abort)();
-        if let Some(run) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
-            let mut run = run.lock().unwrap();
-            run.status = RLM_CHILD_AGENT_STATUS_CANCELLED.to_string();
-            run.error = Some(reason.to_string());
-        }
+        let current = self.active_rlm_child_runs.lock().unwrap().get(&run.id).cloned();
+        let Some(current) = current else { return false; };
+        let abort = {
+            let mut current = current.lock().unwrap();
+            if matches!(current.status.as_str(), "done" | "error" | "cancelled") { return false; }
+            current.status = RLM_CHILD_AGENT_STATUS_CANCELLED.to_string();
+            current.error = Some(reason.to_string());
+            current.abort.clone()
+        };
+        abort();
         true
     }
 
@@ -1005,38 +1026,30 @@ impl AgentSession {
 
     /// `_currentActiveSessionId()`.
     pub(super) async fn current_active_session_id(&self) -> Option<String> {
-        self.agent_message_controller
-            .as_ref()
-            .map(|controller| self.session_id())
-            .or(Some(self.session_id()))
+        match &self.agent_message_controller {
+            Some(controller) => controller.list_agents().await.ok().flatten().and_then(|listed| listed.current.map(|current| current.active_session_id)),
+            None => None,
+        }
     }
 
     /// `_awaitPendingRlmChildPublication(selector)`.
-    pub(super) async fn await_pending_rlm_child_publication(&self, selector: &str) -> Result<String, String> {
-        let deferred = {
-            let mut deleting = self.deleting_rlm_children.lock().unwrap();
-            let entry = deleting
-                .entry(selector.to_string())
-                .or_insert_with(|| Arc::new(create_agent_message_deferred()));
-            entry.clone()
-        };
-        deferred.wait().await?;
-        Ok(selector.to_string())
+    pub(super) async fn await_pending_rlm_child_publication(&self, selector: &str) -> Result<Option<String>, String> {
+        let run = self.active_rlm_child_runs.lock().unwrap().values()
+            .find(|run| { let run = run.lock().unwrap(); run.id == selector || run.session_name == selector })
+            .cloned();
+        let Some(run) = run else { return Ok(None); };
+        let publication = run.lock().unwrap().publication.clone();
+        publication.wait().await?;
+        let child = run.lock().unwrap().session.clone();
+        Ok(child.map(|child| child.session_id()))
     }
 
-    /// `listRlmSubagents()`.
-    ///
-    /// REPAIR CURSOR: `this._agentMessageController?.listAgents()` needs an
-    /// `AgentSessionMessageListResult` from the controller. The Rust trait
-    /// (`core/agent_messages.rs:947`) declares only `roster()`,
-    /// `await_pending_child_publication` and `send_agent_message`; `roster()`
-    /// returns the unrelated `AgentFamilyRosterResult`, and the daemon builds the
-    /// list in `AgentDaemon::create_agent_message_list_result`
-    /// (`modes/daemon/daemon_mode.rs:12332`) without exposing it on the trait.
-    /// Add `list_agents()` to the canonical trait (and to the daemon controller)
-    /// so this call site can pass the result through unchanged.
+    /// `listRlmSubagents()` includes daemon-owned passive children.
     pub async fn list_rlm_subagents(self: &Arc<Self>) -> Result<RlmListSubagentsResult, String> {
-        let listed: Option<AgentSessionMessageListResult> = None;
+        let listed = match &self.agent_message_controller {
+            Some(controller) => controller.list_agents().await?,
+            None => None,
+        };
         Ok(self.build_rlm_subagent_list(listed))
     }
 
@@ -1411,10 +1424,8 @@ impl AgentSession {
 
     /// `_trackRlmSubagentDeletion(subagent, startDeletion)`.
     ///
-    /// REPAIR CURSOR: the TypeScript reserves the selector with
-    /// `{ subagent, promise }` and returns the SAME accepted result to a repeated
-    /// call. `deleting_rlm_children` only stores the deferred, so a repeated call
-    /// awaits the reservation and then re-reports the accepted result.
+    /// Repeated calls share admission; detached cleanup keeps the selector reserved
+    /// until the run releases its separate deletion reservation.
     pub(super) async fn track_rlm_subagent_deletion(
         self: &Arc<Self>,
         subagent: &RlmSubagentRegistryEntry,
@@ -1423,25 +1434,23 @@ impl AgentSession {
         >,
     ) -> Result<RlmDeleteSubagentResult, String> {
         let child_id = subagent.rlm_child_id.clone();
-        let existing = self
-            .deleting_rlm_children
-            .lock()
-            .unwrap()
-            .get(&child_id)
-            .cloned();
-        if let Some(existing) = existing {
-            existing.wait().await?;
-            return Ok(RlmDeleteSubagentResult {
-                subagent: subagent.clone(),
-                outcome: None,
-            });
+        let (deletion, existing) = {
+            let mut pending = self.deleting_rlm_children.lock().unwrap();
+            match pending.get(&child_id) {
+                Some(deletion) => (deletion.clone(), true),
+                None => {
+                    let deletion = Arc::new(create_agent_message_deferred());
+                    pending.insert(child_id.clone(), deletion.clone());
+                    (deletion, false)
+                }
+            }
+        };
+        if existing {
+            deletion.wait().await?;
+            return Ok(RlmDeleteSubagentResult { subagent: subagent.clone(), outcome: None });
         }
-        let deletion = Arc::new(create_agent_message_deferred());
-        self.deleting_rlm_children
-            .lock()
-            .unwrap()
-            .insert(child_id.clone(), deletion.clone());
         let result = start_deletion(self.clone()).await;
+        match &result { Ok(_) => deletion.resolve(), Err(error) => deletion.reject(error.clone()) }
         // `finally`: release the reservation unless the detached run still owns
         // the selector until its deletion reservation settles.
         let detached = self
@@ -1516,13 +1525,17 @@ impl AgentSession {
         run: &RlmChildRun,
         session: &Arc<AgentSession>,
     ) -> Arc<AgentMessageDeferred> {
-        if let Some(cleanup) = run.deletion_cleanup.clone() {
-            return cleanup;
-        }
-        let cleanup = Arc::new(create_agent_message_deferred());
-        if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
-            entry.lock().unwrap().deletion_cleanup = Some(cleanup.clone());
-        }
+        let current = self.active_rlm_child_runs.lock().unwrap().get(&run.id).cloned();
+        let cleanup = if let Some(current) = current {
+            let mut current = current.lock().unwrap();
+            if let Some(cleanup) = &current.deletion_cleanup { return cleanup.clone(); }
+            let cleanup = Arc::new(create_agent_message_deferred());
+            current.deletion_cleanup = Some(cleanup.clone());
+            cleanup
+        } else {
+            if let Some(cleanup) = &run.deletion_cleanup { return cleanup.clone(); }
+            Arc::new(create_agent_message_deferred())
+        };
         let session_for_cleanup = session.clone();
         let owner = self.clone();
         let child_id = run.id.clone();
@@ -1600,20 +1613,19 @@ impl AgentSession {
         if let Some(complete_deletion) = complete_deletion {
             complete_deletion().await;
         }
-        let current = self
-            .active_rlm_child_runs
-            .lock()
-            .unwrap()
-            .get(&run.id)
-            .cloned();
+        let current = self.active_rlm_child_runs.lock().unwrap().get(&run.id).cloned();
         if let Some(current) = current {
-            self.remove_rlm_subagent_tracking(&run.id, Some(&current.lock().unwrap().clone()));
-        }
-        if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(&run.id) {
-            let mut entry = entry.lock().unwrap();
-            entry.settled = true;
-            entry.settlement.resolve();
-            entry.deletion_reservation.resolve();
+            let snapshot = {
+                let mut current = current.lock().unwrap();
+                current.settled = true;
+                current.settlement.resolve();
+                current.deletion_reservation.resolve();
+                current.clone()
+            };
+            self.remove_rlm_subagent_tracking(&run.id, Some(&snapshot));
+        } else {
+            run.settlement.resolve();
+            run.deletion_reservation.resolve();
         }
         self.unsettled_rlm_child_runs
             .lock()
@@ -1719,16 +1731,12 @@ impl AgentSession {
                 .unwrap_or(false),
         };
         if owns_entry {
-            self.active_rlm_child_runs.lock().unwrap().remove(child_id);
-        }
-        if let Some(run) = run {
-            if let Some(entry) = self.active_rlm_child_runs.lock().unwrap().get(child_id) {
+            let removed = self.active_rlm_child_runs.lock().unwrap().remove(child_id);
+            if let Some(entry) = removed {
                 let mut entry = entry.lock().unwrap();
-                if entry.id == run.id {
-                    entry.abort = Arc::new(|| {});
-                    entry.unsubscribe = None;
-                    entry.session = None;
-                }
+                entry.abort = Arc::new(noop_rlm_child_abort);
+                entry.unsubscribe = None;
+                entry.session = None;
             }
         }
     }
@@ -1807,17 +1815,14 @@ impl AgentSession {
                     outcome: None,
                 });
             }
-            if let Some(live_session) = live_session.clone() {
-                if settled {
+            if live_session.is_some() && settled {
+                {
                     let mut entry = run.lock().unwrap();
                     entry.deletion_run_finished = Some(true);
                     entry.settlement = create_agent_message_deferred();
                     entry.settled = false;
                 }
-                self.unsettled_rlm_child_runs
-                    .lock()
-                    .unwrap()
-                    .push(run.clone());
+                self.unsettled_rlm_child_runs.lock().unwrap().push(run.clone());
             }
             if let Some(live_session) = live_session {
                 self.continue_finished_rlm_run_deletion(
@@ -1876,19 +1881,43 @@ impl AgentSession {
 
     /// `releaseRlmChildSession(childId, session)`.
     pub fn release_rlm_child_session(
-        self: &Arc<Self>,
-        child_id: &str,
-        session: &Arc<AgentSession>,
-    ) -> Box<dyn Fn() + Send + Sync> {
+        self: &Arc<Self>, child_id: &str, session: &Arc<AgentSession>,
+    ) -> Option<Box<dyn Fn() + Send + Sync>> {
+        let run = self.active_rlm_child_runs.lock().unwrap().get(child_id).cloned();
+        if let Some(run) = run {
+            let matches = {
+                let current = run.lock().unwrap();
+                current.status == "done" && current.session.as_ref().is_some_and(|child| Arc::ptr_eq(child, session))
+            };
+            if matches {
+                let weak = Arc::downgrade(self);
+                let child_id = child_id.to_string();
+                return Some(Box::new(move || {
+                    let unsubscribe = run.lock().unwrap().unsubscribe.take();
+                    if let Some(parent) = weak.upgrade() {
+                        let mut runs = parent.active_rlm_child_runs.lock().unwrap();
+                        if runs.get(&child_id).is_some_and(|current| Arc::ptr_eq(current, &run)) { runs.remove(&child_id); }
+                    }
+                    if let Some(unsubscribe) = unsubscribe { unsubscribe(); }
+                }));
+            }
+        }
+        if !self.rlm_child_sessions.lock().unwrap().get(child_id).is_some_and(|child| Arc::ptr_eq(&child.session, session)) { return None; }
         let weak = Arc::downgrade(self);
         let child_id = child_id.to_string();
         let session = session.clone();
-        Box::new(move || {
-            let _ = session;
+        Some(Box::new(move || {
             if let Some(parent) = weak.upgrade() {
-                parent.rlm_child_sessions.lock().unwrap().remove(&child_id);
+                let removed = {
+                    let mut children = parent.rlm_child_sessions.lock().unwrap();
+                    if children.get(&child_id).is_some_and(|child| Arc::ptr_eq(&child.session, &session)) { children.remove(&child_id).is_some() } else { false }
+                };
+                if removed {
+                    let unsubscribe = parent.rlm_child_unsubscribes.lock().unwrap().remove(&child_id);
+                    if let Some(unsubscribe) = unsubscribe { unsubscribe(); }
+                }
             }
-        })
+        }))
     }
 
     /// `_rlmChildSnapshotForRun(run, child = run.session ?? retained session)`.
@@ -1913,7 +1942,7 @@ impl AgentSession {
         RlmChildAgentSnapshot {
             id: run.id.clone(),
             parent_id: self.rlm_parent_node_id.clone(),
-            active_session_id: child.as_ref().map(|child| child.session_id()),
+            active_session_id: None,
             session_name: child
                 .as_ref()
                 .and_then(|child| child.session_name())
@@ -1972,7 +2001,7 @@ impl AgentSession {
         RlmChildAgentSnapshot {
             id: child_id.to_string(),
             parent_id: self.rlm_parent_node_id.clone(),
-            active_session_id: Some(child.session_id()),
+            active_session_id: None,
             session_name: child.session_name(),
             model: child
                 .model()
@@ -2024,6 +2053,7 @@ impl AgentSession {
     /// `_isUnboundTerminalRlmChildRun(run)`.
     pub(super) fn is_unbound_terminal_rlm_child_run(&self, run: &RlmChildRun) -> bool {
         matches!(run.status.as_str(), "done" | "error" | "cancelled")
+            && run.session.is_none()
             && !self.rlm_child_sessions.lock().unwrap().contains_key(&run.id)
     }
 
@@ -2074,7 +2104,7 @@ impl AgentSession {
                 .unwrap()
                 .contains(name)
         };
-        if pending {
+        if pending || self.list_rlm_subagents().await?.subagents.iter().any(|child| child.session_name == name) {
             return Err(format_agent_session_name_unavailable(name, (self.rlm_depth + 1) as f64));
         }
         Ok(())
@@ -2241,26 +2271,12 @@ impl AgentSession {
     }
 
     /// `runRlmChild(prompt, kwargs, spawnCode?)`.
-    ///
-    /// REPAIR CURSOR: `_startRlmChildRun` (agent-session.ts:11448-11600) has no
-    /// Rust owner yet, so this member cannot spawn. The port fails loudly instead
-    /// of returning a stand-in handle. Every dependency the body needs is already
-    /// available: `self.rlm_depth`/`self.rlm_max_depth` for the depth guard,
-    /// `create_child_rlm_session_dir`, `create_default_rlm_subagent_session_name`,
-    /// `assert_rlm_subagent_session_name_available`, `resolve_rlm_subagent_model`,
-    /// `get_supported_thinking_levels` + `clamp_thinking_level_for_model`,
-    /// `create_rlm_subagent_runtime_options` + `create_rlm_subagent_runtime`, and
-    /// `RlmSpawnHandle { rlm_child_id, name, session_dir, model }`.
     pub async fn run_rlm_child(
         self: &Arc<Self>,
         prompt: &str,
         kwargs: &Map<String, Value>,
     ) -> Result<RlmSpawnHandle, String> {
-        let _ = (prompt, kwargs);
-        Err(
-            "runRlmChild is not implemented: _startRlmChildRun (agent-session.ts:11448-11600) is unported"
-                .to_string(),
-        )
+        self.start_rlm_child_run(prompt, kwargs, None).await
     }
 
     /// `_isRetryableError(message)` (agent-session.ts:12000-12019).
