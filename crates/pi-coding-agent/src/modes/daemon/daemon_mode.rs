@@ -15,6 +15,9 @@
 #[path = "daemon_server.rs"]
 mod native_server;
 
+#[path = "daemon_subagents.rs"]
+mod daemon_subagents;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -407,6 +410,7 @@ pub struct CreateAgentSessionRuntimeInput {
 /// `sessionOptions` handed to the runtime factory.
 #[derive(Clone, Default)]
 pub struct SessionRuntimeOptions {
+    pub subagent_options: Option<Arc<crate::core::rlm_runtime::CreateRlmSubagentRuntimeOptions>>,
     pub model: Option<Value>,
     pub rlm_heartbeat_controller: Option<Arc<dyn crate::core::cron_jobs::AgentRlmHeartbeatController>>,
     pub agent_message_controller: Option<Arc<dyn AgentSessionMessageController>>,
@@ -3092,6 +3096,7 @@ pub struct DaemonAttachResult {
 /// TypeScript calls 1:1 and are implemented by the session slice later.
 #[allow(clippy::type_complexity)]
 pub trait DaemonSession: Send + Sync {
+    fn agent_session(&self) -> Option<Arc<crate::core::agent_session::AgentSession>> { None }
     fn session_manager(&self) -> Arc<StdMutex<SessionManager>>;
     fn runtime(&self) -> Arc<dyn DaemonRuntimeApi>;
     /// `state.runtime.session.settingsManager`; the live session holds the
@@ -6671,6 +6676,7 @@ impl AgentDaemon {
             Arc::new(move || state_ref.lock().expect("session state slot poisoned").clone())
         };
         let session_options = SessionRuntimeOptions {
+            subagent_options: None,
             model: None,
             rlm_heartbeat_controller: Some(self.create_rlm_heartbeat_controller(Arc::clone(
                 &get_current_state,
@@ -6892,8 +6898,7 @@ impl AgentDaemon {
                         daemon.shutdown(0, None).await;
                     });
                 }),
-                // The canonical runtime installs its live SubagentRuntimeHost.
-                subagent_runtime_host: None,
+                subagent_runtime_host: Some(Arc::new(daemon_subagents::DaemonSubagentHost::new(self, state))),
             },
         )
         .await;
@@ -14325,6 +14330,7 @@ impl AgentDaemon {
             Arc::new(move || state_ref.lock().expect("session state slot poisoned").clone())
         };
         let session_options = SessionRuntimeOptions {
+            subagent_options: None,
             model: None,
             rlm_heartbeat_controller: Some(self.create_rlm_heartbeat_controller(Arc::clone(
                 &get_current_state,
@@ -15243,7 +15249,7 @@ impl AgentDaemon {
             .into_iter()
             .filter(|candidate| {
                 candidate.child_id == child_id
-                    && canonical_session_path(&candidate.child) == parent_path
+                    && canonical_session_path(&candidate.parent) == parent_path
             })
             .collect::<Vec<_>>();
         let live_edge = edges
@@ -15935,6 +15941,12 @@ impl DaemonAgentMessageController {
 }
 
 impl AgentSessionMessageController for DaemonAgentMessageController {
+    fn list_agents(&self) -> pi_ai::types::BoxFuture<Result<Option<AgentSessionMessageListResult>, String>> {
+        let daemon = self.daemon.clone();
+        let current = self.require_current_state();
+        Box::pin(async move { Ok(Some(daemon.create_agent_message_list_result(&current?, None).await)) })
+    }
+
     /// `roster: () => this.createAgentFamilyRoster(requireCurrentState())`
     /// (`daemon-mode.ts:3375`).
     fn roster(

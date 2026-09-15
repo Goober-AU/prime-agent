@@ -1,0 +1,25 @@
+{
+  "slice": "subagent-runtime-status",
+  "owner": "lead",
+  "files": [
+    "crates/pi-coding-agent/src/core/agent_session/runtime_members.rs",
+    "crates/pi-coding-agent/src/core/agent_session/subagent_runs.rs",
+    "crates/pi-coding-agent/src/core/agent_session_runtime/daemon_adapter.rs",
+    "crates/pi-coding-agent/src/core/agent_session_runtime/in_process_adapter.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_subagents.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_subagents.rs",
+    "crates/pi-coding-agent/src/modes/agent_connection/daemon_agent_connection.rs",
+    "crates/pi-coding-agent/src/modes/agent_connection/types.rs",
+    "crates/pi-coding-agent/src/modes/agent_connection/roster_subscription.rs",
+    "docs/RUST_SUBAGENT_FIX.md",
+    "evidence/status/subagent-runtime-status.json",
+    "crates/pi-coding-agent/src/modes/agents_view/native_host.rs",
+    "crates/pi-coding-agent/src/core/rlm_runtime.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_settings.rs",
+    "crates/pi-coding-agent/src/core/agent_messages.rs",
+    "crates/pi-coding-agent/src/modes/acp/acp_events.rs"
+  ],
+  "scope": "Port subagent spawn/settlement, daemon publication and messaging, child snapshots, bottom tray and sent/received notices from TypeScript. No tests or real provider calls."
+}

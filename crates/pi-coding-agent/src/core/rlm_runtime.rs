@@ -575,6 +575,7 @@ pub struct RlmSubagentRuntime {
 }
 
 /// `interface CreateRlmSubagentRuntimeOptions`.
+#[derive(Clone)]
 pub struct CreateRlmSubagentRuntimeOptions {
     pub parent_session: Arc<AgentSession>,
     pub id: String,
@@ -636,7 +637,7 @@ pub trait SubagentRuntimeHost: Send + Sync {
     /// passivation-eligible.
     fn complete_rlm_subagent_runtime(&self, child_id: &str, session: &Arc<AgentSession>) -> bool {
         let _ = (child_id, session);
-        false
+        true
     }
     /// Release a host-owned child after its detached initial task settles.
     fn release_rlm_subagent_runtime(
@@ -644,9 +645,9 @@ pub trait SubagentRuntimeHost: Send + Sync {
         runtime: RlmSubagentRuntime,
         options: CreateRlmSubagentRuntimeOptions,
         status: &str,
-    ) -> BoxFuture<()> {
-        let _ = (runtime, options, status);
-        Box::pin(async {})
+    ) -> BoxFuture<Result<(), String>> {
+        let _ = (options, status);
+        Box::pin(async move { runtime.session.dispose_async(None).await; Ok(()) })
     }
     /// Close or remove the host-owned child; session is absent when a persisted
     /// child is still passive.

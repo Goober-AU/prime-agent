@@ -54,6 +54,8 @@ mod native_commands;
 mod native_extensions;
 #[path = "native_host_extension_bridge.rs"]
 mod native_extension_bridge;
+#[path = "native_host_subagents.rs"]
+mod native_subagents;
 
 pub(crate) async fn run_interactive_mode(
     options: InteractiveModeSeamOptions,
@@ -97,6 +99,8 @@ impl<T: TuiComponent> TuiComponent for SharedComponent<T> {
 }
 
 struct Transcript {
+    subagents: Option<Rc<RefCell<native_subagents::Bar>>>,
+    agent_messages: Vec<Rc<RefCell<crate::modes::interactive::components::agent_message::AgentMessageComponent>>>,
     extension_surfaces: Option<Rc<RefCell<native_extensions::Surfaces>>>,
     side_pane: Option<Rc<RefCell<native_extensions::SidePane>>>,
     history: Option<Box<Transcript>>,
@@ -142,6 +146,8 @@ impl Transcript {
 
     fn new(mode: Rc<RefCell<InteractiveMode>>) -> Self {
         Self {
+            subagents: None,
+            agent_messages: Vec::new(),
             extension_surfaces: None,
             side_pane: None,
             history: None,
@@ -158,6 +164,7 @@ impl Transcript {
         self.tools.clear();
         self.assistant = None;
         self.assistants.clear();
+        self.agent_messages.clear();
         for message in initial_render_messages(messages) {
             self.message(message, false);
         }
@@ -181,6 +188,16 @@ impl Transcript {
             .cloned()
             .chain(self.history.iter().flat_map(|h| h.all_tools()))
             .collect()
+    }
+    fn sent_agent_message(&mut self, tool_call_id: &str, message: wire::KernelSentAgentMessage) {
+        if let Some(tool) = self.tools.get(tool_call_id) {
+            tool.borrow_mut().append_sent_agent_message(message);
+        } else if let Some(history) = &mut self.history {
+            history.sent_agent_message(tool_call_id, message);
+        }
+    }
+    fn all_agent_messages(&self) -> Vec<Rc<RefCell<crate::modes::interactive::components::agent_message::AgentMessageComponent>>> {
+        self.agent_messages.iter().cloned().chain(self.history.iter().flat_map(|history| history.all_agent_messages())).collect()
     }
     fn all_assistants(&self) -> Vec<Rc<RefCell<AssistantMessageComponent>>> {
         self.assistants
@@ -247,6 +264,17 @@ impl Transcript {
                 self.tool_result(&result.tool_call_id, &value, result.is_error, false);
             }
             AgentMessage::Custom(message) => {
+                if let pi_agent_core::types::CustomAgentMessage::Custom { custom_type, details: Some(details), .. } = &message {
+                    if custom_type == crate::core::agent_messages::AGENT_MESSAGE_CUSTOM_TYPE {
+                        if let Ok(details) = serde_json::from_value(details.clone()) {
+                            let component = Rc::new(RefCell::new(crate::modes::interactive::components::agent_message::AgentMessageComponent::new(details, false)));
+                            component.borrow_mut().set_expanded(self.mode.borrow().agent_messages_expanded);
+                            self.rows.push(Box::new(SharedComponent(component.clone())));
+                            self.agent_messages.push(component);
+                            return;
+                        }
+                    }
+                }
                 let value = serde_json::to_value(message).unwrap_or_default();
                 let text = value
                     .get("content")
@@ -454,6 +482,7 @@ enum InputAction {
     ToggleMessages,
     Model,
     AgentsBack,
+    Subagents,
     Shortcuts,
     Suspend,
     PromptStash,
@@ -1052,7 +1081,7 @@ async fn run_terminal(
         ),
         prompt_stash_session_id: Some(snapshot.state.session_id.clone()),
     })?;
-    controller.apply_connection_state_snapshot(project_state(snapshot.state));
+    controller.apply_connection_state_snapshot(project_state(snapshot.state.clone()));
     controller.init().await?;
     if controller.get_current_model().is_none() {
         controller.show_status("Welcome to Optimus. Connect a provider with /login, then choose a model with /model. Type /help for commands.", "accent");
@@ -1061,7 +1090,10 @@ async fn run_terminal(
         controller.show_warning(&warning);
     }
     let mode = Rc::new(RefCell::new(controller));
+    native_subagents::seed(&mode, &snapshot);
+    let subagents = Rc::new(RefCell::new(native_subagents::Bar::new(mode.clone())));
     let transcript = Rc::new(RefCell::new(Transcript::new(mode.clone())));
+    transcript.borrow_mut().subagents = Some(subagents.clone());
     let initial_history = snapshot.history.clone();
     let initial_history_messages = snapshot.messages.clone();
     let initial_streaming_message = snapshot.streaming_message.clone();
@@ -1203,6 +1235,7 @@ async fn run_terminal(
     ui.borrow_mut().add_child(Rc::new(RefCell::new(native_extensions::Widgets(extension_surfaces.clone(), false))));
     ui.borrow_mut().add_child(editor.clone());
     ui.borrow_mut().add_child(Rc::new(RefCell::new(native_extensions::Widgets(extension_surfaces.clone(), true))));
+    ui.borrow_mut().add_child(subagents.clone());
     ui.borrow_mut().add_child(Rc::new(RefCell::new(native_extensions::Statuses(extension_surfaces.clone(), Tray(mode.clone(), editor.clone())))));
     ui.borrow_mut().set_focus(Some(editor.clone()));
     ui.borrow_mut().start();
@@ -1233,6 +1266,7 @@ async fn run_terminal(
         return Ok(None);
     }
     let (send, receive) = mpsc::channel();
+    subagents.borrow().subscribe(connection.clone(), send.clone());
     let local_extension_bridge = in_process_connection.as_ref().map(|local| {
         let bridge = native_extension_bridge::Bridge::new(send.clone(), &mode.borrow().get_current_cwd());
         let shutdown = send.clone();
@@ -1404,6 +1438,7 @@ async fn run_terminal(
                 picker.borrow_mut().handle_input(&data);
             } else if let Some(selector) = &selector {
                 selector.borrow_mut().handle_input(&data);
+            } else if !side_pane.borrow().is_open() && subagents.borrow_mut().input(&data, &editor, &actions) {
             } else if !side_pane.borrow().is_open() && queue_runtime.handle_input(&data) {
             } else if pi_tui::keybindings::get_keybindings().matches(&data, "app.message.followUp")
             {
@@ -1657,11 +1692,16 @@ async fn run_terminal(
                 }
                 InputAction::ToggleMessages => {
                     mode.borrow_mut().toggle_agent_message_expansion();
-                    for assistant in transcript.borrow().all_assistants() {
-                        assistant
-                            .borrow_mut()
-                            .set_expanded(mode.borrow().agent_messages_expanded);
+                    for message in transcript.borrow().all_agent_messages() {
+                        message.borrow_mut().set_expanded(mode.borrow().agent_messages_expanded);
                     }
+                    for tool in transcript.borrow().all_tools() {
+                        tool.borrow_mut().set_agent_messages_expanded(mode.borrow().agent_messages_expanded);
+                    }
+                }
+                InputAction::Subagents => {
+                    stash_editor_draft_for_agents_view(&mode, &editor, &current_session_id);
+                    mode.borrow_mut().return_to_agents_view(InteractiveModeRunResultType::ScopedAgentsView);
                 }
                 InputAction::AgentsBack => {
                     // `returnToAgentsView` stashes the live draft first
@@ -1926,6 +1966,7 @@ async fn run_terminal(
                         local_extension_bridge.as_ref(),
                         );
                     }
+                    mode.borrow_mut().reset_subagent_summary();
                     current_session_id = state.session_id.clone();
                     queue_runtime.reset_session(current_session_id.clone());
                     mode.borrow_mut()
@@ -1942,6 +1983,7 @@ async fn run_terminal(
                     }
                 }
                 HostEvent::RefreshSnapshot(snapshot) | HostEvent::Connection(wire::AgentConnectionEvent::SessionResynced { snapshot }) => {
+                    native_subagents::seed(&mode, &snapshot);
                     if current_session_id != snapshot.state.session_id {
                         extension_surfaces.borrow_mut().reset();
                         side_pane.borrow_mut().close(connection.clone());
@@ -3727,6 +3769,16 @@ fn apply_event(
     }
     .unwrap_or_default();
     match event.type_name() {
+        "rlm_child_update" => {
+            if let wire::AgentConnectionSessionEvent::RlmChildUpdate { child } = &event {
+                mode.borrow_mut().update_subagent_summary(native_subagents::project_child(child));
+            }
+        }
+        "ipython_sent_agent_message" => {
+            if let wire::AgentConnectionSessionEvent::IpythonSentAgentMessage { tool_call_id, message } = &event {
+                transcript.borrow_mut().sent_agent_message(tool_call_id, message.clone());
+            }
+        }
         "session_action_update" => {
             if let Some(actions) = value.get("actions") {
                 let strings = |key| {
