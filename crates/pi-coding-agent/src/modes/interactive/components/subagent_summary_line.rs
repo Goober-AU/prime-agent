@@ -127,6 +127,7 @@ pub struct SubagentSummaryLine {
     focused: bool,
     counts: SubagentSummaryCounts,
     openable: bool,
+    always_visible: bool,
     get_location_label: Box<dyn Fn() -> Option<String>>,
     get_context_label: Box<dyn Fn() -> Option<String>>,
     get_override_label: Box<dyn Fn() -> Option<String>>,
@@ -145,6 +146,7 @@ impl SubagentSummaryLine {
             focused: false,
             counts: SubagentSummaryCounts::default(),
             openable: false,
+            always_visible: false,
             get_location_label,
             get_context_label,
             get_override_label,
@@ -160,6 +162,10 @@ impl SubagentSummaryLine {
 
     pub fn set_openable(&mut self, openable: bool) {
         self.openable = openable;
+    }
+
+    pub(crate) fn set_always_visible(&mut self, always_visible: bool) {
+        self.always_visible = always_visible;
     }
 
     pub fn is_selectable(&self) -> bool {
@@ -236,7 +242,7 @@ impl Default for SubagentSummaryLine {
 impl Component for SubagentSummaryLine {
     fn render(&mut self, width: f64) -> Vec<String> {
         let mut lines = self.render_info_line(width);
-        if self.counts.total == 0 {
+        if self.counts.total == 0 && !self.always_visible {
             return lines;
         }
         if width < 2.0 {
@@ -244,7 +250,16 @@ impl Component for SubagentSummaryLine {
         }
         let safe_width = width;
         let inner = safe_width - 2.0;
-        let label = theme().fg("accent", "\u{1b}[1msubagents\u{1b}[22m");
+        let title = if self.always_visible {
+            format!(
+                "{} {}",
+                self.counts.total,
+                if self.counts.total == 1 { "agent" } else { "agents" }
+            )
+        } else {
+            "subagents".to_string()
+        };
+        let label = theme().fg("accent", &format!("\u{1b}[1m{title}\u{1b}[22m"));
         let top = truncate_to_width(
             &format!(
                 "{}{}{}",
@@ -280,7 +295,7 @@ impl Component for SubagentSummaryLine {
                 &format!("\u{25cb} {} inactive", self.counts.inactive)
             )
         );
-        let open_hint = if self.openable {
+        let open_hint = if self.is_selectable() {
             if self.focused {
                 format!(
                     "{}/{} open",

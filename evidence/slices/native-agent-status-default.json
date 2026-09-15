@@ -1,0 +1,12 @@
+{
+  "slice": "native-agent-status-default",
+  "owner": "lead",
+  "files": [
+    "crates/pi-coding-agent/src/modes/interactive/components/subagent_summary_line.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_subagents.rs",
+    "crates/pi-coding-agent/src/core/prompts/rlm.rs",
+    "docs/RUST_NATIVE_AGENT_STATUS.md",
+    "evidence/status/native-agent-status-default.json"
+  ],
+  "scope": "Always show native agent counts in the interactive status bar and direct delegated work through native Optimus RLM calls, preserving upstream count semantics. No tests or provider calls."
+}

@@ -1,0 +1,33 @@
+{
+  "slice": "native-agent-status-default",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/modes/interactive/components/subagent-summary-line.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/components/subagent_summary_line.rs",
+      "status": "ported",
+      "notes": "Existing count and selection behavior retained; native host explicitly keeps the tray visible at zero, labels the total count, and hides the empty selection hint."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_subagents.rs",
+      "status": "ported",
+      "notes": "Always-visible option enabled for the mounted native tray in normal and fullscreen layouts."
+    },
+    {
+      "src": "packages/coding-agent/src/core/prompts/rlm.ts",
+      "rust": "crates/pi-coding-agent/src/core/prompts/rlm.rs",
+      "status": "ported",
+      "notes": "User-requested native delegation guidance; report current errors instead of substituting external agent CLIs. Earlier failures in a resumed transcript do not establish current capability."
+    }
+  ],
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust: passed, existing warnings",
+  "checks": {
+    "typescript": "tsgo --noEmit: passed",
+    "biome": "biome check --error-on-warnings .: 1072 files passed",
+    "diff": "git diff --check: passed"
+  },
+  "read_only_observation": "The running session had one top-level public roster entry and zero native child snapshots. Its transcript recorded an old unported native-spawn error followed by four codex exec workers; the installed build already contains the native implementation from PR #28.",
+  "validation_limits": "No tests, provider calls, native child launches, or rendered terminal checks. Existing external processes were not stopped or converted; delegation changes are model guidance. User live validation remains outstanding.",
+  "protocol": "No wire changes",
+  "blocked_on": []
+}
