@@ -9,7 +9,7 @@ fi
 export PI_PACKAGE_DIR="$optimus_install/packages/coding-agent"
 export PI_CODING_AGENT_MODULE_DIR="$PI_PACKAGE_DIR"
 export PRIME_AGENT_BUILD_ID="$(cat "$optimus_install/COMMIT")"
-export PRIME_AGENT_LAUNCHER_PATH="$HOME/.local/bin/optimus-rust"
+export PRIME_AGENT_LAUNCHER_PATH="$HOME/.local/bin/optimus-agent"
 export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.config/optimus-rust}"
 if [ -z "${PRIME_AGENT_KERNEL_VENV:-}" ]; then
     export PRIME_AGENT_KERNEL_VENV="$optimus_install/kernel-venv"
