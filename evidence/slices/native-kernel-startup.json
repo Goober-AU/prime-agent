@@ -1,0 +1,11 @@
+{
+  "slice": "native-kernel-startup",
+  "owner": "lead",
+  "files": [
+    "scripts/test-native-subagents.mjs",
+    "docs/RUST_NATIVE_KERNEL_STARTUP_FIX.md",
+    "evidence/status/native-kernel-startup.json",
+    "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs"
+  ],
+  "scope": "Diagnose and repair native RLM startup stalls, empirically validate through isolated daemon and Python runtime."
+}
