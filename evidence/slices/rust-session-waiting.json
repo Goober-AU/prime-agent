@@ -1,0 +1,10 @@
+{
+  "slice": "rust-session-waiting",
+  "files": [
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_state.rs",
+    "docs/RUST_SESSION_WAITING_FIX.md",
+    "evidence/slices/rust-session-waiting.json",
+    "evidence/status/rust-session-waiting.json"
+  ]
+}

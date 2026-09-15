@@ -46,6 +46,8 @@ mod native_history;
 mod native_queue;
 #[path = "native_host_settings.rs"]
 mod native_settings;
+#[path = "native_host_state.rs"]
+mod native_state;
 #[path = "native_host_commands.rs"]
 mod native_commands;
 #[path = "native_host_extensions.rs"]
@@ -984,6 +986,7 @@ async fn run_terminal(
     };
     let snapshot = connection.get_initial_snapshot().await?;
     let mut current_session_id = snapshot.state.session_id.clone();
+    let mut state_refresh = native_state::StateRefresh::new();
     let services = if let Some(runtime) = &options.runtime {
         local::create_interactive_mode_ui_services(&runtime.session())
     } else {
@@ -1701,6 +1704,13 @@ async fn run_terminal(
             ui.borrow_mut().request_render();
         }
         while let Ok(event) = receive.try_recv() {
+            if matches!(&event,
+                HostEvent::Connection(_) | HostEvent::RefreshSnapshot(_)
+                    | HostEvent::ModelSelected { .. } | HostEvent::SettingAccepted(_)
+                    | HostEvent::ScopeChanged(..)
+            ) {
+                state_refresh.invalidate();
+            }
             match event {
                 HostEvent::Shutdown => mode.borrow_mut().shutdown_requested = true,
                 HostEvent::Extension(event) => {
@@ -1829,7 +1839,11 @@ async fn run_terminal(
                     if event.type_name() == "session_action_update" {
                         queue_runtime.observe_queue_change();
                     }
-                    apply_event(&mode, &transcript, event)
+                    let finished = event.type_name() == "agent_end";
+                    apply_event(&mode, &transcript, event);
+                    if finished {
+                        state_refresh.request(connection.clone(), current_session_id.clone());
+                    }
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SessionReplaced {
                     state,
@@ -1984,7 +1998,7 @@ async fn run_terminal(
                     model,
                     result,
                 } => match result {
-                    Ok(state)
+                    Ok(mut state)
                         if current_session_id == session_id && state.session_id == session_id =>
                     {
                         let mut controller = mode.borrow_mut();
@@ -1993,7 +2007,11 @@ async fn run_terminal(
                             .lock()
                             .map_err(|error| error.to_string())?
                             .set_default_model_and_provider(&model.provider, &model.id);
-                        controller.apply_connection_state_snapshot(project_state(state));
+                        // Model selection can settle after a newer turn has started.
+                        state.is_streaming = controller.is_agent_streaming();
+                        state.is_compacting = controller.is_agent_compacting();
+                        state.is_bash_running = controller.is_bash_running();
+                        native_state::apply_refresh(&mut controller, state);
                         controller.show_status(&format!("Model: {}", model.id), "success");
                     }
                     Ok(_) => {}
@@ -2003,22 +2021,7 @@ async fn run_terminal(
                     if let Err(error) = result {
                         mode.borrow_mut().show_error(&error);
                     }
-                    match connection.get_state().await {
-                        Ok(state) => {
-                            current_session_id = state.session_id.clone();
-                            if mode
-                                .borrow()
-                                .connection_state
-                                .as_ref()
-                                .is_some_and(|previous| previous.session_id != current_session_id)
-                            {
-                                queue_runtime.reset_session(current_session_id.clone());
-                            }
-                            mode.borrow_mut()
-                                .apply_connection_state_snapshot(project_state(state));
-                        }
-                        Err(error) => mode.borrow_mut().show_error(&error),
-                    }
+                    state_refresh.request(connection.clone(), current_session_id.clone());
                 }
                 HostEvent::Render => {}
                 HostEvent::Heartbeats(catalog, open) => {
@@ -2508,6 +2511,9 @@ async fn run_terminal(
             bridge.footer_data.set_available_provider_count(models.iter().map(|m| &m.provider).collect::<std::collections::HashSet<_>>().len());
         }
         queue_runtime.poll();
+        if state_refresh.poll(&mode, &current_session_id) {
+            ui.borrow_mut().request_render();
+        }
         let rows = ui.borrow().terminal_rows();
         model_rows.set(rows as f64);
         editor.borrow_mut().editor_mut().set_terminal_rows(rows);
@@ -3665,6 +3671,7 @@ fn apply_event(
     transcript: &Rc<RefCell<Transcript>>,
     event: wire::AgentConnectionSessionEvent,
 ) {
+    native_state::track_activity(&mut mode.borrow_mut(), &event);
     let value = match &event {
         wire::AgentConnectionSessionEvent::Agent(event) => serde_json::to_value(event),
         event => serde_json::to_value(event),
@@ -3790,9 +3797,12 @@ fn apply_event(
             mode.borrow_mut().session_recap = optional_string(&value, "recap");
             mode.borrow_mut().render_recap();
         }
-        "auto_retry_start" => mode
-            .borrow_mut()
-            .show_warning(&string(&value, "errorMessage")),
+        "auto_retry_start" => {
+            let mut mode = mode.borrow_mut();
+            mode.patch_connection_state(|s| s.retry_attempt = number(&value, "attempt").unwrap_or(0.0));
+            mode.show_warning(&string(&value, "errorMessage"));
+        }
+        "auto_retry_end" => mode.borrow_mut().patch_connection_state(|s| s.retry_attempt = 0.0),
         _ => {}
     }
 }
