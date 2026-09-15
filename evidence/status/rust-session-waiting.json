@@ -1,0 +1,32 @@
+{
+  "slice": "rust-session-waiting",
+  "base_commit": "46af9813ba6be92c279150a9c9f3c971752632ee",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+      "status": "ported",
+      "functions_mapped": 1,
+      "notes": "Native session events now feed the existing activity tracker. Completion refreshes no longer await the daemon on the UI loop; model replies preserve current activity flags."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_state.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "notes": "Private native host adapter for activity events and asynchronous post-turn state refreshes. Generation, event revision, and session guards reject stale replies; metadata cannot resurrect completed activity. Reference lines: 2757-2774, 5501, 5796."
+    }
+  ],
+  "build": "cargo check --locked -p pi-coding-agent: ok (existing port warnings)",
+  "checks": {
+    "typescript_tsgo_no_emit": "passed",
+    "biome": "passed",
+    "git_diff_check": "passed"
+  },
+  "tests": "Not run, per the user's no-tests instruction. The commit hook's installer/browser smoke tests are skipped; non-test checks were run directly.",
+  "runtime_validation": "Pending installation and manual validation. User reported a responsive UI; read-only daemon list reported isStreaming=false and isSessionActive=false. A direct state query timed out. The original client's exact event ordering was not captured.",
+  "diagnostic_incident": "One options-first CLI diagnostic was misparsed as a prompt and invoked the configured provider. This was disclosed to the user; subsequent diagnostics used read-only socket commands.",
+  "daemon_protocol": "unchanged",
+  "installation": "unchanged",
+  "blocked_on": []
+}
