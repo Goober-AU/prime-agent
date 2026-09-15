@@ -1,0 +1,22 @@
+{
+  "slice": "rust-worker-crash",
+  "files": [
+    "crates/pi-coding-agent/src/cli_entry.rs",
+    "crates/pi-coding-agent/src/core/kernel/bootstrap.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_state.rs",
+    "scripts/optimus-rust",
+    "docs/RUST_WORKER_CRASH_FIX.md",
+    "evidence/slices/rust-worker-crash.json",
+    "evidence/status/rust-worker-crash.json",
+    "prime-agent.sh",
+    "optimus-agent.sh",
+    "AGENTS.md",
+    "README.md",
+    "packages/coding-agent/docs/termux.md",
+    "packages/coding-agent/docs/development.md",
+    "packages/coding-agent/docs/quickstart.md",
+    "packages/coding-agent/examples/extensions/README.md",
+    "packages/coding-agent/.changes/optimus-agent-launcher.md"
+  ]
+}

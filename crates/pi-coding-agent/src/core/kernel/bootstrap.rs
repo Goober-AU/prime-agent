@@ -1686,6 +1686,10 @@ fn runtime_candidate_dirs() -> Vec<String> {
             .join("prime-agent-runtime")
             .to_string_lossy()
             .into_owned(),
+        // Native bundles keep packages/coding-agent and prime-agent-runtime
+        // under one release root; the executable lives in that root's bin/.
+        resolve_relative(&get_package_dir(), &["..", "..", "prime-agent-runtime"]),
+        resolve_relative(&module_dir, &["..", "prime-agent-runtime"]),
         resolve_relative(&module_dir, &["..", "..", "prime-agent-runtime"]),
         resolve_relative(
             &module_dir,

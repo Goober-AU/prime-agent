@@ -11,10 +11,15 @@ export PI_CODING_AGENT_MODULE_DIR="$PI_PACKAGE_DIR"
 export PRIME_AGENT_BUILD_ID="$(cat "$optimus_install/COMMIT")"
 export PRIME_AGENT_LAUNCHER_PATH="$HOME/.local/bin/optimus-rust"
 export PRIME_AGENT_CODING_AGENT_DIR="${PRIME_AGENT_CODING_AGENT_DIR:-$HOME/.config/optimus-rust}"
-export PRIME_AGENT_KERNEL_VENV="${PRIME_AGENT_KERNEL_VENV:-$optimus_install/kernel-venv}"
+if [ -z "${PRIME_AGENT_KERNEL_VENV:-}" ]; then
+    export PRIME_AGENT_KERNEL_VENV="$optimus_install/kernel-venv"
+    # Validate the installed interpreter without rebuilding the release's venv.
+    export PRIME_AGENT_KERNEL_PYTHON="${PRIME_AGENT_KERNEL_PYTHON:-$PRIME_AGENT_KERNEL_VENV/bin/python}"
+fi
 
-# Keep the Rust daemon separate from Prime, with short Unix socket paths.
-optimus_runtime_dir="${OPTIMUS_RUST_TMPDIR:-${XDG_RUNTIME_DIR:-$HOME/.cache}/optimus-rust}"
+# Keep each installed build separate from running older daemons.
+optimus_release_name=${optimus_install##*/}
+optimus_runtime_dir="${OPTIMUS_RUST_TMPDIR:-${XDG_RUNTIME_DIR:-$HOME/.cache}/optimus-rust/$optimus_release_name}"
 umask 077
 mkdir -p -- "$optimus_runtime_dir"
 export TMPDIR="$optimus_runtime_dir"

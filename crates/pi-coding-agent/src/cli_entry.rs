@@ -42,6 +42,9 @@ pub fn main_entry(args: Vec<String>) -> i32 {
     let host = crate::native_main_host::NativeMainHost::new(args);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
+        // Native session/extension futures have large poll frames in dev builds.
+        // The default 2 MiB worker stack can overflow at turn finalization.
+        .thread_stack_size(16 * 1024 * 1024)
         .enable_all()
         .build()
     {

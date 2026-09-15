@@ -28,13 +28,13 @@ prime-agent
 To run a source checkout instead, use Node.js 22.8.0 or newer:
 
 ```bash
-git clone https://github.com/PrimeIntellect-ai/prime-agent
-cd prime-agent
+git clone https://github.com/telemusai/optimus-agent
+cd optimus-agent
 npm ci
-./prime-agent.sh
+./optimus-agent.sh
 ```
 
-The source runner preserves the directory from which it is invoked, so you can also call `/path/to/prime-agent/prime-agent.sh` from another project.
+The source runner preserves the directory from which it is invoked, so you can also call `/path/to/optimus-agent/optimus-agent.sh` from another project.
 
 ## Authenticate
 

@@ -1832,6 +1832,7 @@ async fn run_terminal(
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SideQuestionEvent { event }) => side_pane.borrow_mut().update(event),
                 HostEvent::Connection(wire::AgentConnectionEvent::Closed { error }) => {
+                    native_state::stop_activity(&mut mode.borrow_mut());
                     exit_error = error;
                     mode.borrow_mut().shutdown_requested = true;
                 }
@@ -2018,10 +2019,15 @@ async fn run_terminal(
                     Err(error) => mode.borrow_mut().show_error(&error),
                 },
                 HostEvent::Completed(result) => {
+                    let mut worker_failed = false;
                     if let Err(error) = result {
-                        mode.borrow_mut().show_error(&error);
+                        let mut controller = mode.borrow_mut();
+                        worker_failed = native_state::stop_on_worker_failure(&mut controller, &error);
+                        controller.show_error(&error);
                     }
-                    state_refresh.request(connection.clone(), current_session_id.clone());
+                    if !worker_failed {
+                        state_refresh.request(connection.clone(), current_session_id.clone());
+                    }
                 }
                 HostEvent::Render => {}
                 HostEvent::Heartbeats(catalog, open) => {
