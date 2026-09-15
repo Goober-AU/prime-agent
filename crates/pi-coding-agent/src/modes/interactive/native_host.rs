@@ -1717,7 +1717,12 @@ async fn run_terminal(
         }
         while let Ok(event) = receive.try_recv() {
             if matches!(&event,
-                HostEvent::Connection(_) | HostEvent::RefreshSnapshot(_)
+                HostEvent::Connection(
+                    wire::AgentConnectionEvent::SessionEvent { .. }
+                    | wire::AgentConnectionEvent::SessionResynced { .. }
+                    | wire::AgentConnectionEvent::SessionReplaced { .. }
+                    | wire::AgentConnectionEvent::Closed { .. }
+                ) | HostEvent::RefreshSnapshot(_)
                     | HostEvent::ModelSelected { .. } | HostEvent::SettingAccepted(_)
                     | HostEvent::ScopeChanged(..)
             ) {
@@ -2557,6 +2562,7 @@ async fn run_terminal(
         if state_refresh.poll(&mode, &current_session_id) {
             ui.borrow_mut().request_render();
         }
+        state_refresh.reconcile_if_due(connection.clone(), current_session_id.clone(), &mode.borrow());
         let rows = ui.borrow().terminal_rows();
         model_rows.set(rows as f64);
         editor.borrow_mut().editor_mut().set_terminal_rows(rows);

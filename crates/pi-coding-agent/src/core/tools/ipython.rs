@@ -782,7 +782,9 @@ impl IpythonKernelProvisioner {
                         .map(|(_, value)| value.clone())
                 }),
             snapshot_dir.clone(),
-            None,
+            self.options.as_ref()
+                .and_then(|options| options.host_handlers.as_ref())
+                .and_then(|handlers| handlers.get("model.info").cloned()),
         );
         if let Some(extra) = self.options.as_ref().and_then(|options| options.host_handlers.clone()) {
             for (key, value) in extra {

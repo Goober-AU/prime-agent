@@ -1,0 +1,52 @@
+{
+  "slice": "memory-import-waiting",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/core/memory/service.ts",
+      "rust": "crates/pi-coding-agent/src/core/memory/service.rs",
+      "status": "ported",
+      "notes": "Selected model host handler, profile catalog/auth, import extraction and accounting wired."
+    },
+    {
+      "src": "packages/coding-agent/src/core/extensions/builtin/memory.ts",
+      "rust": "crates/pi-coding-agent/src/core/extensions/builtin/memory.rs",
+      "status": "ported",
+      "notes": "Import accounting shared with Python; provider retry settings reach completion."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/agent-connection/daemon-agent-connection.ts",
+      "rust": "crates/pi-coding-agent/src/modes/agent_connection/daemon_agent_connection.rs",
+      "status": "partial",
+      "notes": "Ordered transport dispatch fixes sequence race. Busy get_state snapshots are rechecked; unrelated pre-existing port gaps remain."
+    },
+    {
+      "src": "packages/coding-agent/src/modes/interactive/interactive-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/interactive/native_host_state.rs",
+      "status": "partial",
+      "notes": "Periodic, guarded background reconciliation of stale activity indicators; no rendered validation."
+    }
+  ],
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust: passed (clean final build, 1m 40s)",
+  "staticChecks": [
+    "tsgo --noEmit: passed",
+    "biome check .: passed; 1072 files; no fixes",
+    "git diff --check: passed",
+    "Edited-file ownership and evidence JSON: passed"
+  ],
+  "tests": "Not run by explicit user instruction. No tests added or modified.",
+  "liveObservation": "Existing latest worker finished at 02:50:53 UTC and reported idle; candidate runtime not exercised.",
+  "protocol": "No wire changes. Existing get_connection_state command only.",
+  "blocked_on": "No implementation blocker for this scoped fix. Live validation deferred to user.",
+  "buildAttempts": [
+    "Initial implementation built successfully.",
+    "Final dispatcher refinement compiled but archiving failed with ENOSPC.",
+    "Removed only generated pi-coding-agent build outputs and rebuilt final source successfully."
+  ],
+  "warnings": {
+    "pi-ai": 9,
+    "pi-tui": 5,
+    "pi-coding-agent": 328,
+    "notes": "Same warning counts as preceding installed build."
+  },
+  "binarySha256": "daa6ae28f3533db69e41a722f4edbf0b3186689f24627c9bacff9da080023190"
+}
