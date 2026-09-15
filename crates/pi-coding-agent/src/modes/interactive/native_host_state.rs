@@ -74,7 +74,9 @@ impl StateRefresh {
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    mode.borrow_mut().show_error(&error);
+                    let mut mode = mode.borrow_mut();
+                    stop_on_worker_failure(&mut mode, &error);
+                    mode.show_error(&error);
                     changed = true;
                 }
             }
@@ -89,6 +91,28 @@ impl Drop for StateRefresh {
             task.abort();
         }
     }
+}
+
+pub(super) fn stop_activity(mode: &mut InteractiveMode) {
+    mode.patch_connection_state(|state| {
+        state.is_streaming = false;
+        state.is_compacting = false;
+        state.is_bash_running = false;
+        state.retry_attempt = 0.0;
+        state.active_tool_names.clear();
+    });
+    mode.stop_compaction_loader();
+    mode.stop_working_loader();
+}
+
+pub(super) fn stop_on_worker_failure(mode: &mut InteractiveMode, error: &str) -> bool {
+    // The supervisor's terminal failure contract, unlike a recoverable socket
+    // loss, confirms that no worker remains to emit agent_end.
+    if error.contains("Session worker ") && error.contains("exited; retry_worker is required") {
+        stop_activity(mode);
+        return true;
+    }
+    false
 }
 
 /// Like the TypeScript's post-turn stats refresh, metadata must not overwrite

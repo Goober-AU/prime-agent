@@ -134,7 +134,7 @@ See [Telegram setup and recovery](https://github.com/telemusai/optimus-agent/blo
 
 ## The Rust migration
 
-The Rust application port is included on `main` alongside the TypeScript reference. Build and run it as `optimus-rust`; the existing `prime-agent.sh` launcher continues to run TypeScript.
+The Rust application port is included on `main` alongside the TypeScript reference. Build and run it as `optimus-rust`; the existing `optimus-agent.sh` launcher continues to run TypeScript.
 
 The Rust workspace is organized around four components:
 
@@ -189,17 +189,17 @@ Use Node.js 22.9 or newer and a compatible npm installation. The following sourc
 git clone https://github.com/telemusai/optimus-agent.git optimus-agent
 cd optimus-agent
 npm ci
-./prime-agent.sh
+./optimus-agent.sh
 ```
 
 For a compiled run from the same checkout:
 
 ```bash
 npm run build
-./prime-agent.sh --dist
+./optimus-agent.sh --dist
 ```
 
-The existing source launcher is still named `prime-agent.sh`, and configuration paths retain `.prime/agent` for compatibility. These inherited names do not mean you should install an unrelated Pi package or overwrite an existing Prime installation.
+The source launcher is `optimus-agent.sh`. Configuration paths retain `.prime/agent` for compatibility.
 
 If you already use Prime or Optimus, select an isolated `PRIME_AGENT_CODING_AGENT_DIR` before experimenting with a different build. Follow the [development guide](https://github.com/telemusai/optimus-agent/blob/main/packages/coding-agent/docs/development.md) for profile isolation and checks, and the [Windows guide](https://github.com/telemusai/optimus-agent/blob/main/packages/coding-agent/docs/windows.md) for shell setup.
 

@@ -17,12 +17,12 @@ pkg update && pkg upgrade
 pkg install nodejs termux-api git ripgrep
 
 # Clone and install Prime Agent from source
-git clone https://github.com/PrimeIntellect-ai/prime-agent.git
-cd prime-agent
+git clone https://github.com/telemusai/optimus-agent.git
+cd optimus-agent
 npm ci
 
 # Run Prime Agent
-./prime-agent.sh
+./optimus-agent.sh
 ```
 
 ## Clipboard Support

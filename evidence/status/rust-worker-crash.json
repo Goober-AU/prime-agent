@@ -1,0 +1,30 @@
+{
+  "slice": "rust-worker-crash",
+  "base_commit": "b64ec22cbb60eb7e7fb8e8b40e8ab05722673711",
+  "findings": [
+    "Worker stderr confirms a Tokio thread stack overflow. No crash dump was available to identify the exact overflowing call chain.",
+    "Saved tool result confirms failed kernel auto-bootstrap using the registry requirement instead of the bundled source.",
+    "The installed venv was recreated on first use because the launcher did not select its prepared interpreter."
+  ],
+  "changes": [
+    "16 MiB Tokio worker stacks for the native runtime.",
+    "Native bundle runtime-source candidates.",
+    "Prepared interpreter selection and per-release daemon sockets in the maintained launcher.",
+    "Stop activity on terminal connection closure or a session/revision-guarded state refresh confirming worker exit; stale command failures cannot clear newer session activity.",
+    "Rename prime-agent.sh to optimus-agent.sh and update source-launch references."
+  ],
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust: passed with existing port warnings",
+  "checks": {
+    "typescript": "tsgo --noEmit passed",
+    "biome": "passed",
+    "shell_syntax": "bash -n optimus-agent.sh scripts/optimus-rust passed",
+    "diff": "passed",
+    "python_runtime": "Exact production readiness expression and all default package imports passed in an isolated prepared venv; no provider invoked."
+  },
+  "tests": "Not run, per the existing no-tests instruction. Non-test checks run directly; installer/browser smoke hooks omitted.",
+  "limitations": "Stack allocation corrects the native stack budget; the exact original overflowing call chain and the rendered worker-failure path remain unverified. User live validation is still required.",
+  "protocol": "unchanged",
+  "python_source": "unchanged",
+  "typescript_source": "unchanged; package documentation and changelog changed only for the user-requested script rename",
+  "blocked_on": []
+}

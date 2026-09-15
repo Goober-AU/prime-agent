@@ -1832,6 +1832,7 @@ async fn run_terminal(
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SideQuestionEvent { event }) => side_pane.borrow_mut().update(event),
                 HostEvent::Connection(wire::AgentConnectionEvent::Closed { error }) => {
+                    native_state::stop_activity(&mut mode.borrow_mut());
                     exit_error = error;
                     mode.borrow_mut().shutdown_requested = true;
                 }
