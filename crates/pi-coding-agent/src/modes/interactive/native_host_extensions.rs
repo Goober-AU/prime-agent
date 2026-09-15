@@ -1,6 +1,11 @@
 //! UI state owned by the terminal thread. Daemon notifications carry data;
 //! components and their lifetime stay here, as in the TypeScript interactive host.
 use super::*;
+use crate::core::messages::{bash_output_to_text, BashExecutionMessage};
+use crate::core::tools::truncate::{truncate_tail, TruncationOptions};
+use crate::modes::interactive::components::bash_execution::{
+    BashExecutionComponent, BashExecutionOptions,
+};
 use crate::modes::interactive::components::side_question::SideQuestionComponent;
 
 #[derive(Default)]
@@ -102,6 +107,18 @@ impl TuiComponent for Statuses {
 pub(super) struct SidePane {
     component: Option<SideQuestionComponent>,
     turns: Vec<wire::AgentConnectionSideQuestionEvent>,
+    commands: Vec<String>,
+    bash: Option<SideBash>,
+    bash_components: Vec<Rc<RefCell<BashExecutionComponent>>>,
+    hidden_bash: Option<String>,
+    discarded_bash: std::collections::HashSet<String>,
+    expanded: bool,
+}
+struct SideBash {
+    id: String,
+    input: String,
+    seed_transcript: bool,
+    component: Option<Rc<RefCell<BashExecutionComponent>>>,
 }
 impl SidePane {
     pub fn is_open(&self) -> bool {
@@ -110,23 +127,128 @@ impl SidePane {
     pub fn running(&self) -> bool {
         self.turns.iter().any(|t| t.status == "running")
     }
+    pub fn submit(
+        &mut self,
+        text: String,
+        mode: &Rc<RefCell<InteractiveMode>>,
+        editor: &Rc<RefCell<CustomEditor>>,
+        connection: Arc<dyn wire::AgentConnection>,
+        send: mpsc::Sender<HostEvent>,
+    ) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        let command = crate::core::slash_commands::parse_slash_command(text);
+        if command.is_some_and(|command| {
+            mode.borrow().is_recognized_slash_command(&command.name)
+                || self.commands.contains(&command.name)
+        }) {
+            editor.borrow_mut().editor_mut().add_to_history(text);
+            editor.borrow_mut().editor_mut().set_text("");
+            self.notice(text, "Slash commands are not available in side conversations. Press esc to return to the main thread.");
+            return;
+        }
+        let bash_command = text.strip_prefix("!!").or_else(|| text.strip_prefix('!'));
+        if bash_command.is_some_and(|command| command.trim().is_empty()) {
+            editor.borrow_mut().editor_mut().set_text("");
+            return;
+        }
+        let blocked =
+            if self.bash.is_some() || (bash_command.is_some() && mode.borrow().is_bash_running()) {
+                Some("Wait for the running command to finish or cancel it first.")
+            } else if self.running() {
+                Some("Wait for the current side question to finish or cancel it first.")
+            } else {
+                None
+            };
+        if let Some(message) = blocked {
+            // The editor clears before onSubmit; skipping dispatch alone loses the draft.
+            editor.borrow_mut().editor_mut().set_text(text);
+            mode.borrow_mut().show_warning(message);
+            return;
+        }
+        if bash_command.is_none()
+            && !crate::modes::interactive::prompt_stash_state::stash_images(
+                &mode.borrow().pasted_images,
+                text,
+            )
+            .is_empty()
+        {
+            editor.borrow_mut().editor_mut().set_text(text);
+            self.notice(text, "Images are not supported in side conversations. Press esc to return to the main thread.");
+            return;
+        }
+        editor.borrow_mut().editor_mut().add_to_history(text);
+        editor.borrow_mut().editor_mut().set_text("");
+        if let Some(command) = bash_command {
+            let id = uuid::Uuid::new_v4().to_string();
+            self.bash = Some(SideBash {
+                id: id.clone(),
+                input: text.into(),
+                seed_transcript: !text.starts_with("!!"),
+                component: None,
+            });
+            let command = command.trim().to_string();
+            tokio::spawn(async move {
+                let result = connection
+                    .execute_bash(
+                        &command,
+                        Some(wire::AgentConnectionExecuteBashOptions {
+                            exclude_from_context: Some(true),
+                            transient: Some(true),
+                            run_id: Some(id.clone()),
+                        }),
+                    )
+                    .await;
+                if let Err(error) = result {
+                    let _ = send.send(HostEvent::SideBashFailed(id, error));
+                }
+            });
+        } else {
+            let padding = mode
+                .borrow()
+                .settings_manager()
+                .lock()
+                .map(|settings| settings.get_editor_padding_x() as usize)
+                .unwrap_or(2);
+            self.start(text.into(), padding, connection, send);
+        }
+    }
+    fn notice(&mut self, question: &str, answer: &str) {
+        if let Some(component) = &mut self.component {
+            component.add_turn(wire::AgentConnectionSideQuestionEvent {
+                id: format!("side-notice-{}", uuid::Uuid::new_v4()),
+                question: question.into(),
+                answer: answer.into(),
+                status: "complete".into(),
+                error_message: None,
+            });
+        }
+    }
+    pub fn set_commands(&mut self, id: &str, commands: Vec<String>) {
+        if self.turns.first().is_some_and(|turn| turn.id == id) {
+            self.commands = commands;
+        }
+    }
     pub fn start(
         &mut self,
         question: String,
+        padding: usize,
         connection: Arc<dyn wire::AgentConnection>,
         send: mpsc::Sender<HostEvent>,
     ) {
         if question.trim().is_empty() {
-            let _ = send.send(HostEvent::Error("Usage: /btw <question>".into()));
+            let _ = send.send(HostEvent::Warning("Usage: /btw <question>".into()));
             return;
         }
         if self.running() {
             let _ = send.send(HostEvent::Warning(
-                "Wait for the side answer, or press Esc to cancel it.".into(),
+                "Wait for the current side question to finish or cancel it first.".into(),
             ));
             return;
         }
-        let previous = self
+        let previous: Vec<_> = self
             .turns
             .iter()
             .filter(|t| !t.answer.is_empty())
@@ -144,12 +266,30 @@ impl SidePane {
         };
         match &mut self.component {
             Some(component) => component.add_turn(event.clone()),
-            None => self.component = Some(SideQuestionComponent::new(event.clone(), None)),
+            None => {
+                self.component = Some(SideQuestionComponent::new(event.clone(), Some(padding)));
+                let (connection, send, id) = (connection.clone(), send.clone(), event.id.clone());
+                tokio::spawn(async move {
+                    if let Ok(Ok(commands)) =
+                        tokio::time::timeout(Duration::from_secs(30), connection.get_commands())
+                            .await
+                    {
+                        let _ = send.send(HostEvent::SideCommands(
+                            id,
+                            commands.into_iter().map(|command| command.name).collect(),
+                        ));
+                    }
+                });
+            }
         }
         self.turns.push(event.clone());
         tokio::spawn(async move {
             if let Err(error) = connection
-                .start_side_question(&event.id, &event.question, Some(previous))
+                .start_side_question(
+                    &event.id,
+                    &event.question,
+                    (!previous.is_empty()).then_some(previous),
+                )
                 .await
             {
                 let _ = send.send(HostEvent::Connection(
@@ -164,15 +304,195 @@ impl SidePane {
             }
         });
     }
-    pub fn update(&mut self, event: wire::AgentConnectionSideQuestionEvent) {
+    pub fn update(&mut self, mut event: wire::AgentConnectionSideQuestionEvent) {
         if let Some(turn) = self.turns.iter_mut().find(|t| t.id == event.id) {
+            if turn.status != "running" {
+                return;
+            }
+            if event.status == "error" && event.answer.is_empty() {
+                event.answer = turn.answer.clone();
+            }
             *turn = event.clone();
             if let Some(component) = &mut self.component {
                 component.update(event);
             }
         }
     }
+    pub fn set_expanded(&mut self, expanded: bool) {
+        self.expanded = expanded;
+        for component in &self.bash_components {
+            component.borrow_mut().set_expanded(expanded);
+        }
+    }
+    pub fn bash_failed(&mut self, id: &str, error: &str) -> bool {
+        self.discarded_bash.remove(id);
+        if !self.bash.as_ref().is_some_and(|bash| bash.id == id) {
+            return false;
+        }
+        let bash = self.bash.take().expect("matching side bash");
+        let started = bash.component.is_some();
+        if let Some(component) = bash.component {
+            component.borrow_mut().set_failed(error);
+            // A delayed bash_end must not escape into the main transcript.
+            self.hidden_bash = Some(id.into());
+        } else {
+            self.notice(&bash.input, error);
+        }
+        if let Some(component) = &mut self.component {
+            component.finish_bash();
+        }
+        started
+    }
+    /// Routes transient shell events to their owning pane, matching the TS
+    /// bash_start/output/end handlers. Output has no run id, so its start owns
+    /// the session's single bash slot until bash_end.
+    pub fn handle_bash_event(
+        &mut self,
+        event: &wire::AgentConnectionSessionEvent,
+        ui: &Rc<RefCell<TUI>>,
+        connection: &Arc<dyn wire::AgentConnection>,
+    ) -> bool {
+        match event {
+            wire::AgentConnectionSessionEvent::BashStart {
+                command,
+                exclude_from_context,
+                transient,
+                run_id,
+            } => {
+                self.hidden_bash = None;
+                if run_id
+                    .as_ref()
+                    .is_some_and(|id| self.discarded_bash.contains(id))
+                {
+                    self.hidden_bash = run_id.clone();
+                    Self::abort_bash(connection.clone());
+                    return true;
+                }
+                if let Some(bash) = self
+                    .bash
+                    .as_mut()
+                    .filter(|bash| run_id.as_ref() == Some(&bash.id))
+                {
+                    let component = Rc::new(RefCell::new(BashExecutionComponent::new(
+                        command,
+                        ui.clone(),
+                        *exclude_from_context,
+                        BashExecutionOptions::default(),
+                    )));
+                    component.borrow_mut().set_expanded(self.expanded);
+                    if let Some(pane) = &mut self.component {
+                        pane.add_bash(Box::new(SharedComponent(component.clone())));
+                    }
+                    self.bash_components.push(component.clone());
+                    bash.component = Some(component);
+                    return true;
+                }
+                if transient == &Some(true) {
+                    self.hidden_bash = Some(run_id.clone().unwrap_or_default());
+                    return true;
+                }
+                false
+            }
+            wire::AgentConnectionSessionEvent::BashOutput { chunk } => {
+                if self.hidden_bash.is_some() {
+                    return true;
+                }
+                if let Some(component) = self.bash.as_ref().and_then(|bash| bash.component.as_ref())
+                {
+                    component.borrow_mut().append_output(chunk);
+                    return true;
+                }
+                false
+            }
+            wire::AgentConnectionSessionEvent::BashEnd {
+                exit_code,
+                cancelled,
+                truncated,
+                full_output_path,
+                error_message,
+                transient,
+                run_id,
+            } => {
+                if let Some(id) = run_id {
+                    self.discarded_bash.remove(id);
+                }
+                if self
+                    .hidden_bash
+                    .as_ref()
+                    .is_some_and(|id| run_id.as_deref().unwrap_or_default() == id)
+                {
+                    self.hidden_bash = None;
+                    return true;
+                }
+                if !self
+                    .bash
+                    .as_ref()
+                    .is_some_and(|bash| run_id.as_ref() == Some(&bash.id))
+                {
+                    return transient == &Some(true);
+                }
+                let bash = self.bash.take().expect("matching side bash");
+                if let Some(pane) = &mut self.component {
+                    pane.finish_bash();
+                }
+                if let Some(component) = bash.component {
+                    let mut component = component.borrow_mut();
+                    let mut truncation =
+                        truncate_tail(&component.get_output(), TruncationOptions::default());
+                    truncation.truncated |= truncated;
+                    if let Some(error) = error_message {
+                        component.set_failed(error);
+                    } else {
+                        component.set_complete(
+                            exit_code.map(|code| code as f64),
+                            *cancelled,
+                            Some(truncation.clone()),
+                            full_output_path.clone(),
+                        );
+                    }
+                    if bash.seed_transcript && !cancelled && error_message.is_none() {
+                        self.turns.push(wire::AgentConnectionSideQuestionEvent {
+                            id: format!("side-bash-{}", bash.id),
+                            question: bash.input,
+                            answer: bash_output_to_text(&BashExecutionMessage {
+                                role: "bashExecution".into(),
+                                command: component.get_command().into(),
+                                output: truncation.content.trim_end_matches('\n').into(),
+                                exit_code: *exit_code,
+                                cancelled: false,
+                                truncated: truncation.truncated,
+                                full_output_path: full_output_path.clone(),
+                                timestamp: now_ms() as i64,
+                                exclude_from_context: Some(true),
+                            }),
+                            status: "complete".into(),
+                            error_message: None,
+                        });
+                    }
+                } else if let Some(error) = error_message {
+                    self.notice(&bash.input, error);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+    fn abort_bash(connection: Arc<dyn wire::AgentConnection>) {
+        tokio::spawn(async move {
+            let _ = connection.abort_bash().await;
+        });
+    }
     pub fn close(&mut self, connection: Arc<dyn wire::AgentConnection>) {
+        if let Some(bash) = self.bash.take() {
+            self.discarded_bash.insert(bash.id.clone());
+            // abort_bash is session-scoped. Only abort after our matching start,
+            // otherwise another client's command may still own the slot.
+            if let Some(component) = bash.component {
+                component.borrow_mut().set_complete(None, true, None, None);
+                self.hidden_bash = Some(bash.id);
+                Self::abort_bash(connection.clone());
+            }
+        }
         for turn in self.turns.drain(..).filter(|t| t.status == "running") {
             let connection = connection.clone();
             tokio::spawn(async move {
@@ -180,14 +500,18 @@ impl SidePane {
             });
         }
         self.component = None;
+        self.commands.clear();
+        self.bash_components.clear();
     }
 }
 impl TuiComponent for SidePane {
     fn render(&mut self, width: f64) -> Vec<String> {
-        self.component
-            .as_mut()
-            .map(|c| c.render(width))
-            .unwrap_or_default()
+        let Some(component) = &mut self.component else {
+            return Vec::new();
+        };
+        let mut lines = vec![String::new()];
+        lines.extend(component.render(width));
+        lines
     }
     fn invalidate(&mut self) {
         if let Some(component) = &mut self.component {

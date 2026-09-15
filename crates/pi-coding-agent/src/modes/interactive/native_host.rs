@@ -98,6 +98,7 @@ impl<T: TuiComponent> TuiComponent for SharedComponent<T> {
 
 struct Transcript {
     extension_surfaces: Option<Rc<RefCell<native_extensions::Surfaces>>>,
+    side_pane: Option<Rc<RefCell<native_extensions::SidePane>>>,
     history: Option<Box<Transcript>>,
     mode: Rc<RefCell<InteractiveMode>>,
     rows: Vec<Box<dyn TuiComponent>>,
@@ -142,6 +143,7 @@ impl Transcript {
     fn new(mode: Rc<RefCell<InteractiveMode>>) -> Self {
         Self {
             extension_surfaces: None,
+            side_pane: None,
             history: None,
             mode,
             rows: Vec::new(),
@@ -375,6 +377,12 @@ impl TuiComponent for Transcript {
                 theme().fg("muted", &format!(" {}", mode.get_working_loader_message())),
             ));
         }
+        drop(mode);
+        // TypeScript includes the side-question container in fullscreen scroll
+        // content as well as inline content (getPromptContextContainers).
+        if let Some(side_pane) = &self.side_pane {
+            lines.extend(side_pane.borrow_mut().render(width));
+        }
         // Existing controller text may be unwrapped; enforce the terminal width.
         lines
             .into_iter()
@@ -382,6 +390,9 @@ impl TuiComponent for Transcript {
             .collect()
     }
     fn invalidate(&mut self) {
+        if let Some(side_pane) = &self.side_pane {
+            side_pane.borrow_mut().invalidate();
+        }
         if let Some(history) = &mut self.history {
             history.invalidate();
         }
@@ -460,6 +471,8 @@ enum HostEvent {
     ScopeChanged(String, Vec<wire::AgentConnectionScopedModel>),
     RunUpdate(Vec<String>),
     SideQuestion(String),
+    SideCommands(String, Vec<String>),
+    SideBashFailed(String, String),
     Debug,
     Connection(wire::AgentConnectionEvent),
     Completed(Result<(), String>),
@@ -1185,8 +1198,8 @@ async fn run_terminal(
     let extension_surfaces = Rc::new(RefCell::new(native_extensions::Surfaces::default()));
     transcript.borrow_mut().extension_surfaces = Some(extension_surfaces.clone());
     let side_pane = Rc::new(RefCell::new(native_extensions::SidePane::default()));
+    transcript.borrow_mut().side_pane = Some(side_pane.clone());
     ui.borrow_mut().add_child(transcript.clone());
-    ui.borrow_mut().add_child(side_pane.clone());
     ui.borrow_mut().add_child(Rc::new(RefCell::new(native_extensions::Widgets(extension_surfaces.clone(), false))));
     ui.borrow_mut().add_child(editor.clone());
     ui.borrow_mut().add_child(Rc::new(RefCell::new(native_extensions::Widgets(extension_surfaces.clone(), true))));
@@ -1391,7 +1404,7 @@ async fn run_terminal(
                 picker.borrow_mut().handle_input(&data);
             } else if let Some(selector) = &selector {
                 selector.borrow_mut().handle_input(&data);
-            } else if queue_runtime.handle_input(&data) {
+            } else if !side_pane.borrow().is_open() && queue_runtime.handle_input(&data) {
             } else if pi_tui::keybindings::get_keybindings().matches(&data, "app.message.followUp")
             {
                 actions.borrow_mut().push(InputAction::Submit(
@@ -1530,14 +1543,11 @@ async fn run_terminal(
         for action in std::mem::take(&mut *actions.borrow_mut()) {
             match action {
                 InputAction::Submit(text, follow_up) => {
-                    if side_pane.borrow().is_open() && !text.trim_start().starts_with('/') {
-                        if side_pane.borrow().running() {
-                            mode.borrow_mut().show_warning("Wait for the side answer, or press Esc to cancel it.");
-                        } else if !text.trim().is_empty() {
-                            editor.borrow_mut().editor_mut().add_to_history(&text);
-                            editor.borrow_mut().editor_mut().set_text("");
-                            side_pane.borrow_mut().start(text, connection.clone(), send.clone());
-                        }
+                    if side_pane.borrow().is_open() {
+                        side_pane.borrow_mut().submit(
+                            text, &mode, &editor, connection.clone(), send.clone(),
+                        );
+                        ui.borrow_mut().request_render();
                         continue;
                     }
                     if queue_runtime.submit(&text, follow_up) {
@@ -1565,6 +1575,7 @@ async fn run_terminal(
                 InputAction::Interrupt | InputAction::Escape => {
                     if side_pane.borrow().is_open() {
                         side_pane.borrow_mut().close(connection.clone());
+                        ui.borrow_mut().request_render();
                         continue;
                     }
                     let second = matches!(action, InputAction::Interrupt)
@@ -1625,6 +1636,7 @@ async fn run_terminal(
                 }
                 InputAction::ToggleTools => {
                     mode.borrow_mut().toggle_tool_output_expansion();
+                    side_pane.borrow_mut().set_expanded(mode.borrow().tool_output_expanded);
                     for tool in transcript.borrow().all_tools() {
                         tool.borrow_mut()
                             .set_expanded(mode.borrow().tool_output_expanded);
@@ -1826,17 +1838,47 @@ async fn run_terminal(
                         }
                     }
                 }
-                HostEvent::SideQuestion(question) => side_pane.borrow_mut().start(question, connection.clone(), send.clone()),
+                HostEvent::SideQuestion(question) => {
+                    let padding = mode.borrow().settings_manager().lock()
+                        .map(|settings| settings.get_editor_padding_x() as usize).unwrap_or(2);
+                    side_pane.borrow_mut().start(question, padding, connection.clone(), send.clone());
+                    ui.borrow_mut().request_render();
+                }
+                HostEvent::SideCommands(id, commands) => side_pane.borrow_mut().set_commands(&id, commands),
+                HostEvent::SideBashFailed(id, error) => {
+                    if side_pane.borrow_mut().bash_failed(&id, &error) {
+                        state_refresh.request(connection.clone(), current_session_id.clone());
+                    }
+                    ui.borrow_mut().request_render();
+                }
                 HostEvent::Debug => {
                     if let Err(error) = native_commands::debug(&ui, &connection, &send).await { mode.borrow_mut().show_error(&error); }
                 }
-                HostEvent::Connection(wire::AgentConnectionEvent::SideQuestionEvent { event }) => side_pane.borrow_mut().update(event),
+                HostEvent::Connection(wire::AgentConnectionEvent::SideQuestionEvent { event }) => {
+                    side_pane.borrow_mut().update(event);
+                    ui.borrow_mut().request_render();
+                }
                 HostEvent::Connection(wire::AgentConnectionEvent::Closed { error }) => {
                     native_state::stop_activity(&mut mode.borrow_mut());
                     exit_error = error;
                     mode.borrow_mut().shutdown_requested = true;
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::SessionEvent { event }) => {
+                    if side_pane.borrow_mut().handle_bash_event(&event, &ui, &connection) {
+                        let mut mode = mode.borrow_mut();
+                        native_state::track_activity(&mut mode, &event);
+                        match event {
+                            wire::AgentConnectionSessionEvent::BashStart { .. } => {
+                                mode.patch_connection_state(|state| state.is_bash_running = true);
+                            }
+                            wire::AgentConnectionSessionEvent::BashEnd { .. } => {
+                                mode.patch_connection_state(|state| state.is_bash_running = false);
+                            }
+                            _ => {}
+                        }
+                        ui.borrow_mut().request_render();
+                        continue;
+                    }
                     if event.type_name() == "session_action_update" {
                         queue_runtime.observe_queue_change();
                     }
