@@ -1,0 +1,11 @@
+{
+  "slice": "optimus-agent-command",
+  "files": [
+    "scripts/optimus-rust",
+    "scripts/optimus-agent",
+    "README.md",
+    "docs/RUST_LAUNCHER.md",
+    "evidence/slices/optimus-agent-command.json",
+    "evidence/status/optimus-agent-command.json"
+  ]
+}

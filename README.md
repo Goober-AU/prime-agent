@@ -17,7 +17,7 @@ Optimus began as a fork of Prime Agent. It is now developing its own direction: 
 | Area | Current position |
 | --- | --- |
 | Main implementation | TypeScript/Node.js harness with a Python execution runtime |
-| Rust implementation | Available on `main` as the opt-in `optimus-rust` executable; remaining parity gaps are documented |
+| Rust implementation | Available on `main`, installed as `optimus-agent`; remaining parity gaps are documented |
 | Platforms | macOS, Linux, and native Windows; Windows currently requires a Bash shell such as Git Bash |
 | Memory | Session, project, and global harness memory, with optional selected sharing; authoritative project storage is JSON |
 | TencentDB-backed memory | An intended integration direction, not an implemented backend in the current `main` branch |
@@ -134,7 +134,7 @@ See [Telegram setup and recovery](https://github.com/telemusai/optimus-agent/blo
 
 ## The Rust migration
 
-The Rust application port is included on `main` alongside the TypeScript reference. Build and run it as `optimus-rust`; the existing `optimus-agent.sh` launcher continues to run TypeScript.
+The Rust application port is included on `main` alongside the TypeScript reference. The installed Rust command is `optimus-agent`; Cargo's internal executable remains `optimus-rust`. The existing `optimus-agent.sh` source launcher continues to run TypeScript.
 
 The Rust workspace is organized around four components:
 
@@ -158,10 +158,10 @@ See [Rust validation and remaining gaps](docs/RUST_MAIN_READINESS.md) for the ve
 For an installed Rust release, launch it from your project directory with:
 
 ```bash
-optimus-rust
+optimus-agent
 ```
 
-The maintained launcher is [`scripts/optimus-rust`](scripts/optimus-rust). See [the installation layout and launcher guide](docs/RUST_LAUNCHER.md). In the TUI, `/model` opens searchable model selection; `/model <search>` prefills the search or selects an exact, unambiguous reference.
+The maintained launcher is [`scripts/optimus-agent`](scripts/optimus-agent). See [the installation layout and launcher guide](docs/RUST_LAUNCHER.md). In the TUI, `/model` opens searchable model selection; `/model <search>` prefills the search or selects an exact, unambiguous reference.
 
 From a checkout of this repository, build with Cargo:
 

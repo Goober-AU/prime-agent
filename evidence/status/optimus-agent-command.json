@@ -1,0 +1,24 @@
+{
+  "slice": "optimus-agent-command",
+  "base_commit": "1f41db1346d84207618641ee38fa2c2dfc6dea8a",
+  "change": "Renamed the maintained installed launcher to scripts/optimus-agent and updated PRIME_AGENT_LAUNCHER_PATH and current launch documentation.",
+  "installation": {
+    "command": "~/.local/bin/optimus-agent",
+    "legacy_command": "Removed the previous managed ~/.local/bin/optimus-rust launcher after validating its identity and the replacement.",
+    "activation": "Atomically replaced the old optimus-agent symlink with a regular executable launcher.",
+    "binary_release": "1f41db1346d84207618641ee38fa2c2dfc6dea8a",
+    "profile": "Settings, models and auth hashes unchanged.",
+    "processes": "No running processes stopped or restarted."
+  },
+  "checks": {
+    "shell": "sh -n scripts/optimus-agent passed",
+    "typescript": "tsgo --noEmit passed",
+    "biome": "biome check . passed; 1072 files checked",
+    "diff": "git diff --check passed",
+    "installed_command": "optimus-agent --help and --version exited zero; optimus-rust no longer resolves on PATH."
+  },
+  "build": "Not needed: no Rust executable or Python runtime changes.",
+  "tests": "Not added or run, per user instruction. No model sessions or provider calls started.",
+  "scope": "Linux installed command; internal Cargo target/process name and release/profile directories remain optimus-rust. TypeScript source launcher and Windows packaging unchanged.",
+  "blocked_on": []
+}
