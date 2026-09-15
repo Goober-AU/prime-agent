@@ -17,6 +17,7 @@ pub(super) struct Bar {
 impl Bar {
     pub(super) fn new(mode: Rc<RefCell<InteractiveMode>>) -> Self {
         let mut line = SubagentSummaryLine::default();
+        line.set_always_visible(true);
         line.set_openable(mode.borrow().options.return_to_agents_view);
         Self {
             mode,

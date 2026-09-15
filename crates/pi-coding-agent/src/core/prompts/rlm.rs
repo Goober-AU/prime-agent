@@ -242,6 +242,8 @@ pub fn build_subagent_guidance(options: SubagentGuidanceOptions) -> String {
         "# Delegating to sub-agents".to_string(),
         String::new(),
         "Spawn independent, self-contained work with `handle = await rlm('task', name='worker')`. This returns at admission, not completion; keep the handle to stop or inspect the child later.".to_string(),
+        "Optimus delegation uses these native child sessions so the host owns their status, messages, cancellation, and recovery. Do not substitute external agent CLI processes such as `codex exec`, Claude Code, or nested Optimus launches unless the user explicitly requests that external agent. Ordinary build, test, and utility commands still use `bash()`.".to_string(),
+        "On resume, use `await rlm.list_subagents()` to recover native children. An earlier transcript error saying native subagents were unimplemented may describe an older build; use the current native interface for new delegated work. If it fails now, report the current error instead of silently falling back to an external agent. Preserve any existing external worker results and account for still-running work before creating overlapping tasks.".to_string(),
     ];
     if options.has_agent_message.unwrap_or(false) {
         lines.push(
