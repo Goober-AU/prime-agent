@@ -1,0 +1,26 @@
+{
+  "slice": "rust-prompt-deadlock",
+  "base_commit": "bf40c72af65193b66edb1f0d1c3b3f3243236da6",
+  "observed": [
+    "Installed worker processes remained alive; supervisor cached list responded.",
+    "Worker log recorded repeated worker_passivate_idle_children timeouts.",
+    "Read-only get_state requests to both open sessions timed out after four seconds each.",
+    "One session had a completed assistant response on disk; the other had no persisted user or assistant messages."
+  ],
+  "defect": "session_passivation_snapshot acquired the same non-reentrant state mutex twice in one addition expression; the first guard remained alive while acquiring the second.",
+  "fix": "Copy attached-client and pending-attachment counts under one scoped guard, releasing it before descendant inspection.",
+  "reference": "packages/coding-agent/src/modes/daemon/daemon-mode.ts:2987",
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust passed; 328 existing crate warnings",
+  "checks": {
+    "typescript": "tsgo --noEmit passed",
+    "biome": "biome check . passed",
+    "diff": "git diff --check passed"
+  },
+  "tests": "Not added or run, per the user's instruction. No prompts or provider calls were sent during diagnosis.",
+  "limitations": "Debugger attachment unavailable; no live backtrace. Prompt submission after an idle sweep remains for user validation on the rebuilt worker.",
+  "protocol": "unchanged",
+  "python_source": "unchanged",
+  "typescript_source": "unchanged",
+  "platforms": "Shared native daemon fix; compiled on Linux",
+  "blocked_on": []
+}
