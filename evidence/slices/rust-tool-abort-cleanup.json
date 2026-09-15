@@ -1,0 +1,9 @@
+{
+  "slice": "rust-tool-abort-cleanup",
+  "files": [
+    "crates/pi-agent-core/src/agent_loop.rs",
+    "docs/RUST_TOOL_ABORT_FIX.md",
+    "evidence/slices/rust-tool-abort-cleanup.json",
+    "evidence/status/rust-tool-abort-cleanup.json"
+  ]
+}

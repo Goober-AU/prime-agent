@@ -1552,8 +1552,14 @@ async fn execute_prepared_tool_call(
     let tool_call_id = prepared.tool_call.id.clone();
     let args = prepared.args.clone();
     let signal_for_tool = signal.cloned();
+    // TypeScript's abort race leaves the tool promise alive to finish cleanup.
+    // Dropping the execution future here strands the Python kernel's queue slot.
+    // A dropped JoinHandle detaches the task; the tool still receives cancellation.
+    let execution = tokio::spawn(async move {
+        execute(tool_call_id, args, signal_for_tool, Some(on_update)).await
+    });
     let result = race_with_abort(
-        async move { execute(tool_call_id, args, signal_for_tool, Some(on_update)).await },
+        async move { execution.await.map_err(anyhow::Error::from)? },
         signal.cloned(),
         None,
     )
