@@ -1,0 +1,28 @@
+{
+  "slice": "rust-tool-abort-cleanup",
+  "base_commit": "c86536066cccc87b1a6fa67cc26e10e27e7770c3",
+  "observed": [
+    "Latest chat persisted an interrupted Python tool result at 02:23:50 UTC, followed by a local file-read tool call at 02:24:08 UTC with no result.",
+    "Read-only get_state succeeded: worker ready, isStreaming true and isRunningTools true.",
+    "Python process remained alive; no descendant shell/search process remained."
+  ],
+  "defect": "The agent loop cancellation race dropped the unfinished tool future, discarding the kernel queue release continuation.",
+  "fix": "Race an owned tool task join handle against cancellation so cooperative tool cleanup finishes independently of the prompt result.",
+  "references": [
+    "packages/agent/src/agent-loop.ts:192-236",
+    "packages/agent/src/agent-loop.ts:1161-1180",
+    "packages/coding-agent/src/core/kernel/repl-manager.ts:1010-1018"
+  ],
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust passed; 328 existing pi-coding-agent warnings, 9 pi-ai warnings and 5 pi-tui warnings.",
+  "checks": {
+    "typescript": "tsgo --noEmit passed",
+    "biome": "biome check . passed; 1072 files",
+    "diff": "git diff --check passed"
+  },
+  "tests": "Not added or run, per user instruction; no providers or model sessions called.",
+  "limitations": "Source-verified causal path matching live symptoms; no debugger backtrace or live interruption regression. Already-stranded workers require a fresh updated worker.",
+  "platforms": "Shared native agent loop; Linux compilation only. No protocol, Python, TypeScript or rendering changes.",
+  "blocked_on": [],
+  "build_recovery": "First attempt ran out of disk while creating the archive. Removed 615.4 MiB of generated private Rust build-cache files and rebuilt successfully.",
+  "binary_sha256": "62b9b54208f930f8b7ef0cc18e82ff242c750763b80baecbb1b5c2121c30f256"
+}
