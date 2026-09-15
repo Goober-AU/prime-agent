@@ -1,0 +1,10 @@
+{
+  "slice": "continue-last-conversation",
+  "owner": "lead",
+  "files": [
+    "crates/pi-coding-agent/src/core/session_manager.rs",
+    "docs/RUST_CONTINUE_FIX.md",
+    "evidence/status/continue-last-conversation.json"
+  ],
+  "scope": "Make automatic continuation skip persisted empty drafts while retaining explicit resume and normal recent-conversation ordering. No tests or real provider calls."
+}

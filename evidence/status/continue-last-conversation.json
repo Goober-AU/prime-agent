@@ -1,0 +1,22 @@
+{
+  "slice": "continue-last-conversation",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/core/session-manager.ts",
+      "rust": "crates/pi-coding-agent/src/core/session_manager.rs",
+      "status": "ported",
+      "functions_mapped": 2,
+      "notes": "Intentional fix to both recent-session selectors: skip empty drafts using a private, read-only, early-exit JSONL history scan. Preserves cwd filtering, mtime ordering among conversations, explicit resume, and the no-conversation fallback."
+    }
+  ],
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust: ok (existing warnings)",
+  "checks": {
+    "typescript": "tsgo --noEmit: passed",
+    "biome": "biome check --error-on-warnings .: 1072 files, passed",
+    "diff": "git diff --check: passed"
+  },
+  "root_cause": "Read-only local metadata inspection found a newest draft with zero messages ahead of the prior conversation with 78 messages. The TypeScript reference also selects by mtime without checking history.",
+  "protocol": "No daemon wire changes; shared selection used by interactive startup and daemon continueRecent.",
+  "validation_limits": "No tests, model calls, or live resume performed at user request. No production session files modified. Live behavior remains for user validation.",
+  "blocked_on": []
+}
