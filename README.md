@@ -1,6 +1,6 @@
 # Optimus Agent
 
-**A self-improving, multi-model harness for coding, research, and long-running work. Built on Pi and Prime. Evolving toward a native Rust core.**
+**A self-improving, multi-model harness for coding, research, and long-running work, with a native Rust application layer and a persistent Python runtime.**
 
 Maintained by [Telemus AI](https://github.com/telemusai).
 
@@ -10,13 +10,13 @@ Optimus is the layer between an AI model and real work: the tools it can use, th
 
 It combines a persistent Python workspace, recursive subagents, inspectable memory, provider-aware context management, and background execution. Use one model to plan and review, others to investigate or build, and keep the work connected across sessions.
 
-Optimus began as a fork of Prime Agent. It is now developing its own direction: **native Windows reliability, stronger session continuity, Astra-aware model handling, project-scoped learning, measurable efficiency, and a Rust implementation of the application layer.**
+Optimus focuses on **native Windows reliability, stronger session continuity, Astra-aware model handling, project-scoped learning, measurable efficiency, and a Rust implementation of the application layer.** See [Foundations and acknowledgements](#foundations-and-acknowledgements) for the projects it builds on.
 
 ## Project status
 
 | Area | Current position |
 | --- | --- |
-| Main implementation | TypeScript/Node.js harness with a Python execution runtime |
+| Main implementation | Native Rust application with a Python execution runtime; TypeScript/Node.js retained as the reference |
 | Rust implementation | Available on `main`, installed as `optimus-agent`; remaining parity gaps are documented |
 | Platforms | macOS, Linux, and native Windows; Windows currently requires a Bash shell such as Git Bash |
 | Memory | Session, project, and global harness memory, with optional selected sharing; authoritative project storage is JSON |
@@ -53,7 +53,7 @@ Fast/service-tier selection remains separate from reasoning effort and context m
 
 ### Memory that you can inspect and correct
 
-Optimus extends Prime's continual harness with project-scoped memory and explicit controls for recall, learning, provenance, and recovery.
+Optimus provides a continual harness with project-scoped memory and explicit controls for recall, learning, provenance, and recovery.
 
 - **Separate scopes:** retain session-specific facts, reusable project knowledge, and global harness entries.
 - **Selective recall:** bring relevant entries into context within bounded recall limits.
@@ -134,7 +134,7 @@ See [Telegram setup and recovery](https://github.com/telemusai/optimus-agent/blo
 
 ## The Rust migration
 
-The Rust application port is included on `main` alongside the TypeScript reference. The installed Rust command is `optimus-agent`; Cargo's internal executable remains `optimus-rust`. The existing `optimus-agent.sh` source launcher continues to run TypeScript.
+The Rust application is included on `main` alongside the TypeScript reference. Launch the installed application with `optimus-agent`; Cargo's internal executable remains `optimus-rust`. The `optimus-agent.sh` source launcher runs the TypeScript reference.
 
 The Rust workspace is organized around four components:
 
@@ -163,6 +163,14 @@ optimus-agent
 
 The maintained launcher is [`scripts/optimus-agent`](scripts/optimus-agent). See [the installation layout and launcher guide](docs/RUST_LAUNCHER.md). In the TUI, `/model` opens searchable model selection; `/model <search>` prefills the search or selects an exact, unambiguous reference.
 
+Reopen the last saved conversation in the current project with:
+
+```bash
+optimus-agent --continue
+```
+
+Automatic continuation skips empty drafts. To choose a particular saved session, use `optimus-agent --resume /path/to/session.jsonl`.
+
 From a checkout of this repository, build with Cargo:
 
 ```bash
@@ -181,7 +189,7 @@ PRIME_AGENT_CODING_AGENT_DIR="$PWD/.port-env/agent" \
 
 Configure providers with `/login` and `/model`. Keep the checkout available for the Python runtime and bundled resources; copying the executable alone is not a complete installation. See the [validation notes](docs/RUST_MAIN_READINESS.md) for toolchain details and Windows validation limits.
 
-### Current TypeScript implementation
+### TypeScript reference implementation
 
 Use Node.js 22.9 or newer and a compatible npm installation. The following source-launch commands run in Bash on macOS/Linux or Git Bash on Windows:
 
@@ -201,7 +209,7 @@ npm run build
 
 The source launcher is `optimus-agent.sh`. Configuration paths retain `.prime/agent` for compatibility.
 
-If you already use Prime or Optimus, select an isolated `PRIME_AGENT_CODING_AGENT_DIR` before experimenting with a different build. Follow the [development guide](https://github.com/telemusai/optimus-agent/blob/main/packages/coding-agent/docs/development.md) for profile isolation and checks, and the [Windows guide](https://github.com/telemusai/optimus-agent/blob/main/packages/coding-agent/docs/windows.md) for shell setup.
+If you already use Optimus, select an isolated `PRIME_AGENT_CODING_AGENT_DIR` before experimenting with a different build. Existing `PRIME_AGENT_*` environment variables and `.prime` paths retain their names for configuration and session compatibility. Follow the [development guide](https://github.com/telemusai/optimus-agent/blob/main/packages/coding-agent/docs/development.md) for profile isolation and checks, and the [Windows guide](https://github.com/telemusai/optimus-agent/blob/main/packages/coding-agent/docs/windows.md) for shell setup.
 
 On first launch, use `/login` to configure a provider, `/model` to select a model, and `/effort` to choose its supported reasoning level.
 
@@ -241,7 +249,7 @@ Preserve sessions, memory, configuration, and credentials when upgrading. New tr
 - [Performance metrics](https://github.com/telemusai/optimus-agent/blob/main/docs/performance-metrics.md)
 - [Development](https://github.com/telemusai/optimus-agent/blob/main/packages/coding-agent/docs/development.md)
 
-Some inherited documentation still uses the Prime Agent name. The source of truth for this project's development is [telemusai/optimus-agent](https://github.com/telemusai/optimus-agent).
+Some linked documentation retains upstream terminology. The source of truth for Optimus development is [telemusai/optimus-agent](https://github.com/telemusai/optimus-agent).
 
 ## Contributing
 

@@ -1,0 +1,12 @@
+{
+  "slice": "optimus-readme-branding",
+  "files": [
+    {
+      "path": "README.md",
+      "status": "updated",
+      "notes": "Optimus product wording, Rust as the installed application, TypeScript reference wording, and continuation commands. Preserved the complete upstream acknowledgement, copyright statement, working configuration identifiers, and internal executable/crate names."
+    }
+  ],
+  "validation": "Manual Markdown and local-link review; git diff --check. Documentation only; no tests or builds needed.",
+  "blocked_on": []
+}
