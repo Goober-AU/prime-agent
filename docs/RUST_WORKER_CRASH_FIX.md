@@ -25,8 +25,10 @@ Changes:
   their existing meaning.
 - Commit the existing per-release daemon socket isolation in the launcher.
 - Clear activity flags and loaders on terminal connection closure and the
-  supervisor's confirmed worker-exit error. Transient socket loss alone does
-  not falsely complete a running turn. Failed prompts are not replayed.
+  supervisor's confirmed worker-exit error from a session/revision-guarded
+  state refresh. Late command failures cannot clear a newer session's activity.
+  Transient socket loss alone does not falsely complete a running turn. Failed
+  prompts are not replayed.
 
 The previous stale-Waiting fix from PR #21 is included through the main branch.
 Renamed the repository source launcher to `optimus-agent.sh`, including its

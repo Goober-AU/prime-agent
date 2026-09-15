@@ -10,7 +10,7 @@
     "16 MiB Tokio worker stacks for the native runtime.",
     "Native bundle runtime-source candidates.",
     "Prepared interpreter selection and per-release daemon sockets in the maintained launcher.",
-    "Stop activity on terminal connection closure or confirmed supervisor worker exit.",
+    "Stop activity on terminal connection closure or a session/revision-guarded state refresh confirming worker exit; stale command failures cannot clear newer session activity.",
     "Rename prime-agent.sh to optimus-agent.sh and update source-launch references."
   ],
   "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust: passed with existing port warnings",
@@ -18,7 +18,8 @@
     "typescript": "tsgo --noEmit passed",
     "biome": "passed",
     "shell_syntax": "bash -n optimus-agent.sh scripts/optimus-rust passed",
-    "diff": "passed"
+    "diff": "passed",
+    "python_runtime": "Exact production readiness expression and all default package imports passed in an isolated prepared venv; no provider invoked."
   },
   "tests": "Not run, per the existing no-tests instruction. Non-test checks run directly; installer/browser smoke hooks omitted.",
   "limitations": "Stack allocation corrects the native stack budget; the exact original overflowing call chain and the rendered worker-failure path remain unverified. User live validation is still required.",

@@ -2019,15 +2019,10 @@ async fn run_terminal(
                     Err(error) => mode.borrow_mut().show_error(&error),
                 },
                 HostEvent::Completed(result) => {
-                    let mut worker_failed = false;
                     if let Err(error) = result {
-                        let mut controller = mode.borrow_mut();
-                        worker_failed = native_state::stop_on_worker_failure(&mut controller, &error);
-                        controller.show_error(&error);
+                        mode.borrow_mut().show_error(&error);
                     }
-                    if !worker_failed {
-                        state_refresh.request(connection.clone(), current_session_id.clone());
-                    }
+                    state_refresh.request(connection.clone(), current_session_id.clone());
                 }
                 HostEvent::Render => {}
                 HostEvent::Heartbeats(catalog, open) => {
