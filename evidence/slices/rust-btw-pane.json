@@ -1,0 +1,12 @@
+{
+  "slice": "rust-btw-pane",
+  "files": [
+    "crates/pi-coding-agent/src/core/agent_session.rs",
+    "crates/pi-coding-agent/src/core/agent_session/task_queue.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host.rs",
+    "crates/pi-coding-agent/src/modes/interactive/native_host_extensions.rs",
+    "docs/RUST_BTW_FIX.md",
+    "evidence/slices/rust-btw-pane.json",
+    "evidence/status/rust-btw-pane.json"
+  ]
+}

@@ -25,6 +25,8 @@
 mod runtime_members;
 #[path = "agent_session/agent_handle.rs"]
 mod agent_handle;
+#[path = "agent_session/task_queue.rs"]
+mod task_queue;
 
 use futures::FutureExt;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -9159,20 +9161,11 @@ impl AgentSession {
         }
         let epoch = self.session_input_pump_epoch.load(Ordering::SeqCst);
         let session = self.clone();
-        let next = {
-            let mut pump = self.session_input_pump.lock().unwrap();
-            let previous = pump.clone();
-            let next = async move {
-                let _ = previous.await;
-                session.session_input_pump_requested.store(false, Ordering::SeqCst);
-                session.pump_session_inputs(epoch).await;
-                session.notify_session_input_checkpoint_change();
-                Ok(())
-            }.boxed().shared();
-            *pump = next.clone();
-            next
-        };
-        tokio::spawn(next);
+        task_queue::enqueue(&self.session_input_pump, async move {
+            session.session_input_pump_requested.store(false, Ordering::SeqCst);
+            session.pump_session_inputs(epoch).await;
+            session.notify_session_input_checkpoint_change();
+        });
     }
 
     /// `_pumpSessionInputs(epoch)`.
@@ -14923,18 +14916,7 @@ impl AgentSession {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let next = {
-            let mut queue = self.agent_event_queue.lock().unwrap();
-            let previous = queue.clone();
-            let next = async move {
-                let _ = previous.await;
-                task.await;
-                Ok(())
-            }.boxed().shared();
-            *queue = next.clone();
-            next
-        };
-        tokio::spawn(next);
+        task_queue::enqueue(&self.agent_event_queue, task);
     }
 
     /// `_maybeStartSerializedBackgroundPlan()`.

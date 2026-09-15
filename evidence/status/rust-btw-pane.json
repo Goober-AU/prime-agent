@@ -1,0 +1,32 @@
+{
+  "slice": "rust-btw-pane",
+  "base_commit": "c3f591e6e79c65d61d58f09bcb8302094e2e6446",
+  "changes": [
+    "Mount the side pane in shared transcript content for fullscreen and inline rendering, with immediate repaint and configured padding.",
+    "Capture side follow-ups, preserve blocked drafts, show slash/image notices, and keep main queue navigation separate.",
+    "Route transient shell runs and output to the pane by run ID; seed only non-excluded output and cancel only owned runs.",
+    "Replace recursively polled event and input-pump future chains with serialized completion signals."
+  ],
+  "worker_incident": {
+    "observed": "Installed c3f591e6e worker aborted with tokio-rt-worker stack overflow at 2026-09-15T00:58:27Z despite its 16 MiB stack.",
+    "verified_defect": "Shared queue futures embedded and polled predecessor work recursively, allowing unbounded stack growth with backlog.",
+    "limitation": "No crash dump or live reproduction. The recorded overflow's exact call stack remains unknown; attribution to the queue is an inference."
+  },
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust: passed (328 existing crate warnings)",
+  "checks": {
+    "typescript": "tsgo --noEmit passed",
+    "biome": "biome check . passed",
+    "diff": "git diff --check passed"
+  },
+  "tests": "Not added or run, per the user's no-tests instruction. No real provider calls. Installer/browser test hooks omitted; static checks run directly.",
+  "live_validation_remaining": [
+    "Fullscreen and inline pane rendering, streaming, follow-ups, Esc dismissal and editor draft behavior",
+    "Side shell output, exclusion, cancellation and concurrent client ownership",
+    "Long streaming sessions and queue backlog without worker closure"
+  ],
+  "protocol": "unchanged; existing side-question and capability-gated transient_bash calls",
+  "python_source": "unchanged",
+  "typescript_source": "unchanged read-only reference",
+  "platforms": "Shared native Rust implementation; compiled on Linux; Windows/macOS runtime validation deferred",
+  "blocked_on": []
+}
