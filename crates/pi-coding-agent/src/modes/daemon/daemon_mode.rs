@@ -1915,7 +1915,9 @@ pub struct WorkerRosterReporterState {
     pub snapshot_pending: bool,
 }
 
-const ROSTER_SESSION_EVENT_TRIGGERS: [&str; 14] = [
+const ROSTER_SESSION_EVENT_TRIGGERS: [&str; 16] = [
+    "agent_start",
+    "agent_end",
     "turn_start",
     "turn_end",
     "bash_start",
@@ -8329,6 +8331,22 @@ impl AgentDaemon {
                 if !contains(&ROSTER_SESSION_EVENT_TRIGGERS, event_type) {
                     return;
                 }
+                if event_type == "agent_end" {
+                    // AgentEnd is observed before Agent::finish_run clears streaming.
+                    // Publish once more after the owning run and action queue settle.
+                    let session = self.session_of(state);
+                    let daemon = Arc::downgrade(self);
+                    let stopped = self.server_stopped.clone();
+                    tokio::spawn(async move {
+                        tokio::select! {
+                            _ = stopped.cancelled() => return,
+                            _ = session.wait_for_idle() => {}
+                        }
+                        if let Some(daemon) = daemon.upgrade() {
+                            daemon.schedule_roster_flush();
+                        }
+                    });
+                }
             }
             DaemonOutbound::SessionStatus { .. }
             | DaemonOutbound::SessionClosed { .. }
@@ -8400,6 +8418,12 @@ impl AgentDaemon {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
+        // Drop the manager guard before session_id/session_file lock it again.
+        let cwd = parent_session
+            .session_manager()
+            .lock()
+            .expect("session manager poisoned")
+            .get_cwd();
         let summary = RosterSessionSummary {
             id: child_id.clone(),
             lifecycle: "live".to_string(),
@@ -8412,11 +8436,7 @@ impl AgentDaemon {
                 .get("sessionName")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            cwd: parent_session
-                .session_manager()
-                .lock()
-                .expect("session manager poisoned")
-                .get_cwd(),
+            cwd,
             is_streaming: false,
             is_compacting: false,
             attached_clients: 0,
@@ -8468,6 +8488,19 @@ impl AgentDaemon {
     }
 
     fn flush_roster_now(self: &Arc<Self>) {
+        // TypeScript reads the live session here. Event-time projections can
+        // still say busy when a turn or detached child has since settled.
+        for entry in self.session_states() {
+            let active = entry.session.is_session_active();
+            let streaming = entry.session.is_streaming();
+            let compacting = entry.session.is_compacting();
+            let children = entry.session.has_running_rlm_children();
+            let mut state = entry.state.lock().expect("active session poisoned");
+            state.runtime.session.is_session_active = active;
+            state.runtime.session.is_streaming = streaming;
+            state.runtime.session.is_compacting = compacting;
+            state.runtime.session.has_running_rlm_children = children;
+        }
         let scheduled_jobs = self.cron_store.list();
         let mut entries: HashMap<String, WorkerRosterEntry> = HashMap::new();
         // `build_session_list` yields the daemon's `SessionSummary` projection, which

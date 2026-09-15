@@ -1,0 +1,58 @@
+{
+  "slice": "native-kernel-startup",
+  "files": [
+    {
+      "src": "packages/coding-agent/src/modes/daemon/daemon-mode.ts",
+      "rust": "crates/pi-coding-agent/src/modes/daemon/daemon_mode.rs",
+      "status": "ported",
+      "functions_mapped": 3,
+      "notes": "Targeted corrections to queuedChildRosterEntry, observeRosterEvent and flushRoster; fixes nested session-manager locking and stale busy projections. No wire changes."
+    }
+  ],
+  "build": "cargo build --locked -p pi-coding-agent --bin optimus-rust: passed; existing 325 coding-agent warnings",
+  "checks": "npm run check: passed; pre-existing npm min-release-age warnings",
+  "validation": {
+    "platform": "Linux",
+    "command": "node scripts/test-native-subagents.mjs <optimus-rust> <private-python>",
+    "baseline": "727146825: reproduced native startup timeout at 45 seconds",
+    "baselineEvidence": ".port-env/tmp/native-subagents-kPexMr",
+    "candidate": "PASS in 17098ms: two concurrent native children, explicit parent replies, completion, persisted resume and live tmux TUI counts",
+    "candidateEvidence": ".port-env/tmp/native-subagents-XDFikU",
+    "binarySha256": "5bf9a2583a851800223ddb24bab4ea6eadd8b584250ffbf2c34bad7f50affdcb",
+    "footer": "0 agents initially; running counts during work; 2 agents / 0 running / 2 idle / 0 inactive after completion; both received-message notices; no lingering Waiting",
+    "finalRoster": [
+      {
+        "kind": "top-level",
+        "name": null,
+        "isSessionActive": false,
+        "isStreaming": false,
+        "hasRunningRlmChildren": false,
+        "status": "running"
+      },
+      {
+        "kind": "subagent",
+        "name": "native-probe-0",
+        "isSessionActive": false,
+        "isStreaming": false,
+        "hasRunningRlmChildren": false,
+        "status": "idle"
+      },
+      {
+        "kind": "subagent",
+        "name": "native-probe-1",
+        "isSessionActive": false,
+        "isStreaming": false,
+        "hasRunningRlmChildren": false,
+        "status": "idle"
+      }
+    ],
+    "provider": "loopback scripted HTTP; no production credentials",
+    "isolation": "private home/profile/session/kernel environment/sockets/registry; exact-profile process cleanup"
+  },
+  "limitations": [
+    "Windows/macOS runtime not exercised",
+    "Top-level semantic activity still follows the TypeScript summarizer-verdict contract; actual run flags are verified false",
+    "No 3D/Web changes; separate vr-ai-chat repository unaffected"
+  ],
+  "blocked_on": null
+}
