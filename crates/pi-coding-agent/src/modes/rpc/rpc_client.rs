@@ -195,6 +195,8 @@ impl RpcClient {
             SpawnOptions {
                 cwd: self.options.cwd.clone(),
                 env: Some(env),
+                // `env` is already the full `process.env` plus overrides.
+                replace_env: false,
                 detached: false,
                 shell: false,
                 capture_stdout: true,

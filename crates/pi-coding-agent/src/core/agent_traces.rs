@@ -2451,7 +2451,7 @@ mod tests {
 
         // A real transcript persist: `flushNow()` -> `_rewriteFile()` ->
         // `_notifyPersistListeners()` (session-manager.ts:2003-2008, 1912).
-        manager.flush_now();
+        manager.flush_now().expect("the flush must succeed");
         assert!(Path::new(&session_file).exists(), "the persist must write the session file");
 
         assert!(
@@ -2480,7 +2480,7 @@ mod tests {
         let other_file = unregistered.new_session(None).unwrap().expect("session file");
         let other_entry = agent_trace_outbox_entry_path(&other_file);
         let _ = std::fs::remove_file(&other_entry);
-        unregistered.flush_now();
+        unregistered.flush_now().expect("the flush must write the session file");
         assert!(Path::new(&other_file).exists());
         assert!(
             !Path::new(&other_entry).exists(),

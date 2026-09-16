@@ -178,6 +178,7 @@ struct BootstrapPythonSkill {
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct BootstrapVersion {
     schema: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -734,7 +735,10 @@ fn sort_python_skills_for_install(python_skills: &[BootstrapPythonSkill]) -> Vec
     for (index, skill) in python_skills.iter().enumerate() {
         original_index.insert(index, index);
         let key = read_python_skill_project_name(skill).replace('_', "-").to_lowercase();
-        if !by_project_name.iter().any(|(existing, _)| *existing == key) {
+        // TypeScript Map.set overwrites: the LAST duplicate project name wins.
+        if let Some(existing) = by_project_name.iter_mut().find(|(existing, _)| *existing == key) {
+            existing.1 = skill.clone();
+        } else {
             by_project_name.push((key, skill.clone()));
         }
     }
@@ -1072,19 +1076,23 @@ async fn acquire_bootstrap_lock(
     if let Some(parent) = Path::new(&lock_dir).parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
+    // G-01/G-02/G-04: delegate to the landed utils/dir_lock port, which reads
+    // the REAL file identity (GetFileInformationByHandle) so stale locks are
+    // reclaimable on NTFS, propagates hard I/O errors (fail fast), and writes
+    // 0o600 owner files on POSIX. A dir/symlink at the lock path is a
+    // documented protected difference: it is never reclaimed.
+    let lock_dir_static: &'static str = Box::leak(lock_dir.clone().into_boxed_str());
     for _ in 0..u32::MAX {
-        let lock_dir_clone = lock_dir.clone();
-        let owner_alive: OwnerAliveFn = Arc::new(move |owner_pid: Option<u32>| {
-            let lock_dir = lock_dir_clone.clone();
-            Box::pin(async move {
+        let owner_alive = move |owner_pid: Option<i32>| {
+            async move {
                 match owner_pid {
-                    Some(pid) => is_process_alive(pid).await,
-                    None => !lock_missing_pid_is_stale(&lock_dir).await,
+                    Some(pid) => is_process_alive(pid as u32).await,
+                    None => !lock_missing_pid_is_stale(lock_dir_static).await,
                 }
-            })
-        });
-        match try_acquire_dir_lock(&lock_dir, owner_alive).await {
-            DirLockAttempt::Acquired => {
+            }
+        };
+        match crate::utils::dir_lock::try_acquire_dir_lock(&lock_dir, owner_alive).await {
+            Ok(crate::utils::dir_lock::DirLockAttempt::Acquired) => {
                 let lock_dir = lock_dir.clone();
                 return Ok(Arc::new(move || {
                     let lock_dir = lock_dir.clone();
@@ -1094,107 +1102,19 @@ async fn acquire_bootstrap_lock(
                     })
                 }));
             }
-            DirLockAttempt::Held => {
+            Ok(crate::utils::dir_lock::DirLockAttempt::Held) => {
                 tokio::time::sleep(std::time::Duration::from_millis(BOOTSTRAP_LOCK_RETRY_MS)).await;
             }
-            DirLockAttempt::Reclaimed => {}
+            Ok(crate::utils::dir_lock::DirLockAttempt::Reclaimed) => {}
+            // G-02: a hard I/O failure (e.g. access-denied lock directory)
+            // must fail fast with an actionable error, not spin as Held.
+            Err(error) => return Err(KernelError::new(error.to_string())),
         }
     }
     Err(KernelError::new("could not acquire bootstrap lock"))
 }
 
 type BoxFutureLocal = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
-type OwnerAliveFn = Arc<dyn Fn(Option<u32>) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DirLockAttempt {
-    Acquired,
-    Held,
-    Reclaimed,
-}
-
-const CANDIDATE_SWEEP_AGE_MS: u64 = 60 * 60 * 1000;
-
-fn sweep_abandoned_candidates(lock_path: &str) {
-    let path = Path::new(lock_path);
-    let Some(directory) = path.parent() else { return };
-    let Some(name) = path.file_name().map(|value| value.to_string_lossy().into_owned()) else {
-        return;
-    };
-    let prefix = format!("{name}.candidate-");
-    let cutoff = super::shared::now_ms() - CANDIDATE_SWEEP_AGE_MS as f64;
-    let Ok(entries) = std::fs::read_dir(directory) else { return };
-    for entry in entries.flatten() {
-        let entry_name = entry.file_name().to_string_lossy().into_owned();
-        if !entry_name.starts_with(&prefix) {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else { continue };
-        let modified = metadata
-            .modified()
-            .ok()
-            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|value| value.as_millis() as f64)
-            .unwrap_or(f64::MAX);
-        if modified < cutoff {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-struct LockIdentity {
-    dev: u64,
-    ino: u64,
-    is_dir: bool,
-}
-
-#[cfg(unix)]
-fn stat_identity(path: &str) -> Option<LockIdentity> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = std::fs::metadata(path).ok()?;
-    Some(LockIdentity {
-        dev: metadata.dev(),
-        ino: metadata.ino(),
-        is_dir: metadata.is_dir(),
-    })
-}
-
-#[cfg(not(unix))]
-fn stat_identity(path: &str) -> Option<LockIdentity> {
-    let metadata = std::fs::metadata(path).ok()?;
-    // Windows has no stable file index here; identity stays 0 like a
-    // filesystem that reports no stable index.
-    Some(LockIdentity {
-        dev: 0,
-        ino: 0,
-        is_dir: metadata.is_dir(),
-    })
-}
-
-#[cfg(unix)]
-fn link_count(path: &str) -> Option<u64> {
-    use std::os::unix::fs::MetadataExt;
-    std::fs::metadata(path).ok().map(|metadata| metadata.nlink())
-}
-
-#[cfg(not(unix))]
-fn link_count(path: &str) -> Option<u64> {
-    std::fs::metadata(path).ok().map(|_| 1)
-}
-
-fn read_owner_raw(path: &str, legacy_dir: bool) -> Result<String, &'static str> {
-    let owner_path = if legacy_dir {
-        Path::new(path).join("pid").to_string_lossy().into_owned()
-    } else {
-        path.to_string()
-    };
-    match std::fs::read_to_string(&owner_path) {
-        Ok(value) => Ok(value),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err("absent"),
-        Err(_) => Err("unreadable"),
-    }
-}
-
 /// `kill(0)` probe plus the zombie check.
 async fn is_process_alive(pid: u32) -> bool {
     if pid == 0 {
@@ -1245,173 +1165,6 @@ async fn is_process_alive(pid: u32) -> bool {
         false
     }
 }
-
-fn acquire_attempt<'a>(
-    lock_path: &'a str,
-    owner_alive: &'a OwnerAliveFn,
-    retry_on_swept_candidate: bool,
-) -> futures::future::BoxFuture<'a, Result<DirLockAttempt, KernelError>> {
-    // The swept-candidate path retries by recursion, so the future is boxed.
-    Box::pin(acquire_attempt_inner(
-        lock_path,
-        owner_alive,
-        retry_on_swept_candidate,
-    ))
-}
-
-async fn acquire_attempt_inner(
-    lock_path: &str,
-    owner_alive: &OwnerAliveFn,
-    retry_on_swept_candidate: bool,
-) -> Result<DirLockAttempt, KernelError> {
-    let token = format!("{}-{}", std::process::id(), random_token());
-    let temp_path = format!("{lock_path}.candidate-{token}");
-    std::fs::write(&temp_path, format!("{}\n", std::process::id()))
-        .map_err(|error| KernelError::new(error.to_string()))?;
-
-    let result = async {
-        let mut candidate_swept = false;
-        match std::fs::hard_link(&temp_path, lock_path) {
-            Ok(()) => return Ok(DirLockAttempt::Acquired),
-            Err(error) => {
-                // NFS can report failure for a link that landed: nlink 2 means it published.
-                let mut rechecked_nlink: Option<u64> = None;
-                match link_count(&temp_path) {
-                    Some(count) => rechecked_nlink = Some(count),
-                    None => {
-                        // Only a definite ENOENT means the candidate was swept.
-                        if error.kind() != std::io::ErrorKind::NotFound {
-                            return Err(KernelError::new(error.to_string()));
-                        }
-                        candidate_swept = true;
-                    }
-                }
-                if rechecked_nlink == Some(2) {
-                    return Ok(DirLockAttempt::Acquired);
-                }
-                if candidate_swept && retry_on_swept_candidate {
-                    return acquire_attempt(lock_path, owner_alive, false).await;
-                }
-                if error.kind() != std::io::ErrorKind::AlreadyExists {
-                    return Err(KernelError::new(error.to_string()));
-                }
-            }
-        }
-
-        // One immutable dev+ino capture keys every later decision about the judged lock.
-        let captured = match stat_identity(lock_path) {
-            Some(identity) => identity,
-            None => {
-                if std::fs::symlink_metadata(lock_path).is_err() {
-                    return Ok(DirLockAttempt::Reclaimed);
-                }
-                // An unjudgeable lock may be live: fail safe.
-                return Ok(DirLockAttempt::Held);
-            }
-        };
-        if captured.ino == 0 {
-            // Some Windows filesystems report no stable file index: identity unavailable.
-            return Ok(DirLockAttempt::Held);
-        }
-        // An open descriptor pins the inode number against Linux's immediate reuse.
-        let pinned = std::fs::File::open(lock_path).ok();
-        if let Some(pinned) = pinned.as_ref() {
-            if let Some(pinned_identity) = pinned.metadata().ok().and_then(|metadata| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::MetadataExt;
-                    Some((metadata.dev(), metadata.ino()))
-                }
-                #[cfg(not(unix))]
-                {
-                    let _ = metadata;
-                    None::<(u64, u64)>
-                }
-            }) {
-                if pinned_identity.0 != captured.dev || pinned_identity.1 != captured.ino {
-                    // The lock changed hands between the capture and the pin: treat as live.
-                    return Ok(DirLockAttempt::Held);
-                }
-            }
-        }
-        judge_and_reclaim(lock_path, owner_alive, &captured, &token).await
-    }
-    .await;
-
-    let _ = std::fs::remove_file(&temp_path);
-    result
-}
-
-async fn judge_and_reclaim(
-    lock_path: &str,
-    owner_alive: &OwnerAliveFn,
-    captured: &LockIdentity,
-    token: &str,
-) -> Result<DirLockAttempt, KernelError> {
-    let judged = read_owner_raw(lock_path, captured.is_dir);
-    if judged == Err("unreadable") {
-        // A transient read failure may hide a LIVE lock: never judge it stale.
-        return Ok(DirLockAttempt::Held);
-    }
-    let owner_pid = match judged {
-        Ok(raw) => strict_pid(Some(&raw)),
-        Err(_) => strict_pid(None),
-    };
-    if owner_alive(owner_pid).await {
-        return Ok(DirLockAttempt::Held);
-    }
-    let aside_path = format!("{lock_path}.stale-{token}");
-    if let Err(reclaim_error) = std::fs::rename(lock_path, &aside_path) {
-        // ENOENT: a racing reclaimer moved it first.
-        if reclaim_error.kind() == std::io::ErrorKind::NotFound {
-            return Ok(DirLockAttempt::Reclaimed);
-        }
-        // A lost-reply rename: if the lock path is gone, something moved - fall to verify.
-        if stat_identity(lock_path).is_some() {
-            return Err(KernelError::new(reclaim_error.to_string()));
-        }
-    }
-    let aside = stat_identity(&aside_path);
-    if let Some(aside) = aside.as_ref() {
-        if aside.dev == captured.dev && aside.ino == captured.ino {
-            let _ = std::fs::remove_dir_all(&aside_path);
-            let _ = std::fs::remove_file(&aside_path);
-            return Ok(DirLockAttempt::Reclaimed);
-        }
-    }
-    // Not the judged lock: restore, never delete. Known dirs rename back; everything
-    // else links back (link can never replace a rival). Any failure leaves it aside.
-    let is_dir = aside.as_ref().map(|value| value.is_dir).unwrap_or(false);
-    if is_dir {
-        let _ = std::fs::rename(&aside_path, lock_path);
-    } else if std::fs::hard_link(&aside_path, lock_path).is_ok() {
-        let _ = std::fs::remove_file(&aside_path);
-    }
-    Ok(DirLockAttempt::Held)
-}
-
-async fn try_acquire_dir_lock(lock_path: &str, owner_alive: OwnerAliveFn) -> DirLockAttempt {
-    sweep_abandoned_candidates(lock_path);
-    match acquire_attempt(lock_path, &owner_alive, true).await {
-        Ok(attempt) => attempt,
-        Err(_) => DirLockAttempt::Held,
-    }
-}
-
-// kill(0)/kill(-n) probe our own process group: only an exact positive integer owns.
-fn strict_pid(raw: Option<&str>) -> Option<u32> {
-    let trimmed = raw?.trim();
-    if trimmed.is_empty() || !trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return None;
-    }
-    let parsed = trimmed.parse::<i64>().ok()?;
-    if parsed > 0 {
-        Some(parsed as u32)
-    } else {
-        None
-    }
-}
-
 /// Try a bare command followed by supported PATHEXT extensions in the configured order.
 pub fn windows_executable_candidates(name: &str, pathext: Option<&str>) -> Vec<String> {
     let supported = windows_supported_executable_extensions();
@@ -1738,14 +1491,13 @@ async fn resolve_runtime_source_dir() -> Option<String> {
 /// content hash of every rlm/*.py file plus pyproject.toml, so any runtime code or
 /// dependency change invalidates an existing venv automatically. Falls back to the
 /// bare package name when the runtime resolves to a registry install (no local source).
-pub async fn resolve_runtime_identity() -> String {
+pub async fn resolve_runtime_identity() -> Result<String, KernelError> {
     let Some(source_dir) = resolve_runtime_source_dir().await else {
-        return RUNTIME_REQUIREMENT.to_string();
+        return Ok(RUNTIME_REQUIREMENT.to_string());
     };
-    match hash_runtime_source(&source_dir).await {
-        Ok(hash) => hash,
-        Err(_) => RUNTIME_REQUIREMENT.to_string(),
-    }
+    // TS: a hash failure here must surface rather than fall back to
+    // RUNTIME_REQUIREMENT, which would permanently mask later source changes.
+    hash_runtime_source(&source_dir).await
 }
 
 /// Throws if the local source can't be read. A failure here must surface rather than
@@ -1829,7 +1581,7 @@ async fn bootstrap_venv(
     let python = kernel_venv_python(venv, None);
     let source_dir = resolve_runtime_source_dir().await;
     let runtime_requirement = source_dir.unwrap_or_else(|| RUNTIME_REQUIREMENT.to_string());
-    let runtime_identity = resolve_runtime_identity().await;
+    let runtime_identity = resolve_runtime_identity().await?;
 
     run(
         &uv,
@@ -1886,13 +1638,16 @@ async fn sync_python_skills(
         .collect();
     let python_skills_by_project_name: Vec<(String, BootstrapPythonSkill)> = python_skills
         .iter()
-        .map(|skill| {
-            (
-                read_python_skill_project_name(skill).replace('_', "-").to_lowercase(),
-                skill.clone(),
-            )
-        })
-        .collect();
+        .fold(Vec::new(), |mut by_name, skill| {
+            let key = read_python_skill_project_name(skill).replace('_', "-").to_lowercase();
+            // TypeScript Map construction keeps the LAST duplicate key.
+            if let Some(existing) = by_name.iter_mut().find(|(existing, _)| *existing == key) {
+                existing.1 = skill.clone();
+            } else {
+                by_name.push((key, skill.clone()));
+            }
+            by_name
+        });
     let dependencies_by_skill: Vec<(BootstrapPythonSkill, Vec<BootstrapPythonSkill>)> = python_skills
         .iter()
         .map(|skill| {
@@ -2065,7 +1820,7 @@ async fn ensure_kernel_python_uncached(
 
     let venv = resolve_writable_kernel_venv_dir().await?;
     let python = kernel_venv_python(&venv, None);
-    let runtime_identity = resolve_runtime_identity().await;
+    let runtime_identity = resolve_runtime_identity().await?;
     if kernel_ready(&python, &venv, &runtime_identity, python_skills).await {
         return Ok(python);
     }
@@ -2085,7 +1840,13 @@ async fn ensure_kernel_python_uncached(
         report_progress(options, "\u{203a} setting up python kernel (one-time, ~30s)\u{2026}");
         if had_venv {
             report_progress(options, "rebuilding kernel venv");
-            let _ = tokio::fs::remove_dir_all(&venv).await;
+            // TS `rm(venv, { recursive: true, force: true })` tolerates only a
+            // missing path; any other teardown failure must surface.
+            if let Err(remove_error) = tokio::fs::remove_dir_all(&venv).await {
+                if remove_error.kind() != std::io::ErrorKind::NotFound {
+                    return Err(KernelError::new(remove_error.to_string()));
+                }
+            }
         }
 
         bootstrap_venv(&venv, python_skills, options).await
@@ -2146,6 +1907,18 @@ pub fn runtime_ready_check_for_test() -> String {
 
 pub fn sha256_hex_for_test(data: &[u8]) -> String {
     sha256_hex(data)
+}
+
+#[cfg(test)]
+fn parity_test_state_root(case: &str) -> PathBuf {
+    match std::env::var("PARITY_STATE_ROOT") {
+        Ok(root) if !root.trim().is_empty() => {
+            PathBuf::from(root).join("unit").join(case)
+        }
+        _ => std::env::temp_dir()
+            .join("pi-coding-agent-bootstrap-tests")
+            .join(case),
+    }
 }
 
 #[cfg(test)]
@@ -2315,16 +2088,6 @@ mod tests {
     }
 
     #[test]
-    fn strict_pid_requires_a_positive_integer() {
-        assert_eq!(strict_pid(Some("12")), Some(12));
-        assert_eq!(strict_pid(Some(" 12 ")), Some(12));
-        assert_eq!(strict_pid(Some("0")), None);
-        assert_eq!(strict_pid(Some("-1")), None);
-        assert_eq!(strict_pid(Some("abc")), None);
-        assert_eq!(strict_pid(None), None);
-    }
-
-    #[test]
     fn bootstrap_version_comparisons_are_exact() {
         let skills = vec![BootstrapPythonSkill {
             import_name: "a".to_string(),
@@ -2363,5 +2126,163 @@ mod tests {
         let methods = check.split("_harness_methods = ").nth(1).unwrap().split(';').next().unwrap();
         assert_eq!(serde_json::from_str::<Vec<String>>(methods).unwrap(), REQUIRED_HARNESS_METHODS);
         assert!(check.contains("assert _repl.PROTOCOL_VERSION == 3"));
+    }
+
+    /// G-29: write the marker through the real writer and read it back
+    /// through the real reader; every field must survive, including the
+    /// nested skill records and nonempty extra uv args.
+    #[tokio::test]
+    async fn bootstrap_marker_roundtrip_with_skills() {
+        let case = super::parity_test_state_root("t01-marker");
+        let _ = std::fs::remove_dir_all(&case);
+        std::fs::create_dir_all(&case).unwrap();
+        let venv = case.join("venv");
+        let unicode_dir = case.join("路径 with spaces");
+        std::fs::create_dir_all(&unicode_dir).unwrap();
+        let pyproject = unicode_dir.join("pyproject.toml");
+        std::fs::write(&pyproject, "[project]\nname = \"parity-skill\"\n").unwrap();
+        let skills = vec![
+            BootstrapPythonSkill {
+                import_name: "parity_skill_a".to_string(),
+                package_path: unicode_dir.to_string_lossy().into_owned(),
+                pyproject_path: pyproject.to_string_lossy().into_owned(),
+                pyproject_hash: "sha256:hash-a".to_string(),
+            },
+            BootstrapPythonSkill {
+                import_name: "parity_skill_b".to_string(),
+                package_path: case.join("plain").to_string_lossy().into_owned(),
+                pyproject_path: case.join("plain").join("py.toml").to_string_lossy().into_owned(),
+                pyproject_hash: "sha256:hash-b".to_string(),
+            },
+        ];
+        std::fs::create_dir_all(&venv).unwrap();
+        let runtime = "sha256:identity".to_string();
+        write_bootstrap_version(venv.to_string_lossy().as_ref(), &runtime, &skills)
+            .await
+            .unwrap();
+
+        let raw = std::fs::read_to_string(venv.join(BOOTSTRAP_VERSION_FILE)).unwrap();
+        assert!(
+            raw.contains("\"extraUvArgs\"") && raw.contains("\"pythonSkills\""),
+            "marker must be written with camelCase keys, raw={raw}"
+        );
+        assert!(
+            raw.contains("\"importName\"") && raw.contains("\"pyprojectHash\""),
+            "nested skills must use the TypeScript camelCase keys, raw={raw}"
+        );
+
+        let version = read_bootstrap_version(venv.to_string_lossy().as_ref()).await;
+        let version = version.expect("marker must parse");
+        assert_eq!(version.schema, BOOTSTRAP_SCHEMA);
+        assert_eq!(version.runtime.as_deref(), Some(runtime.as_str()));
+        assert_eq!(version.snapshot.as_deref(), Some(STATE_SNAPSHOT_REQUIREMENT));
+        assert_eq!(version.extra_uv_args.as_deref(), Some(default_rlm_extra_uv_args().as_slice()));
+        let stored = version.python_skills.as_ref().expect("skills survive").clone();
+        assert_eq!(stored, skills, "nested skill records must round-trip field by field");
+
+        assert!(bootstrap_version_current(Some(&version), &runtime, &skills));
+        assert!(bootstrap_base_version_current(Some(&version), &runtime));
+
+        // Empty skills stay current.
+        write_bootstrap_version(venv.to_string_lossy().as_ref(), &runtime, &[])
+            .await
+            .unwrap();
+        let version = read_bootstrap_version(venv.to_string_lossy().as_ref())
+            .await
+            .expect("empty marker");
+        assert!(bootstrap_version_current(Some(&version), &runtime, &[]));
+
+        // TypeScript camelCase fixture (positive control). The marker is only
+        // "current" when extraUvArgs equals the default extra args, so the
+        // fixture carries the real default list.
+        let default_args_json = serde_json::to_string(&default_rlm_extra_uv_args()).unwrap();
+        let ts_body = format!(
+            "{{\"schema\":9,\"runtime\":\"rt-ts\",\"snapshot\":\"dill\",\"extraUvArgs\":{},\"pythonSkills\":[{{\"importName\":\"import_ts\",\"packagePath\":\"C:/ts pkg\",\"pyprojectPath\":\"C:/ts pkg/pyproject.toml\",\"pyprojectHash\":\"h\"}}]}}\n",
+            default_args_json
+        );
+        std::fs::write(venv.join(BOOTSTRAP_VERSION_FILE), ts_body).unwrap();
+        let version = read_bootstrap_version(venv.to_string_lossy().as_ref())
+            .await
+            .expect("ts fixture parses");
+        assert_eq!(
+            version.extra_uv_args.as_deref(),
+            Some(default_rlm_extra_uv_args().as_slice())
+        );
+        let ts_skills = version.python_skills.as_ref().expect("ts skills");
+        assert_eq!(ts_skills[0].import_name, "import_ts");
+        assert_eq!(ts_skills[0].package_path, "C:/ts pkg");
+        assert!(bootstrap_version_current(Some(&version), "rt-ts", ts_skills));
+
+        // Legacy snake_case markers (written by the defective writer) read
+        // safely as NOT current: one documented rebuild, then they normalize.
+        let legacy = "{\"schema\":9,\"runtime\":\"rt-old\",\"snapshot\":\"dill\",\"extra_uv_args\":[\"numpy\"],\"python_skills\":[]}\n";
+        std::fs::write(venv.join(BOOTSTRAP_VERSION_FILE), legacy).unwrap();
+        let version = read_bootstrap_version(venv.to_string_lossy().as_ref())
+            .await
+            .expect("legacy marker parses without panicking");
+        assert_eq!(
+            version.extra_uv_args, None,
+            "legacy snake_case args are unreadable by design of the fix"
+        );
+        // The reader looks for the camelCase keys only, so the legacy
+        // python_skills array reads as absent (None), not an empty list.
+        assert_eq!(version.python_skills, None);
+        assert!(!bootstrap_base_version_current(Some(&version), "rt-old"));
+    }
+
+    /// G-07: duplicate project names must resolve like the TypeScript
+    /// reference, where the LAST duplicate wins (Map.set overwrite). The
+    /// dependent skill's dependency edge must therefore point at the last
+    /// duplicate, which delays it in the topological order.
+    #[test]
+    fn duplicate_project_name_resolves_last_like_typescript() {
+        let case = super::parity_test_state_root("t01-dup");
+        let _ = std::fs::remove_dir_all(&case);
+        let first = case.join("first");
+        let second = case.join("second");
+        let dependent = case.join("dependent");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        std::fs::create_dir_all(&dependent).unwrap();
+        std::fs::write(
+            first.join("pyproject.toml"),
+            "[project]\nname = \"parity-dup-name\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.join("pyproject.toml"),
+            "[project]\nname = \"parity-dup-name\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dependent.join("pyproject.toml"),
+            "[project]\nname = \"parity-dependent\"\ndependencies = [\"parity-dup-name\"]\n",
+        )
+        .unwrap();
+        let skill = |name: &str, dir: &Path| BootstrapPythonSkill {
+            import_name: name.to_string(),
+            package_path: dir.to_string_lossy().into_owned(),
+            pyproject_path: dir.join("pyproject.toml").to_string_lossy().into_owned(),
+            pyproject_hash: file_content_hash(dir.join("pyproject.toml").to_string_lossy().as_ref()),
+        };
+        let first_skill = skill("parity_first", &first);
+        let second_skill = skill("parity_second", &second);
+        let dependent_skill = skill("parity_dependent", &dependent);
+        let sorted = sort_python_skills_for_install(&[first_skill, second_skill, dependent_skill]);
+        let position_of = |needle: &str| {
+            sorted
+                .iter()
+                .position(|candidate| candidate.package_path.replace('\\', "/").contains(needle))
+                .unwrap_or(usize::MAX)
+        };
+        assert!(
+            position_of("first") < position_of("second"),
+            "the untouched duplicates must keep their original order: {sorted:?}"
+        );
+        assert!(
+            position_of("second") < position_of("dependent"),
+            "TS contract violated: the dependent sorted before the LAST duplicate \
+             (first-wins defect): {sorted:?}"
+        );
     }
 }

@@ -25,12 +25,15 @@ pub fn resolve_kernel_boot_concurrency() -> usize {
     if raw.is_empty() || !raw.chars().all(|c| c.is_ascii_digit()) {
         return default_kernel_boot_concurrency();
     }
-    let Ok(parsed) = raw.parse::<i64>() else {
+    // TS `Number.parseInt` parses into a double: a digit-only string beyond
+    // i64 still parses (as a float) and clamps to the cap instead of falling
+    // back to the default.
+    let Ok(parsed) = raw.parse::<f64>() else {
         return default_kernel_boot_concurrency();
     };
     // A malformed or out-of-range value (incl. 0, e.g. "00") falls back to the
     // default rather than mis-bounding the gate or throwing at module load.
-    if parsed < 1 {
+    if parsed < 1.0 {
         return default_kernel_boot_concurrency();
     }
     // An explicit override may exceed the auto default (that's its purpose), but is
@@ -333,5 +336,29 @@ mod tests {
 
         release_tx.send(()).unwrap();
         holder.await.unwrap().unwrap();
+    }
+
+    /// G-13: a digit-only override beyond i64 must clamp to the 64 cap like
+    /// the TypeScript `Number.parseInt` (double) path, not fall back to the
+    /// default.
+    #[test]
+    fn extreme_concurrency_override_clamps_like_typescript() {
+        let key = "PRIME_AGENT_MAX_CONCURRENT_KERNEL_BOOTS";
+        let previous = std::env::var(key).ok();
+        std::env::set_var(key, "99999999999999999999");
+        assert_eq!(resolve_kernel_boot_concurrency(), MAX_KERNEL_BOOT_CONCURRENCY);
+        std::env::set_var(key, "18446744073709551616");
+        assert_eq!(resolve_kernel_boot_concurrency(), MAX_KERNEL_BOOT_CONCURRENCY);
+        // Negative controls keep the documented fallback semantics.
+        std::env::set_var(key, "abc");
+        assert_eq!(resolve_kernel_boot_concurrency(), default_kernel_boot_concurrency());
+        std::env::set_var(key, "0");
+        assert_eq!(resolve_kernel_boot_concurrency(), default_kernel_boot_concurrency());
+        std::env::set_var(key, "64");
+        assert_eq!(resolve_kernel_boot_concurrency(), 64);
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
     }
 }

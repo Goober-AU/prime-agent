@@ -3849,3 +3849,235 @@ mod message_tests {
 		assert!(decoded.reasoning_enabled.is_none());
 	}
 }
+
+
+#[cfg(test)]
+mod t15_controls_tests {
+	//! T15 owner 'controls': configured gateway-route payload contracts. The
+	//! fixtures mirror a configured gateway model profile with the credential
+	//! command redacted to `test-key`; base URLs are inert fixture strings and
+	//! nothing connects to the gateway ports.
+
+	use super::*;
+	use crate::types::{Compat, Message, ModelCost, OpenAICompletionsCompat, UserContent, UserMessage};
+	use indexmap::IndexMap;
+	use serde_json::json;
+
+	fn route_compat() -> OpenAICompletionsCompat {
+		OpenAICompletionsCompat {
+			supports_store: Some(false),
+			supports_developer_role: Some(false),
+			supports_reasoning_effort: Some(true),
+			supports_usage_in_streaming: Some(true),
+			max_tokens_field: Some("max_tokens".to_string()),
+			supports_strict_mode: Some(false),
+			..Default::default()
+		}
+	}
+
+	fn route_model(id: &str, max_tokens: f64, map: &[(&str, Option<&str>)]) -> Model {
+		let mut level_map: IndexMap<String, Option<String>> = IndexMap::new();
+		for (level, mapped) in map {
+			level_map.insert(level.to_string(), mapped.map(|value| value.to_string()));
+		}
+		Model {
+			id: id.to_string(),
+			name: id.to_string(),
+			api: "openai-completions".to_string(),
+			provider: "gateway-route".to_string(),
+			base_url: "http://127.0.0.1:43119/gateway/v1".to_string(),
+			reasoning: true,
+			input: vec![InputModality::Text, InputModality::Image],
+			cost: ModelCost::zero(),
+			context_window: 1_000_000.0,
+			max_tokens,
+			compat: Some(Compat::Completions(route_compat())),
+			thinking_level_map: Some(level_map),
+			..Default::default()
+		}
+	}
+
+	fn user_text(text: &str) -> Message {
+		Message::user(UserMessage::new(UserContent::Text(text.to_string()), 1))
+	}
+
+	fn context_with(messages: Vec<Message>) -> Context {
+		Context::new(None, messages, None)
+	}
+
+	fn keyed_options() -> OpenAICompletionsOptions {
+		OpenAICompletionsOptions {
+			stream: StreamOptions {
+				api_key: Some("test-key".to_string()),
+				..Default::default()
+			},
+			..Default::default()
+		}
+	}
+
+	fn effort_options(effort: Option<&str>) -> OpenAICompletionsOptions {
+		let mut options = keyed_options();
+		options.reasoning_effort = effort.map(|value| value.to_string());
+		options
+	}
+
+	/// Same pipeline as the sibling tests module's `build` helper (get_compat +
+	/// cache retention + build_params); helpers here are file-scope functions.
+	fn build(model: &Model, context: &Context, options: Option<&OpenAICompletionsOptions>) -> Value {
+		let compat = get_compat(model);
+		let cache_retention =
+			resolve_cache_retention(options.and_then(|options| options.stream.cache_retention.as_ref()));
+		let cache_control = get_compat_cache_control(&compat, &cache_retention);
+		build_params(model, context, options, &compat, &cache_retention, cache_control.as_ref())
+			.expect("params")
+	}
+
+	/// ollama-cloud/deepseek-v4-flash (profile: maxTokens 384000, map max->max,
+	/// off->null, provider compat max_tokens + no store + no developer role).
+	#[test]
+	fn t15_route_fixture_ollama_cloud_deepseek_v4_flash_payload_contract() {
+		let model = route_model(
+			"deepseek-v4-flash",
+			384_000.0,
+			&[("off", None), ("max", Some("max"))],
+		);
+		// The runtime forwards `model.maxTokens` into the stream options before the
+		// provider sees them; mirror that here.
+		let mut options = effort_options(Some("max"));
+		options.stream.max_tokens = Some(384_000.0);
+		let params = build(&model, &context_with(vec![user_text("hi")]), Some(&options));
+		assert_eq!(params["model"], json!("deepseek-v4-flash"));
+		assert_eq!(params["max_tokens"], json!(384000), "route compat keeps the max_tokens field");
+		assert!(params.get("max_completion_tokens").is_none());
+		assert!(params.get("store").is_none(), "supportsStore false must omit store");
+		assert_eq!(params["stream_options"]["include_usage"], json!(true));
+		assert_eq!(params["reasoning_effort"], json!("max"), "mapped effort passes through");
+		// A null mapping falls back to the requested level (TS `map[level] ?? effort`).
+		let low = build(&model, &context_with(vec![user_text("hi")]), Some(&effort_options(Some("low"))));
+		assert_eq!(low["reasoning_effort"], json!("low"));
+		// `off` mapped to null must omit reasoning_effort entirely (TS `offValue !== null`).
+		let mut off = keyed_options();
+		off.reasoning_enabled = Some(false);
+		let off_params = build(&model, &context_with(vec![user_text("hi")]), Some(&off));
+		assert!(off_params.get("reasoning_effort").is_none(), "map.off == null must omit the off effort");
+	}
+
+	/// azure-foundry-managed/FW-Kimi-K3 (profile: map low/high/max pass through,
+	/// off null; maxTokens 131072).
+	#[test]
+	fn t15_route_fixture_azure_foundry_fw_kimi_k3_payload_contract() {
+		let model = route_model(
+			"FW-Kimi-K3",
+			131_072.0,
+			&[("off", None), ("low", Some("low")), ("high", Some("high")), ("max", Some("max"))],
+		);
+		let mut options = effort_options(Some("max"));
+		options.stream.max_tokens = Some(131_072.0);
+		let params = build(&model, &context_with(vec![user_text("hi")]), Some(&options));
+		assert_eq!(params["max_tokens"], json!(131072));
+		assert_eq!(params["reasoning_effort"], json!("max"));
+		let low = build(&model, &context_with(vec![user_text("hi")]), Some(&effort_options(Some("low"))));
+		assert_eq!(low["reasoning_effort"], json!("low"));
+		// Tool definitions must omit `strict` (supportsStrictMode false).
+		let mut ctx = context_with(vec![user_text("hi")]);
+		ctx.tools = Some(vec![Tool {
+			name: "read".to_string(),
+			description: "read".to_string(),
+			parameters: serde_json::json!({"type": "object", "properties": {}}),
+			..Default::default()
+		}]);
+		let with_tools = build(&model, &ctx, None);
+		let tool = &with_tools["tools"][0];
+		assert_eq!(tool["function"]["name"], json!("read"));
+		assert!(tool.get("strict").is_none(), "supportsStrictMode false must omit strict");
+	}
+
+	/// E-02/E-04 integration: one SSE body exercising text, reasoning, tool-call
+	/// assembly and wire usage; abort and in-stream-error classes are covered by
+	/// the existing dedicated tests next to this module.
+	#[tokio::test]
+	async fn t15_stream_events_cover_text_reasoning_tool_usage() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let body = concat!(
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"repro-model\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"thinking hard\"}}]}\n\n",
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"repro-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer text\"}}]}\n\n",
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"repro-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"call-1\",\"index\":0,\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n",
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"repro-model\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}}]}}]}\n\n",
+			"data: {\"id\":\"chatcmpl-1\",\"model\":\"repro-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
+			"data: [DONE]\n\n"
+		);
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = tokio::spawn(async move {
+			let (mut socket, _) = listener.accept().await.unwrap();
+			let mut request = Vec::new();
+			loop {
+				let mut buffer = [0u8; 4096];
+				let count = socket.read(&mut buffer).await.unwrap();
+				assert_ne!(count, 0, "client closed before sending the request");
+				request.extend_from_slice(&buffer[..count]);
+				if request.windows(4).any(|window| window == b"\r\n\r\n") {
+					break;
+				}
+			}
+			let response = format!(
+				"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
+				body.len(),
+				body
+			);
+			socket.write_all(response.as_bytes()).await.unwrap();
+			socket.shutdown().await.unwrap();
+		});
+		let mut model = Model {
+			id: "repro-model".to_string(),
+			name: "Repro Model".to_string(),
+			api: "openai-completions".to_string(),
+			provider: "gateway-route".to_string(),
+			base_url: format!("http://{address}"),
+			reasoning: true,
+			input: vec![InputModality::Text],
+			cost: ModelCost::zero(),
+			..Default::default()
+		};
+		model.compat = Some(Compat::Completions(route_compat()));
+		let stream = stream_openai_completions(&model, &context_with(vec![user_text("hi")]), Some(keyed_options()));
+		let mut kinds: Vec<&'static str> = Vec::new();
+		let mut done: Option<AssistantMessage> = None;
+		while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next())
+			.await
+			.expect("the fixture stream must finish")
+		{
+			match event {
+				AssistantMessageEvent::ThinkingDelta { delta, .. } => {
+					kinds.push("thinking_delta");
+					assert_eq!(delta, "thinking hard");
+				}
+				AssistantMessageEvent::TextDelta { delta, .. } => {
+					kinds.push("text_delta");
+					assert_eq!(delta, "answer text");
+				}
+				AssistantMessageEvent::ToolCallEnd { tool_call, .. } => {
+					kinds.push("toolcall_end");
+					assert_eq!(tool_call.name, "read");
+					assert_eq!(tool_call.arguments.get("path"), Some(&json!("a")));
+				}
+				AssistantMessageEvent::Done { reason, message } => {
+					kinds.push("done");
+					assert_eq!(reason, "toolUse");
+					done = Some(message);
+				}
+				AssistantMessageEvent::Error { error, .. } => panic!("unexpected error event: {:?}", error.error_message),
+				_ => {}
+			}
+		}
+		tokio::time::timeout(std::time::Duration::from_secs(5), server).await.expect("server").unwrap();
+		assert!(kinds.contains(&"thinking_delta"), "reasoning_content frames must stream as thinking: {kinds:?}");
+		assert!(kinds.contains(&"text_delta"), "{kinds:?}");
+		assert!(kinds.contains(&"toolcall_end"), "{kinds:?}");
+		assert!(kinds.contains(&"done"), "{kinds:?}");
+		let message = done.expect("done message");
+		assert_eq!(message.stop_reason, "toolUse");
+		assert_eq!(message.usage.input, 10.0);
+		assert_eq!(message.usage.output, 5.0);
+	}
+}

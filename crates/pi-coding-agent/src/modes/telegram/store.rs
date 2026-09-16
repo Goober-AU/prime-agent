@@ -281,7 +281,7 @@ impl TelegramStore {
                             && item
                                 .get("text")
                                 .and_then(serde_json::Value::as_str)
-                                .map(|text| text.chars().count() <= 4000)
+                                .map(|text| crate::modes::telegram::api::utf16_len(text) <= 4000)
                                 .unwrap_or(false)
                     })
             })
@@ -297,7 +297,7 @@ impl TelegramStore {
                             && item
                                 .get("text")
                                 .and_then(serde_json::Value::as_str)
-                                .map(|text| text.chars().count() <= 16384)
+                                .map(|text| crate::modes::telegram::api::utf16_len(text) <= 16384)
                                 .unwrap_or(false)
                     })
             })

@@ -391,6 +391,10 @@ pub struct AgentConnectionQueueState {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AgentCronJob {
     pub id: String,
+    /// `job.sessionId`: the DURABLE session id, a different id space from
+    /// `activeSessionId` (the worker id). `heartbeat-scope.ts:29` compares THIS one
+    /// against `session.sessionId`.
+    pub session_id: String,
     pub active_session_id: String,
     pub prompt: String,
     pub status: String,

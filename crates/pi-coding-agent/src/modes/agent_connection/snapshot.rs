@@ -396,7 +396,7 @@ fn relative_path(from: &Path, to: &Path) -> String {
     let mut common = 0;
     while common < from_components.len()
         && common < to_components.len()
-        && from_components[common] == to_components[common]
+        && path_components_equal(from_components[common], to_components[common])
     {
         common += 1;
     }
@@ -411,6 +411,20 @@ fn relative_path(from: &Path, to: &Path) -> String {
         parts.push(component.as_os_str().to_string_lossy().to_string());
     }
     parts.join(std::path::MAIN_SEPARATOR_STR)
+}
+
+// Node path.relative is case-insensitive on win32; compare components
+// case-insensitively there so drive-letter case differences do not break
+// the cwd-relative artifact path.
+fn path_components_equal(a: std::path::Component, b: std::path::Component) -> bool {
+    if a == b {
+        return true;
+    }
+    if cfg!(windows) {
+        return a.as_os_str().to_string_lossy().to_lowercase()
+            == b.as_os_str().to_string_lossy().to_lowercase();
+    }
+    false
 }
 
 fn to_posix_path(path: &str) -> String {

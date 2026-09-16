@@ -59,7 +59,7 @@ impl CatalogSessionBackend for NativeCatalogBackend {
             };
             Ok(match cwd {
                 Some(cwd) => {
-                    SessionManager::list(&cwd, session_dir.as_deref(), Some(&callbacks)).await
+                    SessionManager::list(&cwd, session_dir.as_deref(), Some(callbacks)).await
                 }
                 None => SessionManager::list_all(Some(&callbacks), session_dir.as_deref()).await,
             })

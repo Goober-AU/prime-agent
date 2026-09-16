@@ -588,7 +588,16 @@ async fn connect_daemon_socket(socket_path: &str) -> std::io::Result<DaemonSocke
     }
     #[cfg(windows)]
     {
-        tokio::net::windows::named_pipe::ClientOptions::new().open(socket_path)
+        loop {
+            match tokio::net::windows::named_pipe::ClientOptions::new().open(socket_path) {
+                // The listener needs a scheduling turn to create its next instance.
+                // connect() owns the deadline; cancellation drops this wait safely.
+                Err(error) if error.raw_os_error() == Some(231) => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                result => return result,
+            }
+        }
     }
 }
 

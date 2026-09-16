@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Map, Value};
 use tokio::io::AsyncReadExt;
@@ -38,7 +38,7 @@ use crate::core::kernel::state_snapshot::{
 use crate::core::orphan_process_journal::{
     reap_kernel_orphan_processes, record_orphan_process_state,
 };
-use crate::utils::child_process::{spawn_hidden, spawn_sync_hidden, Signal, SpawnOptions};
+use crate::utils::child_process::{spawn_hidden, spawn_sync_hidden_with_timeout, Signal, SpawnOptions};
 
 const REPL_PROTOCOL_VERSION: f64 = 3.0;
 const READY_TIMEOUT_MS: u64 = 30_000;
@@ -601,8 +601,17 @@ impl KernelState {
             if size > MAX_KERNEL_STDERR_LOG_BYTES {
                 // Drop any prior .old first: rename fails on Windows if it exists.
                 let _ = std::fs::remove_file(format!("{path}.old"));
-                std::fs::rename(&path_buf, format!("{path}.old"))?;
-                size = 0;
+                if let Err(error) = std::fs::rename(&path_buf, format!("{path}.old")) {
+                    // A failed rotation must not cost the log: keep appending instead
+                    // (repl-manager.ts:308-311). The budget is the file's remaining
+                    // capacity, so the oversized file writes the budget marker once.
+                    self.append_kernel_diagnostic(&format!(
+                        "cannot rotate kernel stderr log: {}",
+                        error_message(&KernelError::new(error.to_string()))
+                    ));
+                } else {
+                    size = 0;
+                }
             }
             let file = std::fs::OpenOptions::new()
                 .append(true)
@@ -2691,7 +2700,7 @@ impl KernelState {
                     "/T".to_string(),
                     "/F".to_string(),
                 ];
-                match spawn_sync_hidden(
+                match spawn_sync_hidden_with_timeout(
                     &taskkill.to_string_lossy(),
                     &args,
                     SpawnOptions {
@@ -2699,6 +2708,7 @@ impl KernelState {
                         capture_stderr: false,
                         ..Default::default()
                     },
+                    TASKKILL_TIMEOUT_MS,
                 ) {
                     Ok(output) => {
                         // spawnSyncHidden already waited: `result.status` is the exit code.
@@ -2724,11 +2734,10 @@ impl KernelState {
             if !signaled {
                 // `child.kill(killSignal)`; without a pid there is nothing to signal.
                 if let Some(pid) = pid {
-                    crate::utils::child_process::signal_process_group_or_process(
+                    signaled = crate::utils::child_process::signal_process_group_or_process(
                         pid as i32,
                         kill_signal,
                     );
-                    signaled = true;
                 }
             }
             // Inactive only when the signal proved the pid still named our un-reaped child.
@@ -4005,5 +4014,174 @@ mod tests {
         assert_eq!(MAX_KERNEL_STDERR_LOG_BYTES, 5 * 1024 * 1024);
         assert_eq!(TASKKILL_TIMEOUT_MS, 5000);
         assert_eq!(PROTOCOL_EVENT_KINDS.len(), 8);
+    }
+
+    // --- sessionkernel_t04 fixtures -------------------------------------------------
+
+    /// Process-global lock for tests that touch ambient env vars.
+    static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// G2-03: a failed stderr-log rotation must not cost the log. TS keeps the
+    /// existing file, logs `cannot rotate kernel stderr log: ...` and the write
+    /// budget is the file's remaining capacity (repl-manager.ts:302-313).
+    #[test]
+    fn rotation_failure_preserves_diagnostics() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kernel-stderr.log");
+        let big = "x".repeat(MAX_KERNEL_STDERR_LOG_BYTES as usize + 1024);
+        std::fs::write(&path, big.as_bytes()).unwrap();
+        // An un-removable `.old`: rename onto a directory always fails.
+        std::fs::create_dir(dir.path().join("kernel-stderr.log.old")).unwrap();
+        let manager = new_repl_kernel_manager(KernelManagerOptions {
+            stderr_log_path: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+        let state = manager.state();
+        let log = state
+            .open_stderr_log()
+            .expect("rotation failure must not disable the stderr log");
+        assert_eq!(log.budget, 0, "budget is the file's remaining capacity, not a fresh allowance");
+        assert!(
+            state.kernel_stderr.lock().unwrap().contains("cannot rotate kernel stderr log"),
+            "rotation failure must be reported as a rotation diagnostic"
+        );
+    }
+
+    /// G2-01: cleanup_resources must bound the Windows tree kill at
+    /// TASKKILL_TIMEOUT_MS and fall back to signaling the child (TS
+    /// repl-manager.ts:1412-1435). A hung taskkill must never hang teardown.
+    #[test]
+    fn cleanup_resources_taskkill_is_bounded_and_falls_back() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let journal_path = dir.path().join("orphans.jsonl");
+        std::env::set_var(crate::core::orphan_process_journal::ORPHAN_PROCESS_JOURNAL_ENV, &journal_path);
+
+        let (helper_handle, helper_pid) = spawn_helper(20);
+        let _ = helper_handle;
+        let manager = new_repl_kernel_manager(KernelManagerOptions::default());
+        let state = manager.state();
+        let child_state = Arc::new(ChildState {
+            id: 1,
+            pid: Some(helper_pid as u32),
+            stdin: Arc::new(tokio::sync::Mutex::new(None)),
+            stdin_destroyed: std::sync::atomic::AtomicBool::new(false),
+            exit: ExitState::new(),
+            destroy_stdout: Latch::new(),
+            destroy_stderr: Latch::new(),
+            stderr_closed: Latch::new(),
+        });
+        *state.child.lock().unwrap() = Some(child_state);
+        *state.state.lock().unwrap() = State::Running;
+
+        let hang = |command: &str, _args: &[String], _options: &SpawnOptions| {
+            if command.to_lowercase().ends_with("taskkill.exe") {
+                // Stand-in for a hung taskkill: a child that outlives the
+                // cleanup deadline. The unbounded baseline path waits on it
+                // forever; the bounded fix kills it at the timeout.
+                let mut stand_in = std::process::Command::new("ping");
+                stand_in.args(["-n", "60", "127.0.0.1"]);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    stand_in.creation_flags(0x08000000);
+                }
+                stand_in
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                Some(stand_in.spawn())
+            } else {
+                None
+            }
+        };
+        crate::utils::child_process::set_sync_spawn_override_for_tests(Some(hang));
+        let (done_sender, done_receiver) = std::sync::mpsc::channel::<Duration>();
+        std::thread::spawn({
+            let state = state.clone();
+            move || {
+                let start = Instant::now();
+                state.cleanup_resources(None);
+                let _ = done_sender.send(start.elapsed());
+            }
+        });
+        let elapsed = match done_receiver.recv_timeout(Duration::from_secs(30)) {
+            Ok(elapsed) => elapsed,
+            Err(_) => {
+                crate::utils::child_process::set_sync_spawn_override_for_tests(None);
+                std::env::remove_var(crate::core::orphan_process_journal::ORPHAN_PROCESS_JOURNAL_ENV);
+                panic!("cleanup_resources hung; the Windows taskkill tree kill is unbounded");
+            }
+        };
+        crate::utils::child_process::set_sync_spawn_override_for_tests(None);
+        assert!(
+            elapsed < Duration::from_secs(30),
+            "cleanup_resources must be bounded, took {elapsed:?}"
+        );
+        // The fallback kill must have delivered: the helper is gone.
+        assert!(
+            wait_process_gone(helper_pid, Duration::from_secs(10)),
+            "fallback kill did not terminate the kernel child"
+        );
+        // A failed tree cleanup preserves the recovery evidence: no inactive journal record.
+        let records = read_journal_records(&journal_path);
+        assert!(
+            !records.iter().any(|record| record.pid == helper_pid as i64 && !record.active),
+            "failed tree cleanup must not mark the orphan record inactive"
+        );
+        std::env::remove_var(crate::core::orphan_process_journal::ORPHAN_PROCESS_JOURNAL_ENV);
+    }
+
+    fn spawn_helper(seconds: u32) -> (tokio::process::Child, i32) {
+        let handle = crate::utils::child_process::spawn_hidden(
+            "ping",
+            &["-n".to_string(), format!("{seconds}"), "127.0.0.1".to_string()],
+            SpawnOptions::default(),
+        )
+        .expect("helper spawn");
+        let pid = handle.child.id().expect("helper pid") as i32;
+        (handle.child, pid)
+    }
+
+    fn read_journal_records(path: &std::path::Path) -> Vec<crate::core::orphan_process_journal::OrphanProcessRecord> {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => contents
+                .lines()
+                .filter_map(|line| serde_json::from_str::<crate::core::orphan_process_journal::OrphanProcessRecord>(line).ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Test liveness oracle: a terminated process whose handle is still open
+    /// (tokio reaper) reports `STILL_ACTIVE`-independent existence via
+    /// `process_id_exists`, so check the exit code like the OS task list does.
+    fn probe_process_running(pid: i32) -> bool {
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        const STILL_ACTIVE: u32 = 259;
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            if handle.is_null() {
+                return false;
+            }
+            let mut exit_code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut exit_code) != 0;
+            CloseHandle(handle);
+            ok && exit_code == STILL_ACTIVE
+        }
+    }
+
+    fn wait_process_gone(pid: i32, deadline: Duration) -> bool {
+        let start = Instant::now();
+        while start.elapsed() < deadline {
+            if !probe_process_running(pid) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        !probe_process_running(pid)
     }
 }

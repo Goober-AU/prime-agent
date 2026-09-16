@@ -9,6 +9,8 @@ use pi_tui::tui::{
 };
 use serde_json::Value;
 
+use super::native_wire::normalize_browser_numbers;
+
 use super::agents_view_mode as view;
 use super::roster_store as roster;
 use crate::core::settings_manager::SettingsManager;
@@ -310,7 +312,7 @@ fn outbound(value: &Value) -> roster::DaemonOutbound {
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+                .filter_map(|entry| serde_json::from_value(normalize_browser_numbers(entry.clone())).ok())
                 .collect(),
             removed: value
                 .get("removed")
@@ -376,7 +378,7 @@ impl roster::DaemonTransport for NativeTransport {
             Ok(roster::DaemonResponse {
                 command: response.command,
                 success: response.success,
-                data: response.data,
+                data: response.data.map(normalize_browser_numbers),
                 error: response.error,
             })
         })
@@ -667,7 +669,7 @@ async fn run_on_owner_thread(options: AgentsViewSeamOptions) -> Result<(), Strin
             reconnect_timeout_ms: None,
             initial_session: options
                 .initial_session
-                .map(|session| serde_json::to_value(session).and_then(serde_json::from_value))
+                .map(|session| serde_json::to_value(session).and_then(|value| serde_json::from_value(normalize_browser_numbers(value))))
                 .transpose()
                 .map_err(|error| format!("Invalid initial agents session: {error}"))?,
             initial_scope_key: options.initial_scope_key,

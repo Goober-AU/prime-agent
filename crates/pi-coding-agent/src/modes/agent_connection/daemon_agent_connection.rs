@@ -726,7 +726,12 @@ pub fn collect_daemon_launch_env() -> IndexMap<String, String> {
 
 /// `isUnknownDaemonCommandError(error, commandType)`.
 pub fn is_unknown_daemon_command_error(error: &str, command_type: &str) -> bool {
+    // The daemon's own message is `Unknown daemon command: {command}`
+    // (`daemon_mode.rs`, `daemon-protocol.ts:isUnknownDaemonCommandError`), while older
+    // transports surface the shorter `unknown command: {command}`. Accept both, exactly
+    // like the agents-view matcher (`agents_view_mode.rs`) does for its own call sites.
     error.contains(&format!("unknown command: {command_type}"))
+        || (error.contains("Unknown daemon command") && error.contains(command_type))
 }
 
 fn command_body(type_: &str, fields: Vec<(&str, Value)>) -> Value {
@@ -3022,10 +3027,53 @@ impl AgentConnection for DaemonAgentConnection {
 
     fn list_heartbeats(&self) -> BoxFuture<Result<Vec<AgentConnectionHeartbeat>, String>> {
         let this = self.clone();
-        // `listDaemonHeartbeats(client, activeSessionId?)` lives in
-        // modes/daemon/heartbeat-catalog.ts (another slice).
-        Box::pin(async {
-            Err("listHeartbeats requires modes/daemon/heartbeat-catalog.ts (not ported in this slice)".to_string())
+        // `listDaemonHeartbeats(client, this.options.ownedSession ? this.activeSessionId : undefined)`
+        // (`daemon-agent-connection.ts:843`): only an OWNED session scopes the catalog to
+        // its own active session id; a shared control-plane connection sends none.
+        let active_session_id = this
+            .options
+            .lock()
+            .unwrap()
+            .owned_session
+            .then(|| Value::String(this.active_session_id()));
+        let command = command_body(
+            "heartbeats_list",
+            vec![("activeSessionId", active_session_id.unwrap_or(Value::Null))],
+        );
+        Box::pin(async move {
+            // `await client.waitForHello(...)` first (`heartbeat-catalog.ts:12`): a
+            // connection whose hello has not arrived yet must wait and then decide,
+            // not deterministically report an empty catalog.
+            if this.client.hello_socket_path().is_none() {
+                this.client.wait_for_hello(3000).await?;
+            }
+            // `if (!client.supportsServerCapability("heartbeat_catalog")) return []`
+            // (`heartbeat-catalog.ts:13`): an older daemon is an empty catalog, not an
+            // error every caller has to swallow.
+            if !this.client.supports_server_capability("heartbeat_catalog") {
+                return Ok(Vec::new());
+            }
+            match this.request_data(command, None).await {
+                Ok(data) => Ok(data
+                    .get("heartbeats")
+                    .and_then(Value::as_array)
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|entry| serde_json::from_value(entry.clone()).ok())
+                            .collect::<Vec<AgentConnectionHeartbeat>>()
+                    })
+                    .unwrap_or_default()),
+                // `catch (error) { if (isUnknownDaemonCommandError(error, "heartbeats_list")) return []; throw error; }`
+                // (`heartbeat-catalog.ts:21-25`).
+                Err(error) => {
+                    if is_unknown_daemon_command_error(&error, "heartbeats_list") {
+                        Ok(Vec::new())
+                    } else {
+                        Err(error)
+                    }
+                }
+            }
         })
     }
 

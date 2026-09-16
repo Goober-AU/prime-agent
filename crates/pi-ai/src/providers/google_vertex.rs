@@ -435,8 +435,10 @@ fn process_part(
 
 		let provided_id = function_call.get("id").and_then(Value::as_str);
 		let name = function_call.get("name").and_then(Value::as_str).unwrap_or("");
+		// TS: `!providedId || output.content.some(...)` - an empty string id is
+		// falsy in JS, so it is regenerated.
 		let needs_new_id = match provided_id {
-			None => true,
+			None | Some("") => true,
 			Some(provided_id) => output.content.iter().any(|block| match block {
 				ContentBlock::ToolCall(tool_call) => tool_call.id == provided_id,
 				_ => false,
@@ -1311,7 +1313,9 @@ pub fn build_params(
 			config.insert(key.clone(), value.clone());
 		}
 	}
-	if let Some(system_prompt) = &context.system_prompt {
+	// TS: `...(context.systemPrompt && { systemInstruction })` - an empty string
+	// is falsy in JS, so it must be omitted from the request.
+	if let Some(system_prompt) = context.system_prompt.as_ref().filter(|prompt| !prompt.is_empty()) {
 		config.insert(
 			"systemInstruction".to_string(),
 			Value::String(sanitize_surrogates(system_prompt)),
@@ -1964,5 +1968,86 @@ mod tests {
 		assert_eq!(number_field(&usage, "promptTokenCount"), 3.0);
 		assert_eq!(number_field(&usage, "totalTokenCount"), 9.0);
 		assert_eq!(number_field(&usage, "thoughtsTokenCount"), 0.0);
+	}
+}
+
+
+#[cfg(test)]
+mod t15_controls_tests {
+	//! T15 owner 'controls': E-04 empty-string falsiness contract for google-vertex
+	//! (TS `google.ts` guards `...(context.systemPrompt && ...)` and
+	//! `!providedId || ...` treat `""` as absent).
+
+	use super::*;
+	use crate::types::{Message, ModelCost, UserContent, UserMessage};
+	use serde_json::json;
+
+	fn t15_model() -> Model {
+		let mut model = Model::new("gemini-2.5-pro", "gemini-2.5-pro", "google-vertex", "google", "");
+		model.reasoning = true;
+		model.cost = ModelCost::zero();
+		model
+	}
+
+	fn t15_context(system_prompt: Option<&str>) -> Context {
+		Context::new(
+			system_prompt.map(|prompt| prompt.to_string()),
+			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			None,
+		)
+	}
+
+	/// (a) `Some("")` must omit `systemInstruction` exactly like the TS spread
+	/// guard; `Some("rules")` must still be sent; `None` must stay absent.
+	#[test]
+	fn t15_empty_optional_values_match_contract_system_prompt() {
+		let model = t15_model();
+		let empty = build_params(&model, &t15_context(Some("")), None).unwrap();
+		assert_eq!(
+			empty["config"].get("systemInstruction"),
+			None,
+			"TS spread guard omits empty prompts (context.systemPrompt && systemInstruction)"
+		);
+		let set = build_params(&model, &t15_context(Some("rules")), None).unwrap();
+		assert_eq!(set["config"]["systemInstruction"], json!("rules"));
+		let none = build_params(&model, &t15_context(None), None).unwrap();
+		assert_eq!(none["config"].get("systemInstruction"), None);
+	}
+
+	/// (c) A provided toolcall id of `Some("")` must be regenerated like the TS
+	/// `!providedId` guard; a truthy id must still be reused.
+	#[test]
+	fn t15_empty_optional_values_match_contract_tool_call_id() {
+		let model = t15_model();
+		let stream = create_assistant_message_event_stream();
+
+		let mut output = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), 0);
+		let mut current_block: Option<CurrentBlock> = None;
+		let empty_id = json!({"functionCall": {"name": "read", "id": "", "args": {}}});
+		process_part(&empty_id, &mut output, &stream, &mut current_block).unwrap();
+		let tool_call = output
+			.content
+			.iter()
+			.find_map(|block| match block {
+				ContentBlock::ToolCall(tool_call) => Some(tool_call.clone()),
+				_ => None,
+			})
+			.expect("a toolcall block must be produced");
+		assert!(!tool_call.id.is_empty(), "TS `!providedId` regenerates ids for empty strings");
+		assert!(tool_call.id.starts_with("read_"), "id follows the TS {{name}}_{{ms}}_{{counter}} shape; got {:?}", tool_call.id);
+
+		let mut output2 = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), 0);
+		let mut current_block2: Option<CurrentBlock> = None;
+		let provided = json!({"functionCall": {"name": "read", "id": "call-1", "args": {}}});
+		process_part(&provided, &mut output2, &stream, &mut current_block2).unwrap();
+		let reused = output2
+			.content
+			.iter()
+			.find_map(|block| match block {
+				ContentBlock::ToolCall(tool_call) => Some(tool_call.clone()),
+				_ => None,
+			})
+			.expect("a toolcall block must be produced");
+		assert_eq!(reused.id, "call-1", "TS reuses a truthy provided id");
 	}
 }

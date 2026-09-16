@@ -16,6 +16,7 @@ use crate::core::agent_session::{
 use crate::core::cron_jobs::AgentCronJob;
 use crate::core::session_manager::SessionManager;
 use crate::core::settings_manager::SettingsManager;
+use crate::core::slash_commands::parse_slash_command;
 use crate::modes::agent_connection::in_process_agent_connection::InProcessRuntimeHost;
 use crate::modes::agent_connection::snapshot::{self, AgentsFileEntry, RegisteredCommandEntry, PromptTemplateEntry, SkillEntry, ResourceSkillEntry, ResourcePromptEntry, ResourceExtensionEntry, ResourceThemeEntry, ExtensionLoadError};
 use crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput;
@@ -62,6 +63,11 @@ fn prompt_options_from_invocation(invocation: PromptInvocation) -> PromptOptions
         agent_message_id: invocation.agent_message_id,
         signal: invocation.signal,
         admission_committed: invocation.admission_committed,
+        preflight_result: invocation.preflight_result,
+        // ^ C-02: the session reports `(succeeded, queued)`; forwarding only the first
+        // flag made the daemon's receipt mapping fall back to "delivered" for a queued
+        // admission. `PromptOptions::preflight_result` already has the two-flag shape
+        // (`agent_session.rs:770`), so no mapping is needed.
         ..Default::default()
     };
     if let Some(images) = &invocation.images {
@@ -612,7 +618,20 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         let session = Arc::clone(&self.runtime.session());
         let message = message.to_string();
         let options = prompt_options_from_invocation(options);
-        Box::pin(async move { session.prompt_until_accepted(&message, Some(options)).await })
+        Box::pin(async move {
+            // Extension commands return lazy Rust futures. Keep polling the command
+            // after admission so its dialog can run; the preflight callback above
+            // acknowledges the public request before the user answers the dialog.
+            let extension_command = options.expand_prompt_templates != Some(false)
+                && parse_slash_command(&message).is_some_and(|command| {
+                    session.extension_runner().is_some_and(|runner| runner.get_command(&command.name).is_some())
+                });
+            if extension_command {
+                session.prompt(&message, Some(options)).await
+            } else {
+                session.prompt_until_accepted(&message, Some(options)).await
+            }
+        })
     }
 
     fn prompt_and_wait(
@@ -1101,6 +1120,27 @@ fn restored_prompt(message: &str, images: Option<Value>, options: PromptInvocati
 }
 
 struct DaemonRuntimeAdapter(Arc<super::AgentSessionRuntime>);
+
+#[cfg(test)]
+mod telegram_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_prompt_preserves_admission_acknowledgements() {
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let captured = results.clone();
+        let options = prompt_options_from_invocation(PromptInvocation {
+            preflight_result: Some(Arc::new(move |accepted, queued| {
+                captured.lock().unwrap().push((accepted, queued))
+            })),
+            ..Default::default()
+        });
+        let report = options.preflight_result.expect("daemon response callback must survive adaptation");
+        report(true, false);
+        report(false, false);
+        assert_eq!(*results.lock().unwrap(), vec![(true, false), (false, false)]);
+    }
+}
 
 impl DaemonRuntimeApi for DaemonRuntimeAdapter {
     fn new_session(&self, options: Option<NewSessionRuntimeOptions>) -> BoxFuture<'static, Result<Value, String>> {

@@ -232,7 +232,7 @@ fn border_color() -> ColorFn {
     Box::new(|text: &str| theme().fg("border", text))
 }
 
-fn strip_trailing_newline(content: &str) -> String {
+pub(in crate::modes::interactive) fn strip_trailing_newline(content: &str) -> String {
     content
         .strip_suffix('\n')
         .map(|text| text.to_string())
@@ -240,7 +240,7 @@ fn strip_trailing_newline(content: &str) -> String {
 }
 
 /// `process.env.VISUAL || process.env.EDITOR`.
-fn process_env_visual_editor() -> Option<String> {
+pub(in crate::modes::interactive) fn process_env_visual_editor() -> Option<String> {
     match std::env::var("VISUAL") {
         Ok(value) if !value.is_empty() => Some(value),
         _ => match std::env::var("EDITOR") {

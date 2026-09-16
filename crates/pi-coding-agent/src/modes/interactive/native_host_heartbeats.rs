@@ -937,4 +937,123 @@ mod tests {
             unsupported("watch_session")
         }
     }
+
+    /// Finding D-08: the heartbeat scope predicate must keep the two id spaces
+    /// apart, exactly like the TypeScript (`heartbeat-scope.ts:29`).
+    mod heartbeat_id_space_tests {
+        use super::*;
+        // Explicit imports: the outer test module reaches these through its own glob, and
+        // a glob import is not re-exported, so name them here instead of relying on it.
+        use crate::modes::agent_connection::types as wire;
+        use crate::modes::interactive::interactive_mode::InteractiveMode;
+
+    /// The Rust port compares the job's active-session id against the session's
+    /// DURABLE id (`heartbeat_scope.rs:35-40`), which mixes the two id spaces, and the
+    /// local `AgentCronJob` stand-in has no durable `session_id` field, so
+    /// `project_heartbeat` (`native_host.rs:3683-3700`) drops the wire `sessionId`
+    /// entirely, while the TypeScript compares `heartbeat.job.sessionId` to the
+    /// session's durable id (`heartbeat-scope.ts:29`).
+    fn scoped_heartbeat_ids(
+        mode: &InteractiveMode,
+        catalog: &[wire::AgentConnectionHeartbeat],
+    ) -> Vec<String> {
+        scoped(mode, catalog)
+            .iter()
+            .map(|entry| entry.job["id"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A job whose DURABLE session id is the current session's must stay in scope even
+    /// when its worker id belongs to a superseded worker (a rebound/resumed session).
+    /// The port drops it.
+    #[test]
+    fn a_job_with_the_current_durable_session_id_is_kept() {
+        let mut mode = mode("durable-1", Some("worker-1"));
+        let catalog = vec![
+            heartbeat("rebound", "active", "worker-old", "durable-1"),
+            heartbeat("foreign", "active", "worker-other", "durable-other"),
+        ];
+        apply_catalog(&mut mode, &catalog);
+        assert_eq!(mode.heartbeat_catalog.len(), 2, "both jobs project");
+        assert_eq!(
+            scoped_heartbeat_ids(&mode, &catalog),
+            vec!["rebound".to_string()],
+            "DEFECT D-08: a heartbeat whose durable sessionId is the current session's must stay in scope"
+        );
+        let scoped_ids: Vec<String> = mode
+            .get_scoped_heartbeats()
+            .iter()
+            .map(|entry| entry.job.id.clone())
+            .collect();
+        assert_eq!(
+            scoped_ids,
+            vec!["rebound".to_string()],
+            "the production scope path (`getScopedHeartbeats`) must keep the rebound heartbeat"
+        );
+    }
+
+    /// The other id space: a job whose WORKER id is in the active set stays in scope
+    /// even when its durable session id is foreign (that is the TS second disjunct).
+    /// This is the negative control: it must pass before and after the fix.
+    #[test]
+    fn a_job_in_the_active_session_set_is_kept() {
+        let mut mode = mode("durable-1", Some("worker-1"));
+        let catalog = vec![heartbeat("own", "active", "worker-1", "durable-1")];
+        apply_catalog(&mut mode, &catalog);
+        assert_eq!(scoped_heartbeat_ids(&mode, &catalog), vec!["own".to_string()]);
+
+        // A child's worker joins the active set (heartbeat-scope.ts:21-24).
+        mode.subagent_snapshots.insert(
+            "child".to_string(),
+            crate::modes::interactive::interactive_mode_services::AgentConnectionRlmChildAgentSnapshot {
+                active_session_id: Some("worker-child".into()),
+                ..Default::default()
+            },
+        );
+        let catalog = vec![heartbeat("child-job", "active", "worker-child", "durable-child")];
+        apply_catalog(&mut mode, &catalog);
+        assert_eq!(
+            scoped_heartbeat_ids(&mode, &catalog),
+            vec!["child-job".to_string()],
+            "a child's active worker id stays in scope"
+        );
+    }
+
+    /// The mirrored confusion: a job whose WORKER id happens to equal the current
+    /// DURABLE session id matches neither TS disjunct (the active set holds worker
+    /// ids), so it must be dropped. The port keeps it.
+    #[test]
+    fn a_job_matching_neither_id_space_is_dropped() {
+        let mut mode = mode("durable-1", Some("worker-1"));
+        let catalog = vec![heartbeat("collision", "active", "durable-1", "durable-other")];
+        apply_catalog(&mut mode, &catalog);
+        assert!(
+            scoped_heartbeat_ids(&mode, &catalog).is_empty(),
+            "DEFECT D-08: a job matching neither id space must be dropped, got {:?}",
+            scoped_heartbeat_ids(&mode, &catalog)
+        );
+        assert!(
+            mode.get_scoped_heartbeats().is_empty(),
+            "the production scope path must drop it too"
+        );
+    }
+
+    /// A job whose durable session id is the current session's stays in scope even when
+    /// the active-session id is absent from the snapshot: the first TS disjunct does not
+    /// depend on the active set.
+    #[test]
+    fn the_durable_disjunct_does_not_depend_on_the_active_set() {
+        let mut mode = mode("durable-1", None);
+        let catalog = vec![
+            heartbeat("durable-match", "active", "worker-old", "durable-1"),
+            heartbeat("worker-only", "active", "worker-old", "durable-other"),
+        ];
+        apply_catalog(&mut mode, &catalog);
+        assert_eq!(
+            scoped_heartbeat_ids(&mode, &catalog),
+            vec!["durable-match".to_string()],
+            "with no active session id only the durable-session disjunct can match"
+        );
+    }
+    }
 }

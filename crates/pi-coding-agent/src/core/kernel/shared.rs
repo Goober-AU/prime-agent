@@ -605,7 +605,9 @@ pub fn parse_attachment_display(payload: &Value) -> Option<ParsedAttachment> {
         return None;
     }
     let data = data.as_str()?;
-    if data.chars().count() > MAX_ATTACHMENT_DATA_CHARS {
+    // TS `parseAttachmentDisplay` guards with `data.length`, which counts UTF-16
+    // code units; encode_utf16().count() matches that for astral-plane input.
+    if data.encode_utf16().count() > MAX_ATTACHMENT_DATA_CHARS {
         return Some(ParsedAttachment::Oversized);
     }
     Some(ParsedAttachment::Attachment(KernelAttachment {
@@ -1168,5 +1170,56 @@ mod tests {
         second.abort(Some(KernelError::new("boom")));
         assert!(combined.is_aborted());
         assert_eq!(combined.reason(), Some(KernelError::new("boom")));
+    }
+}
+
+
+#[cfg(test)]
+mod t17_controls_tests {
+    //! T17 owner 'controls': G-10 - the TS `data.length > MAX` guard counts
+    //! UTF-16 code units (packages/coding-agent/src/core/kernel/shared.ts,
+    //! `parseAttachmentDisplay`), while the Rust port counted `char`s, so
+    //! astral-plane payloads could pass the Rust limit at half the TS size.
+
+    use super::*;
+    use serde_json::json;
+
+    /// Boundary control (must stay green in baseline AND candidate): exactly the
+    /// limit in UTF-16 units must still parse; BMP characters count identically
+    /// under both units.
+    #[test]
+    fn t17_g10_bmp_and_exact_limit_stay_within() {
+        let exact_ascii = "a".repeat(MAX_ATTACHMENT_DATA_CHARS);
+        let parsed = parse_attachment_display(&json!({"mime_type": "image/png", "data": exact_ascii}));
+        assert!(matches!(parsed, Some(ParsedAttachment::Attachment(_))), "exactly the limit must parse; got {parsed:?}");
+    }
+
+    /// G-10 reproduction: 5_000_001 astral emoji encode to 10_000_002 UTF-16
+    /// units (over the TS limit) but only 5_000_001 chars, so the Rust port
+    /// returned a valid attachment. Baseline expectation: FAIL
+    /// (`Some(Attachment)` instead of `Oversized`).
+    #[test]
+    fn t17_g10_astral_payload_counts_utf16_units_like_typescript() {
+        let astral = "\u{1F648}".repeat(5_000_001);
+        assert_eq!(
+            astral.encode_utf16().count(),
+            MAX_ATTACHMENT_DATA_CHARS + 2,
+            "fixture must encode above the limit in UTF-16 units"
+        );
+        assert_eq!(
+            parse_attachment_display(&json!({"mime_type": "image/png", "data": astral})),
+            Some(ParsedAttachment::Oversized),
+            "TS data.length counts UTF-16 units; an astral payload over the limit must be Oversized"
+        );
+    }
+
+    /// Just under the limit in UTF-16 units must still parse (fix must not
+    /// overreach past the TS boundary).
+    #[test]
+    fn t17_g10_astral_payload_just_under_the_utf16_limit_parses() {
+        // 4_999_999 astral emoji = 9_999_998 UTF-16 units <= 10_000_000.
+        let data = "\u{1F648}".repeat(4_999_999);
+        let parsed = parse_attachment_display(&json!({"mime_type": "image/png", "data": data}));
+        assert!(matches!(parsed, Some(ParsedAttachment::Attachment(_))), "under-limit astral payload must parse; got {parsed:?}");
     }
 }

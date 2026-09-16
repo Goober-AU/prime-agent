@@ -113,6 +113,8 @@ pub enum AgentRosterStatusLabel {
     Queued,
     Recovering,
     Failed,
+    #[serde(rename = "background helper")]
+    BackgroundHelper,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -2104,6 +2106,7 @@ fn get_session_status_label(summary: &SessionSummary, heartbeat: Option<&Unified
             AgentRosterStatusLabel::Queued => "queued".to_string(),
             AgentRosterStatusLabel::Recovering => "recovering".to_string(),
             AgentRosterStatusLabel::Failed => "failed".to_string(),
+            AgentRosterStatusLabel::BackgroundHelper => "background helper".to_string(),
         };
     }
     if let Some(last_heard) = &summary.last_heard_from_at {

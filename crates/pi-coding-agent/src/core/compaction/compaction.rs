@@ -1464,12 +1464,10 @@ pub async fn compact(
                     // `compactSimple` resolves to the value (or undefined); the
                     // retry layer owns the error channel, so a provider failure is
                     // mapped to `ProviderRequestError` here.
-                    match compact_call().await {
-                        Some(result) => Ok(Some(result)),
-                        None => Err(provider_request_error(
-                            "Provider compaction is not supported for this model".to_string(),
-                        )),
-                    }
+                    // TS `compactSimple` resolving to `undefined` is a NORMAL
+                    // outcome: the caller falls through to the text summarizer
+                    // (compaction.ts:895-925). Only a request failure is an error.
+                    Ok(compact_call().await)
                 })
                     as pi_ai::types::BoxFuture<
                         Result<

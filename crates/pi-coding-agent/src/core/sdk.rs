@@ -677,13 +677,16 @@ pub async fn create_agent_session_with_factories(
         stream_fn,
         on_payload,
         on_response,
-        session_id,
+        session_id: session_id.clone(),
         transform_context,
         steering_mode,
         follow_up_mode,
         transport,
         thinking_budgets,
     });
+    crate::core::performance_monitor::attach_performance_monitor(
+        agent.as_ref(), std::path::Path::new(&agent_dir), session_id,
+    );
 
     {
         let mut manager = session_manager.lock().expect("session manager poisoned");

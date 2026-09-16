@@ -20,12 +20,17 @@ pub struct SubagentSummaryCounts {
     pub running: usize,
     pub idle: usize,
     pub inactive: usize,
+    pub background: usize,
+    pub waiting: usize,
 }
 
 /// Port of `classifySubagentSnapshotStatus`.
 pub fn classify_subagent_snapshot_status(
     child: &AgentConnectionRlmChildAgentSnapshot,
 ) -> AgentRosterStatus {
+    if is_terminal_waiting(child) {
+        return AgentRosterStatus::Idle;
+    }
     // Activity implies a live session; the in-process connection never stamps activeSessionId.
     let resident = child.active_session_id.is_some() || child.activity.is_some();
     let busy = child.status == "running" || child.status == "queued" || child.activity.is_some();
@@ -34,6 +39,11 @@ pub fn classify_subagent_snapshot_status(
         queued_child: !resident && busy,
         busy,
     })
+}
+
+fn is_terminal_waiting(child: &AgentConnectionRlmChildAgentSnapshot) -> bool {
+    matches!(child.status.as_str(), "done" | "error")
+        && child.activity.as_ref().is_some_and(|activity| activity.kind == "waiting")
 }
 
 /// Port of `countDirectSubagentStatuses`.
@@ -47,6 +57,10 @@ pub fn count_direct_subagent_statuses<'a>(
             continue;
         }
         counts.total += 1;
+        if is_terminal_waiting(child) {
+            counts.waiting += 1;
+            continue;
+        }
         match classify_subagent_snapshot_status(child) {
             AgentRosterStatus::Running => counts.running += 1,
             AgentRosterStatus::Idle => counts.idle += 1,
@@ -103,6 +117,12 @@ pub fn count_roster_subagent_statuses<'a>(
             continue;
         }
         counts.total += 1;
+        if child.status_label.as_deref() == Some("background helper")
+            || crate::modes::agents_view::native_wire::is_background_only(&serde_json::to_value(child).unwrap_or_default())
+        {
+            counts.background += 1;
+            continue;
+        }
         let status = child.roster_status.unwrap_or_else(|| {
             classify_session_roster_status(
                 &RosterSummaryView {
@@ -281,7 +301,7 @@ impl Component for SubagentSummaryLine {
             "\u{2026}",
             false,
         );
-        let counts = format!(
+        let mut counts = format!(
             "{}{}{}{}{}",
             theme().fg(
                 "success",
@@ -295,6 +315,12 @@ impl Component for SubagentSummaryLine {
                 &format!("\u{25cb} {} inactive", self.counts.inactive)
             )
         );
+        if self.counts.background > 0 {
+            counts.push_str(&format!("   · {} background", self.counts.background));
+        }
+        if self.counts.waiting > 0 {
+            counts.push_str(&format!("   · {} waiting", self.counts.waiting));
+        }
         let open_hint = if self.is_selectable() {
             if self.focused {
                 format!(

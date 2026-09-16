@@ -144,17 +144,32 @@ fn lease_directory(agent_dir: &str, session_path: &str) -> String {
 
 pub fn canonical_session_path(session_path: &str) -> String {
     let resolved_path = resolve_path(session_path);
-    if let Ok(canonical) = std::fs::canonicalize(&resolved_path) {
-        return canonical.to_string_lossy().to_string();
+    if let Ok(canonical) = plain_realpath(Path::new(&resolved_path)) {
+        return canonical;
     }
     let parent = dirname(&resolved_path);
-    if let Ok(canonical_parent) = std::fs::canonicalize(&parent) {
-        return Path::new(&canonical_parent.to_string_lossy().to_string())
+    if let Ok(canonical_parent) = plain_realpath(Path::new(&parent)) {
+        return Path::new(&canonical_parent)
             .join(basename(&resolved_path))
             .to_string_lossy()
             .to_string();
     }
     resolved_path
+}
+
+/// TS `realpathIfPresentSync` resolves through `realpathSync`, which returns
+/// plain win32 paths; std canonicalize emits verbatim `\\?\` paths on Windows.
+/// Strip the verbatim prefix so both runtimes share one cross-tool identity.
+fn plain_realpath(path: &Path) -> std::io::Result<String> {
+    let canonical = std::fs::canonicalize(path)?;
+    let text = canonical.to_string_lossy().to_string();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return Ok(format!(r"\\{rest}"));
+    }
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return Ok(rest.to_string());
+    }
+    Ok(text)
 }
 
 fn resolve_path(path: &str) -> String {
@@ -614,6 +629,14 @@ pub fn acquire_session_lease(
         return Ok(None);
     }
 
+    // TS realpathIfPresentSync rethrows every non-ENOENT canonicalization error;
+    // only ENOENT falls back (atomic-file.ts:271-278).
+    let resolved_path = resolve_path(session_path);
+    if let Err(error) = std::fs::canonicalize(&resolved_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(AcquireSessionLeaseError::Other(error.to_string()));
+        }
+    }
     let canonical_path = canonical_session_path(session_path);
     let root = Path::new(agent_dir).join("session-leases");
     std::fs::create_dir_all(&root).map_err(|error| AcquireSessionLeaseError::Other(error.to_string()))?;

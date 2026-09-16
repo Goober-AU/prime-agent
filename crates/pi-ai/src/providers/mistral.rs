@@ -529,9 +529,23 @@ async fn send_request(
 		.headers(headers)
 		.json(&Value::Object(payload.clone()));
 	let timeout_ms = options.stream.timeout_ms.map(|value| value.max(0.0) as u64);
-	request = request.timeout(std::time::Duration::from_millis(
-		timeout_ms.unwrap_or(MISTRAL_DEFAULT_TIMEOUT_MS),
-	));
+	// TS SDK (`@mistralai/mistralai` sdks.ts `_createRequest`) arms its default
+	// request timeout only when the caller supplies no signal:
+	// `if (!fetchOptions?.signal && conf.timeoutMs > 0)`. A live caller signal
+	// therefore suppresses the 30 s default; an explicit timeout_ms still applies.
+	let effective_timeout = match timeout_ms {
+		Some(explicit) => Some(explicit),
+		None => {
+			if options.stream.signal.is_some() {
+				None
+			} else {
+				Some(MISTRAL_DEFAULT_TIMEOUT_MS)
+			}
+		}
+	};
+	if let Some(effective_timeout) = effective_timeout {
+		request = request.timeout(std::time::Duration::from_millis(effective_timeout));
+	}
 
 	let send = request.send();
 	let response = match options.stream.signal.as_ref() {
@@ -2231,5 +2245,192 @@ mod tests {
 	fn number_field_defaults_to_zero() {
 		assert_eq!(number_field(&json!({"promptTokens": 5}), "promptTokens"), 5.0);
 		assert_eq!(number_field(&json!({}), "promptTokens"), 0.0);
+	}
+}
+
+
+#[cfg(test)]
+mod t15_controls_tests {
+	//! T15 owner 'controls': E-02 - the Mistral stream must not cap at the SDK's
+	//! 30 s default when a caller signal is present (TS SDK
+	//! `node_modules/@mistralai/mistralai/src/lib/sdks.ts` arms the default timeout
+	//! only `if (!fetchOptions?.signal && conf.timeoutMs > 0)`).
+	//!
+	//! Isolation: ephemeral loopback ports, synthetic key, no production pipe/port.
+
+	use super::*;
+	use crate::types::{ContentBlock, Context, InputModality, Message, Model, ModelCost, StreamOptions, UserContent, UserMessage};
+	use tokio::io::AsyncReadExt;
+	use tokio_util::sync::CancellationToken;
+
+	fn controls_model(id: &str) -> Model {
+		let mut model = Model::new(id, id, "mistral-conversations", "mistral", "https://api.mistral.ai");
+		model.input = vec![InputModality::Text];
+		model.cost = ModelCost::zero();
+		model
+	}
+
+	fn controls_context() -> Context {
+		Context::new(
+			None,
+			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			None,
+		)
+	}
+
+	fn controls_options(api_key: &str, timeout_ms: Option<f64>, signal: Option<CancellationToken>) -> MistralOptions {
+		let mut options = MistralOptions::from_base(&StreamOptions::default());
+		options.stream.api_key = Some(api_key.to_string());
+		options.stream.timeout_ms = timeout_ms;
+		options.stream.signal = signal;
+		options
+	}
+
+	/// Sends `frames` Mistral content frames, one every `interval_ms`, then a final
+	/// usage/finish frame and `[DONE]`, close-delimited (no Content-Length).
+	async fn slow_sse_server(frames: usize, interval_ms: u64) -> String {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+			.await
+			.unwrap();
+		let address = listener.local_addr().unwrap();
+		tokio::spawn(async move {
+			let Ok((mut socket, _)) = listener.accept().await else {
+				return;
+			};
+			let mut request = Vec::new();
+			loop {
+				let mut buffer = [0u8; 4096];
+				match socket.read(&mut buffer).await {
+					Ok(0) | Err(_) => return,
+					Ok(count) => {
+						request.extend_from_slice(&buffer[..count]);
+						if request.windows(4).any(|window| window == b"\r\n\r\n") {
+							break;
+						}
+					}
+				}
+			}
+			let header = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+			if socket.write_all(header.as_bytes()).await.is_err() {
+				return;
+			}
+			for index in 0..frames {
+				tokio::time::sleep(std::time::Duration::from_millis(interval_ms)).await;
+				let frame = format!(
+					"data: {{\"id\":\"cmpl-1\",\"model\":\"mistral-large-latest\",\"choices\":[{{\"index\":0,\"delta\":{{\"content\":\"d{index}\"}}}}]}}\n\n"
+				);
+				if socket.write_all(frame.as_bytes()).await.is_err() {
+					return;
+				}
+			}
+			let final_frame = format!(
+				"data: {{\"id\":\"cmpl-1\",\"model\":\"mistral-large-latest\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":1000,\"completion_tokens\":{frames},\"total_tokens\":{}}}}}\n\n",
+				1000 + frames
+			);
+			let _ = socket.write_all(final_frame.as_bytes()).await;
+			let _ = socket.write_all(b"data: [DONE]\n\n").await;
+			let _ = socket.shutdown().await;
+		});
+		format!("http://{address}")
+	}
+
+	/// Accepts one request and never answers (for explicit-timeout controls).
+	async fn stalling_server() -> String {
+		let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+			.await
+			.unwrap();
+		let address = listener.local_addr().unwrap();
+		tokio::spawn(async move {
+			if let Ok((mut socket, _)) = listener.accept().await {
+				let mut buffer = [0u8; 4096];
+				let _ = socket.read(&mut buffer).await;
+				// Never answer within the test window; the socket is dropped with the task.
+				tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+			}
+		});
+		format!("http://{address}")
+	}
+
+	fn text_of(message: &AssistantMessage) -> String {
+		message
+			.content
+			.iter()
+			.filter_map(|block| match block {
+				ContentBlock::Text(text) => Some(text.text.clone()),
+				_ => None,
+			})
+			.collect::<Vec<_>>()
+			.join("")
+	}
+
+	/// E-02 reproduction: a 22-frame stream at 1.6 s/frame (35 s total) with a LIVE
+	/// caller signal and no explicit timeout must complete in Optimus exactly like
+	/// the TypeScript SDK (which arms no timeout when a signal is present).
+	/// Baseline expectation: the unconditional 30 s reqwest timeout kills the stream
+	/// with a transport error at ~30 s, so this test FAILS on the unmodified tree.
+	#[tokio::test]
+	async fn t15_mistral_stream_timeout_respects_caller_signal() {
+		let base_url = slow_sse_server(22, 1_600).await;
+		let mut model = controls_model("mistral-large-latest");
+		model.base_url = base_url;
+		let signal = CancellationToken::new();
+		let options = controls_options("test-key", None, Some(signal));
+		let started = std::time::Instant::now();
+		let stream = stream_mistral(&model, &controls_context(), Some(options));
+		let message = tokio::time::timeout(std::time::Duration::from_secs(90), stream.result())
+			.await
+			.expect("the stream must finish well inside the 90 s test window");
+		let elapsed = started.elapsed();
+		assert_eq!(
+			message.stop_reason, "stop",
+			"the stream must complete like the TS contract; got stop_reason {:?} after {elapsed:?} (error: {:?})",
+			message.stop_reason, message.error_message
+		);
+		assert!(elapsed >= std::time::Duration::from_millis(33_000), "the fixture must cross the disputed 30 s boundary; elapsed {elapsed:?}");
+		let text = text_of(&message);
+		assert!(text.contains("d21"), "the final frame's delta must arrive before DONE; got {text:?}");
+		assert_eq!(message.usage.input, 1000.0);
+		assert_eq!(message.usage.output, 22.0);
+	}
+
+	/// Negative control (must stay green in baseline AND candidate): caller
+	/// cancellation ends the stream promptly even without any timeout.
+	#[tokio::test]
+	async fn t15_mistral_stream_caller_cancellation_ends_stream() {
+		let base_url = slow_sse_server(100, 1_000).await;
+		let mut model = controls_model("mistral-large-latest");
+		model.base_url = base_url;
+		let signal = CancellationToken::new();
+		let options = controls_options("test-key", None, Some(signal.clone()));
+		let stream = stream_mistral(&model, &controls_context(), Some(options));
+		tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+		signal.cancel();
+		let started = std::time::Instant::now();
+		let message = tokio::time::timeout(std::time::Duration::from_secs(15), stream.result())
+			.await
+			.expect("cancellation must end the stream promptly");
+		assert!(started.elapsed() < std::time::Duration::from_secs(5), "cancellation must not wait out any timer; elapsed {:?}", started.elapsed());
+		assert_eq!(message.stop_reason, "aborted");
+	}
+
+	/// Guard control (must stay green in baseline AND candidate): an explicit
+	/// `timeout_ms` still applies even when a caller signal is present, so the
+	/// E-02 repair cannot overreach into disabling explicit timeouts.
+	#[tokio::test]
+	async fn t15_mistral_stream_explicit_timeout_ms_still_applies() {
+		let base_url = stalling_server().await;
+		let mut model = controls_model("mistral-large-latest");
+		model.base_url = base_url;
+		let signal = CancellationToken::new();
+		let options = controls_options("test-key", Some(2_000.0), Some(signal));
+		let started = std::time::Instant::now();
+		let stream = stream_mistral(&model, &controls_context(), Some(options));
+		let message = tokio::time::timeout(std::time::Duration::from_secs(15), stream.result())
+			.await
+			.expect("the explicit timeout must end the stream");
+		assert!(started.elapsed() < std::time::Duration::from_secs(8), "the explicit 2 s timeout must fire at ~2 s; elapsed {:?}", started.elapsed());
+		assert_eq!(message.stop_reason, "error");
+		assert!(message.error_message.is_some(), "the timeout must surface as a stream error");
 	}
 }

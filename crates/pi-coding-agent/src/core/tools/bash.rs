@@ -6,7 +6,10 @@ use pi_agent_core::types::{AgentTool, AgentToolResult, AgentToolUpdateCallback};
 use pi_agent_core::types::ContentBlock as AgentContentBlock;
 // `core/tools/bash.ts:9-15` imports `getShellConfig`, `getShellEnv` and
 // `killProcessTree` from `utils/shell.js`; use the same owners here.
-use crate::utils::shell::{get_shell_config, get_shell_env, kill_process_tree};
+use crate::utils::shell::{
+    get_shell_config, get_shell_env, kill_process_tree, track_detached_child_pid,
+    untrack_detached_child_pid,
+};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -142,6 +145,11 @@ impl BashOperations for LocalBashOperations {
                 Err(error) => return Err(error.to_string()),
             };
 
+            // TS bash.ts:80: `if (child.pid) trackDetachedChildPid(child.pid);`
+            let tracked_child_pid = child.id().map(|pid| pid as i32);
+            if let Some(pid) = tracked_child_pid {
+                track_detached_child_pid(pid);
+            }
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
             let on_data = options.on_data.clone();
@@ -212,6 +220,12 @@ impl BashOperations for LocalBashOperations {
             }
             if let Some(task) = stderr_task {
                 let _ = task.await;
+            }
+
+            // TS bash.ts:102/:116: the child settled (exit or kill), so the
+            // journal record goes inactive in both the success and error paths.
+            if let Some(pid) = tracked_child_pid {
+                untrack_detached_child_pid(pid);
             }
 
             if aborted {

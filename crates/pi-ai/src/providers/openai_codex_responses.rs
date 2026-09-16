@@ -429,6 +429,9 @@ pub fn build_request_body(
             context
                 .system_prompt
                 .clone()
+                // TS: `context.systemPrompt || "You are a helpful assistant."` - an
+                // empty string is falsy in JS, so it falls back to the default.
+                .filter(|prompt| !prompt.is_empty())
                 .unwrap_or_else(|| "You are a helpful assistant.".to_string()),
         ),
     );
@@ -3745,4 +3748,59 @@ mod tests {
         let value = serde_json::to_value(&typed).unwrap();
         assert_eq!(value["transport"], json!("sse"));
     }
+}
+
+
+#[cfg(test)]
+mod t15_controls_tests {
+	//! T15 owner 'controls': E-04 codex `instructions` default must follow the TS
+	//! `context.systemPrompt || "You are a helpful assistant."` contract, which
+	//! drops ONLY the empty string (whitespace is truthy in JS and is sent verbatim).
+
+	use super::*;
+	use crate::types::{Message, UserContent, UserMessage};
+	use serde_json::json;
+
+	fn t15_model() -> Model {
+		let mut model = Model::new(
+			"gpt-5.1-codex",
+			"GPT-5.1 Codex",
+			"openai-codex-responses",
+			"openai-codex",
+			"https://chatgpt.com/backend-api",
+		);
+		model.reasoning = true;
+		model
+	}
+
+	fn t15_context(system_prompt: Option<&str>) -> Context {
+		Context::new(
+			system_prompt.map(|prompt| prompt.to_string()),
+			vec![Message::user(UserMessage::new(UserContent::Text("Say hello".to_string()), 1))],
+			None,
+		)
+	}
+
+	/// Baseline expectation: `Some("")` reaches the wire as `""` (unwrap_or_else
+	/// only covers None), so this test FAILS on the unmodified tree.
+	#[test]
+	fn t15_empty_optional_values_match_contract_instructions() {
+		let model = t15_model();
+		let body = build_request_body(&model, &t15_context(Some("")), None).unwrap();
+		assert_eq!(
+			body["instructions"],
+			json!("You are a helpful assistant."),
+			"TS `context.systemPrompt || default` falls back on the empty string"
+		);
+	}
+
+	/// Guard: the JS `||` contract keeps truthy whitespace verbatim (no overreach).
+	#[test]
+	fn t15_whitespace_system_prompt_is_sent_verbatim() {
+		let model = t15_model();
+		let body = build_request_body(&model, &t15_context(Some(" ")), None).unwrap();
+		assert_eq!(body["instructions"], json!(" "), "JS `||` only drops the empty string");
+		let word = build_request_body(&model, &t15_context(Some("real")), None).unwrap();
+		assert_eq!(word["instructions"], json!("real"));
+	}
 }
