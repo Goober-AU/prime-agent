@@ -148,14 +148,15 @@ pub struct SnapshotTranscriptCache {
 }
 
 impl SnapshotTranscriptCache {
-    pub fn new(options: SnapshotTranscriptCacheOptions) -> Self {
+    pub fn new(mut options: SnapshotTranscriptCacheOptions) -> Self {
+        let messages = options.messages.take();
         let cache = Self {
             target_chunk_bytes: options
                 .target_chunk_bytes
                 .unwrap_or(SNAPSHOT_TARGET_CHUNK_BYTES),
             snapshot_id: options.snapshot_id.clone(),
             active_session_id: options.active_session_id.clone(),
-            options: options.clone(),
+            options,
             chunks: Mutex::new(Vec::new()),
             cache_directory: Mutex::new(None),
             total_bytes: Mutex::new(0),
@@ -166,11 +167,36 @@ impl SnapshotTranscriptCache {
             failure: Mutex::new(None),
             chunk_waiters: Mutex::new(HashMap::new()),
         };
-        if let Some(messages) = options.messages.as_ref() {
+        if let Some(messages) = messages.as_ref() {
             cache.encode_messages(messages);
             *cache.completed.lock().expect("completed poisoned") = true;
         }
         cache
+    }
+
+    /// Preserve the exact worker wire records, including extension-defined messages.
+    pub fn append_messages(&self, messages: Vec<serde_json::Value>) -> Result<(), String> {
+        let mut chunk = Vec::new();
+        let mut bytes = 0;
+        for message in messages {
+            let encoded = serde_json::to_string(&message).map_err(|error| error.to_string())?;
+            if !chunk.is_empty() && bytes + encoded.len() > self.target_chunk_bytes {
+                self.append_message_strings(&chunk)?;
+                chunk.clear();
+                bytes = 0;
+            }
+            bytes += encoded.len() + 1;
+            chunk.push(encoded);
+        }
+        if !chunk.is_empty() { self.append_message_strings(&chunk)?; }
+        self.mark_complete()
+    }
+
+    fn append_message_strings(&self, messages: &[String]) -> Result<(), String> {
+        self.append_encoded_chunk(format!(
+            "{{\"type\":\"session_snapshot_chunk\",\"activeSessionId\":{},\"snapshotId\":{},\"index\":{},\"messages\":[{}]}}\n",
+            json_string(&self.active_session_id), json_string(&self.snapshot_id), self.chunk_count(), messages.join(",")
+        ).into_bytes())
     }
 
     pub fn chunk_count(&self) -> usize {

@@ -681,10 +681,7 @@ impl AgentSession {
                     ));
                 // TS agent-session.ts:10061-10102: the session OWNS the kernel provisioner
                 // and hands the same Arc to the ipython tool, so the session's dispose and
-                // reload address the exact kernel the tool drives. The TS performanceMetrics
-                // flow (agent-session.ts:10089) lands with the kernel metrics slice: the
-                // Rust KernelManagerOptions recorder seam is explicitly TODO
-                // (kernel/shared.rs "needs pi-agent-core::performance_metrics").
+                // reload address the exact kernel the tool drives.
                 let python_skills: Vec<crate::core::kernel::shared::KernelPythonSkill> =
                     crate::core::skills::get_python_skill_runtime_info(&self.model_visible_skills())
                         .into_iter()
@@ -715,6 +712,10 @@ impl AgentSession {
                         host_handlers: Some(self.create_kernel_host_handlers()),
                         python_skills: Some(python_skills),
                         snapshot_dir: snapshot_dir.clone(),
+                        performance_metrics: self.agent.performance_metrics().map(|metrics| {
+                            Arc::new(crate::core::kernel::performance_metrics::KernelPerformanceMetricAdapter::new(metrics.recorder))
+                                as Arc<dyn crate::core::kernel::shared::PerformanceMetricRecorder>
+                        }),
                         model_tool_output_policy: Some(crate::core::model_tool_output_policy::resolve_model_tool_output_policy(
                             Some(&self.settings_manager.lock().unwrap().get_model_tool_output_policy()),
                         )),
@@ -3212,9 +3213,8 @@ impl AgentSession {
 
     /// `setSessionName(name)`.
     pub fn set_session_name(&self, name: &str) -> Result<(), String> {
-        let manager = self.session_manager.clone();
-        let mut manager = manager.lock().unwrap();
-        manager.append_session_info(name)?;
+        self.session_manager.lock().unwrap().append_session_info(name)?;
+        // Synchronous subscribers read the persisted name through the same mutex.
         self.emit(AgentSessionEvent::SessionInfoChanged {
             name: Some(name.to_string()),
         });

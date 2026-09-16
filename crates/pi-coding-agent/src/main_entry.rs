@@ -1866,6 +1866,11 @@ fn main_entry_outbound_from_wire(value: &Value) -> Option<ConnectionOutbound> {
     Some(outbound)
 }
 
+#[cfg(test)]
+pub(crate) fn test_outbound_from_wire(value: &Value) -> Option<ConnectionOutbound> {
+    main_entry_outbound_from_wire(value)
+}
+
 /// `DaemonClient` as the connection slice's `DaemonTransportClient`.
 ///
 /// The two slices agree on one interface in the TypeScript; the port splits it

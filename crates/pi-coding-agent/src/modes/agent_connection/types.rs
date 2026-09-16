@@ -184,11 +184,12 @@ pub struct AgentConnectionSessionEntryBase {
 
 /// `AgentConnectionSessionEntry` union, discriminated on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "type", rename_all_fields = "camelCase")]
 pub enum AgentConnectionSessionEntry {
     #[serde(rename = "message")]
     Message {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
         message: AgentMessage,
@@ -196,55 +197,68 @@ pub enum AgentConnectionSessionEntry {
     #[serde(rename = "thinking_level_change")]
     ThinkingLevelChange {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
+        #[serde(alias = "thinking_level")]
         thinking_level: String,
     },
     #[serde(rename = "service_tier_change")]
     ServiceTierChange {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
+        #[serde(alias = "service_tier")]
         service_tier: ServiceTier,
     },
     #[serde(rename = "model_change")]
     ModelChange {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
         provider: String,
+        #[serde(alias = "model_id")]
         model_id: String,
     },
     #[serde(rename = "compaction")]
     Compaction {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
         summary: String,
+        #[serde(alias = "first_kept_entry_id")]
         first_kept_entry_id: String,
+        #[serde(alias = "tokens_before")]
         tokens_before: f64,
         #[serde(skip_serializing_if = "Option::is_none")]
         details: Option<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(alias = "from_hook", skip_serializing_if = "Option::is_none")]
         from_hook: Option<bool>,
     },
     #[serde(rename = "branch_summary")]
     BranchSummary {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
+        #[serde(alias = "from_id")]
         from_id: String,
         summary: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         details: Option<Value>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(alias = "from_hook", skip_serializing_if = "Option::is_none")]
         from_hook: Option<bool>,
     },
     #[serde(rename = "custom")]
     Custom {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
+        #[serde(alias = "custom_type")]
         custom_type: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         data: Option<Value>,
@@ -252,10 +266,14 @@ pub enum AgentConnectionSessionEntry {
     #[serde(rename = "child_usage_attributed")]
     ChildUsageAttribution {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
+        #[serde(alias = "target_id")]
         target_id: String,
+        #[serde(alias = "child_usage")]
         child_usage: Value,
+        #[serde(alias = "aggregate_usage")]
         aggregate_usage: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
@@ -263,8 +281,10 @@ pub enum AgentConnectionSessionEntry {
     #[serde(rename = "custom_message")]
     CustomMessage {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
+        #[serde(alias = "custom_type")]
         custom_type: String,
         content: Value,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -274,14 +294,17 @@ pub enum AgentConnectionSessionEntry {
     #[serde(rename = "label")]
     Label {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
+        #[serde(alias = "target_id")]
         target_id: String,
         label: Option<String>,
     },
     #[serde(rename = "session_info")]
     SessionInfo {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -290,6 +313,7 @@ pub enum AgentConnectionSessionEntry {
     #[serde(rename = "session_state")]
     SessionState {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
         state: AgentConnectionSavedSessionState,
@@ -297,6 +321,7 @@ pub enum AgentConnectionSessionEntry {
     #[serde(rename = "agent_status")]
     AgentStatus {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
         status: AgentConnectionAgentStatus,
@@ -304,6 +329,7 @@ pub enum AgentConnectionSessionEntry {
     #[serde(rename = "git_state")]
     GitState {
         id: String,
+        #[serde(alias = "parent_id")]
         parent_id: Option<String>,
         timestamp: String,
         git: AgentConnectionSessionGit,
@@ -1558,6 +1584,47 @@ pub type JsonObject = IndexMap<String, Value>;
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn canonical_tree_entries_round_trip_with_parent_links_and_legacy_aliases() {
+        let variants = [
+            json!({"type":"message", "message":{"role":"user", "content":"hello", "timestamp":1}}),
+            json!({"type":"thinking_level_change", "thinkingLevel":"xhigh"}),
+            json!({"type":"service_tier_change", "serviceTier":"default"}),
+            json!({"type":"model_change", "provider":"fixture", "modelId":"fixture"}),
+            json!({"type":"compaction", "summary":"summary", "firstKeptEntryId":"first", "tokensBefore":250000.0, "fromHook":true}),
+            json!({"type":"branch_summary", "fromId":"branch", "summary":"branch summary", "fromHook":true}),
+            json!({"type":"custom", "customType":"fixture", "data":{}}),
+            json!({"type":"child_usage_attributed", "targetId":"child", "childUsage":{}, "aggregateUsage":{}}),
+            json!({"type":"custom_message", "customType":"fixture", "content":"fixture", "display":true}),
+            json!({"type":"label", "targetId":"label-target", "label":"label"}),
+            json!({"type":"session_info", "name":"name"}),
+            json!({"type":"session_state", "state":{"status":"active"}}),
+            json!({"type":"agent_status", "status":{"summary":"idle", "basedOnMessageCount":1.0}}),
+            json!({"type":"git_state", "git":{"repoUrl":"fixture", "commit":"fixture"}}),
+        ];
+        for mut wire in variants {
+            wire["id"] = json!("entry");
+            wire["parentId"] = json!("parent");
+            wire["timestamp"] = json!("2026-09-16T00:00:00Z");
+            let entry: AgentConnectionSessionEntry = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(entry.parent_id(), Some("parent"), "{}", wire["type"]);
+            assert_eq!(serde_json::to_value(&entry).unwrap(), wire);
+            let mut legacy = wire.clone();
+            for (canonical, old) in [
+                ("parentId", "parent_id"), ("thinkingLevel", "thinking_level"),
+                ("serviceTier", "service_tier"), ("modelId", "model_id"),
+                ("firstKeptEntryId", "first_kept_entry_id"), ("tokensBefore", "tokens_before"),
+                ("fromHook", "from_hook"), ("fromId", "from_id"), ("customType", "custom_type"),
+                ("targetId", "target_id"), ("childUsage", "child_usage"), ("aggregateUsage", "aggregate_usage"),
+            ] {
+                if let Some(value) = legacy.as_object_mut().unwrap().remove(canonical) {
+                    legacy[old] = value;
+                }
+            }
+            assert_eq!(serde_json::from_value::<AgentConnectionSessionEntry>(legacy).unwrap(), entry);
+        }
+    }
 
     #[test]
     fn session_events_round_trip_without_an_agent_wrapper() {

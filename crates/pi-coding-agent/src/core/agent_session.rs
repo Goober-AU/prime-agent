@@ -2307,6 +2307,7 @@ pub struct AgentSession {
     assistant_turns_since_auto_refine: AtomicU64,
     last_auto_refine_review_at: Mutex<f64>,
     auto_refine_in_progress: AtomicBool,
+    refinement_abort_controller: Mutex<CancellationToken>,
     /// `_autoRefineOperations: Set<Promise<void>>` - the scheduled runs a
     /// disposal drain awaits (`agent-session.ts:4548`).
     auto_refine_operations: Mutex<Vec<(u64, SharedVoidFuture)>>,
@@ -2609,6 +2610,7 @@ impl AgentSession {
             assistant_turns_since_auto_refine: AtomicU64::new(0),
             last_auto_refine_review_at: Mutex::new(0.0),
             auto_refine_in_progress: AtomicBool::new(false),
+            refinement_abort_controller: Mutex::new(CancellationToken::new()),
             auto_refine_operations: Mutex::new(Vec::new()),
             scheduled_auto_refine_timers: Mutex::new(Vec::new()),
             auto_refine_operation_ids: AtomicU64::new(0),
@@ -7021,6 +7023,7 @@ impl AgentSession {
         // Invalidate scheduled timers and abort any in-flight review so a late
         // resolution cannot write harness state or re-subscribe handlers.
         self.scheduled_auto_refine_timers.lock().unwrap().clear();
+        self.abort_refinement();
         *self.serialized_plan_in_flight.lock().unwrap() = None;
         *self.serialized_explicit_refine_options.lock().unwrap() = None;
         *self.pending_requested_refine.lock().unwrap() = None;
@@ -11461,6 +11464,7 @@ impl AgentSession {
         self.abort_compaction();
         self.abort_branch_summary();
         self.abort_bash();
+        self.abort_refinement();
         *self.pending_requested_refine.lock().unwrap() = None;
         self.auto_refine_branch_version.fetch_add(1, Ordering::SeqCst);
         let error = "Session input was aborted.".to_string();
@@ -11510,11 +11514,6 @@ impl AgentSession {
     /// This path must NOT run `requestAbort`: TS 7680-7681 keeps queued inputs for
     /// the restart manifest, so it does not call `_cancelSessionActions`. TS 7685
     /// is the only place that sets `_sessionInputSuspendedForUpdateRestart` true.
-    ///
-    /// UNRESOLVED in this file: TS 7655-7657 aborts `_autoRefineReviewAbort` and
-    /// `_refineAbortController`; the Rust `AgentSession` has no field owning those
-    /// tokens (each `_runBackgroundPlan` call makes a local `CancellationToken`,
-    /// agent_session.rs:13769/13795), so this file has no owner symbol to cancel.
     pub fn abort_for_update_restart(self: &Arc<Self>) {
         self.session_input_pump_requested.store(false, Ordering::SeqCst);
         self.session_input_pump_epoch.fetch_add(1, Ordering::SeqCst);
@@ -11524,6 +11523,7 @@ impl AgentSession {
         // TS 7686-7688.
         self.cancel_post_compaction_continue();
         self.abort_retry();
+        self.abort_refinement();
         for controller in self.rlm_quiescence_wait_aborts.lock().unwrap().iter() {
             controller.cancel();
         }
@@ -12224,6 +12224,7 @@ impl AgentSession {
     /// `_invalidatePendingAutoRefineForBranchChange()`.
     async fn invalidate_pending_auto_refine_for_branch_change(self: &Arc<Self>) {
         self.auto_refine_branch_version.fetch_add(1, Ordering::SeqCst);
+        self.abort_refinement();
         self.discard_pending_auto_refine(true);
         self.invalidate_queued_prompt_preparation();
     }
@@ -12917,12 +12918,20 @@ impl AgentSession {
         context: &AutoRefineReviewContext,
         signal: Option<CancellationToken>,
     ) -> Result<AutoRefineReview, String> {
+        let signal = signal.unwrap_or_else(|| self.refinement_signal());
+        if signal.is_cancelled() || self.disposed.load(Ordering::SeqCst) {
+            return Err("Refinement was aborted".to_string());
+        }
         let request = AutoRefineReviewRequest {
             reason: context.reason,
             turns_since_last_review: context.turns_since_last_review,
         };
         if let Some(reviewer) = &self.auto_refine_reviewer {
-            return reviewer(request.clone(), signal).await;
+            return tokio::select! {
+                biased;
+                _ = signal.cancelled() => Err("Refinement was aborted".to_string()),
+                result = reviewer(request.clone(), Some(signal.clone())) => result,
+            };
         }
         let model = match self.model() {
             Some(model) => model,
@@ -12934,7 +12943,11 @@ impl AgentSession {
                 })
             }
         };
-        let auth = self.get_required_request_auth(&model).await?;
+        let auth = tokio::select! {
+            biased;
+            _ = signal.cancelled() => return Err("Refinement was aborted".to_string()),
+            result = self.get_required_request_auth(&model) => result?,
+        };
         let state = self.load_merged_harness_state();
         let history = self.load_refinement_history();
         // The refinement slice keeps its own minimal `AgentMessage` (blocked_on: pi-ai
@@ -12947,7 +12960,7 @@ impl AgentSession {
             .iter()
             .filter_map(Self::refinement_evidence_message)
             .collect();
-        review_auto_refine(ReviewAutoRefineRequest {
+        let review = review_auto_refine(ReviewAutoRefineRequest {
             messages: &messages,
             state: &state,
             history: &history,
@@ -12966,10 +12979,24 @@ impl AgentSession {
                 model,
                 auth.api_key.clone(),
                 auth.headers.clone(),
+                signal.clone(),
             ),
-        })
-        .await
-        .map_err(|error| error.message)
+        });
+        tokio::select! {
+            biased;
+            _ = signal.cancelled() => Err("Refinement was aborted".to_string()),
+            result = review => result.map_err(|error| error.message),
+        }
+    }
+
+    fn refinement_signal(&self) -> CancellationToken {
+        self.refinement_abort_controller.lock().unwrap().child_token()
+    }
+
+    fn abort_refinement(&self) {
+        let mut controller = self.refinement_abort_controller.lock().unwrap();
+        controller.cancel();
+        *controller = CancellationToken::new();
     }
 
     /// `reviewAutoRefine(messages, ...)` message bridge.
@@ -13010,17 +13037,20 @@ impl AgentSession {
         model: Model,
         api_key: String,
         headers: indexmap::IndexMap<String, String>,
+        signal: CancellationToken,
     ) -> CompletionFn {
         Arc::new(move |request: RefinementCompletionRequest| {
             let model = model.clone();
             let api_key = api_key.clone();
             let headers = headers.clone();
+            let signal = signal.clone();
             Box::pin(async move {
                 let options = pi_ai::types::SimpleStreamOptions {
                     stream: pi_ai::types::StreamOptions {
                         max_tokens: Some(request.max_tokens),
                         api_key: Some(api_key),
                         headers: Some(headers),
+                        signal: Some(signal.clone()),
                         ..Default::default()
                     },
                     ..Default::default()
@@ -13034,7 +13064,15 @@ impl AgentSession {
                         .collect(),
                     tools: None,
                 };
-                let response = pi_ai::stream::complete_simple(&model, &context, Some(&options)).await;
+                let response = tokio::select! {
+                    biased;
+                    _ = signal.cancelled() => pi_ai::types::AssistantMessage {
+                        stop_reason: STOP_REASON_ABORTED.to_string(),
+                        error_message: Some("Refinement was aborted".to_string()),
+                        ..Default::default()
+                    },
+                    response = pi_ai::stream::complete_simple(&model, &context, Some(&options)) => response,
+                };
                 refinement_assistant_message(&response)
             })
         })
@@ -13053,11 +13091,12 @@ impl AgentSession {
     }
 
     /// `_planRefine(options, signal, trigger)`: the planning phase of `refine()`.
+    #[cfg(test)]
     async fn plan_refine_with_options(
         self: &Arc<Self>,
         options: &RefineOptions,
     ) -> Result<RefinementPlan, String> {
-        self.plan_refine_for_trigger(options, REFINEMENT_SOURCE_USER)
+        self.plan_refine_for_trigger(options, REFINEMENT_SOURCE_USER, self.refinement_signal())
             .await
     }
 
@@ -13069,15 +13108,23 @@ impl AgentSession {
         self: &Arc<Self>,
         options: &RefineOptions,
         source: &str,
+        signal: CancellationToken,
     ) -> Result<RefinementPlan, String> {
         if self.disposed.load(Ordering::SeqCst) {
             return Err("Cannot refine a disposed session.".to_string());
+        }
+        if signal.is_cancelled() {
+            return Err("Refinement was aborted".to_string());
         }
         let model = match self.model() {
             Some(model) => model,
             None => return Err(format_no_model_selected_message()),
         };
-        let auth = self.get_required_request_auth(&model).await?;
+        let auth = tokio::select! {
+            biased;
+            _ = signal.cancelled() => return Err("Refinement was aborted".to_string()),
+            result = self.get_required_request_auth(&model) => result?,
+        };
         let global_dir = get_global_harness_state_dir(&crate::config::get_agent_dir());
         let local_dir = self.local_harness_state_dir();
         let global_state = load_harness_state(&global_dir, HarnessScope::Global);
@@ -13162,17 +13209,20 @@ impl AgentSession {
             };
             let emitted = match self.extension_runner() {
                 Some(runner) => {
-                    runner
-                        .emit(ExtensionEvent::SessionBeforeRefine(
+                    let event = ExtensionEvent::SessionBeforeRefine(
                             crate::core::extensions::types::SessionBeforeRefinePayload {
                                 preparation,
                             },
-                        ))
-                        .await
+                        );
+                    tokio::select! {
+                        biased;
+                        _ = signal.cancelled() => return Err("Refinement was aborted".to_string()),
+                        result = runner.emit(event) => result,
+                    }
                 }
                 None => None,
             };
-            if self.disposed.load(Ordering::SeqCst) {
+            if self.disposed.load(Ordering::SeqCst) || signal.is_cancelled() {
                 return Err("Refinement cancelled because the session was disposed.".to_string());
             }
             let parsed = emitted
@@ -13202,7 +13252,7 @@ impl AgentSession {
                 });
             }
         }
-        let plan = plan_refinement(PlanRefinementRequest {
+        let planning = plan_refinement(PlanRefinementRequest {
             messages: &messages,
             state: &planning_state,
             history: &history,
@@ -13217,10 +13267,17 @@ impl AgentSession {
                 model.clone(),
                 auth.api_key.clone(),
                 auth.headers.clone(),
+                signal.clone(),
             ),
-        })
-        .await
-        .map_err(|error| error.message)?;
+        });
+        let plan = tokio::select! {
+            biased;
+            _ = signal.cancelled() => return Err("Refinement was aborted".to_string()),
+            result = planning => result.map_err(|error| error.message)?,
+        };
+        if self.disposed.load(Ordering::SeqCst) || signal.is_cancelled() {
+            return Err("Refinement was aborted".to_string());
+        }
         Ok(RefinementPlan {
             baseline_state: Some(baseline_state),
             ..plan
@@ -13233,12 +13290,16 @@ impl AgentSession {
         plan: &RefinementPlan,
         options: &RefineOptions,
         source: &str,
+        signal: Option<&CancellationToken>,
     ) -> Result<RefinementResult, String> {
         if self.disposed.load(Ordering::SeqCst) {
             return Err("Cannot refine a disposed session.".to_string());
         }
+        if signal.is_some_and(CancellationToken::is_cancelled) {
+            return Err("Refinement was aborted".to_string());
+        }
         self.disconnect_from_agent();
-        let outcome = self.apply_refine_inner(plan, options, source).await;
+        let outcome = self.apply_refine_inner(plan, options, source, signal).await;
         if !self.disposed.load(Ordering::SeqCst) {
             self.reconnect_to_agent();
         }
@@ -13251,6 +13312,7 @@ impl AgentSession {
         plan: &RefinementPlan,
         options: &RefineOptions,
         source: &str,
+        signal: Option<&CancellationToken>,
     ) -> Result<RefinementResult, String> {
         let global_dir = get_global_harness_state_dir(&crate::config::get_agent_dir());
         let local_dir = self.local_harness_state_dir();
@@ -13318,6 +13380,9 @@ impl AgentSession {
         };
         if self.disposed.load(Ordering::SeqCst) {
             return Err("Refinement cancelled because the session was disposed.".to_string());
+        }
+        if signal.is_some_and(CancellationToken::is_cancelled) {
+            return Err("Refinement was aborted".to_string());
         }
         let mut result = apply_refinement_proposal(
             &mut state,
@@ -13422,7 +13487,8 @@ impl AgentSession {
             }
         }
 
-        let plan = self.plan_refine_for_trigger(options, &source).await;
+        let signal = self.refinement_signal();
+        let plan = self.plan_refine_for_trigger(options, &source, signal.clone()).await;
         let plan = match plan {
             Ok(plan) => plan,
             Err(error) => {
@@ -13440,8 +13506,11 @@ impl AgentSession {
                 let plan = plan.clone();
                 let options = options.clone();
                 let source = source.clone();
+                let signal = signal.clone();
                 let future: BoxFuture<Result<RefinementResult, String>> =
-                    Box::pin(async move { session.apply_refine(&plan, &options, &source).await });
+                    Box::pin(async move {
+                        session.apply_refine(&plan, &options, &source, Some(&signal)).await
+                    });
                 future
             }
         });
@@ -13525,7 +13594,8 @@ impl AgentSession {
         if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
             return Ok(());
         }
-        let plan = self.plan_refine_for_trigger(options, source).await;
+        let signal = self.refinement_signal();
+        let plan = self.plan_refine_for_trigger(options, source, signal.clone()).await;
         let plan = match plan {
             Ok(plan) => plan,
             Err(error) => {
@@ -13533,11 +13603,11 @@ impl AgentSession {
                 return Err(error);
             }
         };
-        if self.disposed.load(Ordering::SeqCst) {
+        if self.disposed.load(Ordering::SeqCst) || signal.is_cancelled() {
             self.schedule_session_input_pump();
             return Ok(());
         }
-        let outcome = self.apply_refine(&plan, options, source).await;
+        let outcome = self.apply_refine(&plan, options, source, Some(&signal)).await;
         self.notify_session_input_checkpoint_change();
         self.schedule_session_input_pump();
         outcome.map(|_| ())
@@ -13718,11 +13788,15 @@ impl AgentSession {
             plan,
             options,
             source,
+            abort,
             ..
         } = bg_result
         else {
             return Ok(());
         };
+        if abort.is_cancelled() {
+            return Err("Refinement was aborted".to_string());
+        }
         let settled = create_agent_message_deferred();
         // `this._refineInFlight = applySettled`.
         let slot_future: BoxFuture<Result<(), String>> = {
@@ -13733,7 +13807,7 @@ impl AgentSession {
             .refine_in_flight_gen
             .fetch_add(1, Ordering::SeqCst);
         *self.refine_in_flight.lock().unwrap() = Some((my_gen, slot_future.shared()));
-        let outcome = self.apply_refine(plan, options, source).await;
+        let outcome = self.apply_refine(plan, options, source, Some(abort)).await;
         settled.resolve();
         // `if (this._refineInFlight === applySettled) this._refineInFlight = undefined;`
         // (`agent-session.ts:2731`): clear only if this apply still owns the slot;
@@ -14090,9 +14164,7 @@ impl AgentSession {
             // turn made; the turn that would service them never runs.
             *self.pending_requested_compaction.lock().unwrap() = None;
             *self.pending_requested_refine.lock().unwrap() = None;
-            // DEVIATION (named): TS 9420-9429 also aborts a serialized refine plan
-            // in flight; the Rust owner of that plan awaits it at its own
-            // checkpoint (agent_session.rs:12169/12257/12297), not here.
+            self.abort_refinement();
             if skip_aborted_check {
                 return Some(false);
             }
@@ -14276,6 +14348,13 @@ impl AgentSession {
             };
         self.continue_after_threshold_compaction.store(false, Ordering::SeqCst);
 
+        // Unlike the single-threaded TS microtask queue, Tokio can run a spawned
+        // continuation immediately. Publish its fence before scheduling it or
+        // calling start-event subscribers that may yield to another worker.
+        let controller = CancellationToken::new();
+        let compaction_operation = self.begin_compaction_operation();
+        *self.auto_compaction_abort_controller.lock().unwrap() = Some(controller.clone());
+
         // TS 9594-9602.
         self.queue_pending_rlm_continuation();
         if (reason == COMPACTION_REASON_REQUESTED || reason == COMPACTION_REASON_THRESHOLD)
@@ -14291,13 +14370,6 @@ impl AgentSession {
             reason: reason.to_string(),
             custom_instructions: custom_instructions.clone(),
         });
-        let controller = CancellationToken::new();
-        // agent-session.ts:9606-9610 publishes the in-flight auto compaction so the
-        // scheduled post-compaction runner can wait for it (8580-8582) and re-check
-        // it (8598) instead of racing a compaction that is still running.
-        let compaction_operation = self.begin_compaction_operation();
-        *self.auto_compaction_abort_controller.lock().unwrap() = Some(controller.clone());
-
         // TS 9613-9628: the auth pre-check runs before any summary call.
         let auth = match self.model() {
             None => Err("no model is selected".to_string()),
@@ -16032,7 +16104,7 @@ impl AgentSession {
             };
             *self.serialized_explicit_refine_options.lock().unwrap() = Some(options);
             let branch_version = self.auto_refine_branch_version.load(Ordering::SeqCst);
-            let refine_abort = CancellationToken::new();
+            let refine_abort = self.refinement_signal();
             let session = self.clone();
             let plan: SharedPlanFuture = {
                 let plan: BoxFuture<Result<Option<SerializedBackgroundPlanResult>, String>> =
@@ -16070,7 +16142,7 @@ impl AgentSession {
             return;
         }
         let branch_version = self.auto_refine_branch_version.load(Ordering::SeqCst);
-        let refine_abort = CancellationToken::new();
+        let refine_abort = self.refinement_signal();
         let session = self.clone();
         let plan: SharedPlanFuture = {
             let plan: BoxFuture<Result<Option<SerializedBackgroundPlanResult>, String>> =
@@ -16106,6 +16178,7 @@ impl AgentSession {
             let review = self.review_auto_refine(&context, Some(refine_abort.clone())).await;
             if self.disposed.load(Ordering::SeqCst)
                 || self.disposing.load(Ordering::SeqCst)
+                || refine_abort.is_cancelled()
                 || branch_version != self.auto_refine_branch_version.load(Ordering::SeqCst)
             {
                 return Ok(Some(SerializedBackgroundPlanResult::Invalidated {
@@ -16148,9 +16221,10 @@ impl AgentSession {
             .unwrap()
             .clone()
             .unwrap_or_default();
-        let plan = self.plan_refine_with_options(&options).await;
+        let plan = self.plan_refine_for_trigger(&options, REFINEMENT_SOURCE_USER, refine_abort.clone()).await;
         if self.disposed.load(Ordering::SeqCst)
             || self.disposing.load(Ordering::SeqCst)
+            || refine_abort.is_cancelled()
             || branch_version != self.auto_refine_branch_version.load(Ordering::SeqCst)
         {
             return Ok(Some(SerializedBackgroundPlanResult::Invalidated {
@@ -16611,6 +16685,72 @@ mod post_compaction_continuation_tests {
         session: &Arc<AgentSession>,
     ) -> Option<Arc<Mutex<PostCompactionContinuationSettlement>>> {
         session.post_compaction_continuation_settlement.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn nine_rename_releases_manager_before_notifying_subscribers() {
+        let session = test_session(ScriptedAgent::new(vec![]));
+        let manager = session.session_manager.clone();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let events = observed.clone();
+        session.subscribe(Arc::new(move |event| {
+            if let AgentSessionEvent::SessionInfoChanged { name } = event {
+                let manager = manager.try_lock().expect("rename must release the manager before notifying subscribers");
+                assert_eq!(manager.get_session_name(), name);
+                events.lock().unwrap().push(name);
+            }
+        }));
+        session.set_session_name("renamed session").unwrap();
+        session.set_session_name("second name").unwrap();
+        assert_eq!(*observed.lock().unwrap(), vec![Some("renamed session".to_string()), Some("second name".to_string())]);
+        assert_eq!(session.session_name().as_deref(), Some("second name"));
+        session.dispose_async(Some(false)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn nine_compaction_publishes_fence_before_start_event_can_yield_to_continuation() {
+        let agent = ScriptedAgent::new(vec![Ok(())]);
+        let session = test_session(agent.clone());
+        session.continue_after_threshold_compaction.store(true, Ordering::SeqCst);
+        let started = Arc::new(tokio::sync::Notify::new());
+        let event_started = started.clone();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        session.subscribe(Arc::new(move |event| {
+            if matches!(event, AgentSessionEvent::CompactionStart { .. }) {
+                event_started.notify_one();
+                // Hand the worker core back to Tokio: otherwise the newly spawned
+                // continuation can stay in this thread's non-stealable LIFO slot.
+                tokio::task::block_in_place(|| {
+                    release_rx.lock().unwrap().recv_timeout(std::time::Duration::from_secs(5)).expect("test releases the start-event barrier");
+                });
+            }
+        }));
+        let owner = session.clone();
+        let compact = tokio::spawn(async move { owner.run_auto_compaction(COMPACTION_REASON_THRESHOLD, false).await });
+        tokio::time::timeout(std::time::Duration::from_secs(2), started.notified()).await.unwrap();
+        // Hold the synchronous event callback open while Tokio can run the
+        // already-scheduled continuation on another worker.
+        let runner_started = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while agent.wait_for_idle_calls.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        }).await.is_ok();
+        let premature = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+            while agent.continue_calls() == 0 { tokio::task::yield_now().await; }
+        }).await.is_ok();
+        release_tx.send(()).unwrap();
+        assert!(!tokio::time::timeout(std::time::Duration::from_secs(2), compact).await.unwrap().unwrap());
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while session.post_compaction_continuation_scheduled.load(Ordering::SeqCst)
+                || session.post_compaction_continuation_settlement.lock().unwrap().is_some() {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        assert!(runner_started, "test must actually run the continuation while the start barrier is held");
+        assert!(!premature, "continuation ran before auto-compaction published its in-flight fence");
+        assert_eq!(agent.continue_calls(), 1, "auth failure resumes exactly once after the fence settles");
+        session.dispose_async(Some(false)).await;
     }
 
     /// D1: `_settlePostCompactionContinue` clears the ownership slot and notifies
@@ -20066,7 +20206,7 @@ mod t11_refinement_lifecycle_tests {
             .expect("plan");
         let result = t
             .session
-            .apply_refine(&plan, &options, REFINEMENT_SOURCE_USER)
+            .apply_refine(&plan, &options, REFINEMENT_SOURCE_USER, None)
             .await
             .unwrap_or_else(|error| panic!("apply: {error}"));
         assert!(
@@ -20403,6 +20543,98 @@ mod t11_refinement_lifecycle_tests {
     /// 9143-9150). The reachable safety contract is the session-level guard:
     /// a disposed session must never persist a planned refinement.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nine_refinement_provider_cancellation_reaches_planning_and_review() {
+        for mode in ["abort", "review", "dispose", "update", "branch"] {
+            let t = T11Session::new(
+                &format!("nine-h13-{mode}"), false,
+                serde_json::json!({"enabled": false}), vec![],
+            ).await;
+            append_user_turn(&t);
+            let started = Arc::new(tokio::sync::Notify::new());
+            let observed = Arc::new(AtomicBool::new(false));
+            let received_signal = Arc::new(Mutex::new(None::<CancellationToken>));
+            let release = CancellationToken::new();
+            let provider_started = started.clone();
+            let provider_observed = observed.clone();
+            let provider_signal = received_signal.clone();
+            let provider_release = release.clone();
+            t.provider.append_responses(vec![FauxResponseStep::Factory(Arc::new(move |_, options, _, _| {
+                let signal = options.and_then(|options| options.signal.clone());
+                *provider_signal.lock().unwrap() = signal.clone();
+                let started = provider_started.clone();
+                let observed = provider_observed.clone();
+                let release = provider_release.clone();
+                Box::pin(async move {
+                    started.notify_one();
+                    if let Some(signal) = signal {
+                        tokio::select! {
+                            biased;
+                            _ = signal.cancelled() => { observed.store(true, Ordering::SeqCst); }
+                            _ = release.cancelled() => {}
+                        }
+                    } else {
+                        release.cancelled().await;
+                    }
+                    faux_assistant_message(FauxAssistantContent::Text(proposal_json("nine-cancelled-memory").to_string()), None)
+                })
+            }))]);
+            let owner = t.session.clone();
+            let review = mode == "review";
+            let pending = tokio::spawn(async move {
+                if review {
+                    owner.review_auto_refine(&AutoRefineReviewContext {
+                        reason: AutoRefineReason::TurnInterval, turns_since_last_review: 1,
+                    }, None).await.map(|_| ())
+                } else {
+                    owner.refine_with_options(&RefineOptions::default(), false, None).await.map(|_| ())
+                }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(3), started.notified()).await.expect("provider request starts");
+            match mode {
+                "dispose" => t.session.dispose(),
+                "update" => t.session.abort_for_update_restart(),
+                "branch" => t.session.invalidate_pending_auto_refine_for_branch_change().await,
+                _ => t.session.request_abort(),
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), pending).await;
+            let provider_saw_abort = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while !observed.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
+            }).await.is_ok();
+            release.cancel();
+            assert!(received_signal.lock().unwrap().as_ref().is_some_and(CancellationToken::is_cancelled), "{mode}: provider must receive the cancelled token");
+            assert!(provider_saw_abort, "{mode}: provider observed cancellation");
+            let error = result.expect("cancelled refinement settles promptly").unwrap().expect_err("cancelled refinement must fail");
+            assert!(error.to_lowercase().contains("abort"), "{mode}: {error}");
+            assert_eq!(t.provider.call_count(), 1, "{mode}: cancellation cannot start a corrective retry");
+            assert!(t.local_harness().refinements.is_empty(), "{mode}: cancelled result was not saved");
+            if mode == "abort" {
+                t.queue_json(proposal_json("nine-fresh-memory"));
+                t.session.refine_with_options(&RefineOptions::default(), false, None).await.expect("later refinement has a fresh token");
+                assert_eq!(t.local_harness().refinements.len(), 1);
+            }
+            t.session.dispose_async(Some(false)).await;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nine_refinement_cancelled_serialized_plan_never_applies() {
+        let t = T11Session::new("nine-h13-before-apply", false,
+            serde_json::json!({"enabled": false}), vec![]).await;
+        append_user_turn(&t);
+        t.queue_json(proposal_json("nine-cancelled-plan"));
+        let abort = t.session.refinement_signal();
+        let plan = t.session.plan_refine_for_trigger(&RefineOptions::default(), REFINEMENT_SOURCE_USER, abort.clone()).await.unwrap();
+        t.session.request_abort();
+        let result = t.session.apply_serialized_plan(&SerializedBackgroundPlanResult::Plan {
+            plan, options: RefineOptions::default(), abort,
+            branch_version: 0, source: REFINEMENT_SOURCE_USER.to_string(),
+        }).await;
+        assert!(result.unwrap_err().contains("aborted"));
+        assert!(t.local_harness().refinements.is_empty());
+        t.session.dispose_async(Some(false)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn t11_cancel_before_apply_never_persists() {
         let t = T11Session::new(
             "h13-cancel",
@@ -20423,7 +20655,7 @@ mod t11_refinement_lifecycle_tests {
         t.session.dispose_async(Some(false)).await;
         let outcome = t
             .session
-            .apply_refine(&plan, &RefineOptions::default(), REFINEMENT_SOURCE_USER)
+            .apply_refine(&plan, &RefineOptions::default(), REFINEMENT_SOURCE_USER, None)
             .await;
         assert!(
             outcome.is_err(),

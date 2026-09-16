@@ -38,7 +38,7 @@ use crate::core::session_action_store::{can_evict_worker, IdleEvictionMinutes, S
 use crate::core::agent_messages::{
     assert_agent_session_name_available, format_agent_session_name_unavailable,
     session_name_reservation_key, AgentFamilyCatalogEntry, AgentSessionNameAvailabilityInput,
-    AgentSessionNameScope,
+    AgentSessionNameScope, AgentSessionMessageAgentSummary,
 };
 use super::super::rlm_ledger::{create_rlm_ledger_registry_seed_source, RlmLedgerEdge, RlmSpawnLedger};
 use super::super::daemon_socket::*;
@@ -47,9 +47,25 @@ use super::super::daemon_worker_client::{DaemonWorkerClient, PrivateFrame};
 use super::super::daemon_worker_protocol::*;
 use super::super::saved_session_info::serialize_saved_session_info;
 
+#[path = "supervisor_maintenance.rs"]
+mod supervisor_maintenance;
+use supervisor_maintenance::HeartbeatSnapshot;
+
 #[cfg(test)]
 #[path = "daemon_supervisor_parity_tests.rs"]
 mod daemon_supervisor_parity_tests;
+
+#[cfg(test)]
+#[path = "supervisor_messaging_safety_tests.rs"]
+mod supervisor_messaging_safety_tests;
+
+#[cfg(test)]
+#[path = "supervisor_maintenance_tests.rs"]
+mod supervisor_maintenance_tests;
+
+#[cfg(all(test, windows))]
+#[path = "worker_stop_safety_tests.rs"]
+mod worker_stop_safety_tests;
 
 const REQUEST_TIMEOUT: u64 = 24 * 60 * 60 * 1000;
 const MAX_PUBLIC_LINE: usize = super::super::daemon_client::DAEMON_MAX_LINE_LENGTH;
@@ -117,6 +133,7 @@ struct Worker {
     /// `worker.promotedOwnerClientId` (daemon-supervisor.ts:3243, 3266): set once the promotion
     /// of this registration completed, so a repeated `promoteOwnedWorker` is a no-op (:3244).
     promoted_owner_client_id: Mutex<Option<String>>,
+    heartbeat_snapshot: Mutex<HeartbeatSnapshot>,
 }
 #[derive(Clone)]
 struct InputPause { connection_id: String, worker: Arc<Worker>, active: String, requested: String }
@@ -380,6 +397,7 @@ impl Supervisor {
             connection: AsyncMutex::new(()), stream: Mutex::new(CompactAssistantStreamReconstructor::new()),
             recovery: AtomicBool::new(false), deferred_recovery: AtomicBool::new(false), deferred_recovery_rounds: AtomicU64::new(0),
             promoted_owner_client_id: Mutex::new(None),
+            heartbeat_snapshot: Mutex::new(HeartbeatSnapshot::default()),
         });
         self.attach_worker_listeners(&worker, &client);
         self.workers.lock().unwrap().insert(worker.descriptor.lock().unwrap().worker_id.clone(), Arc::clone(&worker));
@@ -418,15 +436,11 @@ impl Supervisor {
         match frame.header.get("outboundType").and_then(Value::as_str).unwrap_or("") {
             "roster_delta" => { self.consume_worker_roster_delta(worker, &frame.payload); return; }
             "roster_heartbeat" => return,
-            // daemon-supervisor.ts:5897-5901. TS also records `worker.heartbeatSnapshotStale`
-            // and calls `broadcastHeartbeatsChanged()` (7109-7114), which fans out to every
-            // client. Both are withheld here on purpose: this supervisor never advertises
-            // `heartbeat_catalog` (see `server_capabilities`), and
-            // `DAEMON_OUTBOUND_COMPATIBILITY` gates `heartbeats_changed` on exactly that
-            // capability (daemon-protocol.ts:1258), so a client must not act on the frame. The
-            // frame is consumed rather than forwarded: letting it fall through `forward_frame`
-            // would feed a non-event payload into the assistant-stream reconstructor.
-            "heartbeats_changed" => return,
+            "heartbeats_changed" => {
+                worker.heartbeat_snapshot.lock().unwrap().invalidate();
+                self.broadcast_heartbeats_changed();
+                return;
+            }
             _ => {}
         }
         self.forward_frame(worker, frame);
@@ -446,6 +460,7 @@ impl Supervisor {
             *current = None;
         }
         if self.stopped.is_cancelled() { return; }
+        self.invalidate_worker_input_pauses(worker);
         self.mark_worker_roster_entries(worker, Some(DAEMON_WORKER_LIFECYCLE_RECOVERING));
         // `isWorkerRecoveryEligible` (3881, 3923-3925): no concurrent ladder may be
         // admitted for the same worker.
@@ -545,6 +560,10 @@ impl Supervisor {
             // daemon-supervisor.ts:4230-4236: a client-owned worker whose process is gone and
             // that has no stored launch environment waits for its owner, never for a relaunch.
             if verdict == ProcessIdentityVerdict::Gone && descriptor.owner_client_id.is_some() {
+                if let Err(error) = self.recover_uncertain_worker_operations(worker).await {
+                    self.park_worker_recovery_failure(worker, &error);
+                    return Err(error);
+                }
                 let mut current = worker.descriptor.lock().unwrap();
                 current.lifecycle = DAEMON_WORKER_LIFECYCLE_FAILED.into();
                 current.last_error = Some("Waiting for the owning client to reconnect".to_string());
@@ -559,6 +578,7 @@ impl Supervisor {
                 keep_probing_live_worker = true;
                 continue;
             }
+            self.recover_uncertain_worker_operations(worker).await?;
             // daemon-supervisor.ts:4293-4302: the identity is gone and no client-owned launch
             // context is stored here, so the worker parks failed with the TS message. Recovery
             // from there is the shipped reclaim path (`create` / `retry_worker`), never a
@@ -646,6 +666,7 @@ impl Supervisor {
     /// `connectWorker(worker, WORKER_CONNECT_TIMEOUT_MS)` + `subscribeWorker` +
     /// `refreshWorkerSummaries(worker, true)` (daemon-supervisor.ts:4252-4254).
     async fn reconnect_worker(self: &Arc<Self>, worker: &Arc<Worker>) -> Result<(), String> {
+        worker.heartbeat_snapshot.lock().unwrap().invalidate();
         let descriptor = worker.descriptor.lock().unwrap().clone();
         let client = Arc::new(DaemonWorkerClient::new(&descriptor.socket_path));
         self.attach_worker_listeners(worker, &client);
@@ -1214,24 +1235,51 @@ impl Supervisor {
             let path = entry.map_err(|error| error.to_string())?.path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
             let descriptor: DaemonWorkerDescriptor = match std::fs::read(&path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()) { Some(value) => value, None => continue };
-            if normalize_socket_path_for_daemon(&descriptor.supervisor_socket_path, None) != self.socket_path || descriptor.stop_requested_at.is_some() { continue; }
-            if !matches_exact_process_identity(&ProcessIdentity { pid: descriptor.pid as i64, process_start_id: descriptor.process_start_id.clone() }) {
+            if normalize_socket_path_for_daemon(&descriptor.supervisor_socket_path, None) != self.socket_path { continue; }
+            let identity = ProcessIdentity { pid: descriptor.pid as i64, process_start_id: descriptor.process_start_id.clone() };
+            if !is_stopping_process_alive(&identity) {
+                let worker = self.install_worker(descriptor.clone(), Arc::new(DaemonWorkerClient::new(&descriptor.socket_path)));
+                worker.client.lock().unwrap().take();
+                if descriptor.stop_requested_at.is_some() || descriptor.owner_client_id.is_some() {
+                    if let Err(error) = self.stop_worker(&worker, descriptor.archive_on_stop == Some(true), false).await {
+                        eprintln!("Retaining stopped worker cleanup record {}: {error}", descriptor.worker_id);
+                        self.schedule_worker_stop_finalization(&worker);
+                    }
+                    continue;
+                }
+                if let Err(error) = self.recover_uncertain_worker_operations(&worker).await {
+                    self.park_worker_recovery_failure(&worker, &error);
+                    continue;
+                }
                 if descriptor.owner_client_id.is_none() && descriptor.session_file.is_some() {
-                    let body = recovery_command(&descriptor)?;
-                    self.launch_worker(&body, String::new(), Some(descriptor)).await?;
+                    let recovered = async {
+                        let body = recovery_command(&descriptor)?;
+                        self.launch_worker(&body, String::new(), Some(descriptor)).await
+                    }.await;
+                    if let Err(error) = recovered { self.park_worker_recovery_failure(&worker, &error); }
                 }
                 continue;
             }
+            if descriptor.stop_requested_at.is_some() {
+                let worker = self.install_worker(descriptor.clone(), Arc::new(DaemonWorkerClient::new(&descriptor.socket_path)));
+                worker.client.lock().unwrap().take();
+                self.schedule_worker_stop_finalization(&worker);
+                continue;
+            }
+            if !matches_exact_process_identity(&identity) { continue; }
             let client = Arc::new(DaemonWorkerClient::new(&descriptor.socket_path));
             let root = descriptor.root_active_session_id.clone();
             // Listeners are installed before authentication so the roster snapshot
             // the worker flushes right after auth cannot race them.
             let worker = self.install_worker(descriptor, client);
-            let client = { worker.client.lock().unwrap().clone().ok_or("Session worker is not connected")? };
+            let client = { worker.client.lock().unwrap().clone().expect("installed worker client") };
             let descriptor = { worker.descriptor.lock().unwrap().clone() };
-            self.authenticate(&client, &descriptor).await?;
-            self.refresh(&worker).await?;
-            self.subscribe(&worker, &root).await?;
+            let adopted = async {
+                self.authenticate(&client, &descriptor).await?;
+                self.refresh(&worker).await?;
+                self.subscribe(&worker, &root).await
+            }.await;
+            if let Err(error) = adopted { self.park_worker_recovery_failure(&worker, &error); }
         }
         Ok(())
     }
@@ -1352,6 +1400,13 @@ impl Supervisor {
             let mut matches: Vec<(Arc<Worker>, SessionSummary)> = Vec::new();
             for worker in workers {
                 if !visible(&worker, &owner) { continue; }
+                let descriptor = worker.descriptor.lock().unwrap().clone();
+                let target = canonical_session_path(path);
+                let matches_path = descriptor.session_file.as_ref().or(descriptor.create_command.session_path.as_ref())
+                    .is_some_and(|file| canonical_session_path(file) == target)
+                    || self.find_summary_in_worker(&worker, path).is_some();
+                if !matches_path { continue; }
+                if self.reclaim_stale_worker_registration(&worker).await? { continue; }
                 // The refresh republishes the worker's rows, so the summary that
                 // answers a reuse is the roster's, matched on the canonical path.
                 self.refresh(&worker).await?;
@@ -1363,12 +1418,6 @@ impl Supervisor {
             if let Some((worker, summary)) = matches.into_iter().next() {
                 return Ok(serde_json::to_value(self.public_summary(&worker, summary)).unwrap_or(Value::Null));
             }
-            // blocked_on: `reclaimStaleWorkerRegistration(worker, freshCreate)`
-            // (daemon-supervisor.ts:3190-3239) is not ported; its owners
-            // `scheduleWorkerStopFinalization`, `recoverUncertainWorkerOperations`,
-            // `invalidateWorkerSessionInputPauses` and `deleteWorkerDescriptor` have no symbol in
-            // this crate. A single match is therefore always reused here, and a stale
-            // registration is only reclaimed through the `launch_worker` fallback below.
         }
         self.launch_worker(body, owner, None).await
     }
@@ -1728,20 +1777,17 @@ impl Supervisor {
     /// `cron_list` can see jobs of passivated trees. The ledger family supplies the sessions
     /// and their parents; a session is "uncovered" when no worker holds its path.
     ///
-    /// blocked_on: the TS prologue (964-974) first settles `collectEphemeralCancelIntents()`
-    /// (:1388-1411) through `cancelScheduledJobsForSessionTree` (:6998) and
-    /// `deleteWorkerDescriptor` (:1603) and excludes those roots. Neither helper is ported: the
-    /// owned-descriptor sweeper belongs to the descriptor-write ownership that
-    /// `daemon_supervisor.rs` and `daemon_mode.rs` own, so a stale owned descriptor is filtered
-    /// here only by the `AgentRoster`/worker lookup, not deleted.
     async fn collect_passive_scheduled_jobs(self: &Arc<Self>, include_inactive: bool) -> Vec<(String, Value)> {
+        let cancelled_roots = self.settle_ephemeral_cancel_intents().await;
         let ledger = match self.rlm_spawn_ledger().await { Ok(ledger) => ledger, Err(_) => return Vec::new() };
         let infos = ledger.family().await;
         let info_by_path: HashMap<String, SessionInfo> = infos.iter()
             .map(|info| (canonical_session_path(&info.path), info.clone()))
             .collect();
         let mut results: Vec<(String, Value)> = Vec::new();
+        let parent_map: HashMap<String, String> = infos.iter().filter_map(|info| info.parent_session_path.as_ref().map(|parent| (canonical_session_path(&info.path), canonical_session_path(parent)))).collect();
         for info in &infos {
+            if roster_path_descends_from(&parent_map, &canonical_session_path(&info.path), &cancelled_roots) { continue; }
             if info.state.as_ref().is_some_and(|state| state.status != crate::core::session_manager::SessionStateStatus::Active) { continue; }
             let artifact_dir = crate::core::session_manager::get_session_artifact_path_for_file(&resolve_path(&info.path), Some(&info.id));
             if !Path::new(&artifact_dir).join(crate::core::cron_jobs::SESSION_SCHEDULED_JOBS_FILENAME).exists() { continue; }
@@ -1767,6 +1813,7 @@ impl Supervisor {
                     cursor
                 };
                 let current = root;
+                if self.find_worker_by_session_file(&current.path, None).is_some() { continue; }
                 results.push((current.path.clone(), serde_json::to_value(&job).unwrap_or(Value::Null)));
             }
         }
@@ -1869,6 +1916,31 @@ impl Supervisor {
             parent_session_id: (depth > 0).then(|| summary.parent_session_id.clone()).flatten(),
             parent_session_path: (depth > 0).then(|| summary.parent_session_path.as_ref().map(|path| canonical_session_path(path))).flatten(),
             session_path: summary.session_file.as_ref().map(|file| canonical_session_path(file)),
+        }
+    }
+    /// The existing peer-discovery wire shape, projected only from supervisor-owned roster data.
+    fn agent_peer_summary(&self, summary: &SessionSummary) -> AgentSessionMessageAgentSummary {
+        let actions = summary.session_actions.as_ref();
+        let unfinished = summary.unfinished_action_count.unwrap_or_else(|| {
+            actions.and_then(|value| value.get("queuedCount")).and_then(Value::as_i64).unwrap_or(0)
+                + i64::from(actions.and_then(|value| value.get("active")).is_some_and(|value| !value.is_null()))
+        });
+        AgentSessionMessageAgentSummary {
+            active_session_id: summary.active_session_id.clone().unwrap_or_else(|| summary.id.clone()),
+            session_id: summary.session_id.clone(),
+            session_name: summary.session_name.clone(),
+            runtime_kind: Some(summary.runtime_kind.clone().unwrap_or_else(|| "top-level".into())),
+            cwd: summary.cwd.clone(),
+            is_streaming: summary.is_streaming,
+            unfinished_action_count: unfinished as f64,
+            parent_active_session_id: summary.parent_active_session_id.clone(),
+            parent_session_id: summary.parent_session_id.clone(),
+            parent_session_path: summary.parent_session_path.clone(),
+            session_path: summary.session_file.clone(),
+            rlm_depth: summary.rlm_depth.map(|depth| depth as f64),
+            status: Some(self.family_catalog_entry(summary).status),
+            rlm_child_id: summary.rlm_child_id.clone(),
+            ..Default::default()
         }
     }
     /// The roster summary for a resolved active session id, as the a2a send path needs it
@@ -2099,50 +2171,84 @@ impl Supervisor {
     /// same guard in `stop_finalizations()` (a process-wide set, one supervisor per process), so a
     /// repeated timeout does not stack escalation loops and no registration field is needed.
     fn schedule_worker_stop_finalization(self: &Arc<Self>, worker: &Arc<Worker>) {
-        let worker_id = worker.descriptor.lock().unwrap().worker_id.clone();
+        let descriptor = worker.descriptor.lock().unwrap().clone();
+        let worker_id = descriptor.worker_id.clone();
         {
             let mut scheduled = stop_finalizations().lock().unwrap();
             if !scheduled.insert(worker_id.clone()) { return; }
         }
-        tokio::spawn(finalize_timed_out_worker_stop(Arc::clone(self), Arc::clone(worker)));
+        tokio::spawn(finalize_timed_out_worker_stop(Arc::clone(self), Arc::clone(worker), descriptor));
     }
     /// `stopWorker(worker, removeDescriptor, force, archiveSession)` (daemon-supervisor.ts:6689).
     /// Only the `shutdown` command's `force` flag reaches here (`forceWorkers`, 2419/7326); every
     /// other caller keeps the non-forcing default of the port.
     async fn stop_worker(self: &Arc<Self>, worker: &Arc<Worker>, archive: bool, force: bool) -> Result<(), String> {
         self.ownership.assert_current().await.map_err(|error| error.to_string())?;
+        let worker_id = worker.descriptor.lock().unwrap().worker_id.clone();
+        if !self.workers.lock().unwrap().get(&worker_id).is_some_and(|registered| Arc::ptr_eq(registered, worker)) {
+            return Err(format!("Session worker {worker_id} was replaced during stop"));
+        }
         let descriptor = {
             let mut descriptor = worker.descriptor.lock().unwrap();
             descriptor.lifecycle = DAEMON_WORKER_LIFECYCLE_STOPPING.into();
-            descriptor.stop_requested_at = Some(chrono::Utc::now().to_rfc3339());
+            descriptor.stop_requested_at.get_or_insert_with(|| chrono::Utc::now().to_rfc3339());
             descriptor.archive_on_stop = Some(archive);
             self.persist_worker(&descriptor)?;
             descriptor.clone()
         };
+        let assert_stop_current = || {
+            let current = worker.descriptor.lock().unwrap().clone();
+            if !self.workers.lock().unwrap().get(&descriptor.worker_id).is_some_and(|registered| Arc::ptr_eq(registered, worker))
+                || current.pid != descriptor.pid
+                || current.process_start_id != descriptor.process_start_id
+                || current.worker_instance_id != descriptor.worker_instance_id
+                || current.stop_requested_at != descriptor.stop_requested_at
+            {
+                return Err(format!("Session worker {} was replaced during stop", descriptor.worker_id));
+            }
+            Ok(())
+        };
         let kind = if archive { "worker_archive_and_shutdown" } else { "shutdown" };
         let client = { worker.client.lock().unwrap().clone() };
         if let Some(client) = client {
-            response_data(client.request_worker(command(kind), 30_000).await.map_err(|error| error.to_string())?)?;
+            let request_timeout = if force { 1_000 } else { 30_000 };
+            // A stuck write, disconnected channel or rejected request cannot bypass
+            // process cleanup. The outer deadline also bounds the transport write.
+            let requested = tokio::time::timeout(Duration::from_millis(request_timeout), async {
+                client.request_worker(command(kind), request_timeout).await
+                    .map_err(|error| error.to_string()).and_then(response_data)
+            }).await.unwrap_or_else(|_| Err(format!("Timed out requesting {kind}")));
+            if let Err(error) = requested { eprintln!("Worker {} shutdown request failed: {error}", descriptor.worker_id); }
+            assert_stop_current()?;
+            client.close().await;
+            let mut current = worker.client.lock().unwrap();
+            if current.as_ref().is_some_and(|current| Arc::ptr_eq(current, &client)) { *current = None; }
         }
+        self.ownership.assert_current().await.map_err(|error| error.to_string())?;
+        assert_stop_current()?;
         let identity = ProcessIdentity { pid: descriptor.pid as i64, process_start_id: descriptor.process_start_id.clone() };
         // `const gracefulDeadline = Date.now() + (force ? 500 : process.platform === "win32" ? 10_000 : 2000)`
         // (daemon-supervisor.ts:6824); this port only serves Windows workers.
         let deadline = tokio::time::Instant::now() + Duration::from_millis(if force { 500 } else { 10_000 });
-        let mut alive = matches_exact_process_identity(&identity);
+        let mut alive = is_stopping_process_alive(&identity);
         let mut sigkill_sent = false;
         while alive {
+            assert_stop_current()?;
             if tokio::time::Instant::now() >= deadline {
                 // daemon-supervisor.ts:6830-6843: `force` escalates to SIGKILL, then waits 1s
                 // before declaring the stop a timeout.
-                if force && matches_exact_process_identity(&identity) {
-                    signal_process_group_or_process(descriptor.pid, Signal::Kill);
-                    sigkill_sent = true;
+                self.ownership.assert_current().await.map_err(|error| error.to_string())?;
+                assert_stop_current()?;
+                if force && identity.process_start_id.is_some() && matches_exact_process_identity(&identity) {
+                    sigkill_sent = signal_process_group_or_process(descriptor.pid, Signal::Kill);
                     let force_deadline = tokio::time::Instant::now() + Duration::from_millis(1000);
-                    while matches_exact_process_identity(&identity) && tokio::time::Instant::now() < force_deadline {
+                    while is_stopping_process_alive(&identity) && tokio::time::Instant::now() < force_deadline {
+                        assert_stop_current()?;
                         tokio::time::sleep(Duration::from_millis(25)).await;
                     }
                 }
-                if matches_exact_process_identity(&identity) {
+                assert_stop_current()?;
+                if is_stopping_process_alive(&identity) {
                     // `if (removeDescriptor) { this.scheduleWorkerStopFinalization(worker); }` then
                     // `throw new WorkerStopTimeoutError(...)` (daemon-supervisor.ts:6845-6852): a
                     // stop that timed out keeps escalating in the background and finishes the
@@ -2154,15 +2260,28 @@ impl Supervisor {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
-            alive = matches_exact_process_identity(&identity);
+            alive = is_stopping_process_alive(&identity);
         }
+        self.ownership.assert_current().await.map_err(|error| error.to_string())?;
+        assert_stop_current()?;
         let client = { worker.client.lock().unwrap().take() };
         if let Some(client) = client { client.close().await; }
+        if let Err(error) = self.recover_uncertain_worker_operations(worker).await {
+            self.schedule_worker_stop_finalization(worker);
+            return Err(error);
+        }
+        self.invalidate_worker_input_pauses(worker);
+        if let Err(error) = self.finish_worker_schedules(worker, archive).await {
+            self.schedule_worker_stop_finalization(worker);
+            return Err(error);
+        }
+        assert_stop_current()?;
         self.workers.lock().unwrap().remove(&descriptor.worker_id);
         // The registration is gone, so its rows stop being live: owned rows die
         // with it, resident rows are passivated.
         self.flip_worker_roster_entries_inactive(worker);
         remove_file_durably(&self.descriptor_dir.join(format!("{}.json", descriptor.worker_id)).to_string_lossy(), RemoveFileDurablyOptions { fsync_dir: true, platform: None }).await.map_err(|error| error.to_string())?;
+        self.broadcast_heartbeats_changed();
         Ok(())
     }
     async fn dispatch(self: &Arc<Self>, public: &Arc<PublicClient>, mut body: Map<String, Value>) -> Result<Option<DaemonResponse>, String> {
@@ -2175,6 +2294,22 @@ impl Supervisor {
             "list" => {
                 let data = self.handle_list(public, &body).await?;
                 return Ok(success(Some(data)));
+            }
+            "list_agent_peers" => {
+                let token = body.get("workerToken").and_then(Value::as_str).filter(|token| !token.is_empty())
+                    .ok_or("Worker authentication failed")?;
+                let workers: Vec<_> = self.workers.lock().unwrap().values().cloned().collect();
+                let requester = workers.iter().find(|worker| worker.descriptor.lock().unwrap().authentication_token == token)
+                    .ok_or("Worker authentication failed")?;
+                let peers: Vec<_> = workers.iter().filter(|worker| {
+                    !Arc::ptr_eq(worker, requester) && self.is_live_worker(worker)
+                        && worker.descriptor.lock().unwrap().lifecycle == DAEMON_WORKER_LIFECYCLE_READY
+                        && worker.client.lock().unwrap().as_ref().is_some_and(|client| client.is_connected())
+                }).filter_map(|worker| {
+                    let active = worker.descriptor.lock().unwrap().root_active_session_id.clone();
+                    self.summary_for_active(worker, &active).map(|summary| self.agent_peer_summary(&summary))
+                }).collect();
+                return Ok(success(Some(json!({"peers": peers}))));
             }
             "roster_subscribe" => {
                 public.roster_subscribed.store(true, Ordering::SeqCst);
@@ -2263,11 +2398,8 @@ impl Supervisor {
                 jobs.sort_by(|left, right| compare_cron_jobs_by_next_run(left, right));
                 return Ok(success(Some(json!({"jobs": jobs}))));
             }
-            // `case "heartbeats_list"` (daemon-supervisor.ts:2481-2535): without an
-            // `activeSessionId` the live workers are asked in parallel (5s each) and their rows are
-            // unioned by `job.id`; a worker that cannot answer contributes the failure unless it has
-            // a fresh cached snapshot. This slice keeps no per-worker snapshot cache, so a worker
-            // that cannot answer produces the documented worker-state error instead of a silent gap.
+            // Refresh connected workers; a temporarily unreachable worker may use a
+            // snapshot only while no change notification has invalidated it.
             "heartbeats_list" if body.get("activeSessionId").and_then(Value::as_str).is_none() => {
                 let workers: Vec<Arc<Worker>> = self.workers.lock().unwrap().values().cloned().collect();
                 let mut heartbeats: Vec<Value> = Vec::new();
@@ -2280,24 +2412,28 @@ impl Supervisor {
                     // `if (worker.client && worker.descriptor.lifecycle === "ready")` (:2493):
                     // only an already-connected ready worker is asked; this path never dials.
                     let client = { worker.client.lock().unwrap().as_ref().cloned() };
+                    let snapshot_epoch = worker.heartbeat_snapshot.lock().unwrap().epoch;
                     let forwarded = match client.filter(|client| client.is_connected() && lifecycle == DAEMON_WORKER_LIFECYCLE_READY) {
                         Some(client) => match client.request_worker(command("heartbeats_list"), 5_000).await {
-                            Ok(response) if response.success => Some(response),
-                            Ok(response) => { if failure.is_none() { failure = Some(response); } None }
+                            Ok(response) if response.success => {
+                                let rows = response.data.as_ref().and_then(|data| data.get("heartbeats")).and_then(Value::as_array).cloned().unwrap_or_default();
+                                worker.heartbeat_snapshot.lock().unwrap().store_if_current(snapshot_epoch, rows.clone());
+                                Some(rows)
+                            },
+                            Ok(_) => None,
                             Err(_) => None,
                         },
                         None => None,
                     };
-                    // Without a fresh `worker.heartbeatSnapshot` (this slice caches none) the
-                    // worker contributes the documented worker-state failure (:2503-2514).
-                    let Some(forwarded) = forwarded else {
+                    let rows = forwarded.or_else(|| worker.heartbeat_snapshot.lock().unwrap().fresh());
+                    let Some(rows) = rows else {
                         if failure.is_none() {
                             let state = if lifecycle == DAEMON_WORKER_LIFECYCLE_READY { "disconnected".to_string() } else { lifecycle.clone() };
                             failure = Some(DaemonResponse::failure(id.as_deref(), &kind, &format!("Cannot list heartbeats while session worker is {state}"), None));
                         }
                         continue;
                     };
-                    for heartbeat in forwarded.data.as_ref().and_then(|data| data.get("heartbeats")).and_then(Value::as_array).cloned().unwrap_or_default() {
+                    for heartbeat in rows {
                         let job_id = heartbeat.get("job").and_then(|job| job.get("id")).and_then(Value::as_str).unwrap_or_default().to_string();
                         if seen.insert(job_id) { heartbeats.push(heartbeat); }
                     }
@@ -2335,28 +2471,30 @@ impl Supervisor {
                 }
                 if let Some(job) = self.cancel_passive_scheduled_job(&job_id).await {
                     // `broadcastHeartbeatsChanged()` (2627) re-arms the wake timer (:7110).
-                    self.schedule_scheduled_session_wake_recompute();
+                    self.broadcast_heartbeats_changed();
                     return Ok(success(Some(json!({"job": job}))));
                 }
                 return Err(format!("No cron job found: {job_id}"));
             }
-            // `if (command.type === "send_message")` (daemon-supervisor.ts:2707-2779): the
-            // a2a path is reachable without an `activeSessionId`. The target is resolved by
-            // the ordinary worker lookup; when that fails with an unknown active session the
-            // session path is resolved through the catalog and a worker is woken on demand
-            // (:2741-2745). `fromActiveSessionId` is optional and only adds the `agentOrigin`
-            // family check (:2733-2740, 2754-2756), which is only enforceable when the
-            // sender already has a resident worker.
+            // Cross-worker messages use the authenticated private delivery command: the
+            // target worker cannot resolve a source session hosted by another worker.
             "send_message" if body.get("activeSessionId").and_then(Value::as_str).is_none() => {
                 let target_selector = body.get("targetActiveSessionId").and_then(Value::as_str).ok_or("send_message requires targetActiveSessionId")?.to_string();
                 let source = match body.get("fromActiveSessionId").and_then(Value::as_str) {
                     Some(from) => Some(self.find(&public.identity(), from).await.map_err(|error| error.to_string())?),
                     None => None,
                 };
+                let source_summary = source.as_ref().map(|(worker, active)| {
+                    self.summary_for_active(worker, active).ok_or("Source session worker has no summary")
+                }).transpose()?;
+                let agent_origin = body.get("agentOrigin").and_then(Value::as_bool) == Some(true);
+                if agent_origin && source_summary.is_none() {
+                    return Err("Agent messaging requires fromActiveSessionId".into());
+                }
                 let target = match self.find(&public.identity(), &target_selector).await {
                     Ok(found) => found,
                     Err(error) if error.starts_with("Unknown active session:") => {
-                        let cwd = source.as_ref().and_then(|(worker, _)| worker.descriptor.lock().unwrap().create_command.session_path.clone())
+                        let cwd = source_summary.as_ref().map(|summary| summary.cwd.clone())
                             .or_else(|| self.config.cwd.clone())
                             .unwrap_or_else(|| std::env::current_dir().map(|dir| dir.to_string_lossy().into_owned()).unwrap_or_default());
                         let session_dir = source.as_ref().and_then(|(worker, _)| worker.descriptor.lock().unwrap().session_dir.clone()).or_else(|| self.config.session_dir.clone());
@@ -2365,6 +2503,14 @@ impl Supervisor {
                             // it apart from the original lookup failure (:2725-2732).
                             if catalog_error.starts_with("Ambiguous session selector") { catalog_error } else { error.clone() }
                         })?;
+                        if let (Some(source_summary), true) = (source_summary.as_ref(), agent_origin) {
+                            let target_info = crate::core::session_manager::read_session_info(&session_path).await
+                                .ok_or_else(|| format!("Unknown active session: {target_selector}"))?;
+                            crate::core::agent_messages::assert_agent_family_reach(
+                                &self.family_catalog_entry(source_summary),
+                                &self.family_catalog_entry(&summary_for_inactive_session(&target_info, false, false)),
+                            )?;
+                        }
                         let create = json!({"type":"create", "sessionPath": session_path, "continueRecent": false});
                         self.create_for_owner(public.identity(), create.as_object().expect("create body is an object")).await?;
                         // `findSummaryInWorker(worker, sessionPath) ?? sessionSummaryFromRosterEntry(root)`
@@ -2375,17 +2521,33 @@ impl Supervisor {
                     Err(error) => return Err(error),
                 };
                 let (target_worker, target_active) = target;
-                let target_summary = self.summary_for_active(&target_worker, &target_active);
-                if let (Some((source_worker, source_active)), true) = (source.as_ref(), body.get("agentOrigin").and_then(Value::as_bool) == Some(true)) {
-                    // `assertAgentFamilyReach` on the resolved pair (:2754-2756).
-                    if let (Some(source_summary), Some(target_summary)) = (self.summary_for_active(source_worker, source_active), target_summary.as_ref()) {
-                        crate::core::agent_messages::assert_agent_family_reach(&self.family_catalog_entry(&source_summary), &self.family_catalog_entry(target_summary))?;
-                    }
+                if source.as_ref().is_some_and(|(_, source_active)| source_active == &target_active) {
+                    return Err("Agent messaging cannot target the sending session".into());
+                }
+                if let (Some(source_summary), true) = (source_summary.as_ref(), agent_origin) {
+                    let target_summary = self.summary_for_active(&target_worker, &target_active)
+                        .ok_or("Target session worker has no summary")?;
+                    crate::core::agent_messages::assert_agent_family_reach(
+                        &self.family_catalog_entry(source_summary), &self.family_catalog_entry(&target_summary),
+                    )?;
                 }
                 let client = self.connected_client(&target_worker).await?;
-                let mut forwarded = body.clone();
-                forwarded.insert("type".into(), json!("send_message"));
-                forwarded.insert("targetActiveSessionId".into(), json!(target_active));
+                let forwarded = if let Some(source_summary) = source_summary {
+                    // Never accept sender attribution supplied by the public caller.
+                    let sender = crate::core::agent_messages::AgentSessionMessageSender {
+                        active_session_id: Some(source_summary.active_session_id.unwrap_or(source_summary.id)),
+                        session_id: Some(source_summary.session_id),
+                        session_name: source_summary.session_name,
+                        runtime_kind: Some(source_summary.runtime_kind.unwrap_or_else(|| "top-level".into())),
+                        client_id: Some(public.id.lock().unwrap().clone()),
+                    };
+                    json!({"type":"worker_deliver_message", "targetActiveSessionId":target_active,
+                        "message":body.get("message"), "sender":sender}).as_object().unwrap().clone()
+                } else {
+                    let mut forwarded = body.clone();
+                    forwarded.insert("targetActiveSessionId".into(), json!(target_active));
+                    forwarded
+                };
                 let mut response = client.request_worker(forwarded, REQUEST_TIMEOUT).await.map_err(|error| error.to_string())?;
                 response.id = id; response.command = kind.clone();
                 return Ok(Some(response));
@@ -2674,6 +2836,8 @@ impl Supervisor {
             }
         }
         let attaching = matches!(kind.as_str(), "attach" | "reattach");
+        let chunked_attach = attaching && body.get("capabilities").and_then(Value::as_array)
+            .is_some_and(|capabilities| capabilities.iter().any(|capability| capability == "chunked_snapshot"));
         if attaching {
             let supports_ui = body.get("supportsExtensionUi").and_then(Value::as_bool) == Some(true) || body.get("capabilities").and_then(Value::as_array).is_some_and(|capabilities| capabilities.iter().any(|value| value.as_str() == Some("extension_ui")));
             public.supports_extension_ui.store(supports_ui, std::sync::atomic::Ordering::SeqCst);
@@ -2730,6 +2894,10 @@ impl Supervisor {
         if response.success && promote_owned_session && matches!(kind.as_str(), "cron_add" | "heartbeat_set") {
             self.promote_owned_worker(&worker, &public.identity())?;
         }
+        if response.success && matches!(kind.as_str(), "heartbeat_set" | "heartbeat_pause" | "heartbeat_clear" | "cron_add" | "cron_cancel") {
+            worker.heartbeat_snapshot.lock().unwrap().invalidate();
+            self.broadcast_heartbeats_changed();
+        }
         if kind == "acquire_session_input_pause" && response.success {
             let pause_id = response.data.as_ref().and_then(|data| data.get("pauseId")).and_then(Value::as_str).ok_or("Worker returned an invalid session input pause id")?.to_string();
             let pause = InputPause { connection_id: public.connection_id.clone(), worker: worker.clone(), active: active.clone(), requested: requested.clone() };
@@ -2753,6 +2921,10 @@ impl Supervisor {
                 self.subscribe(&worker, &active).await?;
                 if kind == "reattach" { if let Some(previous) = previous_active.filter(|previous| previous != &active) { public.subscriptions.lock().unwrap().remove(&previous); public.write(&json!({"type":"session_detached","activeSessionId":previous})); } }
             }
+        }
+        if chunked_attach && response.success {
+            self.stream_cached_attach(public, &active, &mut response).await?;
+            return Ok(None);
         }
         Ok(Some(response))
     }
@@ -2929,9 +3101,9 @@ fn server_capabilities() -> Vec<String> {
     //     (daemon_agent_connection.rs:2499-2501), which the supervisor's generic forward
     //     already routes; withholding it made RLM children invisible to those clients.
     // Still withheld, because the path is genuinely absent here:
-    //   - `slim_attach`, `chunked_snapshot` - `subscribe` pins full snapshots and the attach
-    //     branch reads `response.data.snapshot` directly, so a slim/chunked reply could not be
-    //     consumed (see the attach branch below).
+    //   - `slim_attach` - private worker snapshots still arrive in full. Public
+    //     `chunked_snapshot` attaches are served through the disk-backed cache,
+    //     but that is not a bound on the initial decoded worker response.
     //   - `history_ranges` - the attach branch pins `capabilities` to
     //     `["attach_snapshot", "event_sequence"]`, so the snapshot never carries the `history`
     //     field the capability promises.
@@ -2943,7 +3115,7 @@ fn server_capabilities() -> Vec<String> {
         .filter(|capability| {
             !matches!(
                 capability.as_str(),
-                "slim_attach" | "chunked_snapshot" | "history_ranges" | "owned_session_recovery_context"
+                "slim_attach" | "history_ranges" | "owned_session_recovery_context"
             )
         })
         .collect();
@@ -3007,27 +3179,49 @@ fn stop_finalizations() -> &'static Mutex<HashSet<String>> {
     SCHEDULED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
-async fn finalize_timed_out_worker_stop(supervisor: Arc<Supervisor>, worker: Arc<Worker>) {
-    let (pid, process_start_id, worker_id, archive_on_stop) = {
-        let descriptor = worker.descriptor.lock().unwrap();
-        (descriptor.pid as i64, descriptor.process_start_id.clone(), descriptor.worker_id.clone(), descriptor.archive_on_stop == Some(true))
-    };
+fn is_stopping_process_alive(identity: &ProcessIdentity) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE};
+        // Windows keeps an exited process object addressable while another handle
+        // is open. OpenProcess alone therefore does not establish liveness.
+        unsafe {
+            let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, identity.pid as u32);
+            if !handle.is_null() {
+                let exited = WaitForSingleObject(handle, 0) == WAIT_OBJECT_0;
+                CloseHandle(handle);
+                if exited { return false; }
+            }
+        }
+    }
+    is_process_identity_alive(identity)
+}
+
+async fn finalize_timed_out_worker_stop(supervisor: Arc<Supervisor>, worker: Arc<Worker>, descriptor: DaemonWorkerDescriptor) {
+    let (pid, process_start_id, worker_id, worker_instance_id, stop_requested_at, archive_on_stop) =
+        (descriptor.pid as i64, descriptor.process_start_id, descriptor.worker_id, descriptor.worker_instance_id, descriptor.stop_requested_at, descriptor.archive_on_stop == Some(true));
     let _guard = StopFinalizationGuard { worker_id: worker_id.clone() };
     let identity = ProcessIdentity { pid, process_start_id: process_start_id.clone() };
     let is_stop_generation_current = || {
-        let descriptor = worker.descriptor.lock().unwrap();
+        let descriptor = worker.descriptor.lock().unwrap().clone();
         supervisor.workers.lock().unwrap().get(&worker_id).is_some_and(|registered| Arc::ptr_eq(registered, &worker))
             && descriptor.stop_requested_at.is_some()
+            && descriptor.stop_requested_at == stop_requested_at
+            && descriptor.worker_instance_id == worker_instance_id
             && descriptor.pid as i64 == pid
+            && descriptor.process_start_id == process_start_id
     };
     let sigkill_deadline = tokio::time::Instant::now() + Duration::from_millis(super::STOP_FINALIZATION_SIGKILL_GRACE_MS);
     let mut killed = false;
     while !supervisor.stopped.is_cancelled() {
         if !is_stop_generation_current() { return; }
-        if !matches_exact_process_identity(&identity) { break; }
+        if !is_stopping_process_alive(&identity) { break; }
         if !killed && tokio::time::Instant::now() >= sigkill_deadline {
-            signal_process_group_or_process(identity.pid as i32, Signal::Kill);
-            killed = true;
+            if supervisor.ownership.assert_current().await.is_err() || !is_stop_generation_current() { return; }
+            if identity.process_start_id.is_some() && matches_exact_process_identity(&identity) {
+                killed = signal_process_group_or_process(identity.pid as i32, Signal::Kill);
+            }
         }
         tokio::time::sleep(Duration::from_millis(super::STOP_FINALIZATION_RECHECK_MS)).await;
     }

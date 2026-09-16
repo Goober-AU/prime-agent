@@ -3,13 +3,10 @@
 //! NOTE: the TypeScript reads `node:os` through a lazy dynamic import; Rust links it at
 //! build time, so `_os` is always available here.
 //!
-//! NOTE: the TypeScript WebSocket transport uses the runtime `globalThis.WebSocket`. No
-//! WebSocket crate is available in this workspace, so the socket comes from an injectable
-//! factory that is `None` by default; `connectWebSocket` then fails with the exact
-//! TypeScript message for a runtime without WebSocket ("WebSocket transport is not
-//! available in this runtime") and the transport falls back to SSE, exactly like the
-//! browser/Vite path. The cache, reconnect and fallback state machines are ported in full
-//! and unit tested against a fake socket.
+//! Native WebSocket IO feeds the existing connection cache, continuation and SSE fallback
+//! state machines. The constructor remains injectable for isolated transport tests.
+
+mod native_web_socket;
 
 use std::collections::{HashMap, VecDeque};
 use std::pin::Pin;
@@ -19,6 +16,7 @@ use futures::StreamExt;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::compaction::{CompactionOptions, ProviderCompactionResult};
 use crate::env_api_keys::get_env_api_key;
@@ -843,8 +841,9 @@ async fn run_openai_codex_responses(
         // must never be replayed over either transport.
         for _websocket_attempt in 0..2 {
             let websocket_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let result = process_web_socket_stream(
-                &resolve_codex_web_socket_url(Some(&model.base_url)),
+            let websocket_url = resolve_codex_web_socket_url(Some(&model.base_url));
+            let request = process_web_socket_stream(
+                &websocket_url,
                 &body,
                 &websocket_headers,
                 output,
@@ -857,8 +856,16 @@ async fn run_openai_codex_responses(
                     })
                 },
                 options,
-            )
-            .await;
+            );
+            let result = match options.stream.timeout_ms {
+                Some(timeout) => tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout.max(0.0) as u64),
+                    request,
+                )
+                .await
+                .unwrap_or_else(|_| Err(CodexThrown::error("Request timed out"))),
+                None => request.await,
+            };
             match result {
                 Ok(()) => {
                     if options
@@ -885,6 +892,7 @@ async fn run_openai_codex_responses(
                         .map(|signal| signal.is_cancelled())
                         .unwrap_or(false)
                         || is_codex_non_transport_error(&error)
+                        || error.message == "Request timed out"
                     {
                         return Err(error);
                     }
@@ -1581,11 +1589,10 @@ pub type WebSocketConstructor = Arc<dyn Fn(&str, IndexMap<String, String>) -> Ar
 
 fn web_socket_constructor_slot() -> &'static Mutex<Option<WebSocketConstructor>> {
     static SLOT: OnceLock<Mutex<Option<WebSocketConstructor>>> = OnceLock::new();
-    SLOT.get_or_init(|| Mutex::new(None))
+    SLOT.get_or_init(|| Mutex::new(Some(native_web_socket::constructor())))
 }
 
-/// Install the WebSocket factory used by the transport. `None` restores the default
-/// (`getWebSocketConstructor()` finds no `globalThis.WebSocket`).
+/// Override the native factory. `None` explicitly disables WebSocket IO (for embedders/tests).
 pub fn set_web_socket_constructor(constructor: Option<WebSocketConstructor>) {
     if let Ok(mut slot) = web_socket_constructor_slot().lock() {
         *slot = constructor;
@@ -1615,6 +1622,8 @@ pub struct CachedWebSocketConnection {
     /// `idleTimer?: ReturnType<typeof setTimeout>`
     pub idle_timer: Option<tokio::task::JoinHandle<()>>,
     pub continuation: Option<CachedWebSocketContinuationState>,
+    /// Reusing a session ID must not reuse another endpoint or account's connection.
+    connection_identity: String,
 }
 
 /// `export interface OpenAICodexWebSocketDebugStats`.
@@ -1823,10 +1832,10 @@ fn schedule_session_web_socket_expiry(session_id: &str, entry: &Arc<Mutex<Cached
             let entry = entry_for_timer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             close_web_socket_silently(&entry.socket, 1000, "idle_timeout");
         }
-        web_socket_session_cache()
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(&session_id);
+        let mut cache = web_socket_session_cache().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if cache.get(&session_id).map(|entry| Arc::ptr_eq(entry, &entry_for_timer)).unwrap_or(false) {
+            cache.remove(&session_id);
+        }
     });
     let mut entry = entry.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(previous) = entry.idle_timer.take() {
@@ -1896,28 +1905,45 @@ async fn connect_web_socket(
     socket.add_event_listener(WebSocketEventType::Error, on_error.clone());
     socket.add_event_listener(WebSocketEventType::Close, on_close.clone());
 
-    let abort_socket = socket.clone();
-    let abort_signal = signal.cloned();
-    let abort_task = abort_signal.as_ref().map(|signal| {
-        let signal = signal.clone();
-        let settle = settle.clone();
-        tokio::spawn(async move {
-            signal.cancelled().await;
-            settle(Err(CodexThrown::error("Request was aborted")));
-            close_web_socket_silently(&abort_socket, 1000, "aborted");
-        })
-    });
+    let listeners = SocketListenerGuard {
+        socket: socket.clone(),
+        listeners: vec![
+            (WebSocketEventType::Open, on_open),
+            (WebSocketEventType::Error, on_error),
+            (WebSocketEventType::Close, on_close),
+        ],
+        close_on_drop: true,
+    };
 
-    let result = receiver.recv().await.unwrap_or_else(|| Err(CodexThrown::error("WebSocket error")));
-
-    if let Some(abort_task) = abort_task {
-        abort_task.abort();
-    }
-    socket.remove_event_listener(WebSocketEventType::Open, &on_open);
-    socket.remove_event_listener(WebSocketEventType::Error, &on_error);
-    socket.remove_event_listener(WebSocketEventType::Close, &on_close);
+    let result = match signal {
+        Some(signal) => tokio::select! {
+            biased;
+            _ = signal.cancelled() => Err(CodexThrown::error("Request was aborted")),
+            result = receiver.recv() => result.unwrap_or_else(|| Err(CodexThrown::error("WebSocket error"))),
+        },
+        None => receiver.recv().await.unwrap_or_else(|| Err(CodexThrown::error("WebSocket error"))),
+    };
+    let mut listeners = listeners;
+    listeners.close_on_drop = result.is_err();
 
     result
+}
+
+struct SocketListenerGuard {
+    socket: Arc<dyn WebSocketLike>,
+    listeners: Vec<(WebSocketEventType, WebSocketListener)>,
+    close_on_drop: bool,
+}
+
+impl Drop for SocketListenerGuard {
+    fn drop(&mut self) {
+        for (kind, listener) in &self.listeners {
+            self.socket.remove_event_listener(*kind, listener);
+        }
+        if self.close_on_drop {
+            close_web_socket_silently(&self.socket, 1000, "aborted");
+        }
+    }
 }
 
 /// `extractWebSocketError(event)`.
@@ -1973,6 +1999,18 @@ struct AcquiredWebSocket {
     entry: Option<Arc<Mutex<CachedWebSocketConnection>>>,
     reused: bool,
     keep: bool,
+    session_id: Option<String>,
+    released: bool,
+}
+
+impl Drop for AcquiredWebSocket {
+    fn drop(&mut self) {
+        if !self.released {
+            self.keep = false;
+            let session_id = self.session_id.clone();
+            self.finish(session_id.as_deref());
+        }
+    }
 }
 
 impl AcquiredWebSocket {
@@ -1980,6 +2018,7 @@ impl AcquiredWebSocket {
     fn release(&mut self, session_id: Option<&str>, keep: bool) {
         self.keep = keep;
         self.finish(session_id);
+        self.released = true;
     }
 
     fn finish(&mut self, session_id: Option<&str>) {
@@ -2042,9 +2081,12 @@ async fn acquire_web_socket(
             entry: None,
             reused: false,
             keep: true,
+            session_id: None,
+            released: false,
         });
     };
 
+    let identity = format!("{:x}", Sha256::digest(serde_json::to_vec(&(url, headers)).unwrap_or_default()));
     let cached = web_socket_session_cache()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -2058,16 +2100,22 @@ async fn acquire_web_socket(
             }
         }
         let (busy, reusable, socket) = {
-            let entry = cached.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            (entry.busy, is_web_socket_reusable(&entry.socket), entry.socket.clone())
+            let mut entry = cached.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let busy = entry.busy;
+            let reusable = is_web_socket_reusable(&entry.socket) && entry.connection_identity == identity;
+            if !busy && reusable {
+                entry.busy = true;
+            }
+            (busy, reusable, entry.socket.clone())
         };
         if !busy && reusable {
-            cached.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).busy = true;
             return Ok(AcquiredWebSocket {
                 socket,
                 entry: Some(cached),
                 reused: true,
                 keep: true,
+                session_id: Some(session_id.to_string()),
+                released: false,
             });
         }
         if busy {
@@ -2077,6 +2125,8 @@ async fn acquire_web_socket(
                 entry: None,
                 reused: false,
                 keep: true,
+                session_id: Some(session_id.to_string()),
+                released: false,
             });
         }
         if !reusable {
@@ -2094,6 +2144,7 @@ async fn acquire_web_socket(
         busy: true,
         idle_timer: None,
         continuation: None,
+        connection_identity: identity,
     }));
     web_socket_session_cache()
         .lock()
@@ -2104,11 +2155,17 @@ async fn acquire_web_socket(
         entry: Some(entry),
         reused: false,
         keep: true,
+        session_id: Some(session_id.to_string()),
+        released: false,
     })
 }
 
 /// `decodeWebSocketData(data)`.
 pub async fn decode_web_socket_data(data: &Value) -> Option<String> {
+    decode_web_socket_data_sync(data)
+}
+
+fn decode_web_socket_data_sync(data: &Value) -> Option<String> {
     match data {
         Value::String(text) => Some(text.clone()),
         Value::Array(items) => {
@@ -2133,19 +2190,22 @@ pub fn parse_web_socket(
     socket: Arc<dyn WebSocketLike>,
     signal: Option<tokio_util::sync::CancellationToken>,
 ) -> Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>> {
+    let mut state = WebSocketParseState {
+        socket,
+        signal,
+        queue: VecDeque::new(),
+        done: false,
+        failed: None,
+        saw_completion: false,
+        wake: Arc::new(tokio::sync::Notify::new()),
+        state: Arc::new(Mutex::new(WebSocketParseShared::default())),
+        listeners: None,
+        finished: false,
+    };
+    // Native IO can reply on another thread before the first stream poll.
+    state.ensure_listeners();
     Box::pin(futures::stream::unfold(
-        WebSocketParseState {
-            socket,
-            signal,
-            queue: VecDeque::new(),
-            done: false,
-            failed: None,
-            saw_completion: false,
-            wake: Arc::new(tokio::sync::Notify::new()),
-            state: Arc::new(Mutex::new(WebSocketParseShared::default())),
-            listeners: None,
-            finished: false,
-        },
+        state,
         |mut state| async move {
             if state.finished {
                 return None;
@@ -2240,44 +2300,40 @@ impl WebSocketParseState {
         let wake = self.wake.clone();
 
         let on_message: WebSocketListener = Arc::new(move |event: Value| {
-            let state = state.clone();
-            let wake = wake.clone();
             let data = event.get("data").cloned().unwrap_or(Value::Null);
-            tokio::spawn(async move {
-                let Some(text) = decode_web_socket_data(&data).await else {
-                    return;
-                };
-                if text.is_empty() {
-                    return;
-                }
-                match serde_json::from_str::<Value>(&text) {
-                    Ok(parsed) => {
-                        let type_ = parsed.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
-                        let mut shared = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                        if type_ == "response.completed"
-                            || type_ == "response.done"
-                            || type_ == "response.incomplete"
-                        {
-                            shared.saw_completion = true;
-                            shared.done = true;
-                        }
-                        shared.queue.push_back(Ok(parsed));
-                        drop(shared);
-                        wake.notify_waiters();
-                    }
-                    Err(cause) => {
-                        let thrown = CodexThrown::protocol_error(
-                            format!("Invalid Codex WebSocket JSON: {}", cause),
-                            Some(Value::String(text)),
-                        );
-                        let mut shared = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                        shared.failed = Some(thrown);
+            let Some(text) = decode_web_socket_data_sync(&data) else {
+                return;
+            };
+            if text.is_empty() {
+                return;
+            }
+            match serde_json::from_str::<Value>(&text) {
+                Ok(parsed) => {
+                    let type_ = parsed.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let mut shared = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if type_ == "response.completed"
+                        || type_ == "response.done"
+                        || type_ == "response.incomplete"
+                    {
+                        shared.saw_completion = true;
                         shared.done = true;
-                        drop(shared);
-                        wake.notify_waiters();
                     }
+                    shared.queue.push_back(Ok(parsed));
+                    drop(shared);
+                    wake.notify_waiters();
                 }
-            });
+                Err(cause) => {
+                    let thrown = CodexThrown::protocol_error(
+                        format!("Invalid Codex WebSocket JSON: {}", cause),
+                        Some(Value::String(text)),
+                    );
+                    let mut shared = state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                    shared.failed = Some(thrown);
+                    shared.done = true;
+                    drop(shared);
+                    wake.notify_waiters();
+                }
+            }
         });
 
         let state_for_error = self.state.clone();
@@ -2285,7 +2341,9 @@ impl WebSocketParseState {
         let on_error: WebSocketListener = Arc::new(move |event: Value| {
             let thrown = extract_web_socket_error(&event);
             let mut shared = state_for_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            shared.failed = Some(thrown);
+            if !shared.saw_completion && shared.failed.is_none() {
+                shared.failed = Some(thrown);
+            }
             shared.done = true;
             drop(shared);
             wake_for_error.notify_waiters();
@@ -2479,8 +2537,7 @@ async fn process_web_socket_stream(
     let entry = acquired.entry.clone();
     let reused = acquired.reused;
     let mut keep_connection = true;
-    let use_cached_context = options.stream.transport.as_deref() == Some("websocket-cached")
-        || options.stream.transport.as_deref() == Some("auto");
+    let use_cached_context = matches!(options.stream.transport.as_deref(), None | Some("auto" | "websocket-cached"));
     // ChatGPT Codex Responses rejects `store: true` ("Store must be set to false").
     // WebSocket continuation still works via connection-scoped previous_response_id state.
     let full_body = body.clone();
@@ -2537,11 +2594,19 @@ async fn process_web_socket_stream(
     for (key, value) in request_body.iter() {
         request.insert(key.clone(), value.clone());
     }
-    socket.send(&serde_json::to_string(&Value::Object(request)).unwrap_or_default());
-
     let codex_error: Arc<Mutex<Option<CodexThrown>>> = Arc::new(Mutex::new(None));
+    let raw_events = parse_web_socket(socket.clone(), options.stream.signal.clone()).inspect({
+        let on_start = on_start.clone();
+        move |event| {
+            // Even an extension event is evidence that a request is in flight.
+            if event.is_ok() {
+                on_start();
+            }
+        }
+    });
+    socket.send(&serde_json::to_string(&Value::Object(request)).unwrap_or_default());
     let events: Pin<Box<dyn futures::Stream<Item = Value> + Send>> = map_codex_events(
-        parse_web_socket(socket.clone(), options.stream.signal.clone()),
+        raw_events,
         codex_error.clone(),
     );
     let started_events: Pin<Box<dyn futures::Stream<Item = Value> + Send>> =
@@ -3085,6 +3150,7 @@ mod tests {
             busy: false,
             idle_timer: None,
             continuation: None,
+            connection_identity: String::new(),
         };
         // No continuation: the full body is sent.
         assert_eq!(build_cached_web_socket_request_body(&mut entry, &body), body);
@@ -3129,6 +3195,7 @@ mod tests {
                 last_response_id: "resp_1".to_string(),
                 last_response_items: vec![json!({ "type": "message", "role": "assistant", "content": "hi" })],
             }),
+            connection_identity: String::new(),
         };
         let mut rewritten = body.clone();
         rewritten.insert(

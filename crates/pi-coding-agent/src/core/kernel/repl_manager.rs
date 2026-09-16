@@ -226,6 +226,11 @@ fn as_snapshot_performance_metadata(value: Option<&Value>) -> Option<SnapshotPer
 struct SnapshotMetricState {
     recorder: Arc<dyn PerformanceMetricRecorder>,
     started_at: Option<f64>,
+    timing: Arc<Mutex<SnapshotQueueTiming>>,
+}
+
+#[derive(Default)]
+struct SnapshotQueueTiming {
     dequeued_at: Option<f64>,
     following_cell_queued_at: Option<f64>,
 }
@@ -1884,8 +1889,9 @@ impl KernelState {
             // The tail still holds the predecessor: stamp it before replacing the slot.
             let mut tail = self.execution_queue_tail_snapshot_metric.lock().unwrap();
             if let Some(metric) = tail.as_mut() {
-                if metric.following_cell_queued_at.is_none() {
-                    metric.following_cell_queued_at = safe_metric_now(Some(&metric.recorder));
+                let mut timing = metric.timing.lock().unwrap();
+                if timing.following_cell_queued_at.is_none() {
+                    timing.following_cell_queued_at = safe_metric_now(Some(&metric.recorder));
                 }
             }
         }
@@ -1894,7 +1900,7 @@ impl KernelState {
         *self.execution_queue_tail_snapshot_metric.lock().unwrap() = snapshot_metric.clone();
         prev.wait().await;
         if let Some(metric) = snapshot_metric.as_mut() {
-            metric.dequeued_at = safe_metric_now(Some(&metric.recorder));
+            metric.timing.lock().unwrap().dequeued_at = safe_metric_now(Some(&metric.recorder));
         }
 
         let started = now_ms();
@@ -1961,9 +1967,7 @@ impl KernelState {
         // the slot so the repair's own restore can run, then requeue behind it.
         if self.protocol_repair_promise.lock().unwrap().is_some() && !opts.protocol_repair {
             let retried_snapshot_metric = snapshot_metric.clone();
-            if snapshot_metric.is_some() {
-                *self.execution_queue_tail_snapshot_metric.lock().unwrap() = None;
-            }
+            self.release_metric_tail(snapshot_metric);
             *snapshot_metric = None;
             slot.settle(Ok(()));
             self.wait_for_protocol_repair(&opts.signal).await;
@@ -2005,8 +2009,11 @@ impl KernelState {
     }
 
     fn release_metric_tail(&self, snapshot_metric: &Option<SnapshotMetricState>) {
-        if snapshot_metric.is_some() {
-            *self.execution_queue_tail_snapshot_metric.lock().unwrap() = None;
+        if let Some(metric) = snapshot_metric {
+            let mut tail = self.execution_queue_tail_snapshot_metric.lock().unwrap();
+            if tail.as_ref().is_some_and(|tail| Arc::ptr_eq(&tail.timing, &metric.timing)) {
+                *tail = None;
+            }
         }
     }
 
@@ -3073,7 +3080,11 @@ impl KernelState {
             return;
         };
         let ended_at = safe_metric_now(Some(&state.recorder));
-        let next_cell_start = match (state.following_cell_queued_at, state.dequeued_at) {
+        let (following_cell_queued_at, dequeued_at) = {
+            let timing = state.timing.lock().unwrap();
+            (timing.following_cell_queued_at, timing.dequeued_at)
+        };
+        let next_cell_start = match (following_cell_queued_at, dequeued_at) {
             (Some(queued), Some(dequeued)) => Some(queued.max(dequeued)),
             _ => None,
         };
@@ -3090,7 +3101,7 @@ impl KernelState {
                     "queue_ms",
                     crate::core::kernel::shared::elapsed_metric_ms(
                         state.started_at,
-                        state.dequeued_at,
+                        dequeued_at,
                     ),
                 ),
                 (
@@ -3131,8 +3142,9 @@ impl KernelState {
         let metric_state = recorder.map(|recorder| SnapshotMetricState {
             started_at: safe_metric_now(Some(&recorder)),
             recorder,
-            dequeued_at: None,
-            following_cell_queued_at: None,
+            // Queue bookkeeping and the final recorder must observe the same
+            // state, as they do with the shared object in the TypeScript runtime.
+            timing: Arc::new(Mutex::new(SnapshotQueueTiming::default())),
         });
         let mut metric_metadata: Option<SnapshotPerformanceMetadata> = None;
         let mut metric_outcome = PerformanceMetricOutcome::Failure;
@@ -3855,6 +3867,33 @@ fn snapshot_format_field(format: Option<KernelSnapshotFormat>) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn nine_kernel_shared_snapshot_timing_survives_older_release() {
+        struct Recorder;
+        impl PerformanceMetricRecorder for Recorder {
+            fn session_id(&self) -> &str { "private-metric-test" }
+            fn monotonic_now(&self) -> f64 { 1.0 }
+            fn record(&self, _: crate::core::kernel::shared::PerformanceMetricEvent) {}
+        }
+        let older = SnapshotMetricState {
+            recorder: Arc::new(Recorder), started_at: Some(0.0),
+            timing: Arc::new(Mutex::new(SnapshotQueueTiming::default())),
+        };
+        let queued = older.clone();
+        queued.timing.lock().unwrap().dequeued_at = Some(10.0);
+        queued.timing.lock().unwrap().following_cell_queued_at = Some(20.0);
+        assert_eq!(older.timing.lock().unwrap().dequeued_at, Some(10.0));
+        assert_eq!(older.timing.lock().unwrap().following_cell_queued_at, Some(20.0));
+        let newer = SnapshotMetricState { timing: Arc::new(Mutex::new(SnapshotQueueTiming::default())), ..older.clone() };
+        let manager = new_repl_kernel_manager(KernelManagerOptions::default());
+        *manager.state.execution_queue_tail_snapshot_metric.lock().unwrap() = Some(newer.clone());
+        manager.state.release_metric_tail(&Some(older));
+        assert!(manager.state.execution_queue_tail_snapshot_metric.lock().unwrap().as_ref()
+            .is_some_and(|tail| Arc::ptr_eq(&tail.timing, &newer.timing)));
+        manager.state.release_metric_tail(&Some(newer));
+        assert!(manager.state.execution_queue_tail_snapshot_metric.lock().unwrap().is_none());
+    }
 
     #[tokio::test]
     async fn first_execution_and_followup_reach_the_kernel_write() {
