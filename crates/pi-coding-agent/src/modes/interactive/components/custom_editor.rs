@@ -485,7 +485,7 @@ impl Component for CustomEditor {
         }
 
         // Check app keybindings first
-        if self.keybindings_match(data, "app.agents.back") {
+        if self.editor.get_text().is_empty() && self.keybindings_match(data, "app.agents.back") {
             if let Some(on_agents_back) = self.on_agents_back.as_mut() {
                 if on_agents_back() {
                     return;
@@ -756,6 +756,24 @@ mod tests {
         assert_eq!(keys[0], "ctrl+d");
         editor.handle_input("\x04");
         assert!(exited.get());
+    }
+
+    #[test]
+    fn left_edits_nonempty_prompt_instead_of_leaving_the_chat() {
+        init();
+        let mut editor = editor(CustomEditorOptions::default());
+        let back = Rc::new(std::cell::Cell::new(false));
+        let called = back.clone();
+        editor.on_agents_back = Some(Box::new(move || { called.set(true); true }));
+        editor.editor_mut().set_text("/hep");
+        editor.handle_input("\x1b[1;1D");
+        editor.handle_input("l");
+        editor.handle_input("\x1b[1;1C");
+        assert_eq!(editor.editor().get_text(), "/help");
+        assert!(!back.get());
+        editor.editor_mut().set_text("");
+        editor.handle_input("\x1b[1;1D");
+        assert!(back.get(), "empty-prompt navigation remains available");
     }
 
     #[test]

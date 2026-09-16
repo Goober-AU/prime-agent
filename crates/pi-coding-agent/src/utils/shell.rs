@@ -32,7 +32,8 @@ pub fn order_windows_bash_candidates(matches: &[String], system_root: Option<&st
 fn find_bash_on_path() -> Option<String> {
     if super::pi_user_agent::process_platform() == "win32" {
         // Windows: Use 'where' and verify file exists (where can return non-existent paths)
-        let result = spawn_sync_hidden(
+        // TS shell.ts:27: spawnSyncHidden(..., { timeout: 5000 }).
+        let result = crate::utils::child_process::spawn_sync_hidden_with_timeout(
             "where",
             &["bash.exe".to_string()],
             SpawnOptions {
@@ -40,6 +41,7 @@ fn find_bash_on_path() -> Option<String> {
                 capture_stderr: true,
                 ..Default::default()
             },
+            5000,
         );
         if let Ok(output) = result {
             if output.status.success() && !output.stdout.is_empty() {
@@ -62,7 +64,8 @@ fn find_bash_on_path() -> Option<String> {
     }
 
     // Unix: Use 'which' and trust its output (handles Termux and special filesystems)
-    let result = spawn_sync_hidden(
+    // TS shell.ts:44: spawnSyncHidden(..., { timeout: 5000 }).
+    let result = crate::utils::child_process::spawn_sync_hidden_with_timeout(
         "which",
         &["bash".to_string()],
         SpawnOptions {
@@ -70,6 +73,7 @@ fn find_bash_on_path() -> Option<String> {
             capture_stderr: true,
             ..Default::default()
         },
+        5000,
     );
     if let Ok(output) = result {
         if output.status.success() && !output.stdout.is_empty() {
@@ -310,10 +314,11 @@ pub fn kill_tracked_detached_children() {
 
 /// `recordOrphanProcessState` from core/orphan-process-journal.ts.
 ///
-/// That module belongs to another slice; until it exists this records the same
-/// call site so behaviour can be wired without changing the signature.
+/// Delegates to the journal module (same crate) so detached bash() children
+/// and autonomous spawns surface to the recovered supervisor's reaper, and a
+/// failed kill keeps its truthful active evidence.
 fn record_orphan_process_state(pid: i32, tracked: bool) {
-    let _ = (pid, tracked);
+    crate::core::orphan_process_journal::record_orphan_process_state(pid as i64, tracked);
 }
 
 /// Kill a process and all its children (cross-platform)

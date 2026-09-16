@@ -395,6 +395,13 @@ fn read_command_output(
 }
 
 fn home_dir() -> String {
+    // Node's os.homedir() honors USERPROFILE on Windows; dirs::home_dir()
+    // goes straight to the OS known-folder API. Keep explicit profile roots
+    // (including isolated installations) ahead of that existing fallback.
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return profile.to_string_lossy().into_owned();
+    }
     dirs::home_dir()
         .map(|path| path.to_string_lossy().to_string())
         .unwrap_or_default()

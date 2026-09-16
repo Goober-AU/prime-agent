@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::modes::telegram::store::{is_record, is_telegram_id, is_telegram_update_id, valid_bot_token};
 
@@ -67,6 +68,11 @@ pub struct TelegramUpdate {
     pub message: Option<Value>,
 }
 
+/// JavaScript `String.length`: the number of UTF-16 code units.
+pub fn utf16_len(text: &str) -> usize {
+    text.chars().map(char::len_utf16).sum()
+}
+
 /// `privateMessage(update)`.
 pub fn private_message(update: &Value) -> Option<TelegramMessage> {
     if !is_record(update) {
@@ -84,7 +90,8 @@ pub fn private_message(update: &Value) -> Option<TelegramMessage> {
     let text = message.get("text");
     let text_ok = match text {
         None => true,
-        Some(Value::String(text)) => text.chars().count() <= 16384,
+        // `text.length` in the reference counts UTF-16 code units, not code points.
+        Some(Value::String(text)) => utf16_len(text) <= 16384,
         Some(_) => false,
     };
     if chat.get("type").and_then(Value::as_str) != Some("private")
@@ -111,16 +118,66 @@ pub fn split_telegram_text(text: &str, limit: usize) -> Result<Vec<String>, Stri
     }
     let mut chunks: Vec<String> = Vec::new();
     let mut chunk = String::new();
+    let mut chunk_units = 0usize;
     for character in text.chars() {
-        if chunk.chars().count() + character.len_utf8() > limit {
+        // `chunk.length + character.length` in the reference: both are UTF-16 code units.
+        let character_units = character.len_utf16();
+        if chunk_units + character_units > limit {
             chunks.push(std::mem::take(&mut chunk));
+            chunk_units = 0;
         }
         chunk.push(character);
+        chunk_units += character_units;
     }
     if !chunk.is_empty() {
         chunks.push(chunk);
     }
     Ok(chunks)
+}
+
+/// The `signal?: AbortSignal` argument of every `TelegramApi` request.
+///
+/// The port modelled the reference's optional signal as a boolean ("this request
+/// carries a signal", which selects the longer signalled timeout). Keeping that
+/// form convertible means every existing call site still reads the same while a
+/// real `CancellationToken` — which can actually abort the in-flight request — is
+/// accepted alongside it.
+#[derive(Debug, Clone, Default)]
+pub struct TelegramSignal(Option<CancellationToken>);
+
+impl TelegramSignal {
+    /// `AbortSignal.timeout(hasSignal ? 40_000 : 15_000)`.
+    pub fn timeout_ms(&self) -> u64 {
+        if self.0.is_some() {
+            TELEGRAM_SIGNALLED_REQUEST_TIMEOUT_MS
+        } else {
+            TELEGRAM_REQUEST_TIMEOUT_MS
+        }
+    }
+
+    /// The abort handle, when a real one was supplied.
+    pub fn token(&self) -> Option<&CancellationToken> {
+        self.0.as_ref()
+    }
+}
+
+impl From<bool> for TelegramSignal {
+    /// `true`: the reference passes a signal that is never aborted in this call.
+    fn from(has_signal: bool) -> Self {
+        Self(has_signal.then(CancellationToken::new))
+    }
+}
+
+impl From<Option<CancellationToken>> for TelegramSignal {
+    fn from(token: Option<CancellationToken>) -> Self {
+        Self(token)
+    }
+}
+
+impl From<CancellationToken> for TelegramSignal {
+    fn from(token: CancellationToken) -> Self {
+        Self(Some(token))
+    }
 }
 
 /// The HTTP surface `TelegramApi.call` uses.
@@ -129,6 +186,9 @@ pub fn split_telegram_text(text: &str, limit: usize) -> Result<Vec<String>, Stri
 /// request the TypeScript issues (POST, JSON body, response bytes).
 pub trait TelegramFetcher: Send + Sync {
     /// `fetcher(url, { method, headers, body, signal })`.
+    ///
+    /// The request is raced against its `AbortSignal` by the caller, so a cancelled
+    /// request drops this future — the same effect as the reference's aborted fetch.
     fn fetch(
         &self,
         url: String,
@@ -183,19 +243,28 @@ impl TelegramApi {
         &self,
         method: &str,
         body: Value,
-        has_signal: bool,
+        signal: impl Into<TelegramSignal>,
     ) -> Result<Value, TelegramCallError> {
+        let signal = signal.into();
+        let token = signal.token().cloned();
         let url = format!("{}/bot{}/{}", self.base_url, self.token, method);
         let body_text = serde_json::to_string(&body).unwrap_or_else(|_| "{}".to_string());
-        let timeout_ms = if has_signal {
-            TELEGRAM_SIGNALLED_REQUEST_TIMEOUT_MS
-        } else {
-            TELEGRAM_REQUEST_TIMEOUT_MS
-        };
-        let response = match self.fetcher.fetch(url, body_text, timeout_ms).await {
+        let timeout_ms = signal.timeout_ms();
+        let request = self.fetcher.fetch(url, body_text, timeout_ms);
+        let response = match match token.as_ref() {
+            // `AbortSignal.any([signal, AbortSignal.timeout(...)])`: an abort ends the
+            // in-flight request instead of waiting for the transport timeout.
+            Some(token) => tokio::select! {
+                result = request => result,
+                _ = token.cancelled() => return Err(TelegramCallError::Aborted),
+            },
+            None => request.await,
+        } {
             Ok(response) => response,
             Err(_) => {
-                if has_signal {
+                // `if (signal?.aborted) throw signal.reason`: only an actual abort is
+                // reported as an abort. Everything else keeps the connectivity wording.
+                if token.as_ref().is_some_and(CancellationToken::is_cancelled) {
                     return Err(TelegramCallError::Aborted);
                 }
                 return Err(TelegramCallError::Error(
@@ -230,8 +299,8 @@ impl TelegramApi {
     }
 
     /// `identify(signal)`.
-    pub async fn identify(&self, has_signal: bool) -> Result<TelegramBotIdentity, TelegramCallError> {
-        let result = self.call("getMe", Value::Object(Default::default()), has_signal).await?;
+    pub async fn identify(&self, signal: impl Into<TelegramSignal>) -> Result<TelegramBotIdentity, TelegramCallError> {
+        let result = self.call("getMe", Value::Object(Default::default()), signal).await?;
         static USERNAME: once_cell::sync::Lazy<regex::Regex> =
             once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[A-Za-z0-9_]{1,64}$").expect("static regex"));
         let id = result.get("id").cloned().unwrap_or(Value::Null);
@@ -251,9 +320,9 @@ impl TelegramApi {
     }
 
     /// `requirePolling(signal)`.
-    pub async fn require_polling(&self, has_signal: bool) -> Result<(), TelegramCallError> {
+    pub async fn require_polling(&self, signal: impl Into<TelegramSignal>) -> Result<(), TelegramCallError> {
         let result = self
-            .call("getWebhookInfo", Value::Object(Default::default()), has_signal)
+            .call("getWebhookInfo", Value::Object(Default::default()), signal)
             .await?;
         let Some(url) = result.get("url").and_then(Value::as_str) else {
             return Err(TelegramCallError::Error(
@@ -270,7 +339,7 @@ impl TelegramApi {
     }
 
     /// `updates(offset, signal)`.
-    pub async fn updates(&self, offset: f64, has_signal: bool) -> Result<Vec<TelegramUpdate>, TelegramCallError> {
+    pub async fn updates(&self, offset: f64, signal: impl Into<TelegramSignal>) -> Result<Vec<TelegramUpdate>, TelegramCallError> {
         let result = self
             .call(
                 "getUpdates",
@@ -280,7 +349,7 @@ impl TelegramApi {
                     "limit": 50,
                     "allowed_updates": ["message"],
                 }),
-                has_signal,
+                signal,
             )
             .await?;
         let Some(updates) = result.as_array() else {
@@ -303,7 +372,12 @@ impl TelegramApi {
     }
 
     /// `send(chatId, text, signal)`.
-    pub async fn send(&self, chat_id: f64, text: &str, has_signal: bool) -> Result<(), TelegramCallError> {
+    pub async fn send(
+        &self,
+        chat_id: f64,
+        text: &str,
+        signal: impl Into<TelegramSignal>,
+    ) -> Result<(), TelegramCallError> {
         self.call(
             "sendMessage",
             serde_json::json!({
@@ -311,7 +385,7 @@ impl TelegramApi {
                 "text": text,
                 "link_preview_options": { "is_disabled": true },
             }),
-            has_signal,
+            signal,
         )
         .await
         .map(|_| ())

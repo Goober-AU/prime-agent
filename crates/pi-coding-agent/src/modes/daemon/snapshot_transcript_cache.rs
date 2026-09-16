@@ -381,7 +381,13 @@ impl SnapshotTranscriptCache {
             index
         );
         let line = format!("{prefix}{}]}}\n", serialized_messages.join(","));
-        let _ = self.store_chunk(line.into_bytes());
+        // TS storeChunk throws through the constructor, so a failed spill can never
+        // leave complete() true. The Rust constructor stays non-throwing for API
+        // compatibility, but it must record the spill failure (complete() -> false)
+        // instead of silently losing chunks behind a false complete snapshot.
+        if let Err(error) = self.store_chunk(line.into_bytes()) {
+            self.mark_failed(&error);
+        }
         serialized_messages.clear();
         *serialized_bytes = 0;
     }
@@ -716,5 +722,111 @@ mod tests {
         assert_eq!(cache.wait_for_chunk(0).await.expect_err("fails"), "boom");
         assert!(!cache.complete());
         assert!(cache.append_encoded_chunk(b"x".to_vec()).is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod t17_controls_tests {
+    //! T17 owner 'controls': G-26 - a constructor-time spill failure must be
+    //! recorded, not reported as a complete snapshot. The TS storeChunk throws
+    //! through the constructor (packages/coding-agent/src/.../snapshot-transcript-cache.ts),
+    //! so `complete()` can never be true while chunks are missing. The Rust port
+    //! stays non-throwing for API compatibility, but `flush_messages` swallowed
+    //! `store_chunk` errors, so a failed spill left `failure` empty and
+    //! `completed` true.
+
+    use super::*;
+    use pi_ai::types::{AssistantMessage, ContentBlock, Message, TextContent, Usage};
+
+    fn text_message(text: &str) -> AgentMessage {
+        AgentMessage::Message(Message::Assistant(AssistantMessage {
+            role: "assistant".to_string(),
+            content: vec![ContentBlock::Text(TextContent {
+                type_: pi_ai::types::TEXT_CONTENT_TYPE.to_string(),
+                text: text.to_string(),
+                text_signature: None,
+            })],
+            api: "openai-completions".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt".to_string(),
+            response_model: None,
+            response_id: None,
+            diagnostics: None,
+            usage: Usage::default(),
+            stop_reason: "stop".to_string(),
+            stop_reason_raw: None,
+            error_message: None,
+            timestamp: 0,
+        }))
+    }
+
+    /// A unique directory under the system temp dir (ephemeral; no production state).
+    fn unique_temp_dir(tag: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "t17-g26-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&path).expect("temp dir must be creatable");
+        path.to_string_lossy().to_string()
+    }
+
+    /// G-26 reproduction: cache_root is an existing FILE, so the spill's
+    /// `create_private_directory` fails; `memory_cache_bytes: Some(0)` forces the
+    /// spill on the first chunk. Baseline expectation: FAIL
+    /// (`complete()` returned true while `chunk_count()` was 0).
+    #[test]
+    fn t17_g26_failed_spill_is_not_reported_complete() {
+        let file_root = std::env::temp_dir().join(format!(
+            "t17-g26-file-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&file_root, b"").expect("the fixture root must be writable as a file");
+        let cache = SnapshotTranscriptCache::new(SnapshotTranscriptCacheOptions {
+            active_session_id: "active-1".to_string(),
+            snapshot_id: "snap/1".to_string(),
+            messages: Some(vec![text_message("one"), text_message("two")]),
+            cache_root: file_root.to_string_lossy().to_string(),
+            target_chunk_bytes: None,
+            memory_cache_bytes: Some(0),
+        });
+        assert_eq!(cache.chunk_count(), 0, "the spill must have failed for a file root");
+        assert!(
+            !cache.complete(),
+            "a snapshot whose spill failed must not be reported complete (TS storeChunk throws through the constructor)"
+        );
+        // The failure must be visible to readers, not just complete().
+        let read = cache.read_chunk(0);
+        assert!(read.is_err(), "no chunk was stored, so reads must error; got {read:?}");
+    }
+
+    /// Guard control (must stay green in baseline AND candidate): a healthy
+    /// spill must keep producing a complete, file-backed snapshot.
+    #[test]
+    fn t17_g26_healthy_spill_stays_complete() {
+        let cache_root = unique_temp_dir("healthy");
+        let cache = SnapshotTranscriptCache::new(SnapshotTranscriptCacheOptions {
+            active_session_id: "active-1".to_string(),
+            snapshot_id: "snap-healthy".to_string(),
+            messages: Some(vec![text_message("one"), text_message("two")]),
+            cache_root,
+            target_chunk_bytes: None,
+            memory_cache_bytes: Some(0),
+        });
+        assert!(cache.complete(), "a healthy spill must stay complete");
+        assert!(cache.file_backed(), "the chunks must have spilled to disk");
+        assert!(cache.chunk_count() >= 1);
+        let chunk = cache.read_chunk(0).expect("the stored chunk must be readable");
+        assert!(String::from_utf8_lossy(&chunk).starts_with("{\"type\":\"session_snapshot_chunk\""));
+        assert!(String::from_utf8_lossy(&chunk).contains("\"messages\":["));
     }
 }

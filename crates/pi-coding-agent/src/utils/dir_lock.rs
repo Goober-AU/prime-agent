@@ -28,9 +28,9 @@ impl DirLockAttempt {
 const CANDIDATE_SWEEP_AGE_MS: u128 = 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct StatIdentity {
-    dev: u64,
-    ino: u64,
+pub(crate) struct StatIdentity {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
     is_dir: bool,
 }
 
@@ -76,13 +76,13 @@ fn sweep_abandoned_candidates(lock_path: &str) {
 }
 
 /// Node's `statSync(path, { bigint: true })` identity plus the directory flag.
-fn stat_identity(path: &Path) -> Option<StatIdentity> {
+pub(crate) fn stat_identity(path: &Path) -> Option<StatIdentity> {
     let file = open_lock(path).ok()?;
     file_identity(&file)
 }
 
 #[cfg(unix)]
-fn file_identity(file: &std::fs::File) -> Option<StatIdentity> {
+pub(crate) fn file_identity(file: &std::fs::File) -> Option<StatIdentity> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata().ok()?;
     Some(StatIdentity {
@@ -93,7 +93,7 @@ fn file_identity(file: &std::fs::File) -> Option<StatIdentity> {
 }
 
 #[cfg(windows)]
-fn file_identity(file: &std::fs::File) -> Option<StatIdentity> {
+pub(crate) fn file_identity(file: &std::fs::File) -> Option<StatIdentity> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
@@ -110,7 +110,7 @@ fn file_identity(file: &std::fs::File) -> Option<StatIdentity> {
     })
 }
 
-fn open_lock(path: &Path) -> std::io::Result<std::fs::File> {
+pub(crate) fn open_lock(path: &Path) -> std::io::Result<std::fs::File> {
     if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(std::io::Error::other(
             "Refusing to reclaim a symbolic link as a lock",

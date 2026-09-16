@@ -129,10 +129,52 @@ impl Component for ThinkingSelectorComponent {
     }
 
     fn handle_input(&mut self, data: &str) {
-        Component::handle_input(&mut self.container, data);
+        // Container only lays out its children; its default input handler is a
+        // no-op. The focus owner must forward keys to the actual selectable list.
+        self.select_list.borrow_mut().handle_input(data);
     }
 
     fn invalidate(&mut self) {
         Component::invalidate(&mut self.container);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn effort_menu_accepts_navigation_and_selection() {
+        crate::modes::interactive::theme::theme::init_theme(Some("dark"), false);
+        let selected = Rc::new(Cell::new(None));
+        let output = selected.clone();
+        let mut picker = ThinkingSelectorComponent::new(
+            ThinkingLevel::High,
+            &[ThinkingLevel::Low, ThinkingLevel::Medium, ThinkingLevel::High,
+              ThinkingLevel::Xhigh, ThinkingLevel::Max],
+            Box::new(move |value| output.set(Some(value))),
+            Box::new(|| panic!("selection must not cancel")),
+        );
+        assert!(picker.render(80.0).join("\n").contains("xhigh"));
+        picker.handle_input("\x1b[B");
+        picker.handle_input("\r");
+        assert_eq!(selected.get(), Some(ThinkingLevel::Xhigh));
+        picker.handle_input("\x1b[A");
+        picker.handle_input("\r");
+        assert_eq!(selected.get(), Some(ThinkingLevel::High));
+    }
+
+    #[test]
+    fn effort_menu_escape_cancels_without_changing_level() {
+        let cancelled = Rc::new(Cell::new(false));
+        let output = cancelled.clone();
+        let mut picker = ThinkingSelectorComponent::new(
+            ThinkingLevel::Max, &[ThinkingLevel::Low, ThinkingLevel::High, ThinkingLevel::Max],
+            Box::new(|_| panic!("cancel must not select")),
+            Box::new(move || output.set(true)),
+        );
+        picker.handle_input("\x1b");
+        assert!(cancelled.get());
     }
 }

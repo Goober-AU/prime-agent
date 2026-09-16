@@ -59,7 +59,7 @@ impl Bar {
         if let (Some(values), Some(state)) = (summaries, &mode.connection_state) {
             let rows: Vec<crate::modes::daemon::daemon_session_list::SessionSummary> = values
                 .into_iter()
-                .filter_map(|row| serde_json::from_value(row).ok())
+                .filter_map(|row| serde_json::from_value(crate::modes::agents_view::native_wire::normalize_browser_numbers(row)).ok())
                 .collect();
             if rows.iter().any(|row| row.session_id == state.session_id) {
                 return count_roster_subagent_statuses(
@@ -72,15 +72,17 @@ impl Bar {
                 );
             }
         }
-        let children: Vec<_> = mode.subagent_snapshots.values().cloned().collect();
-        let counts =
-            super::super::count_direct_subagent_statuses(&children, mode.rlm_node_id.as_deref());
-        SubagentSummaryCounts {
-            total: counts.total,
-            running: counts.running,
-            idle: counts.idle,
-            inactive: counts.inactive,
-        }
+        let children: Vec<wire::AgentConnectionRlmChildAgentSnapshot> = mode.subagent_snapshots.values().map(|child| {
+            wire::AgentConnectionRlmChildAgentSnapshot {
+                id: child.id.clone(), parent_id: child.parent_id.clone(),
+                active_session_id: child.active_session_id.clone(), status: child.status.clone(),
+                activity: child.activity.as_ref().map(|kind| wire::AgentConnectionRlmChildAgentActivity { kind: kind.clone(), ..Default::default() }),
+                ..Default::default()
+            }
+        }).collect();
+        crate::modes::interactive::components::subagent_summary_line::count_direct_subagent_statuses(
+            &children, mode.rlm_node_id.as_deref(),
+        )
     }
 
     /// Returns true when the tray consumed input; all other input stays in chat.

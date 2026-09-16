@@ -104,7 +104,7 @@ pub fn telegram_help() -> String {
             .to_string(),
     );
     lines.push(
-        "Terminal display, login, package, and update commands stay in the Prime terminal. Text messages are queued as follow-ups while Prime is working."
+        "Terminal display, login, package, and update commands stay in the Prime terminal. Text messages steer the current turn while Prime is working and start a new turn when idle."
             .to_string(),
     );
     lines.join("\n")
@@ -734,7 +734,7 @@ mod tests {
         let help = telegram_help();
         assert!(help.starts_with("Prime in Telegram\n\n/help \u{2014} "));
         assert!(help.contains("/stop \u{2014} "));
-        assert!(help.ends_with("Text messages are queued as follow-ups while Prime is working."));
+        assert!(help.ends_with("Text messages steer the current turn while Prime is working and start a new turn when idle."));
     }
 
     #[test]

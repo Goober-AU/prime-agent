@@ -516,6 +516,12 @@ impl IpythonKernelProvisioner {
         })
     }
 
+    /// Test-only view of the last recorded restore result (the revive path).
+    #[doc(hidden)]
+    pub fn last_restore_for_tests(&self) -> Option<crate::core::kernel::state_snapshot::RestoreResult> {
+        self.last_restore.lock().expect("last restore lock").clone()
+    }
+
     /// The kernel manager, once a startup has completed successfully.
     pub fn manager(&self) -> Option<Arc<dyn KernelClient>> {
         self.started_manager.lock().expect("started manager lock").clone()
@@ -592,6 +598,10 @@ impl IpythonKernelProvisioner {
         // in-flight startKernel before it spawns, so a disposed session's boot
         // doesn't waste a slot during a fan-out.
         self.dispose_controller.abort(None);
+        // A replacement may never start, but still owns the old kernel's shutdown.
+        if let Some(ready_gate) = self.options.as_ref().and_then(|options| options.ready_gate.clone()) {
+            ready_gate().await;
+        }
         let pending = self.manager_promise.lock().expect("manager promise lock").take();
         *self.started_manager.lock().expect("started manager lock") = None;
         let Some(pending) = pending else {
@@ -602,6 +612,16 @@ impl IpythonKernelProvisioner {
             let snapshot = *self.dispose_snapshot.lock().expect("dispose snapshot lock");
             let _ = manager.shutdown(snapshot, true).await;
         }
+    }
+
+    /// Begin disposal immediately, while allowing every replacement to await the same flush.
+    pub(crate) fn replacement_ready_gate(
+        self: &Arc<Self>,
+    ) -> Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync> {
+        let previous = self.clone();
+        let disposal = async move { previous.dispose(None).await }.boxed().shared();
+        tokio::spawn(disposal.clone());
+        Arc::new(move || disposal.clone().boxed())
     }
 
     pub async fn kill(&self) {
@@ -947,9 +967,11 @@ async fn choose_busy_kernel_action(ctx: Option<&ExtensionContext>, signal: Optio
     if !ctx.has_ui {
         return "cancel";
     }
-    let choice = ctx
-        .ui
-        .select(
+    // TS passes the tool signal into `ui.select` (ipython.ts:616-618): abort
+    // closes the dialog, the selection resolves to cancel, and the loop keeps
+    // the original busy error. A stale selection never resumes the loop.
+    let open_dialog = || {
+        ctx.ui.select(
             BUSY_KERNEL_PROMPT.to_string(),
             vec![
                 BUSY_KERNEL_WAIT_CHOICE.to_string(),
@@ -960,8 +982,17 @@ async fn choose_busy_kernel_action(ctx: Option<&ExtensionContext>, signal: Optio
                 timeout: None,
             },
         )
-        .await;
-    let _ = signal;
+    };
+    let choice = match signal.as_ref() {
+        Some(signal) if signal.is_aborted() => None,
+        Some(signal) => {
+            tokio::select! {
+                choice = open_dialog() => choice,
+                _ = signal.wait() => None,
+            }
+        }
+        None => open_dialog().await,
+    };
     match choice.as_deref() {
         Some(choice) if choice == BUSY_KERNEL_WAIT_CHOICE => "wait",
         Some(choice) if choice == BUSY_KERNEL_KILL_CHOICE => "kill",
@@ -1398,7 +1429,26 @@ impl KernelClient for ReplKernelClient {
     }
 }
 
-fn default_kernel_client_factory() -> KernelClientFactory {
+static KERNEL_CLIENT_FACTORY_OVERRIDE: Mutex<Option<KernelClientFactory>> = Mutex::new(None);
+
+/// Test-only seam: replace the default kernel client factory so tests can drive
+/// the real provisioner with a recording fake kernel. `None` restores the
+/// native factory (the port of `newReplKernelManager`).
+#[doc(hidden)]
+pub fn set_kernel_client_factory_override(factory: Option<KernelClientFactory>) {
+    *KERNEL_CLIENT_FACTORY_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = factory;
+}
+
+pub(crate) fn default_kernel_client_factory() -> KernelClientFactory {
+    if let Some(factory) = KERNEL_CLIENT_FACTORY_OVERRIDE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return factory;
+    }
     Arc::new(|options: KernelManagerOptions| -> Arc<dyn KernelClient> {
         Arc::new(ReplKernelClient {
             manager: crate::core::kernel::repl_manager::new_repl_kernel_manager(options),
@@ -1816,6 +1866,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replacement_disposes_previous_without_starting_new_kernel() {
+        let previous = provisioner_with(Arc::new(StubKernelClient));
+        previous.ensure(None, None).await.expect("old kernel started");
+        assert!(previous.has_running_kernel());
+        let ready_gate = previous.replacement_ready_gate();
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !previous.dispose_controller.is_aborted() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("reload must dispose the previous kernel without another tool call");
+        tokio::time::timeout(std::time::Duration::from_secs(2), ready_gate())
+            .await
+            .expect("old kernel flush finished");
+        assert!(!previous.has_running_kernel());
+        assert!(previous.manager_promise.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn unstarted_replacement_dispose_waits_for_previous_flush() {
+        let (release, receiver) = tokio::sync::watch::channel(false);
+        let replacement = IpythonKernelProvisioner::new(
+            "/tmp",
+            Some(IpythonToolOptions {
+                ready_gate: Some(Arc::new(move || {
+                    let mut receiver = receiver.clone();
+                    Box::pin(async move {
+                        receiver.wait_for(|released| *released).await.expect("flush released");
+                    })
+                })),
+                ..Default::default()
+            }),
+            Arc::new(|_| panic!("disposing an unused replacement must not start a kernel")),
+        );
+        let disposal = replacement.dispose(None);
+        tokio::pin!(disposal);
+        tokio::select! {
+            _ = &mut disposal => panic!("dispose returned before the previous snapshot flush"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+        }
+        release.send(true).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), disposal)
+            .await
+            .expect("dispose must finish after the previous snapshot flush");
+        assert!(replacement.manager_promise.lock().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn default_kernel_factory_constructs_a_lazy_real_manager() {
         let directory = tempfile::tempdir().unwrap();
         let manager = default_kernel_client_factory()(KernelManagerOptions {
@@ -2040,5 +2140,88 @@ mod tests {
         if !cfg!(windows) {
             assert!(resolve_kernel_bash_shell(None).is_some());
         }
+    }
+
+    /// G2-08: the busy-kernel dialog must honor the tool abort signal (TS
+    /// ipython.ts:616-618 passes the signal; abort closes the dialog and the
+    /// loop keeps the original error). A stale selection must not resume the
+    /// abandoned loop.
+    #[tokio::test]
+    async fn busy_dialog_abort_cancels_prompt_and_stays_cancelled() {
+        use super::super::{ExtensionUiContext, ExtensionUiDialogOptions};
+        use std::time::Duration;
+
+        let signal = AbortSignal::new();
+        let ctx = ExtensionContext {
+            has_ui: true,
+            cwd: String::new(),
+            ui: ExtensionUiContext {
+                select: Some(Arc::new(
+                    |_title: String, _options: Vec<String>, _opts: ExtensionUiDialogOptions| {
+                        Box::pin(async move {
+                            // A real user is still deciding; only the abort may end this.
+                            futures::future::pending::<Option<String>>().await
+                        }) as BoxFuture<'static, Option<String>>
+                    },
+                )),
+                ..Default::default()
+            },
+        };
+        let ctx_ref = &ctx;
+        let action = tokio::time::timeout(Duration::from_secs(10), async {
+            let fut = choose_busy_kernel_action(Some(ctx_ref), Some(signal.clone()));
+            tokio::pin!(fut);
+            tokio::select! {
+                action = &mut fut => panic!("dialog resolved without the abort: {action}"),
+                _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+            }
+            signal.abort(None);
+            fut.await
+        })
+        .await
+        .expect("busy dialog did not close on abort: the kernel dialog ignores the signal");
+        assert_eq!(action, "cancel", "abort must cancel the busy prompt");
+    }
+
+    /// Negative controls: a real selection still resolves wait/kill, and an
+    /// already-aborted signal cancels without opening a dialog.
+    #[tokio::test]
+    async fn busy_dialog_selections_still_resolve_and_preflight_abort_cancels() {
+        use super::super::{ExtensionUiContext, ExtensionUiDialogOptions};
+        use std::time::Duration;
+
+        for (choice, expected) in [
+            (BUSY_KERNEL_WAIT_CHOICE.to_string(), "wait"),
+            (BUSY_KERNEL_KILL_CHOICE.to_string(), "kill"),
+        ] {
+            let ctx = ExtensionContext {
+                has_ui: true,
+                cwd: String::new(),
+                ui: ExtensionUiContext {
+                    select: Some(Arc::new({
+                        let choice = choice.clone();
+                        move |_title: String, _options: Vec<String>, _opts: ExtensionUiDialogOptions| {
+                            let choice = choice.clone();
+                            Box::pin(async move { Some(choice) }) as BoxFuture<'static, Option<String>>
+                        }
+                    })),
+                    ..Default::default()
+                },
+            };
+            let action = choose_busy_kernel_action(Some(&ctx), None).await;
+            assert_eq!(action, expected, "selection {choice} must resolve {expected}");
+        }
+
+        let signal = AbortSignal::new();
+        signal.abort(None);
+        let ctx = ExtensionContext {
+            has_ui: true,
+            cwd: String::new(),
+            ui: ExtensionUiContext::default(),
+        };
+        let action = tokio::time::timeout(Duration::from_secs(2), choose_busy_kernel_action(Some(&ctx), Some(signal.clone())))
+            .await
+            .expect("preflight abort must not hang");
+        assert_eq!(action, "cancel");
     }
 }

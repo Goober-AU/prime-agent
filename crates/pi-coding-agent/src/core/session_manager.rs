@@ -329,35 +329,15 @@ pub fn clone_usage(usage: &Usage) -> Usage {
 // PRIVATE stand-in: config.ts
 // ---------------------------------------------------------------------------
 
+// Session paths follow the user-config contract (config.ts getAgentDir /
+// getSessionsDir): PRIME_AGENT_* env names with tilde expansion, PRIME_AGENT
+// precedence over the legacy alias, default <home>/.prime/agent.
 fn get_default_agent_dir() -> String {
-    if let Ok(env_dir) = std::env::var("PI_CODING_AGENT_DIR") {
-        if !env_dir.is_empty() {
-            return env_dir;
-        }
-    }
-    dirs::home_dir()
-        .unwrap_or_default()
-        .join(".prime/agent")
-        .to_string_lossy()
-        .to_string()
+    crate::config::get_agent_dir()
 }
 
 fn get_sessions_dir(agent_dir: &str) -> String {
-    let override_dir = std::env::var("PI_SESSION_DIR")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            std::env::var("PI_CODING_AGENT_SESSION_DIR")
-                .ok()
-                .filter(|value| !value.is_empty())
-        });
-    match override_dir {
-        Some(dir) => dir,
-        None => Path::new(agent_dir)
-            .join("sessions")
-            .to_string_lossy()
-            .to_string(),
-    }
+    crate::config::get_sessions_dir(Some(agent_dir))
 }
 
 // ---------------------------------------------------------------------------
@@ -590,9 +570,11 @@ fn inline_tool_text_reference(message: &Map<String, Value>, value: &str) -> Opti
     };
     for content_index in 0..content_count {
         let text = tool_result_content_text(message, content_index);
+        // TypeScript stores start/length in UTF-16 code units (JS string
+        // indices), not bytes and not chars (session-manager.ts:300-308).
         let start = match &text {
             Some(text) => match text.find(value) {
-                Some(index) => index as i64,
+                Some(index) => text[..index].encode_utf16().count() as i64,
                 None => continue,
             },
             None => continue,
@@ -603,7 +585,7 @@ fn inline_tool_text_reference(message: &Map<String, Value>, value: &str) -> Opti
                 "source": "content",
                 "contentIndex": content_index,
                 "start": start,
-                "length": value.chars().count(),
+                "length": value.encode_utf16().count(),
                 "sha256": sha256_text(value),
             }
         });
@@ -721,11 +703,12 @@ fn decode_inline_tool_text_reference(
         return None;
     }
     let source = tool_result_content_text(message, content_index)?;
-    let source_chars: Vec<char> = source.chars().collect();
-    if length > source_chars.len() || start > source_chars.len() - length {
+    // TS slices the source by UTF-16 code units (session-manager.ts:395-399).
+    let source_units: Vec<u16> = source.encode_utf16().collect();
+    if length > source_units.len() || start > source_units.len() - length {
         return None;
     }
-    let decoded: String = source_chars[start..start + length].iter().collect();
+    let decoded: String = String::from_utf16_lossy(&source_units[start..start + length]);
     if sha256_text(&decoded) == sha {
         Some(decoded)
     } else {
@@ -881,7 +864,7 @@ fn compaction_matches_target(
     }
 }
 
-fn iso_to_millis(timestamp: &str) -> f64 {
+pub fn iso_to_millis(timestamp: &str) -> f64 {
     match chrono::DateTime::parse_from_rfc3339(timestamp) {
         Ok(parsed) => parsed.timestamp_millis() as f64,
         Err(_) => f64::NAN,
@@ -1232,9 +1215,10 @@ pub fn build_session_context_with_entry_ids(
                         .get("customInstructions")
                         .and_then(Value::as_str)
                         .map(str::to_string),
-                    compaction
-                        .get("retainedMessageCount")
-                        .and_then(Value::as_f64),
+                    // TS derives the boundary from retainedMessages.length at read
+                    // time (session-manager.ts:766); the entry field is never written
+                    // by TS writers, so reading it always fell back to the timestamp.
+                    Some(retained_messages.len() as f64),
                     provider_context,
                     compaction
                         .get("harnessDigest")
@@ -2010,8 +1994,34 @@ pub fn find_most_recent_session(session_dir: &str) -> Option<String> {
         .map(|(path, _)| path)
 }
 
+// TS normalizeCwd resolves through path.resolve, which lexically collapses
+// dot segments and trailing separators (session-manager.ts:1169-1171); a
+// recorded '../' cwd must match the plain query.
 fn normalize_cwd(cwd: &str) -> String {
-    resolve_path(cwd)
+    lexical_resolve(cwd)
+}
+
+fn lexical_resolve(path: &str) -> String {
+    let candidate = PathBuf::from(path);
+    let base = if candidate.is_absolute() {
+        candidate
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(&candidate),
+            Err(_) => candidate,
+        }
+    };
+    let mut result = PathBuf::new();
+    for component in base.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => result.push(other.as_os_str()),
+        }
+    }
+    result.to_string_lossy().to_string()
 }
 
 fn session_info_matches_cwd(session: &SessionInfo, cwd: &str) -> bool {
@@ -2309,14 +2319,13 @@ fn advance_scan_tail(tail: &[u8], line: &[u8]) -> Vec<u8> {
 }
 
 async fn scan_session_info(file_path: &str, retry_on_replacement: bool) -> Option<SessionInfo> {
-    let stats = match std::fs::metadata(file_path) {
+    let (stats, (dev, ino)) = match session_scan_metadata(file_path) {
         Ok(stats) => stats,
         Err(_) => {
             drop_session_scan_state(file_path);
             return None;
         }
     };
-    let (dev, ino) = file_identity(&stats);
     let size = stats.len();
     let mtime = stats.modified().ok();
 
@@ -2350,9 +2359,11 @@ async fn scan_session_info(file_path: &str, retry_on_replacement: bool) -> Optio
         })
     };
 
+    // Match TS scanSessionInfo: unchanged identity/size/mtime reuses the
+    // snapshot, and append-only growth resumes from the scanned prefix.
     let same_file = previous
         .as_ref()
-        .map(|previous| previous.dev == dev && previous.ino == ino)
+        .map(|previous| same_file_identity(previous.dev, previous.ino, dev, ino))
         .unwrap_or(false);
     if let Some(previous) = previous.as_ref() {
         if same_file && previous.file_size == size && previous.mtime == mtime {
@@ -2392,8 +2403,7 @@ async fn scan_session_info(file_path: &str, retry_on_replacement: bool) -> Optio
 
     // A rename rewrite racing the scan can mix two files' bytes into one
     // accumulator: a changed inode afterwards discards the state and rescans.
-    let after = std::fs::metadata(file_path).ok();
-    let after_identity = after.as_ref().map(file_identity);
+    let after_identity = session_scan_metadata(file_path).ok().map(|(_, identity)| identity);
     if after_identity != Some((dev, ino)) {
         drop_session_scan_state(file_path);
         if retry_on_replacement {
@@ -2440,15 +2450,52 @@ fn clone_scan_state(state: &SessionScanState) -> SessionScanState {
     }
 }
 
-#[cfg(unix)]
-fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
-    (metadata.dev(), metadata.ino())
+fn session_scan_metadata(file_path: &str) -> std::io::Result<(std::fs::Metadata, (u64, u64))> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+
+        // Windows metadata from path stat does not expose a stable file ID.
+        // Query the existing handle-based identity helper; metadata and ID
+        // must describe the same opened file even when the path is replaced.
+        let file = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .open(file_path)?;
+        let metadata = file.metadata()?;
+        let identity = crate::utils::dir_lock::file_identity(&file)
+            .map(|identity| (identity.dev, identity.ino))
+            .unwrap_or((0, 0));
+        Ok((metadata, identity))
+    }
+    #[cfg(not(windows))]
+    {
+        let metadata = std::fs::metadata(file_path)?;
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            (metadata.dev(), metadata.ino())
+        };
+        #[cfg(not(unix))]
+        let identity = (0, 0);
+        Ok((metadata, identity))
+    }
 }
 
-#[cfg(not(unix))]
-fn file_identity(_metadata: &std::fs::Metadata) -> (u64, u64) {
-    (0, 0)
+#[cfg(unix)]
+fn same_file_identity(a_dev: u64, a_ino: u64, b_dev: u64, b_ino: u64) -> bool {
+    a_dev == b_dev && a_ino == b_ino
+}
+
+#[cfg(windows)]
+fn same_file_identity(a_dev: u64, a_ino: u64, b_dev: u64, b_ino: u64) -> bool {
+    // An unavailable file index must never claim an unchanged file.
+    (a_dev, a_ino) != (0, 0) && a_dev == b_dev && a_ino == b_ino
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(_a_dev: u64, _a_ino: u64, _b_dev: u64, _b_ino: u64) -> bool {
+    false
 }
 
 /// Fold the complete lines in [state.offset, size) into the accumulator. An
@@ -3024,15 +3071,27 @@ fn get_session_file_path(session_dir: &str, session_id: &str) -> String {
         .to_string()
 }
 
-fn create_unique_session_file_target(session_dir: &str) -> (String, String) {
+fn create_unique_session_file_target(session_dir: &str) -> Result<(String, String), String> {
+    create_unique_session_file_target_with(session_dir, &|session_file| {
+        Path::new(session_file).exists()
+    })
+}
+
+/// TS `createUniqueSessionFileTarget` throws a catchable Error when the retry
+/// loop exhausts (session-manager.ts:514-523); the panic made exhaustion
+/// unobservable. The existence probe is injectable for parity tests.
+pub fn create_unique_session_file_target_with(
+    session_dir: &str,
+    exists: &dyn Fn(&str) -> bool,
+) -> Result<(String, String), String> {
     for _ in 0..100 {
         let session_id = create_session_id();
         let session_file = get_session_file_path(session_dir, &session_id);
-        if !Path::new(&session_file).exists() {
-            return (session_id, session_file);
+        if !exists(&session_file) {
+            return Ok((session_id, session_file));
         }
     }
-    panic!("Unable to create a unique session file");
+    Err("Unable to create a unique session file".to_string())
 }
 
 pub fn get_session_artifacts_root(session_dir: &str) -> String {
@@ -3323,7 +3382,7 @@ impl SessionManager {
                 let explicit_path = session_file;
                 self.new_session(None)?;
                 self.session_file = Some(explicit_path);
-                self.rewrite_file();
+                self.rewrite_file()?;
                 self.flushed = true;
                 return Ok(());
             }
@@ -3357,7 +3416,7 @@ impl SessionManager {
                 }
             }
             if should_rewrite {
-                self.rewrite_file();
+                self.rewrite_file()?;
             }
 
             self.build_index();
@@ -3404,7 +3463,7 @@ impl SessionManager {
                     }
                 }
                 None => {
-                    let target = create_unique_session_file_target(&self.get_session_dir());
+                    let target = create_unique_session_file_target(&self.get_session_dir())?;
                     session_id = target.0;
                     session_file = Some(target.1);
                 }
@@ -3489,9 +3548,12 @@ impl SessionManager {
         }
     }
 
-    fn rewrite_file(&mut self) {
+    // TS _rewriteFile throws synchronously on any write failure and only
+    // notifies persistence observers after a successful commit
+    // (session-manager.ts:1900-1914). Propagate instead of swallowing.
+    fn rewrite_file(&mut self) -> Result<(), String> {
         if !self.persist || self.session_file.is_none() {
-            return;
+            return Ok(());
         }
         let session_file = self.session_file.clone().unwrap_or_default();
         let content = format!(
@@ -3504,16 +3566,18 @@ impl SessionManager {
         );
         let target_path = realpath_if_present_sync(&session_file);
         let directory = dirname(&target_path);
-        let _ = std::fs::create_dir_all(&directory);
+        std::fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
         let metadata = stat_metadata_if_present(&target_path);
         let mode = metadata.as_ref().map(|metadata| metadata.mode);
-        let _ = write_file_atomic_sync(
+        write_file_atomic_sync(
             &target_path,
             &content,
             WriteFileAtomicOptions { mode, fsync: false },
             None,
-        );
+        )?;
+        // Observers see committed writes only.
         self.notify_persist_listeners();
+        Ok(())
     }
 
     fn notify_persist_listeners(&self) {
@@ -3571,9 +3635,12 @@ impl SessionManager {
         self.load_observation
     }
 
-    pub fn materialize_session_file(&mut self, session_dir: Option<&str>) -> String {
+    pub fn materialize_session_file(
+        &mut self,
+        session_dir: Option<&str>,
+    ) -> Result<String, String> {
         if let Some(session_file) = self.session_file.clone() {
-            return session_file;
+            return Ok(session_file);
         }
         let dir = session_dir.map(str::to_string).unwrap_or_else(|| {
             if self.session_dir.is_empty() {
@@ -3586,7 +3653,7 @@ impl SessionManager {
             let _ = std::fs::create_dir_all(&dir);
         }
         let previous_header = self.get_header();
-        let target = create_unique_session_file_target(&dir);
+        let target = create_unique_session_file_target(&dir)?;
         self.session_dir = dir;
         self.session_id = target.0;
         self.session_file = Some(target.1.clone());
@@ -3616,9 +3683,9 @@ impl SessionManager {
             .unwrap_or_default()];
         entries.extend(self.get_entries());
         self.file_entries = entries;
-        self.rewrite_file();
+        self.rewrite_file()?;
         self.flushed = true;
-        self.session_file.clone().unwrap_or_default()
+        Ok(self.session_file.clone().unwrap_or_default())
     }
 
     pub fn get_session_artifact_dir(&self) -> Option<String> {
@@ -3637,18 +3704,19 @@ impl SessionManager {
     /// pre-model entries (session header, goal state, settings changes)
     /// are durable on disk before the first assistant response.
     /// No-op for in-memory (non-persisted) sessions.
-    pub fn flush_now(&mut self) {
+    pub fn flush_now(&mut self) -> Result<(), String> {
         if !self.persist {
-            return;
+            return Ok(());
         }
         let Some(session_file) = self.session_file.clone() else {
-            return;
+            return Ok(());
         };
         if self.flushed && Path::new(&session_file).exists() {
-            return;
+            return Ok(());
         }
-        self.rewrite_file();
+        self.rewrite_file()?;
         self.flushed = true;
+        Ok(())
     }
 
     fn persist(&mut self, entry: &SessionEntry) -> Result<(), String> {
@@ -3671,7 +3739,7 @@ impl SessionManager {
         }
 
         if !self.flushed || !Path::new(&session_file).exists() {
-            self.rewrite_file();
+            self.rewrite_file()?;
             self.flushed = true;
         } else {
             let _ = std::fs::create_dir_all(dirname(&session_file));
@@ -3745,7 +3813,7 @@ impl SessionManager {
         if self.flushed && Path::new(&session_file).exists() {
             return Ok(());
         }
-        self.rewrite_file();
+        self.rewrite_file()?;
         self.flushed = true;
         Ok(())
     }
@@ -4364,22 +4432,28 @@ impl SessionManager {
         tip_entry_id: Option<&str>,
         target_model: Option<&pi_ai::types::Model>,
     ) -> Result<SessionHistorySnapshot, String> {
-        if let Some(tip_entry_id) = tip_entry_id {
+        if let Some(tip_entry_id) = tip_entry_id.or(self.leaf_id.as_deref()) {
             if !self.by_id.contains_key(tip_entry_id) {
                 return Err(format!(
                     "Session history tip no longer exists: {tip_entry_id}"
                 ));
             }
         }
+        // TS default parameter: buildSessionHistory(tipEntryId = this.leafId)
+        // (session-manager.ts:2427) — an omitted tip resolves to the current
+        // leaf instead of yielding an empty snapshot. (An explicit JSON null in
+        // the daemon body still maps to None here, which selects the leaf like
+        // an omitted call.)
+        let effective_tip = tip_entry_id.or(self.leaf_id.as_deref());
         let entries: Vec<SessionEntry> = self.file_entries.clone();
         let context = build_session_context_with_entry_ids(
             &entries,
-            Some(tip_entry_id),
+            Some(effective_tip),
             Some(&self.indexed_by_id()),
             target_model,
         );
         let mut snapshot = order_session_context_for_transcript(&context);
-        snapshot.tip_entry_id = tip_entry_id.map(str::to_string);
+        snapshot.tip_entry_id = effective_tip.map(str::to_string);
         Ok(snapshot)
     }
 
@@ -4567,7 +4641,7 @@ impl SessionManager {
             .collect();
 
         let target = if self.persist {
-            create_unique_session_file_target(&self.get_session_dir())
+            create_unique_session_file_target(&self.get_session_dir())?
         } else {
             (create_session_id(), String::new())
         };
@@ -4663,7 +4737,7 @@ impl SessionManager {
                 .iter()
                 .any(|entry| entry_type(entry) == "message" && message_role(entry) == "assistant");
             if has_assistant {
-                self.rewrite_file();
+                self.rewrite_file()?;
                 self.flushed = true;
             } else {
                 self.flushed = false;
@@ -4883,7 +4957,7 @@ impl SessionManager {
             let _ = std::fs::create_dir_all(&dir);
         }
 
-        let target = create_unique_session_file_target(&dir);
+        let target = create_unique_session_file_target(&dir)?;
         let new_session_id = target.0;
         let timestamp = iso_now();
         let new_session_file = target.1;
@@ -4972,13 +5046,30 @@ impl SessionManager {
     pub async fn list(
         cwd: &str,
         session_dir: Option<&str>,
-        callbacks: Option<&SessionListCallbacks>,
+        callbacks: Option<SessionListCallbacks>,
     ) -> Vec<SessionInfo> {
         let dir = session_dir
             .map(str::to_string)
             .unwrap_or_else(|| get_default_session_dir(cwd, None));
         let matches_cwd = |session: &SessionInfo| session_info_matches_cwd(session, cwd);
-        let mut sessions = list_sessions_from_dir(&dir, callbacks, 0, None)
+        // TS routes the cwd-scoped SUBSET through the item events (onSession) and
+        // forwards progress unfiltered (session-manager.ts:2740-2751).
+        let scoped_callbacks = callbacks.map(|callbacks| {
+            let cwd = cwd.to_string();
+            SessionListCallbacks {
+                on_progress: callbacks.on_progress,
+                on_session: callbacks.on_session.map(|on_session| {
+                    let cwd = cwd.clone();
+                    let wrapped: Box<SessionListItem> = Box::new(move |session: &SessionInfo| {
+                        if session_info_matches_cwd(session, &cwd) {
+                            on_session(session);
+                        }
+                    });
+                    wrapped
+                }),
+            }
+        });
+        let mut sessions = list_sessions_from_dir(&dir, scoped_callbacks.as_ref(), 0, None)
             .await
             .into_iter()
             .filter(|session| matches_cwd(session))
@@ -5189,8 +5280,9 @@ mod tests {
         assert_ne!(first, kept);
         assert_eq!(manager.get_leaf_id().as_deref(), Some(tail.as_str()));
 
+        // The omitted tip resolves to the current leaf (TS default parameter).
         let snapshot = manager.build_session_history(None, None).unwrap();
-        assert_eq!(snapshot.tip_entry_id, None);
+        assert_eq!(snapshot.tip_entry_id, manager.get_leaf_id());
     }
 
     #[test]

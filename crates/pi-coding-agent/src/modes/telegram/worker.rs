@@ -940,15 +940,15 @@ async fn run_telegram_worker_inner(
     *api_slot = Some(Arc::clone(&api));
 
     // `controller.signal` always exists, so every API call is signalled.
-    let has_signal = true;
+    let signal = Some(controller.clone());
     let bot = api
-        .identify(has_signal)
+        .identify(signal.clone())
         .await
         .map_err(|error| error_message(&error))?;
     if bot.id != settings.bot_id {
         return Err("Telegram bot identity changed. Run /telegram setup again.".to_string());
     }
-    api.require_polling(has_signal)
+    api.require_polling(signal.clone())
         .await
         .map_err(|error| error_message(&error))?;
 
@@ -959,7 +959,7 @@ async fn run_telegram_worker_inner(
         writer.write()?;
     }
     while settings.paired_user_id.is_none() && !controller.is_cancelled() {
-        match api.updates(state.offset, has_signal).await {
+        match api.updates(state.offset, signal.clone()).await {
             Ok(updates) => {
                 for update in updates {
                     if controller.is_cancelled() {

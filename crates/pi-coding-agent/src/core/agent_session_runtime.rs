@@ -208,6 +208,34 @@ pub trait RuntimeExtensionRunner: Send + Sync {
     fn emit_event(&self, event: Value) -> BoxFuture<Option<Value>>;
 }
 
+/// Adapter over the session's live `extensionRunner`.
+///
+/// `agent-session-runtime.ts` reads `this.session.extensionRunner` on every emit
+/// (lines 170, 187, 201, 692), so the runtime resolves the CURRENT session's
+/// runner on each call instead of holding a captured handle. An attached seam
+/// still wins so an embedder can override the routing.
+struct SessionRunnerAdapter {
+    runner: crate::core::agent_session::ExtensionRunner,
+}
+
+impl RuntimeExtensionRunner for SessionRunnerAdapter {
+    fn has_handlers(&self, event_type: &str) -> bool {
+        self.runner.has_handlers(event_type)
+    }
+
+    fn emit_event(&self, event: Value) -> BoxFuture<Option<Value>> {
+        let runner = Arc::clone(&self.runner);
+        Box::pin(async move {
+            // The runtime passes serialized `{ type, ... }` payloads; they decode
+            // back into the typed `ExtensionEvent` the runner dispatches on.
+            match serde_json::from_value::<crate::core::extensions::types::ExtensionEvent>(event) {
+                Ok(event) => runner.emit(event).await,
+                Err(_) => None,
+            }
+        })
+    }
+}
+
 impl AgentSessionRuntime {
     /// Attaches the `ExtensionRunner` seam for the events this file emits.
     pub fn set_session_extension_runner(&self, runner: Option<Arc<dyn RuntimeExtensionRunner>>) {
@@ -217,11 +245,22 @@ impl AgentSessionRuntime {
             .expect("session runner poisoned") = runner;
     }
 
+    /// `this.session.extensionRunner` (agent-session-runtime.ts:170).
+    ///
+    /// The session's own runner is resolved per call; the injected seam is only a
+    /// fallback for embedders that route these events elsewhere.
     fn session_extension_runner(&self) -> Option<Arc<dyn RuntimeExtensionRunner>> {
-        self.session_runner
+        if let Some(runner) = self
+            .session_runner
             .lock()
             .expect("session runner poisoned")
             .clone()
+        {
+            return Some(runner);
+        }
+        self.session()
+            .extension_runner()
+            .map(|runner| Arc::new(SessionRunnerAdapter { runner }) as Arc<dyn RuntimeExtensionRunner>)
     }
 }
 

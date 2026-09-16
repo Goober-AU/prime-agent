@@ -18,6 +18,13 @@ mod native_server;
 #[path = "daemon_subagents.rs"]
 mod daemon_subagents;
 
+// Owner parity-validation tests (T08: C-01, C-02, C-09, H-05). In-crate so they can
+// drive the private daemon seams (`AgentDaemon::handle_line`,
+// `accept_agent_session_message`) without re-implementing them.
+#[cfg(test)]
+#[path = "daemon_parity_tests.rs"]
+mod daemon_parity_tests;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -76,7 +83,9 @@ use crate::core::session_file_actions::{
     delete_session_artifacts, delete_session_file, DeleteSessionFileOptions,
     DeleteSessionFileResult,
 };
-use crate::core::session_lease::canonical_session_path;
+use crate::core::session_lease::{
+    canonical_session_path, SESSION_LEASES_ENABLED_ENV, SESSION_LEASE_OWNER_ID_ENV,
+};
 use crate::core::session_manager::SessionManager;
 use crate::core::session_manager::{
     get_session_artifact_path_for_file, order_session_context_for_transcript, read_session_info,
@@ -328,6 +337,33 @@ pub struct AgentSessionRuntimeConfig {
     pub api_key: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// The ensure-supervisor launch environment (daemon-mode.ts:925-934): a
+/// fresh `createCliSubprocessEnv()` copy plus the agent dir, with every
+/// inherited worker role/token/lease variable deleted so the spawned
+/// supervisor cannot launch in worker mode or journal to a literal "1" file.
+pub fn daemon_supervisor_launch_env(
+    source: &crate::cli::subprocess_launch::ProcessEnv,
+    agent_dir: Option<&String>,
+) -> crate::cli::subprocess_launch::ProcessEnv {
+    let mut env = create_cli_subprocess_env(source, None, &[]);
+    if let Some(agent_dir) = agent_dir {
+        env.insert("PRIME_AGENT_AGENT_DIR".to_string(), agent_dir.clone());
+    }
+    for key in [
+        DAEMON_WORKER_ROLE_ENV,
+        DAEMON_WORKER_TOKEN_ENV,
+        DAEMON_WORKER_ACTIVE_SESSION_ID_ENV,
+        DAEMON_WORKER_RECOVERY_JOURNAL_ENV,
+        DAEMON_WORKER_SUPERVISOR_SOCKET_ENV,
+        ORPHAN_PROCESS_JOURNAL_ENV,
+        SESSION_LEASES_ENABLED_ENV,
+        SESSION_LEASE_OWNER_ID_ENV,
+    ] {
+        env.shift_remove(key);
+    }
+    env
 }
 
 /// `mergeAgentSessionRuntimeConfig` from core/agent-session-config.ts.
@@ -1967,7 +2003,7 @@ pub struct PromptInvocation {
     pub prefix_messages: Option<Value>,
     pub signal: Option<tokio_util::sync::CancellationToken>,
     pub admission_committed: Option<Arc<dyn Fn() + Send + Sync>>,
-    pub preflight_result: Option<Arc<dyn Fn(bool) + Send + Sync>>,
+    pub preflight_result: Option<Arc<dyn Fn(bool, bool) + Send + Sync>>,
 }
 
 /// `session.acquireSessionInputPause()`: the returned handle releases the pause.
@@ -2111,6 +2147,51 @@ pub struct PassiveRlmMemoEntry {
     pub result: Vec<PassiveRlmSubagent>,
     pub input_stats: HashMap<String, String>,
     pub in_flight: Option<Arc<Notify>>,
+}
+
+/// `...session.rlmDiagnostics` (`daemon-mode.ts:3516`).
+///
+/// `get rlmDiagnostics()` returns `undefined` at depth 0 (`agent-session.ts:3874`), and
+/// the live session is reachable through the seam's `agent_session()` accessor the same
+/// way `AgentSessionDaemonAdapter` exposes it. Each key is a real `AgentObserveAgentSummary`
+/// field, so the spread lands on the summary's own typed slots.
+fn rlm_diagnostics_spread(session: &dyn DaemonSession) -> AgentObserveAgentSummary {
+let Some(value) = session
+    .agent_session()
+    .and_then(|live| live.rlm_diagnostics())
+else {
+    return AgentObserveAgentSummary::default();
+};
+let text = |key: &str| {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+};
+AgentObserveAgentSummary {
+    last_stop_reason: text("lastStopReason"),
+    terminal_status: text("terminalStatus"),
+    continuation_queued: value.get("continuationQueued").and_then(Value::as_bool),
+    compaction_reason: text("compactionReason"),
+    current_task_id: text("currentTaskId"),
+    diagnostic_state: text("diagnosticState"),
+    ..AgentObserveAgentSummary::default()
+}
+}
+
+/// `AGENT_OBSERVE_LATEST_MESSAGE_MAX_CHARS`: the hard-coded 240 in
+/// `createAgentObserveMessagePreview(latest, messages.length - 1, 240)` (`daemon-mode.ts:3525`).
+const AGENT_OBSERVE_LATEST_MESSAGE_MAX_CHARS: usize = 240;
+
+/// Saved-roots classifier for the agent-family catalog (daemon-mode.ts:5909-5914):
+/// keep every rlmDepth==0 session (including depth-0 forks that record a
+/// parentSessionPath) that is not currently an active agent.
+pub fn saved_roots_classifier(
+    rlm_depth: i64,
+    active_paths: &std::collections::HashSet<String>,
+    canonical_session_path_value: &str,
+) -> bool {
+    rlm_depth == 0 && !active_paths.contains(canonical_session_path_value)
 }
 
 impl AgentDaemon {
@@ -2783,11 +2864,7 @@ impl AgentDaemon {
                 &[],
                 None,
             );
-            let mut env = create_cli_subprocess_env(&std::env::vars().collect(), None, &[]);
-            if let Some(agent_dir) = &agent_dir {
-                env.insert("PRIME_AGENT_AGENT_DIR".to_string(), agent_dir.clone());
-            }
-            env.insert(ORPHAN_PROCESS_JOURNAL_ENV.to_string(), "1".to_string());
+            let mut env = daemon_supervisor_launch_env(&std::env::vars().collect(), agent_dir.as_ref());
             let child = spawn_hidden(
                 &launch.command,
                 &launch.args,
@@ -4330,7 +4407,7 @@ impl AgentDaemon {
                     }),
                 };
                 let saved_sessions = if scope_current {
-                    SessionManager::list(&cwd, session_dir.as_deref(), Some(&callbacks)).await
+                    SessionManager::list(&cwd, session_dir.as_deref(), Some(callbacks)).await
                 } else {
                     SessionManager::list_all(Some(&callbacks), session_dir.as_deref()).await
                 };
@@ -11200,7 +11277,7 @@ impl AgentDaemon {
                 .prompt_and_wait(
                     &message,
                     PromptInvocation {
-                        preflight_result: Some(Arc::new(move |did_succeed: bool| {
+                        preflight_result: Some(Arc::new(move |did_succeed: bool, _did_queue: bool| {
                             if did_succeed {
                                 daemon.record_worker_recovery_state(
                                     &state_for_preflight,
@@ -11223,6 +11300,11 @@ impl AgentDaemon {
         let command_id = command.id.clone();
         let accept_agent_message = body.get("agentMessageId").and_then(Value::as_str).is_some()
             && body.get("expandPromptTemplates").and_then(Value::as_bool) == Some(false);
+        // `let responseSent = false; let preflightRejected = false;`
+        // (daemon-mode.ts:4521-4522): both flags live in the command scope, so the
+        // settlement below can read the rejection the preflight callback recorded.
+        let response_sent = Arc::new(AtomicBool::new(false));
+        let preflight_rejected = Arc::new(AtomicBool::new(false));
         let invocation = PromptInvocation {
             agent_message_id: body
                 .get("agentMessageId")
@@ -11234,10 +11316,10 @@ impl AgentDaemon {
                 let state = Arc::clone(&state);
                 let client = Arc::clone(&client);
                 let command_id = command_id.clone();
-                let response_sent = Arc::new(AtomicBool::new(false));
-                let preflight_rejected = Arc::new(AtomicBool::new(false));
+                let response_sent = Arc::clone(&response_sent);
+                let preflight_rejected = Arc::clone(&preflight_rejected);
                 let commit = Arc::clone(&commit_admission);
-                Some(Arc::new(move |did_succeed: bool| {
+                Some(Arc::new(move |did_succeed: bool, did_queue: bool| {
                     if did_succeed {
                         daemon.record_worker_recovery_state(&state, "prompt_accepted", Some(true));
                         commit();
@@ -11257,12 +11339,15 @@ impl AgentDaemon {
                     } else {
                         preflight_rejected.store(true, Ordering::SeqCst);
                     }
-                }) as Arc<dyn Fn(bool) + Send + Sync>)
+                    let _ = did_queue;
+                }) as Arc<dyn Fn(bool, bool) + Send + Sync>)
             },
             ..options
         };
         let session = self.session_of(&state);
         let daemon = Arc::clone(self);
+        let settle_response_sent = Arc::clone(&response_sent);
+        let settle_preflight_rejected = Arc::clone(&preflight_rejected);
         tokio::spawn(async move {
             let result = if accept_agent_message {
                 session
@@ -11272,7 +11357,44 @@ impl AgentDaemon {
                 session.prompt_until_accepted(&message, invocation).await
             };
             match result {
-                Ok(()) => {}
+                // `.then(() => { if (preflightRejected) write(failure(...)); else
+                // sendSuccessResponse(); })` (daemon-mode.ts:4545-4552). A session that
+                // reports a rejected preflight and then returns Ok still owes the
+                // requester an answer; before this the rejection was swallowed and the
+                // client waited out the request timeout.
+                Ok(()) => {
+                    if settle_preflight_rejected.load(Ordering::SeqCst) {
+                        if !settle_response_sent.load(Ordering::SeqCst) {
+                            daemon.write(
+                                &client,
+                                &DaemonOutbound::Raw(
+                                    serde_json::to_value(DaemonResponse::failure(
+                                        command_id.as_deref(),
+                                        "prompt",
+                                        "Prompt was not accepted by the session.",
+                                        None,
+                                    ))
+                                    .unwrap_or(Value::Null),
+                                ),
+                            );
+                        }
+                    } else if !settle_response_sent.swap(true, Ordering::SeqCst) {
+                        daemon.write(
+                            &client,
+                            &DaemonOutbound::Raw(
+                                serde_json::to_value(DaemonResponse::success(
+                                    command_id.as_deref(),
+                                    "prompt",
+                                    None,
+                                ))
+                                .unwrap_or(Value::Null),
+                            ),
+                        );
+                    }
+                }
+                // `.catch((error) => { if (responseSent) broadcastToSession(...) else
+                // write(failure(command.id, ...)) })` (daemon-mode.ts:4553-4558): the
+                // requester hears the failure directly unless it was already answered.
                 Err(error) => {
                     let failure = serde_json::to_value(DaemonResponse::failure(
                         command_id.as_deref(),
@@ -11281,6 +11403,12 @@ impl AgentDaemon {
                         None,
                     ))
                     .unwrap_or(Value::Null);
+                    if !settle_response_sent.load(Ordering::SeqCst) {
+                        settle_response_sent.store(true, Ordering::SeqCst);
+                        daemon.write(&client, &DaemonOutbound::Raw(failure));
+                        clear_admission();
+                        return;
+                    }
                     let broadcast = daemon
                         .sessions
                         .lock()
@@ -11295,6 +11423,7 @@ impl AgentDaemon {
                         .map(|entry| Arc::clone(&entry))
                         .is_some();
                     if !broadcast {
+                        clear_admission();
                         return;
                     }
                     daemon.broadcast_to_session(
@@ -13324,6 +13453,8 @@ impl AgentDaemon {
         }
     }
 
+
+
     /// `createAgentFamilyCatalog(currentState?)`.
     async fn create_agent_family_catalog(
         self: &Arc<Self>,
@@ -13385,14 +13516,15 @@ impl AgentDaemon {
                 .await
             .into_iter()
             .filter(|info| {
-                let depth = if info.rlm_depth != 0 {
-                    info.rlm_depth
-                } else if info.parent_session_path.is_some() {
-                    -1
-                } else {
-                    0
-                };
-                depth == 0 && !active_paths.contains(&canonical_session_path(&info.path))
+                // TS: (info.rlmDepth ?? (info.parentSessionPath ? -1 : 0)) === 0
+                // (daemon-mode.ts:5909-5914). rlmDepth is always defined at this
+                // point, so the ?? fallback is dead code and a depth-0 fork with
+                // a recorded parentSessionPath stays a root.
+                saved_roots_classifier(
+                    info.rlm_depth,
+                    &active_paths,
+                    &canonical_session_path(&info.path),
+                )
             })
             .map(|info| AgentFamilyCatalogEntry {
                 id: info.id.clone(),
@@ -15075,22 +15207,42 @@ impl AgentDaemon {
                 daemon.log("Target session changed before agent message delivery");
             }
         });
+        // `let preflightFailed = false; let preflightQueued = false;` and the
+        // `preflightResult: (didSucceed, didQueue) => {...}` capture
+        // (daemon-mode.ts:6380-6404): the session's own verdict decides the receipt.
+        let preflight_failed = Arc::new(AtomicBool::new(false));
+        let preflight_queued = Arc::new(AtomicBool::new(false));
+        let preflight_result: Arc<dyn Fn(bool, bool) + Send + Sync> = {
+            let preflight_failed = Arc::clone(&preflight_failed);
+            let preflight_queued = Arc::clone(&preflight_queued);
+            Arc::new(move |did_succeed: bool, did_queue: bool| {
+                preflight_failed.store(!did_succeed, Ordering::SeqCst);
+                preflight_queued.store(did_succeed && did_queue, Ordering::SeqCst);
+            })
+        };
         let invocation = PromptInvocation {
             expand_prompt_templates: Some(false),
             streaming_behavior: Some(DELIVERY_MODE_STEER.to_string()),
             queue_if_busy: Some(true),
             custom_message: Some(serde_json::to_value(&message).unwrap_or(Value::Null)),
             admission_committed: Some(admission_committed),
+            preflight_result: Some(preflight_result),
             ..PromptInvocation::default()
         };
-        let status = match self.session_of(target_state)
+        self.session_of(target_state)
             .accept_agent_message_prompt(&content, invocation)
-            .await
-        {
-            Ok(()) => DELIVERY_STATUS_DELIVERED.to_string(),
-            Err(_) => DELIVERY_STATUS_QUEUED.to_string(),
-        };
-        Ok(status)
+            .await?;
+        // `if (preflightFailed) throw new Error("Agent message was not accepted");`
+        // (daemon-mode.ts:6406-6407) - a rejected admission is the caller's error, never a
+        // receipt. `return { status: preflightQueued ? "queued" : "delivered" }` (:6409).
+        if preflight_failed.load(Ordering::SeqCst) {
+            return Err("Agent message was not accepted".to_string());
+        }
+        Ok(if preflight_queued.load(Ordering::SeqCst) {
+            DELIVERY_STATUS_QUEUED.to_string()
+        } else {
+            DELIVERY_STATUS_DELIVERED.to_string()
+        })
     }
 
     /// `sendRemoteAgentSessionMessage(fromState, targetSelector, message)`.
@@ -15554,8 +15706,24 @@ impl AgentDaemon {
         let summary = self.summary_for_state(state);
         let session = self.session_of(state);
         let session_file = session.session_file();
+        // `const messages = session.messages;` (`daemon-mode.ts:3512`), reused for the
+        // `latestMessage` preview index (`:3525`).
+        let messages = session.messages();
+        // `session.isStreaming ? (session.state.pendingToolCalls.size > 0 ? "tool" : "model")`
+        // (`daemon-mode.ts:3490-3500`): a streaming turn that is waiting on a tool call
+        // is reported as "tool", not "model". The pending set lives on the live agent
+        // state (`AgentSession::state().pending_tool_calls`), which is reachable through
+        // the seam's `agent_session()` accessor.
+        let pending_tool_calls = session
+            .agent_session()
+            .map(|live| live.state().pending_tool_calls)
+            .unwrap_or_default();
         let status = if session.is_streaming() {
-            "model".to_string()
+            if pending_tool_calls.is_empty() {
+                "model".to_string()
+            } else {
+                "tool".to_string()
+            }
         } else if session.is_compacting() {
             "compacting".to_string()
         } else if session.is_session_active() || session.has_running_rlm_children() {
@@ -15593,7 +15761,17 @@ impl AgentDaemon {
             is_compacting: summary.is_compacting,
             attached_clients: summary.attached_clients as f64,
             message_count: summary.message_count as f64,
-            transcript_entry_count: session_file.as_ref().map(|_| summary.message_count as f64),
+            // `transcriptEntryCount: session.sessionManager.getEntries().length`
+            // (`daemon-mode.ts:3513`) is the LIFETIME JSONL entry count, deliberately
+            // kept distinct from `messageCount` (the active model context, `:3512`).
+            transcript_entry_count: session_file.as_ref().map(|_| {
+                session
+                    .session_manager()
+                    .lock()
+                    .expect("session manager poisoned")
+                    .get_entries()
+                    .len() as f64
+            }),
             last_activity_at: Some(summary.last_activity_at.as_ref().and_then(|value| {
                 chrono::DateTime::parse_from_rfc3339(value)
                     .ok()
@@ -15610,7 +15788,38 @@ impl AgentDaemon {
             parent_session_id: summary.parent_session_id.clone(),
             rlm_child_id: summary.rlm_child_id.clone(),
             rlm_parent_node_id: summary.rlm_parent_node_id.clone(),
-            ..AgentObserveAgentSummary::default()
+            // `model: session.model ? `${session.model.provider}/${session.model.id}` : null`
+            // (`daemon-mode.ts:3514`). The summary already carries the live model under
+            // the wire shape, so read the two id parts from it instead of re-projecting.
+            model: Some(
+                summary
+                    .model
+                    .as_ref()
+                    .and_then(|model| model.get("provider"))
+                    .and_then(Value::as_str)
+                    .zip(
+                        summary
+                            .model
+                            .as_ref()
+                            .and_then(|model| model.get("id"))
+                            .and_then(Value::as_str),
+                    )
+                    .map(|(provider, id)| format!("{provider}/{id}")),
+            ),
+            // `...(latest ? { latestMessage: createAgentObserveMessagePreview(latest, messages.length - 1, 240) } : {})`
+            // (`daemon-mode.ts:3524-3528`) and `...(summary.firstMessage ? { firstMessage } : {})`
+            // (`:3523`).
+            first_message: summary.first_message.clone().filter(|first| !first.is_empty()),
+            latest_message: messages.last().map(|latest| {
+                create_agent_observe_message_preview(
+                    latest,
+                    (messages.len() as f64) - 1.0,
+                    AGENT_OBSERVE_LATEST_MESSAGE_MAX_CHARS,
+                )
+            }),
+            // `...session.rlmDiagnostics` (`daemon-mode.ts:3516`): the child-only
+            // continuation diagnostics, undefined at depth 0.
+            ..rlm_diagnostics_spread(session.as_ref())
         }
     }
 }
@@ -15730,8 +15939,15 @@ impl AgentDaemon {
             .get_or_hydrate_authorized_agent_family_target(current_state, &input.target)
             .await?;
         self.assert_agent_family_reachable(current_state, &target_state)?;
-        let limit = normalize_observe_limit(input.limit, 20)?;
-        let max_chars = normalize_observe_max_chars(input.max_chars, 4000)?;
+        // `normalizeObserveLimit(input.limit)` / `normalizeObserveMaxChars(input.maxChars)`
+        // are called with NO default argument (`daemon-mode.ts:3467-3468`), so the
+        // TypeScript defaults apply: 8 messages and 800 chars (`agent-observe.ts:107`
+        // `defaultLimit = 8`, `:111` `defaultMaxChars = 800`). The previous 20/4000 pair
+        // contradicted the very clamp it feeds - `normalize_observe_max_chars` rejects
+        // anything above 2_000 - so a request that omitted `maxChars` could never
+        // succeed.
+        let limit = normalize_observe_limit(input.limit, 8)?;
+        let max_chars = normalize_observe_max_chars(input.max_chars, 800)?;
         let messages = self.session_of(&target_state).messages();
         let start_index = messages.len().saturating_sub(limit as usize);
         Ok(AgentObserveRecentMessagesResult {
@@ -16647,5 +16863,1166 @@ mod cron_error_propagation_tests {
         let recorded = fixture.recorded_job();
         assert_eq!(recorded.last_error, None);
         assert_eq!(recorded.run_count, 1.0);
+    }
+}
+
+/// T10 lane `rlm-daemon`: agent-observe parity for findings D-06 and D-07.
+///
+/// Both findings sit on the daemon's observe path, which is only reachable in
+/// crate: the controller and the summary builder are private to this module. The
+/// tests below therefore drive the REAL host handlers production installs
+/// (`create_agent_observe_host_handlers`, `core/agent_observe.rs:139`) over a REAL
+/// `DaemonAgentObserveController` built by the daemon's own factory.
+#[cfg(test)]
+mod agent_observe_parity_tests {
+    use super::*;
+
+    /// The TypeScript defaults are 8 messages and 800 chars
+    /// (`agent-observe.ts:107-112`), which the daemon call site must use.
+    const TS_DEFAULT_LIMIT: i64 = 8;
+    const TS_DEFAULT_MAX_CHARS: i64 = 800;
+
+    fn user_message(text: &str, timestamp: i64) -> AgentMessage {
+        AgentMessage::Message(pi_ai::types::Message::User(pi_ai::types::UserMessage::new(
+            pi_ai::types::UserContent::Text(text.to_string()),
+            timestamp,
+        )))
+    }
+
+    fn assistant_message(text: &str, timestamp: i64) -> AgentMessage {
+        AgentMessage::Message(pi_ai::types::Message::Assistant(pi_ai::types::AssistantMessage {
+            content: vec![pi_ai::types::ContentBlock::Text(pi_ai::types::TextContent::new(text))],
+            timestamp,
+            ..Default::default()
+        }))
+    }
+
+    /// A scripted `AgentHandle` for a real `AgentSession`.
+    struct ScriptedAgent {
+        state: StdMutex<pi_agent_core::types::AgentState>,
+    }
+
+    impl ScriptedAgent {
+        fn new(state: pi_agent_core::types::AgentState) -> Arc<Self> {
+            Arc::new(Self { state: StdMutex::new(state) })
+        }
+    }
+
+    impl crate::core::agent_session::AgentHandle for ScriptedAgent {
+        fn state(&self) -> pi_agent_core::types::AgentState {
+            self.state.lock().unwrap().clone()
+        }
+        fn set_state(&self, state: pi_agent_core::types::AgentState) {
+            *self.state.lock().unwrap() = state;
+        }
+        fn subscribe(
+            &self,
+            _listener: Arc<
+                dyn Fn(
+                        pi_agent_core::types::AgentEvent,
+                        Option<tokio_util::sync::CancellationToken>,
+                    ) -> pi_ai::types::BoxFuture<()>
+                    + Send
+                    + Sync,
+            >,
+        ) -> Box<dyn Fn() + Send + Sync> {
+            Box::new(|| {})
+        }
+        fn set_before_tool_call(&self, _hook: crate::core::agent_session::BeforeToolCallHook) {}
+        fn set_after_tool_call(&self, _hook: crate::core::agent_session::AfterToolCallHook) {}
+        fn set_get_continuation_messages(
+            &self,
+            _hook: crate::core::agent_session::GetContinuationMessagesHook,
+        ) {
+        }
+        fn set_should_stop_before_turn(&self, _hook: Arc<dyn Fn() -> bool + Send + Sync>) {}
+        fn set_should_stop_after_turn(
+            &self,
+            _hook: Arc<
+                dyn Fn(pi_agent_core::types::ShouldStopAfterTurnContext) -> pi_ai::types::BoxFuture<bool>
+                    + Send
+                    + Sync,
+            >,
+        ) {
+        }
+        fn set_stream_fn(&self, _stream_fn: pi_agent_core::types::StreamFn) {}
+        fn stream_fn(&self) -> pi_agent_core::types::StreamFn {
+            pi_agent_core::agent::default_stream_fn()
+        }
+        fn abort(&self) {}
+        fn wait_for_idle(&self) -> pi_ai::types::BoxFuture<()> {
+            Box::pin(async {})
+        }
+        fn prompt(&self, _messages: Vec<AgentMessage>) -> pi_ai::types::BoxFuture<Result<(), String>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn continue_(
+            &self,
+        ) -> pi_ai::types::BoxFuture<Result<(), pi_agent_core::agent::AgentContinueError>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn is_streaming(&self) -> bool {
+            self.state.lock().unwrap().is_streaming
+        }
+        fn has_queued_messages(&self) -> bool {
+            false
+        }
+        fn clear_all_queues(&self) {}
+        fn remove_queued_messages(
+            &self,
+            _predicate: Arc<dyn Fn(&AgentMessage) -> bool + Send + Sync>,
+        ) -> Vec<AgentMessage> {
+            Vec::new()
+        }
+        fn follow_up(&self, _message: AgentMessage) {}
+        fn set_follow_up_mode(&self, _mode: String) {}
+        fn set_steering_mode(&self, _mode: String) {}
+        fn set_convert_to_llm(
+            &self,
+            _convert: Arc<
+                dyn Fn(Vec<AgentMessage>) -> pi_ai::types::BoxFuture<Vec<pi_ai::types::Message>>
+                    + Send
+                    + Sync,
+            >,
+        ) {
+        }
+        fn set_transform_context(
+            &self,
+            _transform: Arc<
+                dyn Fn(
+                        Vec<AgentMessage>,
+                        Option<tokio_util::sync::CancellationToken>,
+                    ) -> pi_ai::types::BoxFuture<Vec<AgentMessage>>
+                    + Send
+                    + Sync,
+            >,
+        ) {
+        }
+        fn set_get_api_key(
+            &self,
+            _get_api_key: Arc<dyn Fn(String) -> pi_ai::types::BoxFuture<Option<String>> + Send + Sync>,
+        ) {
+        }
+        fn set_on_payload(&self, _hook: pi_ai::types::OnPayload) {}
+        fn set_on_response(&self, _hook: pi_ai::types::OnResponse) {}
+        fn set_tool_execution(&self, _mode: String) {}
+        fn performance_metrics(
+            &self,
+        ) -> Option<pi_agent_core::performance_metrics::AgentLoopPerformanceMetrics> {
+            None
+        }
+        fn set_performance_metrics(
+            &self,
+            _metrics: Option<pi_agent_core::performance_metrics::AgentLoopPerformanceMetrics>,
+        ) {
+        }
+        fn signal(&self) -> Option<tokio_util::sync::CancellationToken> {
+            None
+        }
+    }
+
+    /// One resident daemon session whose `agent_session()` seam exposes the real
+    /// `AgentSession`. Everything the tests do not override delegates to
+    /// `MissingSession`, the daemon's own not-resident double, so this double only
+    /// changes the surface under test.
+    struct ObserveSession {
+        inner: MissingSession,
+        active_session_id: String,
+        session_file: String,
+        agent_session: Option<Arc<crate::core::agent_session::AgentSession>>,
+        streaming: bool,
+        session_active: bool,
+    }
+
+    impl DaemonSession for ObserveSession {
+        fn agent_session(&self) -> Option<Arc<crate::core::agent_session::AgentSession>> {
+            self.agent_session.clone()
+        }
+        fn session_id(&self) -> String {
+            self.active_session_id.clone()
+        }
+        fn session_name(&self) -> Option<String> {
+            Some("observe-parity".to_string())
+        }
+        fn session_file(&self) -> Option<String> {
+            Some(self.session_file.clone())
+        }
+        fn is_streaming(&self) -> bool {
+            self.streaming
+        }
+        fn is_session_active(&self) -> bool {
+            self.session_active
+        }
+        fn unfinished_action_count(&self) -> f64 {
+            0.0
+        }
+        fn messages(&self) -> Vec<AgentMessage> {
+            match &self.agent_session {
+                Some(session) => session.messages(),
+                None => Vec::new(),
+            }
+        }
+        fn model_identity(&self) -> Option<pi_ai::types::Model> {
+            self.agent_session.as_ref().and_then(|session| session.model())
+        }
+        fn rlm_depth(&self) -> Option<i64> {
+            Some(self.agent_session.as_ref().map(|session| session.rlm_depth()).unwrap_or(0))
+        }
+        fn session_manager(&self) -> Arc<StdMutex<SessionManager>> {
+            match &self.agent_session {
+                Some(session) => Arc::clone(&session.session_manager),
+                None => self.inner.session_manager(),
+            }
+        }
+        fn settings_manager(&self) -> Option<Arc<StdMutex<SettingsManager>>> {
+            self.agent_session
+                .as_ref()
+                .map(|session| Arc::clone(&session.settings_manager))
+                .or_else(|| self.inner.settings_manager())
+        }
+        fn follow_up(
+            &self,
+            _message: &str,
+            _images: Option<Value>,
+            _options: PromptInvocation,
+        ) -> BoxFuture<'static, Result<bool, String>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn runtime(&self) -> Arc<dyn DaemonRuntimeApi> {
+            self.inner.runtime()
+        }
+        fn session_dir(&self) -> Option<String> {
+            self.inner.session_dir()
+        }
+        fn set_exec_env_provider(&self, client_env: Option<HashMap<String, String>>) {
+            self.inner.set_exec_env_provider(client_env)
+        }
+        fn set_runtime_env_scope(&self, client_env: Option<HashMap<String, String>>) {
+            self.inner.set_runtime_env_scope(client_env)
+        }
+        fn set_subagent_runtime_host(&self, host: Option<Arc<dyn crate::core::rlm_runtime::SubagentRuntimeHost>>) {
+            self.inner.set_subagent_runtime_host(host)
+        }
+        fn set_rebind_session(&self, rebind: Arc<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>) {
+            self.inner.set_rebind_session(rebind)
+        }
+        fn bind_extensions( &self, binding: crate::modes::daemon::daemon_extension_binding::ExtensionBindingInput, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.bind_extensions(binding)
+        }
+        fn abort_for_update_restart(&self) {
+            self.inner.abort_for_update_restart()
+        }
+        fn is_compacting(&self) -> bool {
+            self.inner.is_compacting()
+        }
+        fn is_bash_running(&self) -> bool {
+            self.inner.is_bash_running()
+        }
+        fn is_retrying(&self) -> bool {
+            self.inner.is_retrying()
+        }
+        fn has_running_rlm_children(&self) -> bool {
+            self.inner.has_running_rlm_children()
+        }
+        fn thinking_level(&self) -> Option<String> {
+            self.inner.thinking_level()
+        }
+        fn service_tier(&self) -> Option<String> {
+            self.inner.service_tier()
+        }
+        fn system_prompt(&self) -> Option<String> {
+            self.inner.system_prompt()
+        }
+        fn connection_view(&self) -> DaemonConnectionView {
+            self.inner.connection_view()
+        }
+        fn connection_state(&self, active_session_id: Option<String>) -> Value {
+            self.inner.connection_state(active_session_id)
+        }
+        fn set_current_recap(&self, recap: Option<&str>) {
+            self.inner.set_current_recap(recap)
+        }
+        fn set_session_name(&self, name: &str) {
+            self.inner.set_session_name(name)
+        }
+        fn get_rlm_child_run_status(&self, child_id: &str) -> Option<String> {
+            self.inner.get_rlm_child_run_status(child_id)
+        }
+        fn register_rlm_child_session(&self, child_id: &str, session: Arc<dyn DaemonSession>) -> bool {
+            self.inner.register_rlm_child_session(child_id, session)
+        }
+        fn remove_queued_follow_up(&self, key: &str) {
+            self.inner.remove_queued_follow_up(key)
+        }
+        fn subscribe(&self, listener: Arc<dyn Fn(&Value) + Send + Sync>) -> Box<dyn Fn() + Send + Sync> {
+            self.inner.subscribe(listener)
+        }
+        fn prompt_until_accepted( &self, message: &str, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.prompt_until_accepted(message, options)
+        }
+        fn prompt_and_wait( &self, message: &str, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.prompt_and_wait(message, options)
+        }
+        fn prompt_heartbeat( &self, job: &AgentCronJob, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.prompt_heartbeat(job, options)
+        }
+        fn accept_agent_message_prompt( &self, message: &str, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.accept_agent_message_prompt(message, options)
+        }
+        fn steer( &self, message: &str, images: Option<Value>, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.steer(message, images, options)
+        }
+        fn restore_steering_message( &self, message: &str, images: Option<Value>, options: PromptInvocation, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.restore_steering_message(message, images, options)
+        }
+        fn restore_follow_up_message( &self, message: &str, images: Option<Value>, options: PromptInvocation, ) -> BoxFuture<'static, Result<bool, String>> {
+            self.inner.restore_follow_up_message(message, images, options)
+        }
+        fn restore_pending_next_turn_messages(&self, messages: &Value) {
+            self.inner.restore_pending_next_turn_messages(messages)
+        }
+        fn restore_session_actions(&self, snapshot: &Value) -> BoxFuture<'static, Result<f64, String>> {
+            self.inner.restore_session_actions(snapshot)
+        }
+        fn send_custom_message(&self, message: &Value) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.send_custom_message(message)
+        }
+        fn resume_queued_work(&self) -> bool {
+            self.inner.resume_queued_work()
+        }
+        fn clear_queued_agent_messages(&self) -> Value {
+            self.inner.clear_queued_agent_messages()
+        }
+        fn clear_queue(&self) -> Value {
+            self.inner.clear_queue()
+        }
+        fn mutate_queued_message( &self, lane: &str, index: f64, expected_text: &str, mutation: &Value, ) -> Value {
+            self.inner.mutate_queued_message(lane, index, expected_text, mutation)
+        }
+        fn get_steering_message_previews(&self) -> Vec<Value> {
+            self.inner.get_steering_message_previews()
+        }
+        fn get_follow_up_message_previews(&self) -> Vec<Value> {
+            self.inner.get_follow_up_message_previews()
+        }
+        fn request_abort(&self) {
+            self.inner.request_abort()
+        }
+        fn cancel_rlm_child_run(&self, child_id: &str) -> bool {
+            self.inner.cancel_rlm_child_run(child_id)
+        }
+        fn delete_inactive_rlm_subagent( &self, child_id: &str, is_resident_child_running: Arc<dyn Fn() -> bool + Send + Sync>, ) -> BoxFuture<'static, Result<String, String>> {
+            self.inner.delete_inactive_rlm_subagent(child_id, is_resident_child_running)
+        }
+        fn run_user_bash( &self, command: &str, options: RunUserBashOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.run_user_bash(command, options)
+        }
+        fn execute_bash(&self, command: &str) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.execute_bash(command)
+        }
+        fn abort_bash(&self) {
+            self.inner.abort_bash()
+        }
+        fn acquire_session_input_pause(&self) -> SessionInputPause {
+            self.inner.acquire_session_input_pause()
+        }
+        fn wait_for_idle(&self) -> BoxFuture<'static, ()> {
+            self.inner.wait_for_idle()
+        }
+        fn wait_for_headless_completion( &self, options: HeadlessCompletionOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.wait_for_headless_completion(options)
+        }
+        fn refresh_available_models(&self) -> BoxFuture<'static, Result<Vec<pi_ai::types::Model>, String>> {
+            self.inner.refresh_available_models()
+        }
+        fn refresh_model_catalog(&self) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.refresh_model_catalog()
+        }
+        fn get_provider_auth_status_source(&self, provider: &str) -> Option<String> {
+            self.inner.get_provider_auth_status_source(provider)
+        }
+        fn find_model(&self, provider: &str, model_id: &str) -> Option<pi_ai::types::Model> {
+            self.inner.find_model(provider, model_id)
+        }
+        fn set_model( &self, model: &pi_ai::types::Model, wait_for_extensions: bool, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.set_model(model, wait_for_extensions)
+        }
+        fn cycle_model( &self, direction: &str, wait_for_extensions: bool, ) -> BoxFuture<'static, Result<Option<pi_ai::types::Model>, String>> {
+            self.inner.cycle_model(direction, wait_for_extensions)
+        }
+        fn set_scoped_models(&self, scoped_models: &Value) {
+            self.inner.set_scoped_models(scoped_models)
+        }
+        fn set_thinking_level(&self, level: &str) {
+            self.inner.set_thinking_level(level)
+        }
+        fn set_service_tier(&self, service_tier: &str) {
+            self.inner.set_service_tier(service_tier)
+        }
+        fn cycle_thinking_level(&self) -> Option<String> {
+            self.inner.cycle_thinking_level()
+        }
+        fn set_transport(&self, transport: &str) {
+            self.inner.set_transport(transport)
+        }
+        fn set_steering_mode(&self, mode: &str) {
+            self.inner.set_steering_mode(mode)
+        }
+        fn set_follow_up_mode(&self, mode: &str) {
+            self.inner.set_follow_up_mode(mode)
+        }
+        fn set_auto_compaction_enabled(&self, enabled: bool) {
+            self.inner.set_auto_compaction_enabled(enabled)
+        }
+        fn set_auto_retry_enabled(&self, enabled: bool) {
+            self.inner.set_auto_retry_enabled(enabled)
+        }
+        fn compact( &self, custom_instructions: Option<&str>, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.compact(custom_instructions)
+        }
+        fn refine(&self, options: RefineOptions) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.refine(options)
+        }
+        fn abort_compaction(&self) {
+            self.inner.abort_compaction()
+        }
+        fn abort_branch_summary(&self) {
+            self.inner.abort_branch_summary()
+        }
+        fn abort_retry(&self) {
+            self.inner.abort_retry()
+        }
+        fn reload(&self) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.reload()
+        }
+        fn get_rlm_max_depth_status(&self) -> Value {
+            self.inner.get_rlm_max_depth_status()
+        }
+        fn set_rlm_max_depth( &self, max_depth: Value, global: bool, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.set_rlm_max_depth(max_depth, global)
+        }
+        fn build_session_context(&self) -> Value {
+            self.inner.build_session_context()
+        }
+        fn get_session_stats(&self) -> Value {
+            self.inner.get_session_stats()
+        }
+        fn get_context_tree(&self) -> Value {
+            self.inner.get_context_tree()
+        }
+        fn get_rlm_child_snapshots(&self) -> Vec<Value> {
+            self.inner.get_rlm_child_snapshots()
+        }
+        fn export_to_html( &self, output_path: Option<&str>, ) -> BoxFuture<'static, Result<String, String>> {
+            self.inner.export_to_html(output_path)
+        }
+        fn export_to_jsonl(&self, output_path: Option<&str>) -> Result<String, String> {
+            self.inner.export_to_jsonl(output_path)
+        }
+        fn get_user_messages_for_forking(&self) -> Vec<Value> {
+            self.inner.get_user_messages_for_forking()
+        }
+        fn get_last_assistant_text(&self) -> String {
+            self.inner.get_last_assistant_text()
+        }
+        fn get_tool_definition(&self, name: &str) -> Option<Value> {
+            self.inner.get_tool_definition(name)
+        }
+        fn navigate_tree( &self, target_id: &str, options: NavigateTreeOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.navigate_tree(target_id, options)
+        }
+        fn start_side_question( &self, question: &str, options: SideQuestionOptions, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.start_side_question(question, options)
+        }
+        fn abort_side_question(&self, side_question_id: &str) {
+            self.inner.abort_side_question(side_question_id)
+        }
+        fn release_acp_mcp_servers( &self, owner_id: &str, server_names: &[String], ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.release_acp_mcp_servers(owner_id, server_names)
+        }
+        fn replace_acp_mcp_servers( &self, servers: &[Value], owner_id: &str, ) -> BoxFuture<'static, Result<(), String>> {
+            self.inner.replace_acp_mcp_servers(servers, owner_id)
+        }
+        fn new_session( &self, options: Option<NewSessionRuntimeOptions>, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.new_session(options)
+        }
+        fn release_rlm_child_session( &self, child_id: &str, session: Arc<dyn DaemonSession>, ) -> Option<Box<dyn FnOnce() + Send>> {
+            self.inner.release_rlm_child_session(child_id, session)
+        }
+        fn replied_to_parent_since_task(&self) -> Option<bool> {
+            self.inner.replied_to_parent_since_task()
+        }
+        fn switch_session( &self, session_path: &str, options: SessionPathOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.switch_session(session_path, options)
+        }
+        fn fork( &self, entry_id: &str, options: ForkOptions, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.fork(entry_id, options)
+        }
+        fn import_from_jsonl( &self, input_path: &str, cwd_override: Option<&str>, ) -> BoxFuture<'static, Result<Value, String>> {
+            self.inner.import_from_jsonl(input_path, cwd_override)
+        }
+        fn dispose(&self) -> BoxFuture<'static, ()> {
+            self.inner.dispose()
+        }
+    }
+
+    /// A daemon with one resident session plus the observe controller the daemon
+    /// itself hands to a runtime session, wrapped in the REAL host handlers.
+    ///
+    /// The fixture builds the target's `ActiveSessionRuntimeSession` the way the daemon
+    /// itself does in `add_runtime` (`daemon_mode.rs`: `messages_len:
+    /// session.messages().len()`, `model_identity`, `session_file`, ...), because
+    /// `summary_for_active_session` reads that narrowed view rather than the live
+    /// session. `messages_len` is what `messageCount` reports.
+    ///
+    /// The controller's "current" state is deliberately a SECOND, non-resident state:
+    /// `createAgentObserveRecentMessages` asserts family reach between the caller's
+    /// state and the target, and the daemon has no same-state short circuit
+    /// (`assert_agent_family_reachable`; the TypeScript returns early when both active
+    /// session ids are equal, `daemon-mode.ts` `assertAgentFamilyReachable`). Two depth-0
+    /// top-level states are siblings, which is exactly the reach a real session has when
+    /// it observes its own transcript.
+    struct ObserveFixture {
+        _directory: tempfile::TempDir,
+        daemon: Arc<AgentDaemon>,
+        active_session_id: String,
+        handlers: crate::core::kernel::shared::HostRequestHandlers,
+    }
+
+    impl ObserveFixture {
+        fn new(session: &Arc<ObserveSession>) -> Self {
+            Self::build(session, None)
+        }
+
+        /// The same fixture, with a RESIDENT parent state whose session path is the
+        /// child's `parentSession` header value. That is the reach a real daemon grants
+        /// a parent observing its own child, and the only way a depth-1 target is
+        /// authorized (`is_agent_family_parent`, `core/agent_messages.rs`).
+        fn new_with_parent(session: &Arc<ObserveSession>, parent_session_file: &str) -> Self {
+            Self::build(session, Some(parent_session_file.to_string()))
+        }
+
+        fn build(session: &Arc<ObserveSession>, parent_session_file: Option<String>) -> Self {
+            let directory = tempfile::tempdir().expect("temp dir");
+            let agent_dir = directory.path().join("agent");
+            std::fs::create_dir_all(&agent_dir).expect("agent dir");
+            let socket_path = directory.path().join("daemon.sock").to_string_lossy().into_owned();
+            let daemon = AgentDaemon::new(
+                socket_path.clone(),
+                DaemonModeOptions {
+                    socket_path: Some(socket_path),
+                    default_session_config: AgentSessionRuntimeConfig {
+                        cwd: Some(directory.path().to_string_lossy().into_owned()),
+                        agent_dir: Some(agent_dir.to_string_lossy().into_owned()),
+                        ..Default::default()
+                    },
+                    create_runtime: Arc::new(|_| {
+                        Box::pin(async { panic!("the observe parity test must not create a runtime") })
+                    }),
+                    worker: None,
+                },
+            );
+            let active_session_id = session.active_session_id.clone();
+            let session_handle: Arc<dyn DaemonSession> = Arc::clone(session) as Arc<dyn DaemonSession>;
+            // The same projection `add_runtime` installs for a resident session.
+            let runtime_session = ActiveSessionRuntimeSession {
+                session_id: session_handle.session_id(),
+                session_name: session_handle.session_name(),
+                session_file: session_handle.session_file(),
+                is_session_active: session_handle.is_session_active(),
+                is_streaming: session_handle.is_streaming(),
+                is_compacting: session_handle.is_compacting(),
+                messages_len: session_handle.messages().len(),
+                has_running_rlm_children: session_handle.has_running_rlm_children(),
+                model_identity: session_handle.model_identity(),
+                thinking_level: session_handle.thinking_level(),
+                ..ActiveSessionRuntimeSession::default()
+            };
+            let target_state = Arc::new(StdMutex::new(ActiveSessionState::new(
+                active_session_id.clone(),
+                AgentSessionRuntime {
+                    session: runtime_session,
+                    metadata: Some(AgentSessionRuntimeMetadata::default()),
+                    model_fallback_message: None,
+                },
+            )));
+            daemon.sessions.lock().expect("sessions poisoned").insert(
+                active_session_id.clone(),
+                Arc::new(DaemonSessionState {
+                    state: Arc::clone(&target_state),
+                    session: Arc::clone(&session_handle),
+                    runtime_metadata: AgentSessionRuntimeMetadata::default(),
+                }),
+            );
+            let current_state = match parent_session_file {
+                Some(parent_session_file) => {
+                    let parent_id = "observe-parent".to_string();
+                    let parent_session = Arc::new(ObserveSession {
+                        inner: MissingSession::new(&parent_id),
+                        active_session_id: parent_id.clone(),
+                        session_file: parent_session_file.clone(),
+                        agent_session: None,
+                        streaming: false,
+                        session_active: false,
+                    });
+                    let parent_handle: Arc<dyn DaemonSession> =
+                        Arc::clone(&parent_session) as Arc<dyn DaemonSession>;
+                    let state = Arc::new(StdMutex::new(ActiveSessionState::new(
+                        parent_id.clone(),
+                        AgentSessionRuntime {
+                            session: ActiveSessionRuntimeSession {
+                                session_id: parent_handle.session_id(),
+                                session_name: parent_handle.session_name(),
+                                session_file: parent_handle.session_file(),
+                                ..ActiveSessionRuntimeSession::default()
+                            },
+                            metadata: Some(AgentSessionRuntimeMetadata::default()),
+                            model_fallback_message: None,
+                        },
+                    )));
+                    daemon.sessions.lock().expect("sessions poisoned").insert(
+                        parent_id,
+                        Arc::new(DaemonSessionState {
+                            state: Arc::clone(&state),
+                            session: Arc::clone(&parent_handle),
+                            runtime_metadata: AgentSessionRuntimeMetadata::default(),
+                        }),
+                    );
+                    state
+                }
+                // The caller's own state: a resident-less sibling of the target.
+                None => Arc::new(StdMutex::new(ActiveSessionState::new(
+                    "observe-caller".to_string(),
+                    AgentSessionRuntime::default(),
+                ))),
+            };
+            let controller = daemon.create_agent_observe_controller(Arc::new(move || {
+                Some(Arc::clone(&current_state))
+            }));
+            let handlers = crate::core::agent_observe::create_agent_observe_host_handlers(controller);
+            Self {
+                _directory: directory,
+                daemon,
+                active_session_id,
+                handlers,
+            }
+        }
+
+        /// Invoke a REAL host handler exactly as the Python kernel would.
+        async fn call(&self, handler: &str, payload: Value) -> Result<Value, String> {
+            let handler = self
+                .handlers
+                .get(handler)
+                .expect("the production host handler is registered");
+            handler(payload).await.map_err(|error| error.to_string())
+        }
+    }
+
+    /// Write a session file whose first row is a real header and whose remaining rows are
+    /// `message` entries, returning its path. The daemon's own
+    /// `read_session_info_sync(sessionFile)` reads these rows, so `firstMessage` and
+    /// `transcriptEntryCount` come from a genuine transcript.
+    fn write_transcript(
+        path: &std::path::Path,
+        cwd: &str,
+        texts: &[&str],
+        parent_session: Option<&str>,
+    ) -> String {
+        let mut header = serde_json::json!({
+            "type": "session",
+            "id": "observe-session",
+            "version": 3,
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "cwd": cwd,
+        });
+        if let Some(parent_session) = parent_session {
+            header["parentSession"] = Value::String(parent_session.to_string());
+            header["rlmDepth"] = serde_json::json!(1);
+        }
+        let mut rows = vec![header.to_string()];
+        for (index, text) in texts.iter().enumerate() {
+            rows.push(
+                serde_json::json!({
+                    "type": "message",
+                    "id": format!("m{index}"),
+                    "parentId": if index == 0 { Value::Null } else { Value::String(format!("m{}", index - 1)) },
+                    "timestamp": "2026-01-01T00:00:01.000Z",
+                    "message": {
+                        "role": "user",
+                        "content": text,
+                        "timestamp": 1,
+                    },
+                })
+                .to_string(),
+            );
+        }
+        std::fs::write(path, format!("{}\n", rows.join("\n"))).expect("transcript file");
+        path.to_string_lossy().to_string()
+    }
+
+    /// A daemon holding one session with a real `AgentSession` behind the seam.
+    ///
+    /// `transcript` writes that many real `message` rows into the session file the
+    /// runtime points at, so `sessionManager.getEntries()` and
+    /// `readSessionInfo(sessionFile)` both see a genuine lifetime transcript - which is
+    /// what `transcriptEntryCount` and `firstMessage` are derived from.
+    fn observe_fixture(
+        active_session_id: &str,
+        transcript: &[&str],
+        agent_state: pi_agent_core::types::AgentState,
+        rlm_depth: i64,
+        streaming: bool,
+        session_active: bool,
+    ) -> (tempfile::TempDir, ObservedFixtureParts) {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let cwd = scratch.path().to_string_lossy().to_string();
+        let transcript_path = scratch.path().join("transcript.jsonl");
+        // A depth-1 child is only reachable through its parent, so the caller's state is a
+        // parent whose session path is the child's `parentSession` header value.
+        let (session_file, parent_file) = if rlm_depth > 0 {
+            let parent_path = scratch.path().join("parent.jsonl");
+            let parent_file = write_transcript(&parent_path, &cwd, &["parent task"], None);
+            let session_file =
+                write_transcript(&transcript_path, &cwd, transcript, Some(&parent_file));
+            (session_file, Some(parent_file))
+        } else {
+            (write_transcript(&transcript_path, &cwd, transcript, None), None)
+        };
+        let session = Arc::new(ObserveSession {
+            inner: MissingSession::new(active_session_id),
+            active_session_id: active_session_id.to_string(),
+            session_file: session_file.clone(),
+            agent_session: Some(real_agent_session(
+                ScriptedAgent::new(agent_state),
+                &session_file,
+                rlm_depth,
+            )),
+            streaming,
+            session_active,
+        });
+        let fixture = match parent_file {
+            Some(parent_file) => ObserveFixture::new_with_parent(&session, &parent_file),
+            None => ObserveFixture::new(&session),
+        };
+        (scratch, ObservedFixtureParts { fixture, session })
+    }
+
+    /// The fixture plus the session handle, so a test can assert on the live session.
+    struct ObservedFixtureParts {
+        fixture: ObserveFixture,
+        #[allow(dead_code)]
+        session: Arc<ObserveSession>,
+    }
+
+    /// A real `AgentSession` whose session file is the caller's transcript: the session
+    /// manager is OPENED on it, so `getEntries()` and the daemon's own
+    /// `read_session_info_sync(sessionFile)` both read the same rows.
+    fn real_agent_session(
+        agent: Arc<ScriptedAgent>,
+        transcript_path: &str,
+        rlm_depth: i64,
+    ) -> Arc<crate::core::agent_session::AgentSession> {
+        let cwd = std::path::Path::new(transcript_path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let settings = Arc::new(StdMutex::new(SettingsManager::in_memory(
+            serde_json::json!({
+                "autoRefine": {"enabled": false},
+                "retry": {"enabled": false},
+                "compaction": {"enabled": false},
+                "telemetryEnabled": false,
+                "agentTracesEnabled": false,
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        )));
+        let manager = SessionManager::open(transcript_path, None, Some(&cwd))
+            .expect("open the transcript the daemon will read");
+        let loader = Arc::new(crate::core::resource_loader::DefaultResourceLoader::new(
+            crate::core::resource_loader::DefaultResourceLoaderOptions {
+                cwd: cwd.clone(),
+                agent_dir: cwd.clone(),
+                settings_manager: Some(Arc::clone(&settings)),
+                no_extensions: true,
+                no_skills: true,
+                no_prompt_templates: true,
+                no_themes: true,
+                no_context_files: true,
+                bundled_skills_dir: Some(None),
+                ..Default::default()
+            },
+        ));
+        crate::core::agent_session::AgentSession::new(crate::core::agent_session::AgentSessionConfig {
+            agent: agent as Arc<dyn crate::core::agent_session::AgentHandle>,
+            session_manager: Arc::new(StdMutex::new(manager)),
+            settings_manager: settings,
+            service_tier_preference: None,
+            cwd: cwd.clone(),
+            agent_dir: Some(cwd),
+            scoped_models: None,
+            resource_loader: loader,
+            custom_tools: None,
+            model_registry: Arc::new(StdMutex::new(
+                crate::core::model_registry::ModelRegistry::in_memory(
+                    crate::core::auth_storage::AuthStorage::in_memory(Default::default(), None),
+                ),
+            )),
+            initial_active_tool_names: None,
+            allowed_tool_names: None,
+            include_goals: Some(false),
+            agent_message_controller: None,
+            agent_observe_controller: None,
+            include_compact_skill: Some(false),
+            rlm_heartbeat_controller: None,
+            mcp_manager: None,
+            base_tools_override: None,
+            extension_runner_ref: None,
+            session_start_event: None,
+            rlm_depth: Some(rlm_depth),
+            rlm_max_depth: Some(2),
+            rlm_session_dir: None,
+            rlm_parent_node_id: None,
+            rlm_parent_agent: None,
+            semantic_parent_session_id: None,
+            semantic_spawned_by_request_id: None,
+            subagent_runtime_host: None,
+            autonomous: None,
+            prewarm_ipython_kernel: Some(false),
+            auto_refine_reviewer: None,
+            serialized_refine: None,
+            initial_goal: None,
+        })
+        .expect("agent session")
+    }
+
+    /// D-06: a real host call that omits `limit`/`maxChars` must succeed with the
+    /// TypeScript defaults (`normalizeObserveLimit(input.limit)` with the
+    /// `defaultLimit = 8` / `defaultMaxChars = 800` parameter defaults,
+    /// `agent-observe.ts:107-112`, called from `daemon-mode.ts:3467-3468`).
+    ///
+    /// Measured defect: `create_agent_observe_recent_messages`
+    /// (`daemon_mode.rs:15733-15734`) passes 20 and 4000 as the defaults, and
+    /// `normalize_observe_max_chars` rejects anything above 2000
+    /// (`agent_observe.rs:223`), so EVERY host request that omits `maxChars` - which
+    /// is what the installed observe skill sends - fails with
+    /// "agent_observe max_chars must be between 80 and 2000".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_recent_defaults_to_eight_messages_and_eight_hundred_chars() {
+        let mut agent_state = pi_agent_core::types::AgentState::default();
+        let mut messages: Vec<AgentMessage> = (0..11)
+            .map(|index| user_message(&format!("message-{index}"), index as i64))
+            .collect();
+        messages.push(user_message(&"x".repeat(1200), 11));
+        agent_state.messages = messages;
+        let (_scratch, parts) = observe_fixture(
+            "observe-defaults",
+            &["the first task", "an answer", "third"],
+            agent_state,
+            0,
+            false,
+            false,
+        );
+        let fixture = &parts.fixture;
+
+        let result = fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": fixture.active_session_id }),
+            )
+            .await
+            .expect(
+                "DEFECT D-06: a host request that omits limit/maxChars must use the TypeScript defaults and succeed",
+            );
+        assert_eq!(
+            result.get("limit").and_then(Value::as_f64),
+            Some(TS_DEFAULT_LIMIT as f64),
+            "the daemon must default to the TypeScript limit of 8"
+        );
+        assert_eq!(
+            result.get("maxChars").and_then(Value::as_f64),
+            Some(TS_DEFAULT_MAX_CHARS as f64),
+            "the daemon must default to the TypeScript maxChars of 800"
+        );
+        let previews = result
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages array");
+        assert_eq!(
+            previews.len(),
+            TS_DEFAULT_LIMIT as usize,
+            "the default window must return 8 messages, not 12"
+        );
+        assert_eq!(
+            previews[0].get("index").and_then(Value::as_f64),
+            Some(4.0),
+            "the window must start at messageCount - limit"
+        );
+        let last = previews.last().expect("a last preview");
+        assert_eq!(
+            last.get("text").and_then(Value::as_str).map(str::len),
+            Some(TS_DEFAULT_MAX_CHARS as usize),
+            "the long message must be clipped to the default maxChars"
+        );
+        assert_eq!(last.get("truncated").and_then(Value::as_bool), Some(true));
+    }
+
+    /// The clamp must stay unweakened: an EXPLICIT out-of-range value is still an
+    /// error (`clampInteger`, `agent-observe.ts:69-77`), and an in-range explicit
+    /// value is honored.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_recent_keeps_rejecting_explicit_out_of_range_values() {
+        let mut agent_state = pi_agent_core::types::AgentState::default();
+        agent_state.messages = vec![user_message("only message", 1)];
+        let (_scratch, parts) =
+            observe_fixture("observe-clamp", &["only message"], agent_state, 0, false, false);
+        let fixture = &parts.fixture;
+
+        let too_large = fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": fixture.active_session_id, "max_chars": 4000 }),
+            )
+            .await
+            .expect_err("an explicit 4000 max_chars must stay rejected");
+        assert!(
+            too_large.contains("agent_observe max_chars must be between 80 and 2000"),
+            "the max_chars clamp error must survive, got {too_large:?}"
+        );
+
+        let too_small = fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": fixture.active_session_id, "limit": 51 }),
+            )
+            .await
+            .expect_err("an explicit 51 limit must stay rejected");
+        assert!(
+            too_small.contains("agent_observe limit must be between 1 and 50"),
+            "the limit clamp error must survive, got {too_small:?}"
+        );
+
+        let allowed = fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": fixture.active_session_id, "limit": 3, "max_chars": 150 }),
+            )
+            .await
+            .expect("an in-range explicit value must be honored");
+        assert_eq!(allowed.get("limit").and_then(Value::as_f64), Some(3.0));
+        assert_eq!(allowed.get("maxChars").and_then(Value::as_f64), Some(150.0));
+    }
+
+    /// D-07(a): a streaming session with pending tool calls reports `"tool"`, not
+    /// `"model"` (`daemon-mode.ts:3490-3500`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_summary_reports_tool_status_while_a_tool_call_is_pending() {
+        let mut agent_state = pi_agent_core::types::AgentState::default();
+        agent_state.messages = vec![user_message("run the tests", 1)];
+        agent_state.is_streaming = true;
+        agent_state.pending_tool_calls.insert("call-1".to_string());
+        let (_scratch, parts) = observe_fixture(
+            "observe-tool",
+            &["run the tests", "an answer", "more"],
+            agent_state,
+            0,
+            true,
+            true,
+        );
+        let fixture = &parts.fixture;
+
+        let result = fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": fixture.active_session_id, "limit": 8, "max_chars": 800 }),
+            )
+            .await
+            .expect("the host request must succeed");
+        let status = result
+            .pointer("/agent/status")
+            .and_then(Value::as_str)
+            .expect("agent status");
+        assert_eq!(
+            status, "tool",
+            "DEFECT D-07: a streaming session with a pending tool call must report \"tool\", not \"model\""
+        );
+
+        // Negative control: streaming with NO pending tool call stays "model".
+        let mut idle_state = pi_agent_core::types::AgentState::default();
+        idle_state.messages = vec![user_message("run the tests", 1)];
+        idle_state.is_streaming = true;
+        let (_scratch2, idle_parts) = observe_fixture(
+            "observe-model",
+            &["run the tests", "an answer", "more"],
+            idle_state,
+            0,
+            true,
+            true,
+        );
+        let idle_fixture = &idle_parts.fixture;
+        let result = idle_fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": idle_fixture.active_session_id, "limit": 8, "max_chars": 800 }),
+            )
+            .await
+            .expect("the host request must succeed");
+        assert_eq!(
+            result.pointer("/agent/status").and_then(Value::as_str),
+            Some("model"),
+            "streaming without a pending tool call stays \"model\""
+        );
+    }
+
+    /// D-07(b): `transcriptEntryCount` is the LIFETIME JSONL entry count
+    /// (`session.sessionManager.getEntries().length`, `daemon-mode.ts:3513`), kept
+    /// distinct from `messageCount` (`session.messages.length`, `:3512`). The port
+    /// copies `messageCount` into both (`daemon_mode.rs:15596`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_summary_keeps_transcript_entries_distinct_from_message_count() {
+        let mut agent_state = pi_agent_core::types::AgentState::default();
+        agent_state.messages = vec![user_message("first", 1), assistant_message("second", 2)];
+        let (_scratch, parts) = observe_fixture(
+            "observe-entries",
+            &["row 0", "row 1", "row 2", "row 3", "row 4", "row 5", "row 6"],
+            agent_state,
+            0,
+            false,
+            false,
+        );
+        // 7 message rows are on disk, 2 are in the model context.
+
+        let fixture = &parts.fixture;
+
+        let result = fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": fixture.active_session_id, "limit": 8, "max_chars": 800 }),
+            )
+            .await
+            .expect("the host request must succeed");
+        assert_eq!(
+            result.pointer("/agent/messageCount").and_then(Value::as_f64),
+            Some(2.0),
+            "messageCount is the active model-context length"
+        );
+        assert_eq!(
+            result
+                .pointer("/agent/transcriptEntryCount")
+                .and_then(Value::as_f64),
+            Some(7.0),
+            "DEFECT D-07: transcriptEntryCount must be sessionManager.getEntries().length, not a copy of messageCount"
+        );
+    }
+
+    /// D-07(c): `model`, `firstMessage`, `latestMessage` and the diagnostics spread
+    /// (`daemon-mode.ts:3514-3516`, `:3523-3528`). The port leaves all of them unset.
+    ///
+    /// The first three fields are read off a depth-0 session; the diagnostics spread is
+    /// read off a depth-1 session, because `rlmDiagnostics` returns `undefined` at depth
+    /// 0 (`agent-session.ts:3874`). Both go through the same production summary builder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_summary_carries_model_first_latest_and_diagnostics() {
+        let mut agent_state = pi_agent_core::types::AgentState::default();
+        agent_state.model = pi_ai::types::Model::new(
+            "deepseek-v4.1-flash",
+            "DeepSeek",
+            "openai-completions",
+            "ollama-cloud",
+            "http://localhost",
+        );
+        agent_state.messages = vec![
+            user_message("the first task", 10),
+            assistant_message("an answer", 20),
+        ];
+        let (_scratch, parts) = observe_fixture(
+            "observe-fields",
+            &["the first task", "an answer"],
+            agent_state,
+            0,
+            false,
+            false,
+        );
+        let fixture = &parts.fixture;
+
+        let result = fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": fixture.active_session_id, "limit": 8, "max_chars": 800 }),
+            )
+            .await
+            .expect("the host request must succeed");
+        let agent = result.get("agent").expect("agent summary");
+        assert_eq!(
+            agent.get("model").and_then(Value::as_str),
+            Some("ollama-cloud/deepseek-v4.1-flash"),
+            "DEFECT D-07: model must be provider-slash-id (`daemon-mode.ts:3514`)"
+        );
+        assert_eq!(
+            agent.get("firstMessage").and_then(Value::as_str),
+            Some("the first task"),
+            "DEFECT D-07: firstMessage must carry the session's first message (`daemon-mode.ts:3523`)"
+        );
+        let latest = agent.get("latestMessage").expect(
+            "DEFECT D-07: latestMessage must be the preview of the newest message (`daemon-mode.ts:3524-3528`)",
+        );
+        assert_eq!(latest.get("role").and_then(Value::as_str), Some("assistant"));
+        assert_eq!(latest.get("index").and_then(Value::as_f64), Some(1.0));
+        assert_eq!(latest.get("text").and_then(Value::as_str), Some("an answer"));
+
+        // The diagnostics spread, on a depth-1 child observed by its parent.
+        let mut child_state = pi_agent_core::types::AgentState::default();
+        child_state.messages = vec![assistant_message("child answer", 5)];
+        let (_scratch2, child_parts) = observe_fixture(
+            "observe-child",
+            &["parent task", "child answer"],
+            child_state,
+            1,
+            false,
+            false,
+        );
+        let child = &child_parts.fixture;
+        let result = child
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": child.active_session_id, "limit": 8, "max_chars": 800 }),
+            )
+            .await
+            .expect("a parent may observe its own child");
+        let child_agent = result.get("agent").expect("agent summary");
+        assert_eq!(
+            child_agent.get("continuationQueued").and_then(Value::as_bool),
+            Some(false),
+            "DEFECT D-07: the rlmDiagnostics spread (`daemon-mode.ts:3516`) must reach a depth>0 summary, got {:?}",
+            child_agent.get("continuationQueued")
+        );
+    }
+
+    /// The diagnostics spread is ABSENT for a depth-0 session: `get rlmDiagnostics()`
+    /// returns `undefined` at depth 0 (`agent-session.ts:3874`), so spreading it adds
+    /// no keys (`daemon-mode.ts:3516`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn observe_summary_has_no_diagnostics_at_depth_zero() {
+        let mut agent_state = pi_agent_core::types::AgentState::default();
+        agent_state.messages = vec![user_message("root task", 1)];
+        let (_scratch, parts) =
+            observe_fixture("observe-root", &["root task"], agent_state, 0, false, false);
+        let fixture = &parts.fixture;
+
+        let result = fixture
+            .call(
+                "agent_observe.recent",
+                serde_json::json!({ "target": fixture.active_session_id, "limit": 8, "max_chars": 800 }),
+            )
+            .await
+            .expect("the host request must succeed");
+        let agent = result.get("agent").expect("agent summary");
+        assert!(
+            agent.get("continuationQueued").is_none(),
+            "a depth-0 session has no diagnostics keys, got {agent:?}"
+        );
+        assert!(agent.get("lastStopReason").is_none());
+        assert!(agent.get("terminalStatus").is_none());
     }
 }

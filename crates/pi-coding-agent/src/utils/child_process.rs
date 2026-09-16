@@ -3,6 +3,7 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub const EXIT_STDIO_GRACE_MS: u64 = 100;
@@ -11,7 +12,14 @@ pub const EXIT_STDIO_GRACE_MS: u64 = 100;
 #[derive(Debug, Clone, Default)]
 pub struct SpawnOptions {
     pub cwd: Option<String>,
+    /// `env`. Node's `spawn` replaces the child environment with this map; Rust's
+    /// `Command::envs` only adds to the parent's. `replace_env` selects the Node
+    /// behaviour while every existing caller keeps the additive default.
     pub env: Option<Vec<(String, String)>>,
+    /// `false` (default): `env` is added on top of the inherited environment
+    /// (Rust `Command::envs` semantics). `true`: `env` is the child's whole
+    /// environment, as Node's `spawn(env)` does (env_clear + envs).
+    pub replace_env: bool,
     pub detached: bool,
     /// Run through the platform shell as Node's `shell: true` does.
     pub shell: bool,
@@ -33,13 +41,94 @@ pub fn spawn_hidden(command: &str, args: &[String], options: SpawnOptions) -> st
     })
 }
 
+/// Test-only seam (parity-validation fixture): lets a test intercept the
+/// synchronous spawn boundary used by `taskkill` (kernel cleanup) and `where`
+/// (bash resolution) without touching those call sites. Returning `Some`
+/// overrides the real spawn with a caller-provided child handle (a test can
+/// hand back a long-lived child to model a hung runner); `None` falls through
+/// unchanged. Inert when unset.
+type SyncSpawnOverrideFn = fn(&str, &[String], &SpawnOptions) -> Option<std::io::Result<std::process::Child>>;
+static SYNC_SPAWN_OVERRIDE: Mutex<Option<SyncSpawnOverrideFn>> = Mutex::new(None);
+
+#[doc(hidden)]
+pub fn set_sync_spawn_override_for_tests(override_fn: Option<SyncSpawnOverrideFn>) {
+    *SYNC_SPAWN_OVERRIDE.lock().unwrap() = override_fn;
+}
+
+fn drain_child_pipe<P: std::io::Read>(pipe: Option<P>) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_end(&mut buffer);
+    }
+    buffer
+}
+
+fn wait_sync_child(
+    mut child: std::process::Child,
+) -> std::io::Result<std::process::Output> {
+    let status = child.wait()?;
+    Ok(std::process::Output {
+        status,
+        stdout: drain_child_pipe(child.stdout.take()),
+        stderr: drain_child_pipe(child.stderr.take()),
+    })
+}
+
 pub fn spawn_sync_hidden(
     command: &str,
     args: &[String],
     options: SpawnOptions,
 ) -> std::io::Result<std::process::Output> {
+    if let Some(override_fn) = SYNC_SPAWN_OVERRIDE.lock().unwrap().as_ref() {
+        if let Some(child) = override_fn(command, args, &options) {
+            // The unbounded path: an overridden child is waited on without a
+            // deadline, which is exactly the defect these tests exercise.
+            return wait_sync_child(child?);
+        }
+    }
     let mut builder = build_std_command(command, args, &options);
     builder.output()
+}
+
+/// `spawnSync` with a Node-style timeout (child-process.ts: `execFileSync`
+/// `{ timeout }`): on expiry the child is killed and the call errors, so a
+/// hung runner can never wedge a synchronous teardown path.
+pub fn spawn_sync_hidden_with_timeout(
+    command: &str,
+    args: &[String],
+    options: SpawnOptions,
+    timeout_ms: u64,
+) -> std::io::Result<std::process::Output> {
+    if let Some(override_fn) = SYNC_SPAWN_OVERRIDE.lock().unwrap().as_ref() {
+        if let Some(child) = override_fn(command, args, &options) {
+            // The bounded path: the overridden child is subject to the same
+            // deadline as a real spawn.
+            return match wait_with_timeout(&mut child?, timeout_ms) {
+                Some(status) => Ok(std::process::Output {
+                    status,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                }),
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("command timed out after {}ms: {}", timeout_ms, command),
+                )),
+            };
+        }
+    }
+    let mut builder = build_std_command(command, args, &options);
+    let mut child = builder.spawn()?;
+    match wait_with_timeout(&mut child, timeout_ms) {
+        Some(status) => Ok(std::process::Output {
+            status,
+            stdout: drain_child_pipe(child.stdout.take()),
+            stderr: drain_child_pipe(child.stderr.take()),
+        }),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("command timed out after {}ms: {}", timeout_ms, command),
+        )),
+    }
 }
 
 pub fn exec_sync_hidden(command: &str, options: SpawnOptions) -> std::io::Result<std::process::Output> {
@@ -111,6 +200,9 @@ fn apply_std_options(builder: &mut std::process::Command, options: &SpawnOptions
         builder.current_dir(cwd);
     }
     if let Some(env) = &options.env {
+        if options.replace_env {
+            builder.env_clear();
+        }
         builder.envs(env.iter().map(|(key, value)| (key.clone(), value.clone())));
     }
     builder.stdin(if options.stdin_piped {
@@ -171,6 +263,9 @@ fn build_tokio_command(command: &str, args: &[String], options: &SpawnOptions) -
         builder.current_dir(cwd);
     }
     if let Some(env) = &options.env {
+        if options.replace_env {
+            builder.env_clear();
+        }
         builder.envs(env.iter().map(|(key, value)| (key.clone(), value.clone())));
     }
     builder.stdin(if options.stdin_piped {
@@ -367,12 +462,14 @@ pub fn signal_process_group_if_held(pgid: i32, signal: Signal) -> bool {
     true
 }
 
-pub fn signal_process_group_or_process(pid: i32, signal: Signal) {
+/// Returns whether a signal was actually delivered (Node's `child.kill()`
+/// result); the fallback journal stays active when no signal landed.
+pub fn signal_process_group_or_process(pid: i32, signal: Signal) -> bool {
     if send_signal(-pid, signal) {
-        return;
+        return true;
     }
     // Fall back when process groups are unavailable or the group already exited.
-    let _ = send_signal(pid, signal);
+    send_signal(pid, signal)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -516,6 +613,7 @@ pub fn wait_with_timeout(child: &mut std::process::Child, timeout_ms: u64) -> Op
     }
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -620,5 +718,47 @@ mod tests {
             assert!(!process_group_exists(1234));
             assert!(!process_group_has_live_member(1234));
         }
+    }
+
+    /// G2-01: the bounded sync spawn must kill a hanging child at the timeout
+    /// and report TimedOut instead of blocking forever.
+    #[cfg(windows)]
+    #[test]
+    fn spawn_sync_hidden_with_timeout_bounds_a_hanging_child() {
+        let started = std::time::Instant::now();
+        let result = spawn_sync_hidden_with_timeout(
+            "ping",
+            &[
+                "-n".to_string(),
+                "30".to_string(),
+                "127.0.0.1".to_string(),
+            ],
+            SpawnOptions::default(),
+            500,
+        );
+        match result {
+            Err(error) => {
+                assert!(error.kind() == std::io::ErrorKind::TimedOut, "expected TimedOut, got {error}");
+                assert!(started.elapsed() < std::time::Duration::from_secs(5), "the hang must be bounded");
+            }
+            Ok(_) => panic!("a 30s ping must not complete within a 500ms timeout"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn spawn_sync_hidden_with_timeout_returns_completed_output() {
+        let result = spawn_sync_hidden_with_timeout(
+            "cmd",
+            &["/c".to_string(), "echo parity-ok".to_string()],
+            SpawnOptions {
+                capture_stdout: true,
+                ..Default::default()
+            },
+            5000,
+        )
+        .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "parity-ok");
     }
 }

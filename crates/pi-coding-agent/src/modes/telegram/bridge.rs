@@ -105,7 +105,11 @@ pub fn accept_telegram_pairing(settings: &mut TelegramConnectionSettings, update
                 .as_ref()
                 .map(|pairing| pairing.expires_at)
                 .unwrap_or(0.0)
-        || command.as_ref().map(|command| command.args.len() > 64).unwrap_or(false)
+        // `command.args.length > 64`: UTF-16 code units, not bytes.
+        || command
+            .as_ref()
+            .map(|command| crate::modes::telegram::api::utf16_len(&command.args) > 64)
+            .unwrap_or(false)
         || command.as_ref().map(|command| pairing_hash(&command.args)).unwrap_or_default()
             != settings
                 .pairing
@@ -477,6 +481,7 @@ impl TelegramBridge {
 
     /// `flushReplies()`.
     pub async fn flush_replies(&self, has_signal: bool) -> Result<(), TelegramBridgeError> {
+        let signal = if has_signal { Some(self.shared.controller.clone()) } else { None };
         // Bind first: the `if let` scrutinee's guard would otherwise live across the await.
         let in_flight = self.sending.lock().unwrap().clone();
         if let Some(sending) = in_flight {
@@ -487,7 +492,7 @@ impl TelegramBridge {
         }
         let sending = SendingState::new();
         *self.sending.lock().unwrap() = Some(sending.clone());
-        let outcome = match self.flush_replies_inner(has_signal).await {
+        let outcome = match self.flush_replies_inner(signal).await {
             Ok(()) => Ok(()),
             Err(error) => {
                 let failures = {
@@ -509,7 +514,10 @@ impl TelegramBridge {
     }
 
     /// The `(async () => { ... })()` body of `flushReplies()`.
-    async fn flush_replies_inner(&self, has_signal: bool) -> Result<(), TelegramBridgeError> {
+    async fn flush_replies_inner(
+        &self,
+        signal: Option<CancellationToken>,
+    ) -> Result<(), TelegramBridgeError> {
         let controller = self.shared.controller.clone();
         loop {
             if controller.is_cancelled() {
@@ -531,7 +539,10 @@ impl TelegramBridge {
                 self.save();
                 continue;
             }
-            self.api.send(next.0, &next.1, has_signal).await.map_err(call_error_to_bridge)?;
+            self.api
+                .send(next.0, &next.1, signal.clone())
+                .await
+                .map_err(call_error_to_bridge)?;
             if controller.is_cancelled() {
                 return Ok(());
             }
@@ -706,7 +717,7 @@ impl TelegramBridge {
                         Some(AgentConnectionPromptOptions {
                             source: Some("interactive".to_string()),
                             queue_if_busy: Some(true),
-                            streaming_behavior: Some("followUp".to_string()),
+                            streaming_behavior: Some("steer".to_string()),
                             ..Default::default()
                         }),
                     )
@@ -949,7 +960,8 @@ impl TelegramBridge {
     /// `async run(signal?)`.
     pub async fn run(self: &Arc<Self>, signal: Option<CancellationToken>) -> Result<(), TelegramBridgeError> {
         let controller = self.shared.controller.clone();
-        let has_signal = signal.is_some();
+        // `this.controller.signal` is the signal every API call receives.
+        let request_signal = if signal.is_some() { Some(controller.clone()) } else { None };
         // `signal?.addEventListener("abort", stop, { once: true })` plus
         // `if (signal?.aborted) stop()`.
         let stop_task = signal.as_ref().map(|signal| {
@@ -966,7 +978,7 @@ impl TelegramBridge {
         });
         let delivery = Mutex::new(None::<tokio::task::JoinHandle<()>>);
         let typing = Mutex::new(None::<tokio::task::JoinHandle<()>>);
-        let outcome = self.run_inner(has_signal, &controller, &delivery, &typing).await;
+        let outcome = self.run_inner(request_signal, &controller, &delivery, &typing).await;
         // `finally`: stop, clearInterval, unsubscribe, removeEventListener.
         controller.cancel();
         if let Some(task) = delivery.lock().unwrap().take() {
@@ -1005,7 +1017,7 @@ impl TelegramBridge {
     /// The `try { ... }` body of `run()`.
     async fn run_inner(
         self: &Arc<Self>,
-        has_signal: bool,
+        request_signal: Option<CancellationToken>,
         controller: &CancellationToken,
         delivery: &Mutex<Option<tokio::task::JoinHandle<()>>>,
         typing: &Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -1048,7 +1060,11 @@ impl TelegramBridge {
             })
             .collect();
         self.api
-            .call("setMyCommands", serde_json::json!({ "commands": commands }), has_signal)
+            .call(
+                "setMyCommands",
+                serde_json::json!({ "commands": commands }),
+                request_signal.clone(),
+            )
             .await
             .map_err(call_error_to_bridge)?;
         let state = self
@@ -1087,7 +1103,7 @@ impl TelegramBridge {
                             .call(
                                 "sendChatAction",
                                 serde_json::json!({ "chat_id": paired, "action": "typing" }),
-                                true,
+                                Some(bridge.shared.controller.clone()),
                             )
                             .await;
                     }
@@ -1117,7 +1133,7 @@ impl TelegramBridge {
         while !controller.is_cancelled() {
             match self
                 .api
-                .updates(self.shared.state.lock().unwrap().offset, has_signal)
+                .updates(self.shared.state.lock().unwrap().offset, request_signal.clone())
                 .await
             {
                 Ok(updates) => {

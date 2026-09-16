@@ -278,6 +278,12 @@ fn canonical_builtin_slash_commands() -> Vec<BuiltinSlashCommand> {
         None,
     );
     push(
+        "monitor",
+        "Turn local performance monitoring ON or OFF".to_string(),
+        Some("[status|on|off]"),
+        None,
+    );
+    push(
         "context",
         "Show token, cost, and context usage for agent and sub-agents".to_string(),
         None,

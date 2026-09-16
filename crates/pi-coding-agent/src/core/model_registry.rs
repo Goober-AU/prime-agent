@@ -3,7 +3,7 @@
 //! Model registry - manages built-in and custom models, provides API key resolution.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use indexmap::IndexMap;
@@ -1081,13 +1081,9 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
-/// `getAgentDir()` from config.ts (other slice).
+/// Use the shared resolver so the model picker respects an isolated agent directory.
 fn get_agent_dir() -> String {
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    home.join(".prime")
-        .join("agent")
-        .to_string_lossy()
-        .to_string()
+    crate::config::get_agent_dir()
 }
 
 /// `interface ProviderConfigInput` for `registerProvider`.
@@ -1247,6 +1243,13 @@ impl ModelRegistry {
 
     pub fn in_memory(auth_storage: AuthStorage) -> Self {
         Self::new(auth_storage, None)
+    }
+
+    /// The registry's own auth storage (`modelRegistry.authStorage` in
+    /// TypeScript — a public field there; a read accessor here so kernel env
+    /// provisioning can read credentials without exposing the whole registry).
+    pub fn auth_storage(&self) -> &AuthStorage {
+        &self.auth_storage
     }
 
     /// Set a runtime API key override on the registry's own `AuthStorage`.
@@ -1418,6 +1421,9 @@ impl ModelRegistry {
             }
         }
 
+        for model in &mut combined {
+            super::model_reasoning_policy::apply_azure_reasoning_levels(model);
+        }
         self.models = combined;
     }
 

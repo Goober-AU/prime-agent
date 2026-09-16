@@ -2,6 +2,11 @@
 
 use crate::cli::daemon_launch::maybe_start_daemon_early;
 use crate::config::APP_NAME;
+use crate::modes::daemon::daemon_catalog_process::is_daemon_catalog_process_from_env;
+
+fn can_start_frontend_daemon(owned_worker: bool, catalog: bool) -> bool {
+    !owned_worker && !catalog
+}
 
 /// `enableCompileCache?.()`: the port is a compiled binary, so there is no cache
 /// to enable; the TypeScript swallows a read-only cache dir the same way.
@@ -66,7 +71,7 @@ pub async fn run_cli(host: &dyn CliMainHost) -> Result<(), String> {
     let args: Vec<String> = argv.iter().skip(2).cloned().collect();
     let handled_by_owned_worker = host.maybe_run_frontend(args.clone()).await;
     if !handled_by_owned_worker {
-        if !host.is_owned_session_worker_process() {
+        if can_start_frontend_daemon(host.is_owned_session_worker_process(), is_daemon_catalog_process_from_env()) {
             // Boot a cold daemon concurrently with this process's heavy imports.
             maybe_start_daemon_early(&args);
         }
@@ -83,6 +88,14 @@ pub async fn run_cli(host: &dyn CliMainHost) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn catalog_and_workers_never_start_a_frontend_daemon() {
+        assert!(can_start_frontend_daemon(false, false));
+        assert!(!can_start_frontend_daemon(false, true));
+        assert!(!can_start_frontend_daemon(true, false));
+        assert!(!can_start_frontend_daemon(true, true));
+    }
 
     #[derive(Default)]
     struct Recorder {

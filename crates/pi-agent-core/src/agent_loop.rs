@@ -4,7 +4,7 @@
 //! The Rust port keeps the same call order, the same abort points, and the same
 //! event sequence; the abort signal is a `CancellationToken`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -88,10 +88,35 @@ pub struct LogicalRequestMetricFinalizer {
     pub first_visible_at: Option<f64>,
 }
 
+/// How long a correlation entry may live. A host-owned logical request that never settles
+/// (the successful retry path has no finalizer call) still cannot grow the registry without
+/// bound: the oldest entry is evicted first. This is the documented retention lifecycle.
+const CORRELATION_REGISTRY_CAPACITY: usize = 256;
+
+/// One terminal message lifetime. The correlation and the finalizer always belong to the same
+/// `(session, message)` pair, so they share one entry and one eviction position.
+struct CorrelationEntry {
+    session_id: String,
+    fingerprint: String,
+    sequence: u64,
+    correlation: Option<PerformanceMetricRequestCorrelation>,
+    finalizer: Option<LogicalRequestMetricFinalizer>,
+}
+
 #[derive(Default)]
 struct CorrelationRegistry {
-    correlations: HashMap<String, PerformanceMetricRequestCorrelation>,
-    finalizers: HashMap<String, LogicalRequestMetricFinalizer>,
+    /// Keyed by `(session id, message fingerprint)`, exactly as the host supplies both.
+    ///
+    /// TypeScript keeps these in `WeakMap<AssistantMessage, ...>` keyed by object identity, so
+    /// an entry disappears with its message. A Rust `AssistantMessage` passed by value has no
+    /// identity, so the same two lifetimes are keyed by the serialized terminal message *plus*
+    /// the recorder session. Without the session part, two sessions that produce byte-identical
+    /// messages overwrite each other and the second session is attributed the first session's
+    /// correlation.
+    entries: HashMap<String, CorrelationEntry>,
+    /// Insertion order, used to evict the oldest entry once the capacity is reached.
+    order: std::collections::VecDeque<String>,
+    next_sequence: u64,
 }
 
 fn correlation_registry() -> &'static Mutex<CorrelationRegistry> {
@@ -99,20 +124,152 @@ fn correlation_registry() -> &'static Mutex<CorrelationRegistry> {
     REGISTRY.get_or_init(|| Mutex::new(CorrelationRegistry::default()))
 }
 
+/// Live correlation-registry entries: retained terminal message lifetimes.
+///
+/// Test-only retention seam (TEST-SPEC T16), compiled out of non-test builds.
+#[cfg(test)]
+fn correlation_registry_len_for_tests() -> usize {
+    correlation_registry()
+        .lock()
+        .map(|registry| registry.entries.len())
+        .unwrap_or(0)
+}
+
+/// Logical-request ids of the correlation lifetimes that are still retained.
+///
+/// Test-only identity seam (TEST-SPEC T16): it proves how many distinct message lifetimes the
+/// registry kept, independently of the retention bound and of the lookup ambiguity rule.
+#[cfg(test)]
+fn correlation_registry_logical_ids_for_tests() -> Vec<String> {
+    correlation_registry()
+        .lock()
+        .map(|registry| {
+            let mut ids: Vec<String> = registry
+                .entries
+                .values()
+                .filter_map(|entry| entry.correlation.as_ref())
+                .filter_map(|correlation| correlation.logical_request_id.clone())
+                .collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        })
+        .unwrap_or_default()
+}
+
 fn message_fingerprint(message: &AssistantMessage) -> String {
     serde_json::to_string(message).unwrap_or_default()
 }
 
-fn remember_request_correlation(message: &AssistantMessage, correlation: PerformanceMetricRequestCorrelation) {
-    if let Ok(mut registry) = correlation_registry().lock() {
-        registry.correlations.insert(message_fingerprint(message), correlation);
+/// `(session, fingerprint)` - the identity of one terminal message lifetime.
+fn correlation_key(session_id: &str, fingerprint: &str) -> String {
+    let mut key = String::with_capacity(session_id.len() + fingerprint.len() + 1);
+    key.push_str(session_id);
+    key.push(char::from(31));
+    key.push_str(fingerprint);
+    key
+}
+
+/// Store a message lifetime and evict the oldest lifetime when the bound is reached.
+fn remember_entry(
+    registry: &mut CorrelationRegistry,
+    session_id: &str,
+    message: &AssistantMessage,
+    correlation: Option<PerformanceMetricRequestCorrelation>,
+    finalizer: Option<LogicalRequestMetricFinalizer>,
+) {
+    let fingerprint = message_fingerprint(message);
+    let key = correlation_key(session_id, &fingerprint);
+    registry.next_sequence += 1;
+    let sequence = registry.next_sequence;
+    let entry = registry.entries.entry(key.clone()).or_insert_with(|| CorrelationEntry {
+        session_id: session_id.to_string(),
+        fingerprint,
+        sequence,
+        correlation: None,
+        finalizer: None,
+    });
+    entry.sequence = sequence;
+    if correlation.is_some() {
+        entry.correlation = correlation;
+    }
+    if finalizer.is_some() {
+        entry.finalizer = finalizer;
+    }
+    registry.order.retain(|existing| existing != &key);
+    registry.order.push_back(key);
+    while registry.order.len() > CORRELATION_REGISTRY_CAPACITY {
+        if let Some(oldest) = registry.order.pop_front() {
+            registry.entries.remove(&oldest);
+        }
     }
 }
 
-fn remember_logical_request_finalizer(message: &AssistantMessage, finalizer: LogicalRequestMetricFinalizer) {
+fn remember_request_correlation(
+    message: &AssistantMessage,
+    session_id: &str,
+    correlation: PerformanceMetricRequestCorrelation,
+) {
     if let Ok(mut registry) = correlation_registry().lock() {
-        registry.finalizers.insert(message_fingerprint(message), finalizer);
+        remember_entry(&mut registry, session_id, message, Some(correlation), None);
     }
+}
+
+fn remember_logical_request_finalizer(
+    message: &AssistantMessage,
+    session_id: &str,
+    finalizer: LogicalRequestMetricFinalizer,
+) {
+    if let Ok(mut registry) = correlation_registry().lock() {
+        remember_entry(&mut registry, session_id, message, None, Some(finalizer));
+    }
+}
+
+/// The correlation of the one session that owns this exact terminal message.
+///
+/// Two sessions can produce byte-identical messages. Returning either one would mis-attribute
+/// the request, so an ambiguous message resolves to `None` instead; the caller then falls back
+/// to its own session-scoped metrics rather than to another session's correlation.
+fn entry_for_message<'a>(
+    registry: &'a CorrelationRegistry,
+    message: &AssistantMessage,
+    has: impl Fn(&CorrelationEntry) -> bool,
+) -> Option<&'a CorrelationEntry> {
+    let fingerprint = message_fingerprint(message);
+    let mut owner: Option<&CorrelationEntry> = None;
+    for entry in registry.entries.values() {
+        if entry.fingerprint != fingerprint || !has(entry) {
+            continue;
+        }
+        match owner {
+            None => owner = Some(entry),
+            Some(current) if current.session_id == entry.session_id => {
+                if entry.sequence > current.sequence {
+                    owner = Some(entry);
+                }
+            }
+            // A second session owns the same content: content alone cannot answer.
+            Some(_) => return None,
+        }
+    }
+    owner
+}
+
+fn correlation_for_message(
+    registry: &CorrelationRegistry,
+    message: &AssistantMessage,
+) -> Option<PerformanceMetricRequestCorrelation> {
+    entry_for_message(registry, message, |entry| entry.correlation.is_some())
+        .and_then(|entry| entry.correlation.clone())
+}
+
+/// Same ambiguity rule as [`correlation_for_message`], for the host-owned settlement path.
+fn finalizer_for_message(
+    registry: &CorrelationRegistry,
+    message: &AssistantMessage,
+) -> Option<LogicalRequestMetricFinalizer> {
+    entry_for_message(registry, message, |entry| entry.finalizer.is_some())
+        .and_then(|entry| entry.finalizer.clone())
 }
 
 /// Settles a host-owned logical request exactly once. This is process-local and
@@ -125,7 +282,7 @@ pub fn finalize_performance_metric_logical_request(
         let state = correlation_registry()
             .lock()
             .ok()
-            .and_then(|registry| registry.finalizers.get(&message_fingerprint(message)).cloned());
+            .and_then(|registry| finalizer_for_message(&registry, message));
         let Some(state) = state else {
             return;
         };
@@ -138,11 +295,10 @@ pub fn finalize_performance_metric_logical_request(
 pub fn get_performance_metric_request_correlation(
     message: &AssistantMessage,
 ) -> Option<PerformanceMetricRequestCorrelation> {
-    let correlation = correlation_registry()
+    correlation_registry()
         .lock()
         .ok()
-        .and_then(|registry| registry.correlations.get(&message_fingerprint(message)).cloned())?;
-    Some(correlation)
+        .and_then(|registry| correlation_for_message(&registry, message))
 }
 
 fn settle_logical_request_metric(state: &LogicalRequestMetricFinalizer, outcome: PerformanceMetricOutcome) {
@@ -1504,8 +1660,10 @@ async fn execute_prepared_tool_call(
     signal: Option<&CancellationToken>,
     emit: &AgentEventSink,
 ) -> ExecutedToolCallOutcome {
-    let update_events: Arc<tokio::sync::Mutex<Vec<BoxFuture<'static, anyhow::Result<()>>>>> =
-        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    // `updateEvents: Promise<void>[]`. TypeScript starts `emit(...)` when the tool publishes
+    // the partial result and joins the promises at the end. Each update is therefore started
+    // immediately in its own task (so a client can render progress while the tool still runs)
+    // and the task handle is retained for the join below.
     let accepting_updates = Arc::new(AtomicBool::new(true));
 
     if let Err(error) = throw_if_aborted(signal) {
@@ -1515,9 +1673,47 @@ async fn execute_prepared_tool_call(
         };
     }
 
-    let on_update: crate::types::AgentToolUpdateCallback = {
+    // `updateEvents: Promise<void>[]`. TypeScript starts `emit(...)` inside the publisher's
+    // callback, so emission begins while the tool is still running and the sink observes the
+    // publish order. A single drain task preserves both properties here: the callback appends
+    // to an ordered queue (the linearization point) and the drain task emits from it
+    // immediately, so nothing is dropped by lock contention and no update is reordered.
+    let update_queue: Arc<std::sync::Mutex<VecDeque<AgentEvent>>> =
+        Arc::new(std::sync::Mutex::new(VecDeque::new()));
+    let update_wake = Arc::new(tokio::sync::Notify::new());
+    let updates_closed = Arc::new(AtomicBool::new(false));
+    let update_drain = {
         let emit = emit.clone();
-        let update_events = update_events.clone();
+        let update_queue = update_queue.clone();
+        let update_wake = update_wake.clone();
+        let updates_closed = updates_closed.clone();
+        tokio::spawn(async move {
+            loop {
+                // Register interest before checking the queue so a publish cannot be missed.
+                let notified = update_wake.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let pending: Vec<AgentEvent> = match update_queue.lock() {
+                    Ok(mut guard) => guard.drain(..).collect(),
+                    Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+                };
+                if pending.is_empty() {
+                    if updates_closed.load(Ordering::SeqCst) {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                    notified.await;
+                    continue;
+                }
+                for event in pending {
+                    emit(event).await?;
+                }
+            }
+        })
+    };
+
+    let on_update: crate::types::AgentToolUpdateCallback = {
+        let update_queue = update_queue.clone();
+        let update_wake = update_wake.clone();
         let accepting_updates = accepting_updates.clone();
         let signal = signal.cloned();
         let tool_call_id = prepared.tool_call.id.clone();
@@ -1529,22 +1725,24 @@ async fn execute_prepared_tool_call(
             {
                 return;
             }
-            let emit = emit.clone();
             let tool_call_id = tool_call_id.clone();
             let tool_name = tool_name.clone();
             let args = args.clone();
-            let future: BoxFuture<'static, anyhow::Result<()>> = Box::pin(async move {
-                emit(AgentEvent::ToolExecutionUpdate {
-                    tool_call_id,
-                    tool_name,
-                    args,
-                    partial_result,
-                })
-                .await
-            });
-            if let Ok(mut guard) = update_events.try_lock() {
-                guard.push(future);
+            // `updateEvents.push(Promise.resolve(emit(...)))`: the update joins the ordered
+            // queue now (publish order is the linearization point) and the drain task emits it
+            // immediately, so progress is observable while the tool is unfinished.
+            let event = AgentEvent::ToolExecutionUpdate {
+                tool_call_id,
+                tool_name,
+                args,
+                partial_result,
+            };
+            match update_queue.lock() {
+                Ok(mut guard) => guard.push_back(event),
+                Err(poisoned) => poisoned.into_inner().push_back(event),
             }
+            // `notify_one` stores a permit, so a wakeup cannot be lost.
+            update_wake.notify_one();
         })
     };
 
@@ -1565,36 +1763,40 @@ async fn execute_prepared_tool_call(
     )
     .await;
     accepting_updates.store(false, Ordering::SeqCst);
+    // `await Promise.all(updateEvents)` in TypeScript: close the drain and join it, so every
+    // accepted update has reached the sink before the tool outcome is returned.
+    {
+        let finish_drain = async {
+            updates_closed.store(true, Ordering::SeqCst);
+            update_wake.notify_one();
+            update_drain
+                .await
+                .map_err(anyhow::Error::from)
+                .and_then(|inner| inner)
+        };
+        match race_with_abort(finish_drain, signal.cloned(), None).await {
+            Ok(()) => {}
+            Err(error) if is_abort_error(&error) => {
+                // The caller aborted while the join was in flight; the updates already queued
+                // were emitted by the drain task, which finishes on its own.
+            }
+            Err(error) => {
+                return ExecutedToolCallOutcome {
+                    result: create_error_tool_result(&format!("{error}")),
+                    is_error: true,
+                };
+            }
+        }
+    }
 
     match result {
         Ok(result) => {
-            let pending: Vec<_> = {
-                let mut guard = update_events.lock().await;
-                guard.drain(..).collect()
-            };
-            for future in pending {
-                if let Err(error) = future.await {
-                    if !signal.map(|signal| signal.is_cancelled()).unwrap_or(false) || !is_abort_error(&error) {
-                        return ExecutedToolCallOutcome {
-                            result: create_error_tool_result(&format!("{error}")),
-                            is_error: true,
-                        };
-                    }
-                }
-            }
             ExecutedToolCallOutcome {
                 result,
                 is_error: false,
             }
         }
         Err(error) => {
-            let pending: Vec<_> = {
-                let mut guard = update_events.lock().await;
-                guard.drain(..).collect()
-            };
-            for future in pending {
-                let _ = future.await;
-            }
             let message = if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
                 "Tool execution aborted".to_string()
             } else {
@@ -2008,8 +2210,12 @@ fn finish_request_metrics(
     };
     let metrics_ref = metrics.as_ref().expect("metrics checked above");
     if let Some(message) = message {
+        // The lifetime is scoped to the recording session, so two sessions that finish with
+        // byte-identical content cannot overwrite each other's correlation.
+        let session_id = metrics_ref.recorder.session_id();
         remember_request_correlation(
             message,
+            session_id,
             PerformanceMetricRequestCorrelation {
                 logical_request_id: request_metrics.logical_request_id.clone(),
                 logical_request_started_at: request_metrics.started_at,
@@ -2017,7 +2223,7 @@ fn finish_request_metrics(
                 logical_request_settlement: logical_request_settlement.clone(),
             },
         );
-        remember_logical_request_finalizer(message, logical_finalizer.clone());
+        remember_logical_request_finalizer(message, session_id, logical_finalizer.clone());
     }
 
     let usage = match request_metrics.provider_usage.clone() {
@@ -2071,6 +2277,296 @@ fn finish_request_metrics(
     );
     if message.is_none() || !metrics_ref.host_owns_logical_request_terminal {
         settle_logical_request_metric(&logical_finalizer, outcome);
+    }
+}
+
+/// T16 lane (owner rlm-agentcore): D-15 performance-metric correlation registry.
+///
+/// In-crate `#[cfg(test)]` module: the registry is private to this module, so the retention and
+/// identity seams are reachable only here. Production entry points under test: the real
+/// `agent_loop` stream plus `get_performance_metric_request_correlation` /
+/// `finalize_performance_metric_logical_request`.
+#[cfg(test)]
+mod rlm_t16_tests {
+    use super::*;
+    use crate::performance_metrics::AgentLoopPerformanceMetrics;
+    use crate::types::{AgentContext, AgentMessage};
+    use pi_ai::providers::faux::{faux_assistant_message, register_faux_provider, FauxResponseStep};
+    use pi_ai::types::{UserMessage, UserContent};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// Documented retention bound. This is an independent expectation, not a read of the
+    /// production constant, so weakening the constant alone cannot make the test pass.
+    const RETENTION_BOUND: usize = 256;
+
+    /// Serializes the tests in this binary that assert registry counts.
+    static REGISTRY_TESTS: Mutex<()> = Mutex::new(());
+
+    /// A real recorder whose session id distinguishes two process-local sessions.
+    struct SessionRecorder {
+        session_id: String,
+        recorded: AtomicUsize,
+    }
+
+    impl SessionRecorder {
+        fn new(session_id: &str) -> Arc<Self> {
+            Arc::new(Self {
+                session_id: session_id.to_string(),
+                recorded: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl PerformanceMetricRecorder for SessionRecorder {
+        fn session_id(&self) -> &str {
+            &self.session_id
+        }
+        fn monotonic_now(&self) -> f64 {
+            1.0
+        }
+        fn next_id(&self, scope: crate::performance_metrics::PerformanceMetricIdScope) -> String {
+            format!("{scope:?}-1")
+        }
+        fn record(&self, _event: PerformanceMetricEvent) {
+            self.recorded.fetch_add(1, Ordering::SeqCst);
+        }
+        fn flush(&self) {}
+        fn close(&self) {}
+    }
+
+    /// A terminal message whose bytes do not depend on the provider registration, so two
+    /// sessions can be made byte-identical on purpose.
+    fn pinned_message(
+        registration: &pi_ai::providers::faux::FauxProviderRegistration,
+        content_seed: u64,
+    ) -> AssistantMessage {
+        let model = registration.get_model();
+        let mut message = faux_assistant_message("answer".into(), None);
+        message.api = model.api.clone();
+        message.provider = model.provider.clone();
+        message.model = model.id.clone();
+        message.timestamp = content_seed as i64;
+        message.response_id = Some("pinned-response".to_string());
+        message.usage = Usage::zero();
+        message
+    }
+
+    /// Run one real agent loop for `session_id` and return its terminal assistant message.
+    async fn run_session(
+        provider: &pi_ai::providers::faux::FauxProviderRegistration,
+        recorder: Arc<SessionRecorder>,
+        logical_request_id: &str,
+        content_seed: u64,
+    ) -> AssistantMessage {
+        provider.set_responses(vec![FauxResponseStep::Message(pinned_message(provider, content_seed))]);
+        let context = AgentContext {
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: None,
+        };
+        let mut config = AgentLoopConfig::new(provider.get_model());
+        config.performance_metrics = Some(AgentLoopPerformanceMetrics {
+            recorder: recorder.clone(),
+            logical_request_id: Some(logical_request_id.to_string()),
+            logical_request_started_at: Some(0.0),
+            provider_attempt_number: Some(1),
+            host_owns_logical_request_terminal: false,
+            logical_request_settlement: None,
+        });
+        config.stream_options.stream.session_id = Some("pinned-stream-session".to_string());
+        let stream = agent_loop(
+            vec![AgentMessage::from(UserMessage {
+                role: "user".to_string(),
+                content: UserContent::Text("question".to_string()),
+                provider_context: None,
+                timestamp: 1,
+            })],
+            context,
+            config,
+            None,
+            None,
+        );
+        let mut messages: Vec<AgentMessage> = Vec::new();
+        while let Some(event) = stream.next().await {
+            if let AgentEvent::AgentEnd { messages: produced } = event {
+                messages = produced;
+            }
+        }
+        messages
+            .into_iter()
+            .rev()
+            .find_map(|message| match message {
+                AgentMessage::Message(Message::Assistant(assistant)) => Some(assistant),
+                _ => None,
+            })
+            .expect("the run must produce a terminal assistant message")
+    }
+
+    /// Two sessions that finish with byte-identical assistant content must not share one
+    /// correlation lifetime. On a content-keyed registry the second run overwrites the first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn identical_content_messages_do_not_share_correlation() {
+        let _guard = REGISTRY_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let provider = register_faux_provider(None);
+        let session_a = SessionRecorder::new("session-a");
+        let session_b = SessionRecorder::new("session-b");
+        let left = run_session(&provider, session_a.clone(), "logical-a", 42).await;
+        let right = run_session(&provider, session_b, "logical-b", 42).await;
+        assert_eq!(
+            serde_json::to_string(&left).unwrap(),
+            serde_json::to_string(&right).unwrap(),
+            "fixture precondition: the terminal messages must be byte-identical"
+        );
+        assert!(session_a.recorded.load(Ordering::SeqCst) > 0, "session A recorded metrics");
+        let retained = correlation_registry_logical_ids_for_tests();
+        let left_id = get_performance_metric_request_correlation(&left)
+            .and_then(|correlation| correlation.logical_request_id);
+        let right_id = get_performance_metric_request_correlation(&right)
+            .and_then(|correlation| correlation.logical_request_id);
+        // The registry is process-global, so other tests in this binary may also hold
+        // lifetimes. The property under test is that BOTH sessions keep their own lifetime.
+        assert!(
+            retained.contains(&"logical-a".to_string()) && retained.contains(&"logical-b".to_string()),
+            "each session must keep its own correlation lifetime for byte-identical content; \
+             retained lifetimes observed {retained:?} (left={left_id:?}, right={right_id:?})"
+        );
+        let mut distinct = retained.clone();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            retained.len(),
+            "the two sessions must not share a single lifetime: {retained:?}"
+        );
+        assert_ne!(
+            left_id.as_deref(),
+            Some("logical-b"),
+            "session A must not be attributed to session B's request"
+        );
+        assert_ne!(
+            right_id.as_deref(),
+            Some("logical-a"),
+            "session B must not be attributed to session A's request"
+        );
+        if left_id.is_some() {
+            assert_eq!(left_id.as_deref(), Some("logical-a"));
+        }
+        if right_id.is_some() {
+            assert_eq!(right_id.as_deref(), Some("logical-b"));
+        }
+
+        // Preservation control: distinct content still resolves to its own session's request.
+        let distinct_c = run_session(&provider, SessionRecorder::new("session-c"), "logical-c", 501).await;
+        let distinct_d = run_session(&provider, SessionRecorder::new("session-d"), "logical-d", 502).await;
+        assert_eq!(
+            get_performance_metric_request_correlation(&distinct_c)
+                .and_then(|correlation| correlation.logical_request_id)
+                .as_deref(),
+            Some("logical-c"),
+            "a unique terminal message must keep its own correlation"
+        );
+        assert_eq!(
+            get_performance_metric_request_correlation(&distinct_d)
+                .and_then(|correlation| correlation.logical_request_id)
+                .as_deref(),
+            Some("logical-d"),
+        );
+        provider.unregister();
+    }
+
+    /// Bounded synthetic message lifetimes must not grow the registry without bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finalized_message_lifetimes_do_not_leak_registry_entries() {
+        let _guard = REGISTRY_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let base = correlation_registry_len_for_tests();
+        let lifetimes = RETENTION_BOUND + 32;
+        let mut peak = base;
+        let provider = register_faux_provider(None);
+        for index in 0..lifetimes {
+            let recorder = SessionRecorder::new("session-retention");
+            let terminal = run_session(&provider, recorder, "logical-retention", 1000 + index as u64).await;
+            // The documented end of a message lifetime: the host settles the logical request.
+            finalize_performance_metric_logical_request(
+                &terminal,
+                Some(PerformanceMetricOutcome::Success),
+            );
+            peak = peak.max(correlation_registry_len_for_tests());
+        }
+        provider.unregister();
+        let after = correlation_registry_len_for_tests();
+        assert!(
+            peak <= RETENTION_BOUND + base,
+            "retained lifetimes must stay within the documented bound: peak {peak}, base {base}, \
+             bound {RETENTION_BOUND}"
+        );
+        assert!(
+            after <= RETENTION_BOUND + base,
+            "registry must not grow per message lifetime: {after} live entries after {lifetimes} \
+             finalized lifetimes (base {base}, bound {RETENTION_BOUND})"
+        );
+    }
+
+    /// Preservation control for /monitor behavior: attempts are recorded and settlement is
+    /// exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn metrics_recording_and_single_settlement_are_preserved() {
+        let provider = register_faux_provider(None);
+        let recorder = SessionRecorder::new("session-control");
+        let terminal = run_session(&provider, recorder.clone(), "logical-control", 7).await;
+        provider.unregister();
+        assert!(
+            recorder.recorded.load(Ordering::SeqCst) >= 1,
+            "the provider attempt must still be recorded"
+        );
+        assert_eq!(
+            get_performance_metric_request_correlation(&terminal)
+                .and_then(|correlation| correlation.logical_request_id)
+                .as_deref(),
+            Some("logical-control"),
+        );
+        let before = recorder.recorded.load(Ordering::SeqCst);
+        finalize_performance_metric_logical_request(&terminal, Some(PerformanceMetricOutcome::Success));
+        let after_first = recorder.recorded.load(Ordering::SeqCst);
+        finalize_performance_metric_logical_request(&terminal, Some(PerformanceMetricOutcome::Failure));
+        let after_second = recorder.recorded.load(Ordering::SeqCst);
+        assert!(after_first <= before + 1, "at most one extra record per settlement");
+        assert_eq!(
+            after_second, after_first,
+            "a second settlement of the same lifetime must not record again"
+        );
+    }
+
+    /// A run without a recorder must not create registry state, and an unregistered message
+    /// must not resolve.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unknown_messages_and_metricless_runs_add_no_state() {
+        let _guard = REGISTRY_TESTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let unknown = faux_assistant_message("never registered".into(), None);
+        assert!(get_performance_metric_request_correlation(&unknown).is_none());
+        let before = correlation_registry_len_for_tests();
+        let provider = register_faux_provider(None);
+        provider.set_responses(vec![FauxResponseStep::Message(faux_assistant_message("no metrics".into(), None))]);
+        let config = AgentLoopConfig::new(provider.get_model());
+        assert!(config.performance_metrics.is_none(), "no recorder by default");
+        let stream = agent_loop(
+            vec![AgentMessage::from(UserMessage {
+                role: "user".to_string(),
+                content: UserContent::Text("plain".to_string()),
+                provider_context: None,
+                timestamp: 1,
+            })],
+            AgentContext::default(),
+            config,
+            None,
+            None,
+        );
+        while stream.next().await.is_some() {}
+        provider.unregister();
+        assert_eq!(
+            correlation_registry_len_for_tests(),
+            before,
+            "a run without a recorder must not create correlation state"
+        );
     }
 }
 

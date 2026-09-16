@@ -486,6 +486,15 @@ enum InputAction {
     Shortcuts,
     Suspend,
     PromptStash,
+    /// `app.edits.expand` (interactive-mode.ts:4300).
+    ToggleEditDiffs,
+    /// `app.editor.external` (interactive-mode.ts:4306).
+    OpenExternalEditor,
+    /// `app.session.new|tree|fork|resume` (interactive-mode.ts:4313-4322).
+    SessionNew,
+    SessionTree,
+    SessionFork,
+    SessionResume,
 }
 enum HostEvent {
     Extension(native_extension_bridge::Event),
@@ -563,6 +572,13 @@ enum HostEvent {
     /// `requestAgentsView()` - `/resume` without arguments and the
     /// `app.agents.open` handoff (interactive-mode.ts:8736-8738).
     AgentsView,
+    /// `/reload` succeeded: rebuild the autocomplete provider and refetch the
+    /// command catalogue (interactive-mode.ts:9185-9186).
+    ReconfigureAutocomplete,
+    /// The `/new <prompt>` text, handed to the owner loop so it can collect
+    /// pasted images, record history and prompt verbatim
+    /// (interactive-mode.ts:10243-10248).
+    PromptSession { text: String },
     /// `showError` (interactive-mode.ts:7672-7676) raised by a local handler
     /// that runs off the UI thread and must not render from there.
     Error(String),
@@ -876,12 +892,103 @@ fn bind_editor_actions(
         ("app.shortcuts", || InputAction::Shortcuts),
         ("app.suspend", || InputAction::Suspend),
         ("app.prompt.stash", || InputAction::PromptStash),
+        ("app.edits.expand", || InputAction::ToggleEditDiffs),
+        ("app.editor.external", || InputAction::OpenExternalEditor),
+        // Focusing the in-session summary must not navigate away from this chat.
+        ("app.session.new", || InputAction::SessionNew),
+        ("app.session.tree", || InputAction::SessionTree),
+        ("app.session.fork", || InputAction::SessionFork),
+        ("app.session.resume", || InputAction::SessionResume),
     ] {
         let actions = actions.clone();
         editor
             .borrow_mut()
             .on_action(binding, Box::new(move || actions.borrow_mut().push(make())));
     }
+}
+
+/// Port of the escape-repeat half of `handleEscape`
+/// (interactive-mode.ts:6924-6953). Returns true when the repeated press was
+/// consumed (tree selector or input clear), so the caller must not run the
+/// interrupt flow. A first press arms the repeat and returns false; the
+/// interrupt flow then runs like the TypeScript's `interruptOrClearInput`.
+async fn escape_repeat_step(
+    mode: &Rc<RefCell<InteractiveMode>>,
+    editor: &Rc<RefCell<CustomEditor>>,
+    ui: &Rc<RefCell<TUI>>,
+    connection: &Arc<dyn wire::AgentConnection>,
+    send: &mpsc::Sender<HostEvent>,
+) -> bool {
+    mode.borrow_mut().clear_ctrl_c_exit_hint(true);
+    // Bind before matching: the scrutinee temporary would otherwise hold the
+    // mode borrow across the arms.
+    let repeat_action = mode.borrow_mut().take_escape_repeat_action();
+    match repeat_action {
+        Some("tree") => {
+            // The tree flow dispatches the tree command from the owner loop
+            // context (interactive-mode.ts:6924-6936); the inline await keeps
+            // it deterministic for the caller.
+            let _ = dispatch_submission(connection, send, "/tree", false, None).await;
+            return true;
+        }
+        Some("clear") => {
+            let draft = mode.borrow_mut().queue_selection.reset();
+            editor.borrow_mut().editor_mut().set_text(&draft);
+            ui.borrow_mut().request_render();
+            return true;
+        }
+        _ => {}
+    }
+    let arm_tree =
+        mode.borrow().has_interruptible_work() || editor.borrow().editor().get_text().is_empty();
+    mode.borrow_mut().arm_escape_repeat(if arm_tree { "tree" } else { "clear" });
+    false
+}
+
+/// Port of `openExternalEditor` (interactive-mode.ts:7611-7661) for the host
+/// editor. The extension editor owns the same flow
+/// (components/extension_editor.rs:189); the host editor only lacked the
+/// binding.
+fn open_external_editor_for(
+    mode: &Rc<RefCell<InteractiveMode>>,
+    editor: &Rc<RefCell<CustomEditor>>,
+    tui: &Rc<RefCell<TUI>>,
+) {
+    let Some(editor_cmd) =
+        crate::modes::interactive::components::extension_editor::process_env_visual_editor()
+    else {
+        mode.borrow_mut().show_warning(
+            "No editor configured. Set $VISUAL or $EDITOR environment variable.",
+        );
+        return;
+    };
+    let current_text = editor.borrow().editor().get_text().to_string();
+    let tmp_file = std::env::temp_dir().join(format!("pi-editor-{}.pi.md", now_ms()));
+    if std::fs::write(&tmp_file, &current_text).is_err() {
+        return;
+    }
+    tui.borrow_mut().stop(TuiStopOptions::default());
+    let parts: Vec<String> = editor_cmd.split(' ').map(|part| part.to_string()).collect();
+    let editor_program = parts.first().cloned().unwrap_or_default();
+    let mut command = std::process::Command::new(&editor_program);
+    for arg in parts.iter().skip(1) {
+        command.arg(arg);
+    }
+    command.arg(&tmp_file);
+    if let Ok(status) = command.status() {
+        if status.success() {
+            if let Ok(content) = std::fs::read_to_string(&tmp_file) {
+                let new_content =
+                crate::modes::interactive::components::extension_editor::strip_trailing_newline(
+                    &content,
+                );
+                editor.borrow_mut().editor_mut().set_text(&new_content);
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp_file);
+    tui.borrow_mut().start();
+    tui.borrow_mut().request_render_forced();
 }
 
 /// Port of `handlePromptStash` (interactive-mode.ts:4379-4394).
@@ -1591,7 +1698,9 @@ async fn run_terminal(
                     if text.trim().is_empty() {
                         continue;
                     }
-                    editor.borrow_mut().editor_mut().add_to_history(&text);
+                    if should_record_prompt_history(&text) {
+                        editor.borrow_mut().editor_mut().add_to_history(&text);
+                    }
                     editor.borrow_mut().editor_mut().set_text("");
                     if matches!(text.trim(), "/quit" | "/exit") {
                         mode.borrow_mut().shutdown_requested = true;
@@ -1617,6 +1726,19 @@ async fn run_terminal(
                         && mode.borrow().is_ctrl_c_exit_hint_visible();
                     if second {
                         mode.borrow_mut().shutdown_requested = true;
+                        continue;
+                    }
+                    // TS handleCtrlC clears the escape repeat (interactive-mode.ts).
+                    if matches!(action, InputAction::Interrupt) {
+                        mode.borrow_mut().clear_escape_repeat();
+                    }
+                    // TS handleEscape (interactive-mode.ts:6924-6953): a repeated
+                    // Escape inside the window runs the armed action instead of
+                    // the interrupt flow; a first press arms and interrupts.
+                    if matches!(action, InputAction::Escape)
+                        && escape_repeat_step(&mode, &editor, &ui, &connection, &send).await
+                    {
+                        ui.borrow_mut().request_render();
                         continue;
                     }
                     if mode.borrow().has_interruptible_work() {
@@ -1716,6 +1838,30 @@ async fn run_terminal(
                 }
                 InputAction::Model => {
                     submit(&connection, &send, "/model".into(), false, None);
+                }
+                // `app.edits.expand` (interactive-mode.ts:4300 ->
+                // toggleEditDiffExpansion): flip the mode flag and re-apply it to
+                // the transcript's tool components.
+                InputAction::ToggleEditDiffs => {
+                    mode.borrow_mut().toggle_edit_diff_expansion();
+                    let expanded = mode.borrow().edit_diffs_expanded;
+                    for tool in transcript.borrow().all_tools() {
+                        tool.borrow_mut().set_edit_diffs_expanded(expanded);
+                    }
+                }
+                // `app.editor.external` (interactive-mode.ts:4306).
+                InputAction::OpenExternalEditor => open_external_editor_for(&mode, &editor, &ui),
+                // `app.session.new|tree|fork|resume` (interactive-mode.ts:4313-4322):
+                // handleClearCommand / showTreeSelector / showUserMessageSelector /
+                // requestAgentsView. The port routes each through its existing
+                // built-in command flow.
+                InputAction::SessionNew => submit(&connection, &send, "/new".into(), false, None),
+                InputAction::SessionTree => submit(&connection, &send, "/tree".into(), false, None),
+                InputAction::SessionFork => submit(&connection, &send, "/fork".into(), false, None),
+                InputAction::SessionResume => {
+                    stash_editor_draft_for_agents_view(&mode, &editor, &current_session_id);
+                    mode.borrow_mut()
+                        .return_to_agents_view(InteractiveModeRunResultType::AgentsView);
                 }
                 // `applyThinkingLevel` (interactive-mode.ts:8309-8321): the picker
                 // already closed itself, so only the level is applied.
@@ -1849,6 +1995,17 @@ async fn run_terminal(
                     command_cancel = None;
                 }
                 HostEvent::EditorText(text) => editor.borrow_mut().editor_mut().set_text(&text),
+                HostEvent::ReconfigureAutocomplete => {
+                    // TS: refreshConnectionCatalog + setupAutocompleteProvider
+                    // (interactive-mode.ts:9185-9186). `configure` refetches
+                    // `get_commands` off-thread and rebuilds the provider; the
+                    // reply applies on the next keystroke.
+                    let cwd = mode.borrow().get_current_cwd();
+                    native_autocomplete::configure(&mut editor.borrow_mut(), mode.clone(), &cwd);
+                }
+                HostEvent::PromptSession { text } => {
+                    handle_prompt_session(&mode, &editor, &connection, &send, &text);
+                }
                 HostEvent::ReloadSettings => {
                     mode.borrow().settings_manager().lock().map_err(|e| e.to_string())?.reload().await;
                 }
@@ -2002,6 +2159,9 @@ async fn run_terminal(
                     ) {
                         mode.borrow_mut().show_error(&error);
                     }
+                    // TS: refreshCommandCatalogForCurrentSession on session
+                    // resync (interactive-mode.ts:2951, :3048-3055).
+                    let _ = send.send(HostEvent::ReconfigureAutocomplete);
                 }
                 HostEvent::Connection(wire::AgentConnectionEvent::ExtensionError {
                     error, ..
@@ -2774,6 +2934,26 @@ async fn prompt_model(
         .await
 }
 
+/// The `/new` prompt handoff (interactive-mode.ts:10243-10248): collect pasted
+/// images for the prompt, record it in the up-arrow history, then prompt the
+/// model with the text verbatim — never through the slash dispatcher.
+fn handle_prompt_session(
+    mode: &Rc<RefCell<InteractiveMode>>,
+    editor: &Rc<RefCell<CustomEditor>>,
+    connection: &Arc<dyn wire::AgentConnection>,
+    send: &mpsc::Sender<HostEvent>,
+    text: &str,
+) {
+    let images = mode.borrow_mut().collect_images_for(text);
+    editor.borrow_mut().editor_mut().add_to_history(text);
+    let (connection, send, text) = (connection.clone(), send.clone(), text.to_string());
+    tokio::spawn(async move {
+        let result =
+            prompt_model(&connection, &text, false, (!images.is_empty()).then_some(images)).await;
+        let _ = send.send(HostEvent::Completed(result));
+    });
+}
+
 /// `getAvailableThinkingLevels` (interactive-mode.ts:8189-8193).
 ///
 /// The dispatch task holds only the connection, so it applies the same rule to
@@ -2891,6 +3071,15 @@ fn classify_submission(text: &str) -> SlashDispatch {
     }
 
     SlashDispatch::Model(text.to_string())
+}
+
+/// Whether the submitted line belongs in the up-arrow history. TypeScript
+/// records prompt history only in the paths that prompt or run bash
+/// (interactive-mode.ts:5079, :5150); the local built-in arms record nothing,
+/// while session/extension commands fall through to the prompt and are
+/// recorded.
+fn should_record_prompt_history(text: &str) -> bool {
+    !matches!(classify_submission(text), SlashDispatch::Builtin { .. })
 }
 
 /// The text a local command leaves in the chat.
@@ -3243,7 +3432,7 @@ async fn run_builtin_command(
             ));
             Ok(CommandOutput::Nothing)
         }
-        "btw" | "side" | "fork" | "logout" | "scoped-models" | "share" | "traces" | "tree" | "update" | "debug" | "mcp" => native_commands::run(connection, send, if name == "side" { "btw" } else { name }, args).await,
+        "btw" | "side" | "fork" | "logout" | "scoped-models" | "share" | "traces" | "monitor" | "tree" | "update" | "debug" | "mcp" => native_commands::run(connection, send, if name == "side" { "btw" } else { name }, args).await,
         "settings" => {
             let _ = send.send(HostEvent::Settings(connection.get_state().await?));
             Ok(CommandOutput::Nothing)
@@ -3293,7 +3482,9 @@ async fn run_builtin_command(
                 .copied()
             else {
                 let available: Vec<&str> = levels.iter().map(|level| level.as_str()).collect();
-                return Ok(CommandOutput::Warning(format!(
+                // TypeScript uses showError for an unknown level
+                // (interactive-mode.ts:8279), so the port reports it as an error.
+                return Ok(CommandOutput::Error(format!(
                     "Unknown thinking level '{requested}'. Available: {}",
                     available.join(", ")
                 )));
@@ -3307,7 +3498,7 @@ async fn run_builtin_command(
         // `commandName === "fast"` (interactive-mode.ts:4848-4853).
         "fast" => {
             if !args.is_empty() {
-                return Ok(CommandOutput::Warning("Usage: /fast".to_string()));
+                return Ok(CommandOutput::Error("Usage: /fast".to_string()));
             }
             let unavailable = "Fast mode requires GPT-5.4, GPT-5.5, or GPT-5.6 with ChatGPT or OpenAI API key authentication";
             let state = connection.get_state().await?;
@@ -3416,7 +3607,7 @@ async fn run_builtin_command(
         // `commandName === "import"` (interactive-mode.ts:4859-4863, 9255-9270).
         "import" => {
             let Some(input_path) = path_command_argument(text.trim(), "/import") else {
-                return Ok(CommandOutput::Warning(
+                return Ok(CommandOutput::Error(
                     "Usage: /import <path.jsonl>".to_string(),
                 ));
             };
@@ -3505,6 +3696,11 @@ async fn run_builtin_command(
             }
             let _ = send.send(HostEvent::Extension(native_extension_bridge::Event::Reset));
             connection.reload().await?;
+            // TS handleReloadCommand: refreshConnectionCatalog +
+            // setupAutocompleteProvider (interactive-mode.ts:9185-9186). The
+            // owner loop owns the editor, so it reconfigures the provider and
+            // refetches the command catalogue on this event.
+            let _ = send.send(HostEvent::ReconfigureAutocomplete);
             Ok(CommandOutput::Status(
                 "Reloaded keybindings, extensions, skills, prompts, themes".to_string(),
             ))
@@ -3535,7 +3731,7 @@ async fn run_builtin_command(
             );
             let parsed = match parsed {
                 Ok(parsed) => parsed,
-                Err(error) => return Ok(CommandOutput::Warning(error)),
+                Err(error) => return Ok(CommandOutput::Error(error)),
             };
             if connection.new_session(None).await? {
                 return Ok(CommandOutput::Nothing);
@@ -3544,7 +3740,11 @@ async fn run_builtin_command(
                 connection.set_session_name(&name).await?;
             }
             if let Some(prompt) = parsed.prompt {
-                submit(connection, send, prompt, false, None);
+                // interactive-mode.ts:10243-10248: the prompt reaches the model
+                // verbatim; the owner loop collects images, records history and
+                // prompts. Re-classifying it would turn a leading slash into a
+                // local command.
+                let _ = send.send(HostEvent::PromptSession { text: prompt });
             }
             Ok(CommandOutput::Status("New session started".to_string()))
         }
@@ -3684,6 +3884,7 @@ fn project_heartbeat(value: serde_json::Value) -> Option<local::AgentCronJob> {
     let job: crate::core::cron_jobs::AgentCronJob = serde_json::from_value(value).ok()?;
     Some(local::AgentCronJob {
         id: job.id,
+        session_id: job.session_id,
         active_session_id: job.active_session_id,
         prompt: job.prompt,
         status: job.status,
@@ -5293,6 +5494,7 @@ mod tests {
                 HostEvent::AgentsView => "AgentsView",
                 HostEvent::Error(_) => "Error",
                 HostEvent::Fullscreen(_) => "Fullscreen",
+                _ => "Other",
             })
             .collect()
     }
@@ -5785,4 +5987,324 @@ mod tests {
         assert_eq!(logins.current_generation(), None, "the slot is consumed");
         assert!(!logins.is_active(), "no login is in flight");
     }
+    // ==================== T14 terminal-parity suite ====================
+
+    /// Minimal recording `Terminal` so command paths can be observed without a
+    /// real console. The shared event list survives the `Box` move into the TUI.
+    struct RecordingTerminal {
+        events: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl RecordingTerminal {
+        fn new() -> (Self, Rc<RefCell<Vec<&'static str>>>) {
+            let events = Rc::new(RefCell::new(Vec::<&'static str>::new()));
+            (Self { events: events.clone() }, events)
+        }
+    }
+
+    impl pi_tui::terminal::Terminal for RecordingTerminal {
+        fn start(&mut self, _on_input: Box<dyn Fn(String)>, _on_resize: Box<dyn Fn()>) {
+            self.events.borrow_mut().push("start");
+        }
+        fn stop(&mut self, _options: pi_tui::terminal::TerminalStopOptions) {
+            self.events.borrow_mut().push("stop");
+        }
+        fn drain_input(&mut self, _max_ms: u64, _idle_ms: u64) {
+            self.events.borrow_mut().push("drain");
+        }
+        fn write(&mut self, _data: &str) {}
+        fn columns(&self) -> usize { 80 }
+        fn rows(&self) -> usize { 24 }
+        fn kitty_protocol_active(&self) -> bool { false }
+        fn move_by(&mut self, _lines: i64) {}
+        fn hide_cursor(&mut self) {}
+        fn show_cursor(&mut self) {}
+        fn clear_line(&mut self) {}
+        fn clear_from_cursor(&mut self) {}
+        fn clear_screen(&mut self) {}
+        fn enter_alt_screen(&mut self) {}
+        fn leave_alt_screen(&mut self) {}
+        fn alt_screen_active(&self) -> bool { false }
+        fn set_mouse_tracking(&mut self, _enabled: bool) {}
+        fn mouse_tracking_active(&self) -> bool { false }
+        fn set_title(&mut self, _title: &str) {}
+        fn set_progress(&mut self, _active: bool) {}
+    }
+
+    /// A-01: a non-self `/update` during an active turn must be refused with the
+    /// TypeScript warning (interactive-mode.ts:5001-5012) instead of draining,
+    /// stopping the terminal and launching the updater mid-turn.
+    #[tokio::test]
+    async fn t14_a01_nonself_refresh_command_blocked_while_busy() {
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let mode = Rc::new(RefCell::new(stash_mode("t14-a01-gate")));
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            is_streaming: true,
+            cwd: ".".to_string(),
+            ..Default::default()
+        });
+        let (terminal, terminal_events) = RecordingTerminal::new();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(terminal), None)));
+        let seam = crate::main_entry::InteractiveModeSeamOptions {
+            daemon_socket_path: None,
+            migrated_providers: Vec::new(),
+            model_fallback_message: None,
+            initial_message: None,
+            initial_images: None,
+            initial_messages: Vec::new(),
+            verbose: false,
+            return_to_agents_view: false,
+            session_depth: None,
+            session_has_children: false,
+            connection: None,
+            runtime: None,
+        };
+        // Not self-update arguments, so the TypeScript gate applies.
+        let args = vec!["--extensions".to_string()];
+        let result = native_commands::update(&args, &seam, &mode, &ui, &connection).await;
+        assert!(result.is_ok(), "the busy gate must refuse cleanly: {result:?}");
+        let rendered = {
+            let mode = mode.borrow();
+            mode.get_main_view_containers()
+                .into_iter()
+                .flat_map(|container| local::Component::render(container, 80))
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+        assert!(
+            rendered.contains("Wait for the current work to finish before updating."),
+            "expected the TypeScript busy warning on the transcript, got:\n{rendered}"
+        );
+        assert!(
+            terminal_events.borrow().is_empty(),
+            "the busy gate must not drain/stop/restart the terminal: {:?}",
+            terminal_events.borrow()
+        );
+    }
+
+    /// A-12: an unknown `/effort` level is ERROR-styled like the TypeScript
+    /// `showError` (interactive-mode.ts:8279), not warning-styled.
+    #[tokio::test]
+    async fn t14_a12_effort_unknown_level_reports_error_style() {
+        use pi_agent_core::types::ThinkingLevel;
+        let recorder = Arc::new(RecordingConnection::new());
+        {
+            let mut state = recorder.state.lock().unwrap();
+            state.thinking_level = ThinkingLevel::Low;
+            state.available_thinking_levels =
+                vec![ThinkingLevel::Off, ThinkingLevel::Minimal, ThinkingLevel::Low, ThinkingLevel::Medium, ThinkingLevel::High];
+        }
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, _receive) = mpsc::channel();
+        let output = run_builtin_command(&connection, &send, "/effort bogus", "effort", "bogus")
+            .await
+            .expect("effort command must succeed");
+        match output {
+            CommandOutput::Error(message) => {
+                assert!(message.contains("Unknown thinking level 'bogus'"), "{message}");
+            }
+            other => panic!("expected error-styled output (TypeScript showError), got {other:?}"),
+        }
+    }
+
+
+    /// A-02 fix: a second Escape inside the window clears the editor
+    /// (interactive-mode.ts:6924-6953).
+    #[tokio::test]
+    async fn t14_a02_escape_repeat_second_press_clears_the_editor() {
+        let mode = Rc::new(RefCell::new(stash_mode("t14-a02-clear")));
+        let (terminal, _events) = RecordingTerminal::new();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(terminal), None)));
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            ui.clone(),
+            editor_theme(),
+            CustomEditorOptions::default(),
+        )));
+        editor.borrow_mut().editor_mut().set_text("draft text");
+        let connection: Arc<dyn wire::AgentConnection> = Arc::new(RecordingConnection::new());
+        let (send, _receive) = mpsc::channel();
+        assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
+        assert!(escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
+        assert_eq!(editor.borrow().editor().get_text(), "");
+    }
+
+    /// A-02 fix: outside the 500ms window the second press re-arms.
+    #[tokio::test]
+    async fn t14_a02_escape_repeat_outside_the_window_re_arms() {
+        let mode = Rc::new(RefCell::new(stash_mode("t14-a02-window")));
+        let (terminal, _events) = RecordingTerminal::new();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(terminal), None)));
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            ui.clone(),
+            editor_theme(),
+            CustomEditorOptions::default(),
+        )));
+        editor.borrow_mut().editor_mut().set_text("kept draft");
+        let connection: Arc<dyn wire::AgentConnection> = Arc::new(RecordingConnection::new());
+        let (send, _receive) = mpsc::channel();
+        assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
+        tokio::time::sleep(std::time::Duration::from_millis(550)).await;
+        assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
+        assert_eq!(editor.borrow().editor().get_text(), "kept draft");
+    }
+
+    /// A-02 fix: with a streaming turn and an empty editor the repeat opens the
+    /// tree flow.
+    #[tokio::test]
+    async fn t14_a02_escape_repeat_second_press_opens_the_tree() {
+        let mode = Rc::new(RefCell::new(stash_mode("t14-a02-tree")));
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            is_streaming: true,
+            ..Default::default()
+        });
+        let (terminal, _events) = RecordingTerminal::new();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(terminal), None)));
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            ui.clone(),
+            editor_theme(),
+            CustomEditorOptions::default(),
+        )));
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, receive) = mpsc::channel();
+        assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
+        assert!(escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
+        let status = receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the tree dispatch must answer");
+        match status {
+            HostEvent::Status(text) => assert_eq!(text, "No entries in session"),
+            other => panic!(
+                "expected the tree flow status, got {:?}",
+                event_names(std::slice::from_ref(&other))
+            ),
+        }
+    }
+
+    /// A-06 fix: only lines that reach the model enter the up-arrow history.
+    #[test]
+    fn t14_a06_history_records_only_lines_that_reach_the_model() {
+        for (text, expected) in [
+            ("fix the login flow", true),
+            ("!ls -la", true),
+            ("/compact keep the plan", true),
+            ("/compact", true),
+            ("/telegram status", true),
+            ("/no-such-command hi", true),
+            ("/model", false),
+            ("/btw side question", false),
+            ("/quit", false),
+            ("/reload", false),
+            ("/new --name x -- hi", false),
+            ("/effort high", false),
+        ] {
+            assert_eq!(should_record_prompt_history(text), expected, "{text}");
+        }
+    }
+
+    /// A-08 fix: the reload arm asks the owner loop to reconfigure the
+    /// autocomplete provider and refetch the catalogue.
+    #[tokio::test]
+    async fn t14_a08_reload_refreshes_the_command_catalogue() {
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, receive) = mpsc::channel();
+        let output = run_builtin_command(&connection, &send, "/reload", "reload", "")
+            .await
+            .expect("reload must succeed");
+        let _events = output.into_events();
+        // The reload arm first resets extensions, then asks the owner loop to
+        // reconfigure the autocomplete provider.
+        let deadline8 = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let reconfigured = loop {
+            let remaining = deadline8.saturating_duration_since(std::time::Instant::now());
+            match receive.recv_timeout(remaining) {
+                Ok(event) if matches!(event, HostEvent::ReconfigureAutocomplete) => break true,
+                Ok(_) => continue,
+                Err(_) => break false,
+            }
+        };
+        assert!(
+            reconfigured,
+            "reload must ask the owner loop to reconfigure the autocomplete provider"
+        );
+        assert!(recorder.calls().iter().any(|(name, _)| name == "reload"));
+    }
+
+    /// A-13 fix: the new-session prompt reaches the owner loop verbatim.
+    #[tokio::test]
+    async fn t14_a13_new_with_prompt_prompts_verbatim() {
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, receive) = mpsc::channel();
+        let output = run_builtin_command(
+            &connection,
+            &send,
+            "/new --name t14 -- /model",
+            "new",
+            "--name t14 -- /model",
+        )
+        .await
+        .expect("new command must succeed");
+        let events = output.into_events();
+        let prompt_event = receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the new-session prompt must be handed to the owner loop");
+        match prompt_event {
+            HostEvent::PromptSession { text } => assert_eq!(text, "/model"),
+            other => panic!(
+                "the new-session prompt must reach the owner loop verbatim, got {:?}",
+                event_names(std::slice::from_ref(&other))
+            ),
+        }
+        assert!(
+            !events.iter().any(|event| matches!(event, HostEvent::Models(_, _))),
+            "the prompt text must never re-enter the dispatcher, got {:?}",
+            event_names(&events)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let drained: Vec<HostEvent> = receive.try_iter().collect();
+        assert!(
+            !drained.iter().any(|event| matches!(event, HostEvent::Models(_, _))),
+            "no model picker may open for the prompt text: {:?}",
+            event_names(&drained)
+        );
+        assert!(recorder.calls().iter().any(|(name, _)| name == "new_session"));
+        assert!(
+            recorder
+                .calls()
+                .iter()
+                .any(|(name, args)| name == "set_session_name" && *args == ["t14"]),
+            "the session name must be applied: {:?}",
+            recorder.calls()
+        );
+    }
+
+    /// A-13 fix: the owner loop prompts the text verbatim and records history.
+    #[tokio::test]
+    async fn t14_a13_prompt_session_prompts_verbatim_without_rereading() {
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let mode = Rc::new(RefCell::new(stash_mode("t14-a13-loop")));
+        let (terminal, _events) = RecordingTerminal::new();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(terminal), None)));
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            ui.clone(),
+            editor_theme(),
+            CustomEditorOptions::default(),
+        )));
+        let (send, _receive) = mpsc::channel();
+        handle_prompt_session(&mode, &editor, &connection, &send, "/model");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let prompt = recorder.only_call("prompt");
+        assert_eq!(prompt[0], "/model", "the prompt must reach the model verbatim");
+        assert_eq!(prompt[1], "steer");
+        assert!(
+            editor.borrow().editor().get_history().iter().any(|entry| entry == "/model"),
+            "the prompt must be recorded in history: {:?}",
+            editor.borrow().editor().get_history()
+        );
+    }
+
 }

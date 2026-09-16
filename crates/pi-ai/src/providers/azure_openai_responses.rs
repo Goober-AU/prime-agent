@@ -1222,3 +1222,64 @@ mod tests {
 		assert!(!azure_tool_call_providers("anthropic"));
 	}
 }
+
+
+#[cfg(test)]
+mod t15_controls_tests {
+	//! T15 owner 'controls': azure-openai-managed/gpt-6-astra route fixture
+	//! (installed profile models.json, apiKey redacted; base URL is inert).
+
+	use super::*;
+	use crate::types::{InputModality, Message, UserContent, UserMessage};
+	use indexmap::IndexMap;
+
+	fn route_model(id: &str) -> Model {
+		let mut level_map: IndexMap<String, Option<String>> = IndexMap::new();
+		for level in ["off", "low", "medium", "high", "xhigh", "max"] {
+			level_map.insert(level.to_string(), Some(level.to_string()));
+		}
+		Model {
+			id: id.to_string(),
+			name: id.to_string(),
+			api: "azure-openai-responses".to_string(),
+			provider: "azure-openai-managed".to_string(),
+			base_url: "http://127.0.0.1:43119/azure-openai/v1".to_string(),
+			reasoning: true,
+			input: vec![InputModality::Text, InputModality::Image],
+			thinking_level_map: Some(level_map),
+			..Default::default()
+		}
+	}
+
+	fn context() -> Context {
+		Context::new(
+			None,
+			vec![Message::user(UserMessage::new(UserContent::Text("hi".to_string()), 0))],
+			None,
+		)
+	}
+
+	/// Identity effort map (low/medium/high/xhigh/max) with maxTokens 128000.
+	#[test]
+	fn t15_route_fixture_azure_openai_managed_gpt_6_astra_payload_contract() {
+		let model = route_model("gpt-6-astra");
+		let mut options = AzureOpenAIResponsesOptions::default();
+		options.stream.max_tokens = Some(128_000.0);
+		options.stream.api_key = Some("test-key".to_string());
+		options.reasoning_effort = Some("xhigh".to_string());
+		let params = build_params(&model, &context(), Some(&options), "gpt-6-astra");
+		assert_eq!(params.get("model").and_then(Value::as_str), Some("gpt-6-astra"));
+		assert_eq!(params.get("max_output_tokens").and_then(Value::as_f64), Some(128_000.0));
+		let reasoning = params.get("reasoning").expect("reasoning");
+		assert_eq!(reasoning.get("effort").and_then(Value::as_str), Some("xhigh"));
+		assert_eq!(reasoning.get("summary").and_then(Value::as_str), Some("auto"));
+		// The full effort ladder of the route passes through unchanged.
+		for level in ["low", "medium", "high", "max"] {
+			let mut options = AzureOpenAIResponsesOptions::default();
+			options.reasoning_effort = Some(level.to_string());
+			let params = build_params(&model, &context(), Some(&options), "gpt-6-astra");
+			let reasoning = params.get("reasoning").expect("reasoning");
+			assert_eq!(reasoning.get("effort").and_then(Value::as_str), Some(level), "level {level}");
+		}
+	}
+}

@@ -377,4 +377,21 @@ mod tests {
         history.start_index = f64::NAN;
         assert!(validate(&history, 2).is_err());
     }
+
+    #[test]
+    fn streaming_history_refresh_keeps_slash_draft_and_middle_cursor() {
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let (transcript, editor, mut runtime) = fixture("same-session-refresh");
+        editor.borrow_mut().editor_mut().set_text("/telegram pairing");
+        editor.borrow_mut().handle_input("\x1b[D");
+        editor.borrow_mut().handle_input("\x1b[D");
+        let before = editor.borrow().editor().get_cursor();
+        for _ in 0..10 {
+            assert_eq!(apply_history_snapshot(None, vec![user_message("previous prompt")],
+                Some(streaming_assistant_message("stream update")), &transcript, &editor, &mut runtime), None);
+            assert_eq!(editor.borrow().editor().get_cursor(), before);
+            assert_eq!(editor.borrow().editor().get_text(), "/telegram pairing");
+        }
+        assert!(transcript_text(&transcript).contains("stream update"));
+    }
 }

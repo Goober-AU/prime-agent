@@ -498,6 +498,7 @@ pub(super) async fn run(
         "mcp" => return mcp(connection, send, args).await,
         "share" => return share(connection, send).await,
         "traces" => return traces(connection, send, args).await,
+        "monitor" => return monitor(send, args).await,
         "update" => {
             let _ = send.send(HostEvent::RunUpdate(
                 crate::core::prompt_templates::parse_command_args(args),
@@ -512,6 +513,23 @@ pub(super) async fn run(
         _ => return Err(format!("Unknown local command: /{name}")),
     }
     Ok(CommandOutput::Nothing)
+}
+
+async fn monitor(send: &mpsc::Sender<HostEvent>, args: &str) -> Result<CommandOutput, String> {
+    use crate::core::performance_monitor::{parse_monitor_command, MonitorCommand, PerformanceMonitor};
+    let monitor = PerformanceMonitor::from_environment(crate::config::get_agent_dir());
+    let command = parse_monitor_command(args)?;
+    let requested = match command {
+        MonitorCommand::Status => return Ok(CommandOutput::Panel(monitor.status_text()?)),
+        MonitorCommand::Set(enabled) => Some(enabled),
+        MonitorCommand::Select => {
+            let title = format!("Performance monitoring: {}", if monitor.enabled()? { "ON" } else { "OFF" });
+            select(send, &title, &["ON", "OFF"]).await.map(|choice| choice == "ON")
+        }
+    };
+    let Some(enabled) = requested else { return Ok(CommandOutput::Nothing); };
+    monitor.set_enabled(enabled)?;
+    Ok(CommandOutput::Status(monitor.status_text()?))
 }
 
 async fn reload_mcp(
@@ -905,6 +923,17 @@ pub(super) async fn update(
     use crate::cli::daemon_update_restart::*;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let includes_self = update_args_include_self(args);
+    // `commandName === "update"` busy gate (interactive-mode.ts:5001-5012): a
+    // non-self update must not tear down the terminal while a turn, compaction,
+    // or shell command is running.
+    let busy = {
+        let mode = mode.borrow();
+        mode.is_agent_compacting() || mode.is_agent_streaming() || mode.is_bash_running()
+    };
+    if !includes_self && busy {
+        mode.borrow_mut().show_warning("Wait for the current work to finish before updating.");
+        return Ok(None);
+    }
     let cwd = mode.borrow().get_current_cwd();
     let state = connection.get_state().await?;
     let socket = resolve_interactive_update_daemon_socket_path(

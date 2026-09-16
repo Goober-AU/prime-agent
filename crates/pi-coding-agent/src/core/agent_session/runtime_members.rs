@@ -679,13 +679,70 @@ impl AgentSession {
                             }
                         },
                     ));
+                // TS agent-session.ts:10061-10102: the session OWNS the kernel provisioner
+                // and hands the same Arc to the ipython tool, so the session's dispose and
+                // reload address the exact kernel the tool drives. The TS performanceMetrics
+                // flow (agent-session.ts:10089) lands with the kernel metrics slice: the
+                // Rust KernelManagerOptions recorder seam is explicitly TODO
+                // (kernel/shared.rs "needs pi-agent-core::performance_metrics").
+                let python_skills: Vec<crate::core::kernel::shared::KernelPythonSkill> =
+                    crate::core::skills::get_python_skill_runtime_info(&self.model_visible_skills())
+                        .into_iter()
+                        .map(|info| crate::core::kernel::shared::KernelPythonSkill {
+                            import_name: info.python.import_name,
+                            package_path: info.python.package_path,
+                            pyproject_path: info.python.pyproject_path,
+                            name: info.name,
+                        })
+                        .collect();
+                // Rebuilding (e.g. /reload) replaces the provisioner; the previous kernel's
+                // dispose gates the new kernel's startup (agent-session.ts:10071-10091).
+                // Begin disposal now, even if no later tool call starts the replacement.
+                let previous_provisioner = self.ipython_kernel_provisioner.lock().unwrap().clone();
+                let ready_gate = previous_provisioner
+                    .map(|previous| previous.replacement_ready_gate());
+                // Only the first build (a genuine resume) surfaces the restore notice
+                // (agent-session.ts:10077-10080); a later rebuild restores silently.
+                let notify_restore = !self.ipython_runtime_built.load(Ordering::SeqCst);
+                let snapshot_dir = self.session_manager.lock().unwrap().get_session_artifact_dir();
+                let provisioner = crate::core::tools::ipython::IpythonKernelProvisioner::new(
+                    &self.cwd,
+                    Some(crate::core::tools::IpythonToolOptions {
+                        env: Some(self.rlm_kernel_env().into_iter().collect()),
+                        command_prefix: command_prefix.clone(),
+                        shell_path: shell_path.clone(),
+                        session_id: Some(self.session_id()),
+                        host_handlers: Some(self.create_kernel_host_handlers()),
+                        python_skills: Some(python_skills),
+                        snapshot_dir: snapshot_dir.clone(),
+                        model_tool_output_policy: Some(crate::core::model_tool_output_policy::resolve_model_tool_output_policy(
+                            Some(&self.settings_manager.lock().unwrap().get_model_tool_output_policy()),
+                        )),
+                        ready_gate,
+                        on_restore: if notify_restore {
+                            let weak = Arc::downgrade(self);
+                            Some(Arc::new(move |result: crate::core::kernel::state_snapshot::RestoreResult| {
+                                if let Some(session) = weak.upgrade() {
+                                    session.on_ipython_state_restored(result);
+                                }
+                            }) as Arc<dyn Fn(crate::core::kernel::state_snapshot::RestoreResult) + Send + Sync>)
+                        } else {
+                            None
+                        },
+                        on_late_sent_agent_message: on_late_sent_agent_message.clone(),
+                        ..Default::default()
+                    }),
+                    crate::core::tools::ipython::default_kernel_client_factory(),
+                );
+                *self.ipython_kernel_provisioner.lock().unwrap() = Some(provisioner.clone());
                 let options = crate::core::tools::ToolsOptions { ipython: Some(crate::core::tools::IpythonToolOptions {
                     env: Some(self.rlm_kernel_env().into_iter().collect()),
                     host_handlers: Some(self.create_kernel_host_handlers()), session_id: Some(self.session_id()),
                     command_prefix,
                     shell_path,
-                    snapshot_dir: self.session_manager.lock().unwrap().get_session_artifact_dir(),
+                    snapshot_dir,
                     on_late_sent_agent_message,
+                    provisioner: Some(provisioner),
                     ..Default::default()
                 }) };
                 crate::core::tools::create_all_tool_definitions(&self.cwd, Some(&options))
@@ -704,9 +761,76 @@ impl AgentSession {
         self.extension_runner_ref.set(Some(runner.clone()));
         self.bind_extension_core(&runner);
         self.apply_extension_bindings(&runner);
+        // TS agent-session.ts:10135-10146: on every (re)build, ACP MCP tools are
+        // (re)created against the SAME session-owned kernel provisioner, so MCP
+        // requests ride the session's kernel instead of a second one.
+        let previous_acp_mcp_tool_names: Vec<String> = self
+            .acp_mcp_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        let acp_servers = self
+            .mcp_manager
+            .as_ref()
+            .map(|manager| manager.lock().unwrap().get_acp_servers())
+            .unwrap_or_default();
+        if !acp_servers.is_empty() && self.ipython_kernel_provisioner.lock().unwrap().is_none() {
+            panic!("ACP MCP servers require the built-in cpython tool");
+        }
+        let acp_mcp_tool_definitions: Vec<crate::core::extensions::types::ToolDefinition> =
+            if self.ipython_kernel_provisioner.lock().unwrap().is_some() {
+                let acp_provisioner = self.ipython_kernel_provisioner.lock().unwrap().clone().unwrap();
+                crate::core::tools::acp_mcp::create_acp_mcp_tool_definitions(
+                    &acp_mcp_tool_configs(&acp_servers),
+                    acp_provisioner,
+                )
+                .expect("ACP MCP tool definitions")
+                .into_iter()
+                .map(crate::core::extensions::types::ToolDefinition::from)
+                .collect()
+            } else {
+                Vec::new()
+            };
+        let acp_mcp_tool_names: Vec<String> = acp_mcp_tool_definitions
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
+        self.assert_acp_mcp_tool_names_available(&acp_mcp_tool_names)
+            .expect("ACP MCP tool name conflict");
+        for name in previous_acp_mcp_tool_names {
+            if let Some(allowed) = self.allowed_tool_names.lock().unwrap().as_mut() {
+                allowed.remove(&name);
+            }
+        }
+        for name in &acp_mcp_tool_names {
+            if let Some(allowed) = self.allowed_tool_names.lock().unwrap().as_mut() {
+                allowed.insert(name.clone());
+            }
+        }
+        *self.acp_mcp_tools.lock().unwrap() = acp_mcp_tool_definitions;
         let active = active_tool_names.unwrap_or_else(|| self.base_tools_override.as_ref()
             .map(|tools| tools.iter().map(|(name, _)| name.clone()).collect()).unwrap_or_else(|| vec!["ipython".to_string()]));
-        self.refresh_tool_registry(include_all, Some(active));
+        self.refresh_tool_registry(include_all, Some(active.clone()));
+        // TS agent-session.ts:10159-10167: prewarm when configured, or whenever
+        // we're resuming a session that already has a kernel snapshot - so its
+        // state is revived and the model is told what came back before the first
+        // turn, rather than a turn later on first use.
+        let prewarm_ipython_kernel = self.prewarm_ipython_kernel;
+        let has_snapshot = self
+            .session_manager
+            .lock()
+            .unwrap()
+            .get_session_artifact_dir()
+            .map(|artifact_dir| std::path::Path::new(&crate::core::kernel::state_snapshot::snapshot_path_in(&artifact_dir)).exists())
+            .unwrap_or(false);
+        if (prewarm_ipython_kernel || has_snapshot) && active.iter().any(|name| name == "ipython") {
+            if let Some(provisioner) = self.ipython_kernel_provisioner.lock().unwrap().clone() {
+                provisioner.prewarm();
+            }
+        }
+        // Subsequent builds are in-process rebuilds (/reload), not a fresh resume.
         self.ipython_runtime_built.store(true, Ordering::SeqCst);
     }
 
@@ -735,6 +859,89 @@ impl AgentSession {
                 serde_json::to_value(session.start_rlm_child_run(&request.prompt, &kwargs, request.cell_source_code).await?).map_err(|error| error.to_string())
             })
         })));
+        // `bash.completed` (agent-session.ts:10208-10232): a finished background shell
+        // injects one canonical completion message onto the steering lane and returns
+        // after acceptance. An admission-pause rejection is retried until admission is
+        // no longer paused, matching TS 10225-10230.
+        let weak = Arc::downgrade(self);
+        handlers.insert("bash.completed".to_string(), create_async_bash_completion_host_handler(Arc::new(move |details| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let Some(session) = weak.upgrade() else { return; };
+                let timestamp = now_ms_i64();
+                let message = CustomMessage {
+                    role: "custom".to_string(),
+                    custom_type: ASYNC_BASH_COMPLETION_CUSTOM_TYPE.to_string(),
+                    content: CustomMessageContent::Text(format!(
+                        "{ASYNC_BASH_COMPLETION_PREVIEW_LABEL}.\nSource: bash\nCommand completed (pid {}, exit code {}).\nCommand: {}\n\nInspect the saved BashHandle with .poll(), .output(), or .tail(), then continue the task.",
+                        details.pid as i64,
+                        details.exit_code as i64,
+                        serde_json::to_string(&details.command).unwrap_or_default()
+                    )),
+                    display: true,
+                    details: serde_json::to_value(AsyncBashCompletionDetails {
+                        pid: details.pid as i64,
+                        command: details.command.clone(),
+                        exit_code: details.exit_code as i64,
+                    })
+                    .ok(),
+                    timestamp,
+                };
+                let text = match &message.content {
+                    CustomMessageContent::Text(text) => text.clone(),
+                    CustomMessageContent::Blocks(_) => String::new(),
+                };
+                let dispose_abort = session.session_action_commit_dispose_abort.clone();
+                loop {
+                    let committed = Arc::new(AtomicBool::new(false));
+                    let committed_flag = committed.clone();
+                    let result = session
+                        .prompt_injected_message(
+                            &text,
+                            clone_custom_message(&message),
+                            Some(InternalPromptOptions {
+                                base: PromptOptions {
+                                    streaming_behavior: Some("steer".to_string()),
+                                    queue_if_busy: Some(true),
+                                    resume_if_idle: Some(true),
+                                    suppress_autonomous_continuation: Some(true),
+                                    admission_committed: Some(Arc::new(move || {
+                                        committed_flag.store(true, Ordering::SeqCst);
+                                    })),
+                                    ..Default::default()
+                                },
+                                return_after_accepted: Some(true),
+                                ..Default::default()
+                            }),
+                            None,
+                        )
+                        .await;
+                    match result {
+                        Ok(()) => return,
+                        Err(error) => {
+                            // TS 10226: only an uncommitted admission pause is retried.
+                            if committed.load(Ordering::SeqCst)
+                                || !error.contains("session input admission is paused")
+                            {
+                                return;
+                            }
+                            while !session.session_input_admission_pauses.lock().unwrap().is_empty()
+                                && !dispose_abort.is_cancelled()
+                            {
+                                // TS 10227-10229: wait for the pause to be released.
+                                let signal = dispose_abort.clone();
+                                let _ = session
+                                    .wait_for_session_activity_change(Some(&signal))
+                                    .await;
+                            }
+                            if dispose_abort.is_cancelled() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            })
+        })));
         let weak = Arc::downgrade(self);
         handlers.insert("rlm.create_session".to_string(), create_rlm_create_session_host_handler(Arc::new(move |request| {
             let weak = weak.clone(); Box::pin(async move {
@@ -757,7 +964,21 @@ impl AgentSession {
             let weak = weak.clone();
             Box::pin(async move { weak.upgrade().ok_or("Parent session disposed")?.delete_rlm_subagent(&target).await })
         })));
-        if self.agent_message_controller.is_some() {
+        // TS agent-session.ts:10267-10272: the agent_message handlers install only
+        // when the controller exists AND the agent-message skill is visible to the
+        // model (disableModelInvocation skills are not kernel-reachable).
+        let visible_kernel_skill_names: std::collections::HashSet<String> = self
+            .model_visible_skills()
+            .iter()
+            .filter(|skill| match skill {
+                crate::core::skills::Skill::Markdown(value) => !value.base.disable_model_invocation,
+                crate::core::skills::Skill::Python(value) => !value.base.disable_model_invocation,
+            })
+            .map(|skill| skill.name().to_string())
+            .collect();
+        if self.agent_message_controller.is_some()
+            && visible_kernel_skill_names.contains(crate::core::agent_messages::AGENT_MESSAGE_SKILL_NAME)
+        {
             handlers.extend(create_agent_message_host_handlers(Arc::new(subagent_runs::SessionMessageController(Arc::downgrade(self)))));
         }
         if let Some(controller) = &self.agent_observe_controller {
@@ -767,6 +988,9 @@ impl AgentSession {
             "rlm_heartbeat.list", "rlm_heartbeat.create", "rlm_heartbeat.update", "rlm_heartbeat.delete"] {
             if operation.starts_with("goal.") && !self.include_goals { continue; }
             if operation.starts_with("compact.") && !self.include_compact_skill { continue; }
+            // TS agent-session.ts:10252-10255: refine handlers are gated on
+            // `_autoRefineAllowedForSession()`.
+            if operation.starts_with("refine.") && !self.auto_refine_allowed_for_session() { continue; }
             if operation.starts_with("rlm_heartbeat.") && self.rlm_heartbeat_controller.lock().unwrap().is_none() { continue; }
             let weak = Arc::downgrade(self);
             handlers.insert(operation.to_string(), Arc::new(move |payload: Value| {
@@ -781,10 +1005,32 @@ impl AgentSession {
                 })
             }));
         }
+        // TS 10337-10339: `if (this._mcpManager) Object.assign(handlers, this._mcpManager.hostHandlers())`.
+        // The MCP manager owns mcp.refresh/mcp.config/mcp.begin_login; a manager-less
+        // session exposes none of them.
+        if let Some(manager) = &self.mcp_manager {
+            let merged = manager.lock().unwrap().host_handlers();
+            handlers.extend(merged);
+        }
         handlers
     }
 
     pub async fn reload_with_options(self: &Arc<Self>, rebind: Option<ExtensionBindings>) -> Result<(), String> {
+        // `await emitSessionShutdownEvent(this._extensionRunner, { type:
+        // "session_shutdown", reason: "reload" })` (agent-session.ts:10344-10348).
+        // The helper emits only when handlers exist and returns false otherwise.
+        if let Some(runner) = self.extension_runner() {
+            let _ = crate::core::extensions::runner::emit_session_shutdown_event(
+                &runner,
+                crate::core::extensions::types::ExtensionEvent::SessionShutdown(
+                    crate::core::extensions::types::SessionShutdownPayload {
+                        reason: "reload".to_string(),
+                        target_session_file: None,
+                    },
+                ),
+            )
+            .await;
+        }
         self.resource_loader.reload().await;
         self.build_runtime(Some(self.get_active_tool_names()), true);
         if let Some(bindings) = rebind { self.bind_extensions(&bindings).await?; }
@@ -796,11 +1042,20 @@ impl AgentSession {
         let mut env = HashMap::from([
             ("RLM_DEPTH".to_string(), self.rlm_depth.to_string()),
             ("RLM_MAX_DEPTH".to_string(), self.rlm_max_depth().to_string()),
-            ("RLM_GLOBAL_HARNESS_STATE_DIR".to_string(), get_global_harness_state_dir(self.agent_dir.as_deref().unwrap_or(""))),
+            // TS agent-session.ts:10382: getGlobalHarnessStateDir() is called with no
+            // argument, so it resolves to the process-level getAgentDir() (absolute),
+            // never the scoped session agent dir.
+            ("RLM_GLOBAL_HARNESS_STATE_DIR".to_string(), get_global_harness_state_dir(&crate::config::get_agent_dir())),
         ]);
         if let Some(dir) = self.rlm_session_dir_for_reading() {
             env.insert("RLM_SESSION_DIR".to_string(), dir.clone());
-            if let Some(local) = get_local_harness_state_dir(Some(&dir)) {
+            // TS agent-session.ts:10390: `this._localHarnessStateDir() ??
+            // getLocalHarnessStateDir(rlmSessionDir)!` - the session artifact dir
+            // wins; ephemeral sessions fall back to the RLM session dir.
+            if let Some(local) = self
+                .local_harness_state_dir()
+                .or_else(|| get_local_harness_state_dir(Some(&dir)))
+            {
                 env.insert("RLM_HARNESS_STATE_DIR".to_string(), local);
             }
         }
@@ -808,15 +1063,37 @@ impl AgentSession {
         env
     }
 
-    /// `_addWebsearchKeyEnv(env)`.
+    /// `_addWebsearchKeyEnv(env)` (agent-session.ts:10396-10417).
     pub(super) fn add_websearch_key_env(&self, env: &mut HashMap<String, String>) {
-        // `SERPER_CREDENTIAL_ID`/`WEBSEARCH_SKILL_NAME` drive the credential lookup.
-        let _ = (SERPER_CREDENTIAL_ID, WEBSEARCH_SKILL_NAME);
-        if env.contains_key(SERPER_ENV_VAR) {
+        if let Some(agent_dir) = &self.agent_dir {
+            env.insert("PRIME_AGENT_CODING_AGENT_DIR".to_string(), agent_dir.clone());
+        }
+        if std::env::var(SERPER_ENV_VAR)
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
             return;
         }
-        if let Ok(value) = std::env::var(SERPER_ENV_VAR) {
-            env.insert(SERPER_ENV_VAR.to_string(), value);
+        // Inject only when a websearch skill (bundled or custom) is actually loaded,
+        // so the key isn't exposed to kernels that can't use it.
+        let websearch_loaded = self
+            .resource_loader
+            .get_skills()
+            .skills
+            .iter()
+            .any(|skill| skill.name() == WEBSEARCH_SKILL_NAME);
+        if !websearch_loaded {
+            return;
+        }
+        let credential = self.model_registry.lock().unwrap().auth_storage().get(SERPER_CREDENTIAL_ID);
+        let Some(crate::core::auth_storage::AuthCredential::ApiKey { key, .. }) = credential else {
+            return;
+        };
+        let resolved = crate::core::resolve_config_value::resolve_config_value(&key)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        if let Some(resolved) = resolved {
+            env.insert(SERPER_ENV_VAR.to_string(), resolved);
         }
     }
 

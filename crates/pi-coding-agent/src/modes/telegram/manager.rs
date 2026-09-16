@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::modes::telegram::store::{is_record, TelegramStore};
 use crate::utils::child_process::{spawn_hidden, SpawnOptions};
+use crate::utils::dir_lock::{file_identity, open_lock, stat_identity, StatIdentity};
 
 /// `TELEGRAM_WORKER_LOCK_OPTIONS`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,6 +36,14 @@ pub const TELEGRAM_MANAGEMENT_RETRY_MS: u64 = 100;
 #[derive(Debug)]
 pub struct TelegramFileLock {
     lock_path: String,
+    identity: StatIdentity,
+    _pinned: Arc<std::fs::File>,
+    /// `locks[file]`: the in-process registry entry. `None` means the lock was
+    /// released or compromised, and a later `release()` must not touch the path
+    /// (`unlock()` fails with `ENOTACQUIRED` when the registry entry is gone).
+    owned: Arc<std::sync::atomic::AtomicBool>,
+    /// `lock.mtime`: the mtime this holder last wrote, compared on every heartbeat.
+    mtime: Arc<std::sync::Mutex<Option<SystemTime>>>,
     heartbeat: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -51,29 +60,78 @@ impl TelegramFileLock {
         loop {
             match std::fs::create_dir(&lock_path) {
                 Ok(()) => {
-                    let heartbeat = on_compromised.map(|on_compromised| {
+                    let pinned = Arc::new(open_lock(Path::new(&lock_path))
+                        .map_err(|error| TelegramLockError::Io(error.to_string()))?);
+                    let identity = file_identity(&pinned)
+                        .ok_or_else(|| TelegramLockError::Io("Lock identity unavailable".into()))?;
+                    let owned = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                    let mtime = Arc::new(std::sync::Mutex::new(lock_mtime(&lock_path).ok()));
+                    // `update: 2000` with the default `onCompromised`: the heartbeat
+                    // always runs, with or without a caller callback. A callback is the
+                    // only thing that replaces the default (which throws).
+                    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+                    let heartbeat = {
                         let lock_path = lock_path.clone();
-                        let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
                         let flag = alive.clone();
+                        let owned = owned.clone();
+                        let mtime = mtime.clone();
+                        let on_compromised = on_compromised.clone();
+                        let pinned = pinned.clone();
                         tokio::spawn(async move {
+                            let _pinned = pinned;
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_millis(options.update)).await;
+                                let mut stamp = mtime.lock().unwrap();
                                 if !flag.load(std::sync::atomic::Ordering::SeqCst) {
                                     return;
                                 }
-                                // A failed heartbeat means the lock was reclaimed.
-                                if touch(&lock_path).is_err() {
-                                    on_compromised();
-                                    flag.store(false, std::sync::atomic::Ordering::SeqCst);
+                                if !owned.load(std::sync::atomic::Ordering::SeqCst) {
                                     return;
+                                }
+                                // Windows can reuse a removed directory's timestamp.
+                                if stat_identity(Path::new(&lock_path)) != Some(identity) {
+                                    drop(stamp);
+                                    compromise(&owned, &flag, on_compromised.as_deref());
+                                    return;
+                                }
+                                // `updateLock`: ENOENT, or an mtime that is no longer
+                                // ours, means the lock was reclaimed.
+                                match lock_mtime(&lock_path) {
+                                    Ok(current) => {
+                                        let ours = *stamp;
+                                        if ours.is_some_and(|stamp| stamp != current) {
+                                            drop(stamp);
+                                            compromise(&owned, &flag, on_compromised.as_deref());
+                                            return;
+                                        }
+                                    }
+                                    Err(_) => {
+                                        drop(stamp);
+                                        compromise(&owned, &flag, on_compromised.as_deref());
+                                        return;
+                                    }
+                                }
+                                match touch(&lock_path) {
+                                    Ok(()) => {
+                                        *stamp = lock_mtime(&lock_path).ok();
+                                    }
+                                    Err(_) => {
+                                        drop(stamp);
+                                        compromise(&owned, &flag, on_compromised.as_deref());
+                                        return;
+                                    }
                                 }
                             }
                         });
                         alive
-                    });
+                    };
                     return Ok(Self {
                         lock_path,
-                        heartbeat,
+                        identity,
+                        _pinned: pinned,
+                        owned,
+                        mtime,
+                        heartbeat: Some(heartbeat),
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -96,13 +154,57 @@ impl TelegramFileLock {
         }
     }
 
+    /// The holder detected a compromise: the directory is gone or its mtime moved.
+    ///
+    /// Returns `true` when a callback was registered, mirroring `onCompromised`.
+    pub fn was_compromised(&self) -> bool {
+        !self.owned.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// `release()`.
+    ///
+    /// `unlock()` refuses to remove the path when the in-process registry entry is
+    /// gone (`ENOTACQUIRED`), so a compromised holder leaves the new owner's lock
+    /// directory in place.
     pub fn release(&self) {
+        let stamp = self.mtime.lock().unwrap();
         if let Some(heartbeat) = &self.heartbeat {
             heartbeat.store(false, std::sync::atomic::Ordering::SeqCst);
         }
+        // Compromised or already released: `unlock()` fails with `ENOTACQUIRED`.
+        if self.owned.swap(false, std::sync::atomic::Ordering::SeqCst) == false {
+            return;
+        }
+        if stat_identity(Path::new(&self.lock_path)) != Some(self.identity)
+            || lock_mtime(&self.lock_path).ok() != *stamp
+        {
+            return;
+        }
         let _ = std::fs::remove_dir(&self.lock_path);
     }
+}
+
+impl Drop for TelegramFileLock {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// `setLockAsCompromised`: drop the registry entry, stop the heartbeat, notify.
+fn compromise(
+    owned: &Arc<std::sync::atomic::AtomicBool>,
+    alive: &Arc<std::sync::atomic::AtomicBool>,
+    on_compromised: Option<&(dyn Fn() + Send + Sync)>,
+) {
+    owned.store(false, std::sync::atomic::Ordering::SeqCst);
+    alive.store(false, std::sync::atomic::Ordering::SeqCst);
+    if let Some(on_compromised) = on_compromised {
+        on_compromised();
+    }
+}
+
+fn lock_mtime(path: &str) -> std::io::Result<SystemTime> {
+    std::fs::metadata(path)?.modified()
 }
 
 /// `lockfile.check(path, options)`.
@@ -132,20 +234,20 @@ fn touch(path: &str) -> std::io::Result<()> {
     let directory = std::fs::read_dir(path)?;
     drop(directory);
     let stamp = SystemTime::now();
-    let _ = filetime_now(path, stamp);
-    Ok(())
+    filetime_now(path, stamp)
 }
 
-#[cfg(unix)]
-fn filetime_now(path: &str, _stamp: SystemTime) -> std::io::Result<()> {
-    let _ = path;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn filetime_now(path: &str, _stamp: SystemTime) -> std::io::Result<()> {
-    let _ = path;
-    Ok(())
+fn filetime_now(path: &str, stamp: SystemTime) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_FLAG_BACKUP_SEMANTICS, FILE_WRITE_ATTRIBUTES};
+        options.access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    #[cfg(not(windows))]
+    options.read(true);
+    options.open(path)?.set_times(std::fs::FileTimes::new().set_modified(stamp))
 }
 
 fn is_stale(lock_path: &str, stale_ms: u64) -> bool {
@@ -225,19 +327,6 @@ pub async fn start_telegram_worker(store: &TelegramStore, launch: &TelegramWorke
     if telegram_worker_running(store).await {
         return Ok(());
     }
-    if launch.is_bun_binary {
-        return Err("Telegram currently requires the Prime Node package installation.".to_string());
-    }
-    let entrypoint = Path::new(&launch.package_dir)
-        .join(if launch.from_source { "src" } else { "dist" })
-        .join("modes")
-        .join("telegram")
-        .join(if launch.from_source { "worker.ts" } else { "worker.js" })
-        .to_string_lossy()
-        .to_string();
-    if !Path::new(&entrypoint).exists() {
-        return Err("Telegram worker is missing from this installation. Reinstall the current Prime package.".to_string());
-    }
     let env: Vec<(String, String)> = launch
         .env
         .iter()
@@ -251,15 +340,17 @@ pub async fn start_telegram_worker(store: &TelegramStore, launch: &TelegramWorke
         .collect();
     let _ = std::fs::remove_file(store.path("stop.json"));
 
-    let mut args = launch.exec_argv.clone();
-    args.push(entrypoint);
-    args.push(store.agent_dir.clone());
+    let args = native_worker_args(&store.agent_dir);
     let mut handle = spawn_hidden(
         &launch.exec_path,
         &args,
         SpawnOptions {
             cwd: Some(settings.cwd.clone()),
             env: Some(env),
+            // `createCliSubprocessEnv()` builds the worker's whole environment; the
+            // prohibited `PRIME_AGENT_INTERNAL_*` names must be absent, not merely
+            // out-shadowed by the additive `envs()` merge.
+            replace_env: true,
             detached: true,
             shell: false,
             capture_stdout: false,
@@ -289,6 +380,10 @@ pub async fn start_telegram_worker(store: &TelegramStore, launch: &TelegramWorke
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     Err("Telegram worker startup timed out. Check /telegram status.".to_string())
+}
+
+fn native_worker_args(agent_dir: &str) -> Vec<String> {
+    vec!["--internal-telegram-worker".into(), agent_dir.into()]
 }
 
 /// `telegramStopRequested(store, instanceId)`.
@@ -366,6 +461,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn worker_launch_uses_native_entry_not_a_typescript_file() {
+        assert_eq!(native_worker_args("C:/separate profile/agent"),
+            ["--internal-telegram-worker", "C:/separate profile/agent"]);
+    }
+
+    #[test]
+    fn heartbeat_really_refreshes_the_lock_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap();
+        filetime_now(path, UNIX_EPOCH + std::time::Duration::from_secs(100)).unwrap();
+        assert!(is_stale(path, TELEGRAM_WORKER_LOCK_OPTIONS.stale));
+        touch(path).unwrap();
+        assert!(!is_stale(path, TELEGRAM_WORKER_LOCK_OPTIONS.stale));
+        assert!(touch(dir.path().join("missing").to_str().unwrap()).is_err());
+    }
+
+    #[test]
     fn lock_options_match_the_typescript() {
         assert!(!TELEGRAM_WORKER_LOCK_OPTIONS.realpath);
         assert_eq!(TELEGRAM_WORKER_LOCK_OPTIONS.stale, 10_000);
@@ -388,6 +500,49 @@ mod tests {
         );
         first.release();
         assert!(!telegram_lock_held(&target, TELEGRAM_WORKER_LOCK_OPTIONS));
+    }
+
+    #[tokio::test]
+    async fn replacement_with_identical_mtime_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("management").to_string_lossy().into_owned();
+        let path = format!("{target}.lock");
+        let options = TelegramLockOptions { update: 10, ..TELEGRAM_WORKER_LOCK_OPTIONS };
+        let lock = TelegramFileLock::acquire(&target, options, None, None).await.unwrap();
+        let original = lock_mtime(&path).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        filetime_now(&path, original).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !lock.was_compromised() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.expect("replacement identity must be detected even with equal timestamps");
+        lock.release();
+        assert!(Path::new(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn release_preserves_replacement_before_first_heartbeat() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("management").to_string_lossy().into_owned();
+        let path = format!("{target}.lock");
+        let lock = TelegramFileLock::acquire(&target, TELEGRAM_WORKER_LOCK_OPTIONS, None, None).await.unwrap();
+        let original = lock_mtime(&path).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        filetime_now(&path, original).unwrap();
+        lock.release();
+        assert!(Path::new(&path).exists());
+    }
+
+    #[tokio::test]
+    async fn dropped_management_lock_stops_renewal_and_releases() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("management").to_string_lossy().into_owned();
+        let lock = TelegramFileLock::acquire(&target, TELEGRAM_WORKER_LOCK_OPTIONS, None, None).await.unwrap();
+        drop(lock);
+        assert!(!Path::new(&format!("{target}.lock")).exists());
     }
 
     #[test]

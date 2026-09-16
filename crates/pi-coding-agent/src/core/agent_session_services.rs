@@ -863,7 +863,7 @@ mod tests {
 
         // A real transcript persist: `flushNow()` -> `_rewriteFile()` ->
         // `_notifyPersistListeners()` (session-manager.ts:2003-2008, 1912).
-        session_manager.lock().expect("session manager poisoned").flush_now();
+        let _ = session_manager.lock().expect("session manager poisoned").flush_now();
         assert!(
             Path::new(&session_file).exists(),
             "the persist must write the session file"

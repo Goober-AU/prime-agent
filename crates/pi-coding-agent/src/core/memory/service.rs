@@ -331,15 +331,19 @@ impl MemoryService {
             }
             "source" => {
                 let path = string("path")?;
-                let metadata = std::fs::metadata(&path)
+                // `service.ts:175` / `:183`: the reference resolves the input with
+                // `resolve(path)` (process-cwd based, lexical) and then records
+                // `pathToFileURL(path).href`, so a relative in-project path is a
+                // project path and gains an absolute `file:` URI.
+                let resolved = resolve_source_path(&path);
+                let metadata = std::fs::metadata(&resolved)
                     .map_err(|_| "Source must be a file below 32 MiB".to_string())?;
                 if !metadata.is_file() || metadata.len() > 32 * 1024 * 1024 {
                     return Err("Source must be a file below 32 MiB".to_string());
                 }
-                let content = std::fs::read_to_string(&path)
+                let content = std::fs::read_to_string(&resolved)
                     .map_err(|_| "Source must be a file below 32 MiB".to_string())?;
                 let sha256 = hash(&content);
-                let resolved = Path::new(&path).to_path_buf();
                 let relative = path_relative(&self.store.project.root, &resolved);
                 let project_path = relative.filter(|value| !value.starts_with(".."));
                 Ok(serde_json::json!({
@@ -496,13 +500,28 @@ impl MemoryService {
     }
 }
 
+/// `resolve(path)` from `service.ts:175`: Node resolves a relative input against
+/// the process cwd and normalizes `.`/`..` lexically, without touching the disk.
+fn resolve_source_path(path: &str) -> PathBuf {
+    let cwd = std::env::current_dir()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    PathBuf::from(crate::core::tools::path_utils::resolve_path(&cwd, path))
+}
+
+/// `path.relative(root, target)` for the `source` decision (`service.ts:175-179`).
+///
+/// Measured Node win32 semantics (`work/logs/memoryscope/ts-relative-rule.out.json`):
+/// the shared prefix is compared case-insensitively and the remainder keeps the
+/// target's original spelling. The port's project root can additionally carry a
+/// verbatim device prefix, which Node's `realpathSync` never returns
+/// (`project.ts:41`), so that prefix is normalized away before the comparison.
 fn path_relative(root: &str, target: &Path) -> Option<String> {
-    let root_path = Path::new(root);
-    let root_components: Vec<_> = root_path.components().collect();
-    let target_components: Vec<_> = target.components().collect();
+    let root_components = comparable_components(root);
+    let target_components = comparable_components(&target.to_string_lossy());
     let mut common = 0;
     while common < root_components.len().min(target_components.len())
-        && root_components[common] == target_components[common]
+        && root_components[common].0 == target_components[common].0
     {
         common += 1;
     }
@@ -511,9 +530,40 @@ fn path_relative(root: &str, target: &Path) -> Option<String> {
         parts.push("..".to_string());
     }
     for component in &target_components[common..] {
-        parts.push(component.as_os_str().to_string_lossy().to_string());
+        parts.push(component.1.clone());
     }
     Some(parts.join("/"))
+}
+
+/// `(comparison key, original spelling)` per component. The key drops the verbatim
+/// device prefix and lowercases on Windows so the shared prefix matches the way
+/// Node's win32 `path.relative` matches it; the original spelling is what the
+/// caller reports as `projectPath`.
+fn comparable_components(value: &str) -> Vec<(String, String)> {
+    let normalized = strip_verbatim_prefix(value);
+    Path::new(&normalized)
+        .components()
+        .map(|component| {
+            let original = component.as_os_str().to_string_lossy().to_string();
+            let key = if cfg!(windows) {
+                original.to_lowercase()
+            } else {
+                original.clone()
+            };
+            (key, original)
+        })
+        .collect()
+}
+
+/// Strip the verbatim device prefix: a `\\\\?\\C:\x` root becomes `C:\x`.
+fn strip_verbatim_prefix(value: &str) -> String {
+    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = value.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    value.to_string()
 }
 
 pub fn import_overview_value(job: &ImportJob) -> Value {

@@ -4,8 +4,9 @@ use crate::keys::set_kitty_protocol_active;
 use crate::stdin_buffer::{StdinBuffer, StdinBufferEvent, StdinBufferOptions};
 use crate::terminal_colors::{
     parse_osc_color_response, set_default_terminal_colors, DefaultTerminalColors, OscColorKind, Rgb,
-    QUERY_DEFAULT_BACKGROUND, QUERY_DEFAULT_FOREGROUND,
 };
+#[cfg(not(windows))]
+use crate::terminal_colors::{QUERY_DEFAULT_BACKGROUND, QUERY_DEFAULT_FOREGROUND};
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
 use std::io::{Read, Write};
@@ -126,28 +127,56 @@ fn read_available_input() -> std::io::Result<NativeInput> {
 
 #[cfg(not(unix))]
 fn read_available_input() -> std::io::Result<NativeInput> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::event;
     if !event::poll(std::time::Duration::ZERO)? { return Ok(NativeInput::Pending); }
-    let sequence = match event::read()? {
+    Ok(match native_event_sequence(event::read()?) {
+        Some(sequence) => NativeInput::Bytes(sequence.into_bytes()),
+        None => NativeInput::Pending,
+    })
+}
+
+#[cfg(any(not(unix), test))]
+fn native_event_sequence(event: crossterm::event::Event) -> Option<String> {
+    use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+    Some(match event {
         Event::Paste(text) => format!("\x1b[200~{text}\x1b[201~"),
         Event::Key(key) if key.kind != KeyEventKind::Release => {
             let modifier = 1 + u8::from(key.modifiers.contains(KeyModifiers::SHIFT))
                 + 2 * u8::from(key.modifiers.contains(KeyModifiers::ALT))
                 + 4 * u8::from(key.modifiers.contains(KeyModifiers::CONTROL));
+            // Use the same VT forms as the byte-oriented Unix reader. The
+            // editor's functional-key parser does not accept synthetic PUA CSI-u codes.
+            let suffix = match key.code {
+                KeyCode::Up => Some("A"), KeyCode::Down => Some("B"),
+                KeyCode::Right => Some("C"), KeyCode::Left => Some("D"),
+                KeyCode::Home => Some("H"), KeyCode::End => Some("F"),
+                _ => None,
+            };
+            if let Some(suffix) = suffix { return Some(format!("\x1b[1;{modifier}{suffix}")); }
+            let functional = match key.code {
+                KeyCode::Insert => Some(2), KeyCode::Delete => Some(3),
+                KeyCode::PageUp => Some(5), KeyCode::PageDown => Some(6),
+                KeyCode::F(n @ 1..=4) => return Some(format!("\x1b[1;{modifier}{}", char::from(b'P' + n - 1))),
+                KeyCode::F(n @ 5..=12) => Some([15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)]),
+                _ => None,
+            };
+            if let Some(code) = functional { return Some(format!("\x1b[{code};{modifier}~")); }
             let code = match key.code {
-                KeyCode::Char(ch) if modifier == 1 => return Ok(NativeInput::Bytes(ch.to_string().into_bytes())),
+                KeyCode::Char(ch) if !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::CONTROL | KeyModifiers::SUPER) => return Some(ch.to_string()),
                 KeyCode::Char(ch) => ch as u32,
-                KeyCode::Enter => 13, KeyCode::Tab | KeyCode::BackTab => 9, KeyCode::Backspace => 127, KeyCode::Esc => 27,
-                KeyCode::Up => 57352, KeyCode::Down => 57353, KeyCode::Left => 57350, KeyCode::Right => 57351,
-                KeyCode::Home => 57358, KeyCode::End => 57359, KeyCode::Delete => 57349, KeyCode::Insert => 57348,
-                KeyCode::PageUp => 57354, KeyCode::PageDown => 57355, KeyCode::F(n) => 57363 + u32::from(n),
-                _ => return Ok(NativeInput::Pending),
+                KeyCode::Enter if modifier == 1 => return Some("\r".into()),
+                KeyCode::Tab if modifier == 1 => return Some("\t".into()),
+                KeyCode::Esc if modifier == 1 => return Some("\x1b".into()),
+                KeyCode::Backspace if modifier == 1 => return Some("\x7f".into()),
+                KeyCode::BackTab => return Some(format!("\x1b[9;{}u", ((modifier - 1) | 1) + 1)),
+                KeyCode::Enter => 13, KeyCode::Tab => 9, KeyCode::Backspace => 127, KeyCode::Esc => 27,
+                KeyCode::F(n) => 57363 + u32::from(n),
+                _ => return None,
             };
             format!("\x1b[{code};{modifier}u")
         }
-        _ => return Ok(NativeInput::Pending),
-    };
-    Ok(NativeInput::Bytes(sequence.into_bytes()))
+        _ => return None,
+    })
 }
 
 /// Minimal terminal interface for TUI
@@ -331,6 +360,9 @@ impl ProcessTerminal {
     fn query_and_enable_kitty_protocol(&mut self) {
         self.setup_stdin_buffer();
         self.query_default_terminal_colors();
+        // Win32 supplies key/modifier records directly; VT reply parsing and
+        // keyboard protocol negotiation belong only to the byte reader.
+        if cfg!(windows) { return; }
         stdout_write("\x1b[?u");
         self.clear_keyboard_protocol_fallback_timer();
         self.shared.borrow_mut().keyboard_protocol_fallback_timer = Some(150);
@@ -354,6 +386,30 @@ impl ProcessTerminal {
     }
 
     fn query_default_terminal_colors(&mut self) {
+        #[cfg(windows)]
+        {
+            // OSC replies lose their framing through ReadConsoleInput. Read
+            // colours through the console API without injecting input instead.
+            use windows_sys::Win32::System::Console::{
+                GetConsoleScreenBufferInfoEx, GetStdHandle, CONSOLE_SCREEN_BUFFER_INFOEX,
+                STD_OUTPUT_HANDLE,
+            };
+            let mut info: CONSOLE_SCREEN_BUFFER_INFOEX = unsafe { std::mem::zeroed() };
+            info.cbSize = std::mem::size_of_val(&info) as u32;
+            if unsafe { GetConsoleScreenBufferInfoEx(GetStdHandle(STD_OUTPUT_HANDLE), &mut info) } != 0 {
+                let rgb = |value: u32| Rgb {
+                    r: i64::from(value & 255), g: i64::from((value >> 8) & 255),
+                    b: i64::from((value >> 16) & 255),
+                };
+                set_default_terminal_colors(Some(DefaultTerminalColors {
+                    foreground: rgb(info.ColorTable[usize::from(info.wAttributes & 15)]),
+                    background: rgb(info.ColorTable[usize::from((info.wAttributes >> 4) & 15)]),
+                }));
+            }
+            return;
+        }
+        #[cfg(not(windows))]
+        {
         if !crossterm::tty::IsTty::is_tty(&std::io::stdin()) || !crossterm::tty::IsTty::is_tty(&std::io::stdout())
         {
             return;
@@ -365,6 +421,7 @@ impl ProcessTerminal {
         });
         stdout_write(QUERY_DEFAULT_FOREGROUND);
         stdout_write(QUERY_DEFAULT_BACKGROUND);
+        }
     }
 
     /// Called by the owner after 100 ms to close an unanswered colour probe.
@@ -391,8 +448,9 @@ impl ProcessTerminal {
         }
     }
 
-    /// On Windows, add ENABLE_VIRTUAL_TERMINAL_INPUT (0x0200) to the stdin console handle.
-    fn enable_windows_vt_input(&mut self) {
+    /// Crossterm reads Windows INPUT_RECORDs, not a VT byte stream. Mixing VT
+    /// input with that reader loses control keys and splits navigation sequences.
+    fn configure_windows_event_input(&mut self) {
         #[cfg(windows)]
         {
             const STD_INPUT_HANDLE: u32 = -10i32 as u32;
@@ -402,7 +460,7 @@ impl ProcessTerminal {
                 let handle = GetStdHandle(STD_INPUT_HANDLE);
                 let mut mode: u32 = 0;
                 if GetConsoleMode(handle, &mut mode) != 0 {
-                    let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_INPUT);
+                    let _ = SetConsoleMode(handle, mode & !ENABLE_VIRTUAL_TERMINAL_INPUT);
                 }
             }
         }
@@ -626,10 +684,7 @@ impl Terminal for ProcessTerminal {
         // Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
         stdout_write("\x1b[?2004h");
 
-        // On Windows, enable ENABLE_VIRTUAL_TERMINAL_INPUT so the console sends
-        // VT escape sequences (e.g. \x1b[Z for Shift+Tab) instead of raw console
-        // events that lose modifier information. Must run AFTER setRawMode(true).
-        self.enable_windows_vt_input();
+        self.configure_windows_event_input();
 
         // Query and enable Kitty keyboard protocol.
         self.query_and_enable_kitty_protocol();
@@ -856,6 +911,37 @@ impl Terminal for ProcessTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_control_and_navigation_events_match_editor_bindings() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let keys = [(KeyCode::Up,"up"), (KeyCode::Down,"down"),
+            (KeyCode::Left,"left"), (KeyCode::Right,"right"), (KeyCode::Home,"home"),
+            (KeyCode::End,"end"), (KeyCode::PageUp,"pageup"), (KeyCode::PageDown,"pagedown"),
+            (KeyCode::Insert,"insert"), (KeyCode::Delete,"delete"),
+            (KeyCode::Enter,"enter"), (KeyCode::Tab,"tab"),
+            (KeyCode::Backspace,"backspace"), (KeyCode::Esc,"escape")];
+        for (code, name) in keys {
+            for (modifier, prefix) in [(KeyModifiers::NONE,""), (KeyModifiers::SHIFT,"shift+"),
+                (KeyModifiers::CONTROL,"ctrl+"), (KeyModifiers::ALT,"alt+")] {
+                if code == KeyCode::Esc && modifier != KeyModifiers::NONE { continue; }
+                let encoded = native_event_sequence(Event::Key(KeyEvent::new(code,modifier))).unwrap();
+                assert!(crate::keys::matches_key(&encoded, &format!("{prefix}{name}")), "{name} {modifier:?}: {encoded:?}");
+            }
+        }
+        let backtab = native_event_sequence(Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT))).unwrap();
+        assert!(crate::keys::matches_key(&backtab,"shift+tab"));
+    }
+
+    #[test]
+    fn windows_text_paste_and_releases_are_preserved() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        for ch in ['/', 'A', '?', 'é'] {
+            assert_eq!(native_event_sequence(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT))), Some(ch.to_string()));
+        }
+        assert_eq!(native_event_sequence(Event::Paste("/login\ntext".into())), Some("\x1b[200~/login\ntext\x1b[201~".into()));
+        assert!(native_event_sequence(Event::Key(KeyEvent::new_with_kind(KeyCode::Enter,KeyModifiers::NONE,KeyEventKind::Release))).is_none());
+    }
 
     #[test]
     fn kitty_response_pattern() {

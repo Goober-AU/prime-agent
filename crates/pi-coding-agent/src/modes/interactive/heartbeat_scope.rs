@@ -34,7 +34,11 @@ pub fn scope_heartbeats_to_session(
     heartbeats
         .iter()
         .filter(|heartbeat| {
-            heartbeat.job.active_session_id == session.session_id
+            // `heartbeat.job.sessionId === session.sessionId || activeSessionIds.has(heartbeat.job.activeSessionId)`
+            // (`heartbeat-scope.ts:29`): the first disjunct is the DURABLE id space, the
+            // second is the WORKER/active id space. Comparing the job's active-session id
+            // against the session's durable id mixed the two.
+            heartbeat.job.session_id == session.session_id
                 || active_session_ids.contains(heartbeat.job.active_session_id.as_str())
         })
         .cloned()

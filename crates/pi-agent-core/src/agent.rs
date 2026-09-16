@@ -494,10 +494,17 @@ impl Agent {
         let Some(run) = run else {
             return;
         };
+        // Register interest before awaiting: `Notify::notify_waiters` stores no permit, so a
+        // waiter that is not registered yet would miss `finish_run` and park forever.
+        let notified = run.idle.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        #[cfg(test)]
+        idle_wait_probe::after_settled_check();
         if run.settled.load(AtomicOrdering::SeqCst) {
             return;
         }
-        run.idle.notified().await;
+        notified.await;
     }
 
     /// `reset()`.
@@ -1067,6 +1074,199 @@ impl Agent {
         }
 
         config
+    }
+}
+
+/// T10 seam (owner rlm-agentcore, D-03): the lost-wakeup window in
+/// `Agent::wait_for_idle` is only a couple of instructions wide, so a test cannot
+/// reach it by scheduling alone. This probe runs *inside* that window and lets the
+/// test release a finishing run at exactly that point. It is compiled out of
+/// non-test builds and is not exported outside this crate.
+#[cfg(test)]
+pub mod idle_wait_probe {
+    use std::sync::{Mutex, OnceLock};
+
+    struct Probe {
+        reached: std::sync::Arc<tokio::sync::Semaphore>,
+        resume: std::sync::Arc<tokio::sync::Semaphore>,
+    }
+
+    fn slot() -> &'static Mutex<Option<Probe>> {
+        static SLOT: OnceLock<Mutex<Option<Probe>>> = OnceLock::new();
+        SLOT.get_or_init(|| Mutex::new(None))
+    }
+
+    /// Arm the probe. The next `wait_for_idle` call that observes `settled == false`
+    /// signals `reached` and then blocks until `resume` has a permit.
+    pub fn arm() -> (std::sync::Arc<tokio::sync::Semaphore>, std::sync::Arc<tokio::sync::Semaphore>) {
+        let reached = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let resume = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        *slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Probe {
+            reached: reached.clone(),
+            resume: resume.clone(),
+        });
+        (reached, resume)
+    }
+
+    pub(super) fn after_settled_check() {
+        let probe = {
+            let mut slot = slot().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.take()
+        };
+        if let Some(probe) = probe {
+            probe.reached.add_permits(1);
+            futures::executor::block_on(async {
+                probe.resume.acquire().await.unwrap().forget();
+            });
+        }
+    }
+}
+
+/// T10 lane (owner rlm-agentcore): D-03 `Agent::wait_for_idle` lost-wakeup race.
+///
+/// In-crate `#[cfg(test)]` module: the disputed window is only reachable through the
+/// crate-private seam `idle_wait_probe`. Production entry points under test: `Agent::prompt`
+/// and `Agent::wait_for_idle`.
+#[cfg(test)]
+mod rlm_t10_tests {
+    use super::*;
+    use pi_ai::providers::faux::{
+        faux_assistant_message, register_faux_provider, FauxAssistantMessageOptions, FauxResponseStep,
+    };
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+    use tokio::time::timeout;
+
+    /// The awaited-value budget: far above any scheduling delay, far below any watchdog.
+    const WAIT_BUDGET: Duration = Duration::from_millis(250);
+    /// Bounded safety net so a stuck barrier can never hang the test binary.
+    const SEAM_BUDGET: Duration = Duration::from_secs(5);
+    /// One deterministic reproduction plus about ten bounded repetitions of the schedule.
+    const REPETITIONS: usize = 10;
+
+    fn faux_agent() -> (pi_ai::providers::faux::FauxProviderRegistration, Arc<Agent>) {
+        let provider = register_faux_provider(None);
+        provider.set_responses(vec![FauxResponseStep::Message(faux_assistant_message(
+            "done".into(),
+            Some(FauxAssistantMessageOptions {
+                timestamp: Some(7),
+                ..Default::default()
+            }),
+        ))]);
+        let agent = Agent::new(AgentOptions {
+            initial_state: Some(AgentState {
+                model: provider.get_model(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        (provider, agent)
+    }
+
+    /// A waiter that observes `settled == false` must still be woken by the run that finishes
+    /// afterwards. `finish_run` calls `Notified::notify_waiters`, which stores no permit, so a
+    /// waiter that has not registered yet loses the wakeup and parks forever. The `agent_end`
+    /// listener holds the run open so completion is placed *inside* the disputed window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn idle_wait_has_no_lost_wakeup() {
+        let mut parked = Vec::new();
+        for repetition in 0..REPETITIONS {
+            let (provider, agent) = faux_agent();
+            let (reached, resume) = idle_wait_probe::arm();
+            let entered = Arc::new(Semaphore::new(0));
+            let release = Arc::new(Semaphore::new(0));
+            let _subscription = agent.subscribe(Arc::new({
+                let entered = entered.clone();
+                let release = release.clone();
+                move |event, _| {
+                    let entered = entered.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        if !matches!(event, AgentEvent::AgentEnd { .. }) {
+                            return;
+                        }
+                        entered.add_permits(1);
+                        release.acquire().await.unwrap().forget();
+                    })
+                }
+            }));
+            let run = tokio::spawn({
+                let agent = agent.clone();
+                async move {
+                    agent
+                        .prompt(PromptInput::Text {
+                            input: "hi".to_string(),
+                            images: Vec::new(),
+                        })
+                        .await
+                }
+            });
+            // The run is inside its own `agent_end` listener, so it has not settled yet.
+            timeout(SEAM_BUDGET, entered.acquire())
+                .await
+                .expect("the run never reached agent_end")
+                .unwrap()
+                .forget();
+            assert!(agent.signal().is_some(), "the run must still be active");
+            let waiter = tokio::spawn({
+                let agent = agent.clone();
+                async move { agent.wait_for_idle().await }
+            });
+            // The waiter parks inside the window: after the settled check, before registration.
+            timeout(SEAM_BUDGET, reached.acquire())
+                .await
+                .expect("wait_for_idle never reached the awaited-value region")
+                .unwrap()
+                .forget();
+            // Complete the run: `finish_run` notifies while the waiter may be unregistered.
+            release.add_permits(1);
+            timeout(SEAM_BUDGET, run)
+                .await
+                .expect("the run never finished")
+                .unwrap()
+                .unwrap();
+            assert!(agent.signal().is_none(), "the run must have settled");
+            resume.add_permits(1);
+            match timeout(WAIT_BUDGET, waiter).await {
+                Ok(joined) => joined.expect("the waiter task panicked"),
+                Err(_) => parked.push(repetition),
+            }
+            provider.unregister();
+        }
+        assert!(
+            parked.is_empty(),
+            "wait_for_idle parked after the run finished (lost wakeup) in repetitions {parked:?} of {REPETITIONS}"
+        );
+    }
+
+    /// Negative control: an idle agent and an already-settled run resolve every waiter at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn idle_wait_resolves_for_idle_and_settled_runs() {
+        let idle = Agent::new(AgentOptions::default());
+        timeout(WAIT_BUDGET, idle.wait_for_idle())
+            .await
+            .expect("an idle agent must resolve immediately");
+
+        let (provider, agent) = faux_agent();
+        agent
+            .prompt(PromptInput::Text {
+                input: "hi".to_string(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let mut waiters = Vec::new();
+        for _ in 0..8 {
+            let agent = agent.clone();
+            waiters.push(tokio::spawn(async move { agent.wait_for_idle().await }));
+        }
+        for waiter in waiters {
+            timeout(WAIT_BUDGET, waiter)
+                .await
+                .expect("a settled run must resolve every waiter")
+                .unwrap();
+        }
+        provider.unregister();
     }
 }
 

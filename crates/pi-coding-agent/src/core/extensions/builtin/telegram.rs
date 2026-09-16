@@ -315,8 +315,8 @@ async fn run_telegram_action(
                 return Ok(());
             }
             let api = TelegramApi::new(&token, TELEGRAM_DEFAULT_BASE_URL, Arc::new(ReqwestTelegramFetcher))?;
-            let bot = api.identify(false).await.map_err(|error| error.to_string())?;
-            api.require_polling(false).await.map_err(|error| error.to_string())?;
+            let bot = api.identify(None).await.map_err(|error| error.to_string())?;
+            api.require_polling(None).await.map_err(|error| error.to_string())?;
             let binding = session_binding(ctx);
             prepared = Some(TelegramConnectionSettings {
                 version: 1.0,

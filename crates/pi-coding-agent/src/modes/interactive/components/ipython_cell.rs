@@ -805,7 +805,12 @@ impl IPythonCellComponent {
                 .unwrap_or(false)
                 && !is_edit_confirmation(details.stdout.as_deref(), diffs)
             {
-                output_started = true;
+                if !output_started {
+                    output_started = true;
+                    if has_code {
+                        self.add_blank(lines, width);
+                    }
+                }
                 rendered_text_output = true;
                 self.render_output_text(
                     lines,
@@ -1722,4 +1727,34 @@ mod tests {
         ];
         assert_eq!(text_from_blocks(Some(&blocks)), "a\nb");
     }
+    /// G2-11: an expanded cell with stdout output keeps the blank separator
+    /// between the code block and the output (TS startOutput addBlank,
+    /// ipython-cell.ts:554-562; the port's stdout branch skipped add_blank).
+    #[test]
+    fn t14_g2_11_expanded_stdout_cell_keeps_the_blank_separator() {
+        init();
+        let mut cell = state("print(1)");
+        cell.expanded = Some(true);
+        cell.execution_started = Some(true);
+        cell.details = Some(json!({ "status": "ok", "stdout": "hello\n" }));
+        let mut component = IPythonCellComponent::new(cell);
+        let rendered = plain(&component.render(80.0));
+        let lines: Vec<&str> = rendered.split('\n').collect();
+        // The collapsed header also mentions the code, so anchor on the LAST
+        // code line (the end of the code block).
+        let code_idx = lines
+            .iter()
+            .rposition(|line| line.contains("print(1)"))
+            .expect("code line rendered");
+        let out_idx = lines
+            .iter()
+            .position(|line| line.contains("hello"))
+            .expect("stdout line rendered");
+        assert!(
+            out_idx > code_idx + 1
+                && lines[code_idx + 1..out_idx].iter().any(|line| line.is_empty()),
+            "expected a blank separator between the code block and the stdout output\n{rendered}"
+        );
+    }
+
 }
