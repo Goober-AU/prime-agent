@@ -253,7 +253,7 @@ impl MemoryJobs {
                         ..evidence.clone()
                     };
                     let text_budget = chunk_budget as i64
-                        - js_len(&serialize_evidence(&[reference], 80_000)) as i64
+                        - js_len(&serialize_evidence(&[reference], usize::MAX / 4)) as i64
                         - 64;
                     if text_budget < 1 {
                         return Err(
@@ -262,18 +262,30 @@ impl MemoryJobs {
                         );
                     }
                     let text_budget = text_budget as usize;
-                    let characters: Vec<char> = evidence.text.chars().collect();
+                    let mut characters = evidence.text.chars().peekable();
                     let mut offset = 0usize;
-                    while offset < characters.len() {
-                        let part_text: String = characters
-                            [offset..(offset + text_budget).min(characters.len())]
-                            .iter()
-                            .collect();
+                    while characters.peek().is_some() {
+                        let mut part_text = String::new();
+                        let mut part_units = 0usize;
+                        while let Some(&character) = characters.peek() {
+                            if part_units + character.len_utf16() > text_budget {
+                                break;
+                            }
+                            part_text.push(character);
+                            part_units += character.len_utf16();
+                            characters.next();
+                        }
+                        if part_units == 0 {
+                            return Err("Source reference exceeds chunk budget; increase maxImportChunkChars".to_string());
+                        }
                         let part = Evidence {
                             id: format!("{}:{offset}", evidence.id),
                             text: part_text,
                             ..evidence.clone()
                         };
+                        if js_len(&serialize_evidence(std::slice::from_ref(&part), usize::MAX / 4)) > chunk_budget {
+                            return Err("Source reference exceeds chunk budget; increase maxImportChunkChars".to_string());
+                        }
                         let fits = match chunks.last() {
                             Some(previous) => {
                                 let mut combined = previous.records.clone();
@@ -295,7 +307,7 @@ impl MemoryJobs {
                                 proposal: None,
                             });
                         }
-                        offset += text_budget;
+                        offset += part_units;
                     }
                 }
                 let job = ImportJob {
@@ -611,6 +623,90 @@ mod tests {
                 })
             })
         })
+    }
+
+    #[test]
+    fn import_chunks_respect_utf16_budget_and_preserve_all_text_and_offsets() {
+        let (jobs, root) = fixture();
+        let runtime = runtime();
+        runtime.block_on(jobs.store.configure(&serde_json::json!({"maxImportChunkChars": 4096}))).unwrap();
+        for (index, text) in ["a".repeat(9000), "\u{1f600}".repeat(9000), "\u{6f22}\u{5b57}e\u{301}\u{1f680}".repeat(2000)].into_iter().enumerate() {
+            let source = root.join(format!("unicode-{index}.jsonl"));
+            std::fs::write(&source, serde_json::json!({
+                "type": "message", "id": "source", "message": {"role": "user", "content": text, "timestamp": 1}
+            }).to_string()).unwrap();
+            let job = runtime.block_on(jobs.prepare(&source.to_string_lossy())).unwrap();
+            assert!(job.chunks.len() > 1);
+            let mut joined = String::new();
+            let mut offset = 0usize;
+            for chunk in &job.chunks {
+                assert!(js_len(&serialize_evidence(&chunk.records, usize::MAX / 4)) <= 4096);
+                for record in &chunk.records {
+                    assert_eq!(record.id, format!("source:{offset}"));
+                    assert!(!record.text.is_empty());
+                    assert_eq!(record.sha256, hash(&text));
+                    offset += js_len(&record.text);
+                    joined.push_str(&record.text);
+                }
+            }
+            assert_eq!(joined, text);
+            assert_eq!(offset, js_len(&text));
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn import_rejects_reference_that_leaves_no_unicode_character_room() {
+        let (jobs, root) = fixture();
+        let runtime = runtime();
+        runtime.block_on(jobs.store.configure(&serde_json::json!({"maxImportChunkChars": 4096}))).unwrap();
+        let source = root.join("oversized-reference.jsonl");
+        std::fs::write(&source, serde_json::json!({
+            "type": "message", "id": "x".repeat(90_000),
+            "message": {"role": "user", "content": "\u{1f600}", "timestamp": 1}
+        }).to_string()).unwrap();
+        let error = runtime.block_on(jobs.prepare(&source.to_string_lossy())).unwrap_err();
+        assert!(error.contains("Source reference exceeds chunk budget"));
+        assert!(jobs.list().is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn long_import_remains_exclusive_past_the_old_thirty_second_lease() {
+        let (jobs, root) = fixture();
+        let runtime = runtime();
+        runtime.block_on(async {
+            let job = jobs.prepare(&session_file(&root)).await.unwrap();
+            let entered = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let started = entered.clone();
+            let finish = release.clone();
+            let extract: MemoryExtractor = Arc::new(move |records| {
+                let started = started.clone();
+                let finish = finish.clone();
+                Box::pin(async move {
+                    started.notify_one();
+                    finish.notified().await;
+                    extractor()(records).await
+                })
+            });
+            let first_jobs = jobs.clone();
+            let id = job.id.clone();
+            let first = tokio::spawn(async move { first_jobs.run(&id, extract, None).await });
+            tokio::time::timeout(std::time::Duration::from_secs(5), entered.notified()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(32)).await;
+            for _ in 0..2 {
+                let rejected = jobs.run(&job.id, extractor(), None).await.unwrap_err();
+                assert!(rejected.starts_with("Lock file is already being held:"));
+            }
+            assert_eq!(jobs.get(&job.id).unwrap().status, ImportJobStatus::Running);
+            release.notify_one();
+            let complete = tokio::time::timeout(std::time::Duration::from_secs(5), first).await.unwrap().unwrap().unwrap();
+            assert_eq!(complete.status, ImportJobStatus::Preview);
+            assert_eq!(complete.usage.input, 10.0);
+            assert_eq!(jobs.run(&job.id, extractor(), None).await.unwrap().usage.input, 10.0);
+        });
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

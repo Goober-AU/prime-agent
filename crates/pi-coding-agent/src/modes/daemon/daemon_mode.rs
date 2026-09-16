@@ -18,6 +18,9 @@ mod native_server;
 #[path = "daemon_subagents.rs"]
 mod daemon_subagents;
 
+#[path = "agent_message_transport.rs"]
+mod agent_message_transport;
+
 // Owner parity-validation tests (T08: C-01, C-02, C-09, H-05). In-crate so they can
 // drive the private daemon seams (`AgentDaemon::handle_line`,
 // `accept_agent_session_message`) without re-implementing them.
@@ -5076,6 +5079,11 @@ impl AgentDaemon {
                     Some(value) => Some(self.get_session_state(value)?),
                     None => None,
                 };
+                if body.get("agentOrigin").and_then(Value::as_bool) == Some(true)
+                    && from_state.is_none()
+                {
+                    return Err("Agent messaging requires fromActiveSessionId".into());
+                }
                 let receipt = self
                     .send_agent_session_message(SendAgentMessageInput {
                         target_selector: body
@@ -13612,14 +13620,14 @@ impl AgentDaemon {
     }
 
     /// `listSupervisorAgentPeers()`.
-    ///
-    /// The supervisor client is another slice's surface; until it lands this
-    /// returns the empty peer list the TS `catch` branch produces.
     async fn list_supervisor_agent_peers(&self) -> Vec<AgentSessionMessageAgentSummary> {
-        if !self.is_worker() || self.supervisor_socket_path_from_env().is_none() {
+        let Some(worker) = self.options.worker.as_ref() else {
             return Vec::new();
-        }
-        Vec::new()
+        };
+        let Some(socket_path) = self.supervisor_socket_path_from_env() else {
+            return Vec::new();
+        };
+        agent_message_transport::list_peers(&socket_path, &worker.authentication_token).await
     }
 }
 
@@ -15246,17 +15254,28 @@ impl AgentDaemon {
     }
 
     /// `sendRemoteAgentSessionMessage(fromState, targetSelector, message)`.
-    ///
-    /// The supervisor request carries the same `send_message` command; until the
-    /// supervisor client slice lands this reports the unavailable target the TS
-    /// `!supervisorSocketPath` branch produces.
     async fn send_remote_agent_session_message(
         self: &Arc<Self>,
-        _from_state: &Arc<StdMutex<ActiveSessionState>>,
+        from_state: &Arc<StdMutex<ActiveSessionState>>,
         target_selector: &str,
-        _message: &str,
+        message: &str,
     ) -> Result<AgentSessionMessageReceipt, String> {
-        Err(format!("Unknown active session: {target_selector}"))
+        let Some(socket_path) = self.supervisor_socket_path_from_env() else {
+            return Err(format!("Unknown active session: {target_selector}"));
+        };
+        let from_active_session_id = from_state
+            .lock()
+            .expect("active session poisoned")
+            .active_session_id
+            .clone();
+        agent_message_transport::send_message(
+            &socket_path,
+            &from_active_session_id,
+            target_selector,
+            message,
+            &self.shutting_down,
+        )
+        .await
     }
 }
 

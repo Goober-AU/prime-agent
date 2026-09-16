@@ -1,0 +1,2 @@
+- Added native Codex WebSocket connections with cached incremental requests, bounded connection cleanup, cancellation, and SSE fallback before response events.
+- Fixed WebSocket response ordering and prevented interrupted or invalid responses from being replayed; isolated cached connections by endpoint and credentials.

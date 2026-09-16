@@ -1133,6 +1133,28 @@ impl AgentCronJobStore {
         cancelled
     }
 
+    /// Cancel matching active/paused jobs, reporting lock/read/write failures so
+    /// supervisor cleanup retains its durable retry record until cancellation commits.
+    pub fn try_cancel_jobs_for_session(&self, input: &CancelJobsForSessionInput, now_ms: f64) -> Result<Vec<AgentCronJob>, String> {
+        let target = input.session_file.as_deref().map(crate::core::session_lease::canonical_session_path);
+        let mut cancelled = Vec::new();
+        self.mutate_states(|state| {
+            for job in &mut state.jobs {
+                let matches = input.active_session_id.as_deref() == Some(job.active_session_id.as_str())
+                    || input.session_id.as_deref() == Some(job.session_id.as_str())
+                    || target.as_ref().is_some_and(|target| *target == crate::core::session_lease::canonical_session_path(&job.session_file));
+                if matches && matches!(job.status.as_str(), STATUS_ACTIVE | STATUS_PAUSED) {
+                    job.status = STATUS_CANCELLED.into();
+                    job.next_run_at = None;
+                    job.updated_at = iso_string(now_ms);
+                    cancelled.push(job.clone());
+                }
+            }
+            Vec::new()
+        })?;
+        Ok(cancelled)
+    }
+
     /// `pauseHeartbeat(activeSessionId, now = new Date())`.
     pub fn pause_heartbeat(&self, active_session_id: &str, now_ms: f64) -> Option<AgentCronJob> {
         let current = self.get_heartbeat(active_session_id)?;

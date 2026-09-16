@@ -11,7 +11,7 @@ use crate::core::kernel::boot_gate::with_kernel_boot_permit;
 use crate::core::kernel::shared::{
     create_kernel_startup_abort_error, ExecuteOptions, ExecuteResult, ExecuteStatus, KernelBootstrapProgressHandler,
     KernelDiffDisplay, KernelError, KernelManagerOptions, KernelSentAgentMessage, KernelStartOptions, StreamName,
-    AbortSignal, KernelPythonSkill,
+    AbortSignal, KernelPythonSkill, PerformanceMetricRecorder,
 };
 use crate::core::kernel::state_snapshot::{
     cas_snapshot_root_in, manifest_path_in, snapshot_path_in, snapshot_state_exists_in, KernelSnapshotFormat,
@@ -366,6 +366,8 @@ pub struct IpythonToolOptions {
     pub snapshot_dir: Option<String>,
     /// Explicit snapshot writer opt-in. Omitted preserves legacy/default continuation behavior.
     pub snapshot_format: Option<KernelSnapshotFormat>,
+    /// Content-free snapshot timings routed through the owning session's live monitor.
+    pub performance_metrics: Option<Arc<dyn PerformanceMetricRecorder>>,
     /// Opt-in model-facing output policy. Execution itself is never cached.
     pub model_tool_output_policy: Option<ModelToolOutputPolicy>,
     /// Resolves before this kernel starts - e.g. the previous provisioner's dispose.
@@ -819,7 +821,7 @@ impl IpythonKernelProvisioner {
             session_id: self.options.as_ref().and_then(|options| options.session_id.clone()),
             host_handlers: Some(host_handlers),
             python_skills: self.options.as_ref().and_then(|options| options.python_skills.clone()),
-            performance_metrics: None,
+            performance_metrics: self.options.as_ref().and_then(|options| options.performance_metrics.clone()),
             // Only persistent sessions (which have an artifact dir) get a revivable snapshot.
             snapshot: snapshot_dir.as_ref().map(|snapshot_dir| crate::core::kernel::shared::KernelSnapshotConfig {
                 path: snapshot_path_in(snapshot_dir),

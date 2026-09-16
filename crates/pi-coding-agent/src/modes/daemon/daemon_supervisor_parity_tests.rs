@@ -46,7 +46,9 @@ pub(super) struct SupervisorFixture {
 impl SupervisorFixture {
     pub async fn new(case: &str) -> Self {
         let root = state_root(case);
-        let socket_path = root.join("supervisor-parity.sock").to_string_lossy().into_owned();
+        // Production normalizes its socket before owning/persisting descriptors.
+        // Keep this invariant in the fixture too (Windows paths fold to lowercase).
+        let socket_path = normalize_socket_path_for_daemon(&root.join("supervisor-parity.sock").to_string_lossy(), None);
         let descriptor_dir = root.join("daemon-workers").to_string_lossy().into_owned();
         let registry_dir = root.join("registry").to_string_lossy().into_owned();
         std::fs::create_dir_all(&descriptor_dir).expect("descriptor dir");
@@ -227,6 +229,7 @@ pub(super) fn add_descriptor_only_worker(
         deferred_recovery: AtomicBool::new(false),
         deferred_recovery_rounds: AtomicU64::new(0),
         promoted_owner_client_id: Mutex::new(None),
+        heartbeat_snapshot: Mutex::new(HeartbeatSnapshot::default()),
     });
     fixture
         .supervisor
@@ -268,7 +271,6 @@ async fn t09_capabilities_match_service() {
     // Every default the supervisor genuinely serves must still be advertised.
     let withheld_by_the_port = [
         "slim_attach",
-        "chunked_snapshot",
         "history_ranges",
         "heartbeat_catalog",
         "authoritative_child_roster",
@@ -478,6 +480,7 @@ async fn t09_timed_out_stop_finishes_cleanup() {
         deferred_recovery: AtomicBool::new(false),
         deferred_recovery_rounds: AtomicU64::new(0),
         promoted_owner_client_id: Mutex::new(None),
+        heartbeat_snapshot: Mutex::new(HeartbeatSnapshot::default()),
     });
     fixture
         .supervisor

@@ -548,6 +548,17 @@ fn timestamp_millis(timestamp: &str) -> i64 {
     }
 }
 
+fn parse_session_tree_response(data: Value) -> Result<AgentConnectionWatchSessionTree, String> {
+    let nodes = data.get("flatNodes").cloned()
+        .ok_or_else(|| "Daemon returned an invalid session tree: missing flatNodes".to_string())?;
+    let flat_nodes: Vec<AgentConnectionSessionTreeFlatNode> = serde_json::from_value(nodes)
+        .map_err(|error| format!("Daemon returned an invalid session tree: {error}"))?;
+    Ok(AgentConnectionWatchSessionTree {
+        tree: build_session_tree_from_flat_nodes(&flat_nodes),
+        leaf_id: data.get("leafId").and_then(Value::as_str).map(str::to_string),
+    })
+}
+
 /// `readSessionSummaries(value)`.
 pub fn read_session_summaries(value: &Value) -> Result<Vec<DaemonSessionSummary>, String> {
     let sessions = value.get("sessions").and_then(Value::as_array);
@@ -2038,6 +2049,12 @@ impl DaemonAgentConnection {
         *self.latest_snapshot_is_fresh.lock().unwrap() = true;
         {
             let mut guard = assembly.lock().unwrap();
+            // wait_for_snapshot returns the saved begin snapshot. Publish the
+            // assembled transcript there before marking complete, otherwise an
+            // attach replaces the full conversation with its empty chunk header.
+            if let Some(begin) = guard.begin.as_mut() {
+                begin.snapshot = snapshot.clone();
+            }
             guard.completed = true;
         }
         let purpose = begin.purpose.clone();
@@ -2803,15 +2820,7 @@ impl AgentConnection for DaemonAgentConnection {
         );
         Box::pin(async move {
             let data = this.request_data(command, None).await?;
-            let flat_nodes: Vec<AgentConnectionSessionTreeFlatNode> = data
-                .get("flatNodes")
-                .cloned()
-                .and_then(|nodes| serde_json::from_value(nodes).ok())
-                .unwrap_or_default();
-            Ok(AgentConnectionWatchSessionTree {
-                tree: build_session_tree_from_flat_nodes(&flat_nodes),
-                leaf_id: data.get("leafId").and_then(Value::as_str).map(str::to_string),
-            })
+            parse_session_tree_response(data)
         })
     }
 
@@ -4153,9 +4162,39 @@ fn thinking_level_from_str(value: &str) -> Option<ThinkingLevel> {
 }
 
 #[cfg(test)]
+pub(crate) async fn test_decode_cached_attach_frames(frames: &[Value]) -> Vec<AgentMessage> {
+    let response = &frames[0]["data"];
+    let client = crate::modes::daemon::daemon_client::DaemonClient::create("unused-cache-wire-test-socket");
+    let transport = Arc::new(crate::main_entry::MainEntryDaemonTransport::new(client));
+    let connection = DaemonAgentConnection::new(transport, response["activeSessionId"].as_str().unwrap().into(), Default::default());
+    for frame in &frames[1..] {
+        let outbound = crate::main_entry::test_outbound_from_wire(frame).expect("cached attach frame must decode through the production wire adapter");
+        connection.handle_daemon_message(outbound).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(2), connection.apply_attach_result(response)).await
+        .expect("completed cached transcript must not hang the UI attach").unwrap();
+    let snapshot = connection.latest_snapshot.lock().unwrap().clone().unwrap();
+    snapshot.messages
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::modes::daemon::daemon_client::{DaemonClientError, DaemonSocketClosedError};
+
+    #[tokio::test]
+    async fn nine_supervisor_new_client_accepts_old_server_full_snapshot() {
+        let client = crate::modes::daemon::daemon_client::DaemonClient::create("unused-legacy-server-test-socket");
+        let transport = Arc::new(crate::main_entry::MainEntryDaemonTransport::new(client));
+        let connection = DaemonAgentConnection::new(transport, "active".into(), Default::default());
+        let legacy = json!({"activeSessionId":"active","snapshot":{"summary":{"sessionId":"saved","activeSessionId":"active"},"state":{},"messages":[{"role":"user","content":"legacy transcript","timestamp":1}],"lastEventSequence":4}});
+        tokio::time::timeout(Duration::from_secs(2), connection.apply_attach_result(&legacy)).await
+            .expect("old server response must not wait for unadvertised chunks").unwrap();
+        let snapshot = connection.latest_snapshot.lock().unwrap();
+        assert_eq!(snapshot.as_ref().unwrap().messages.len(), 1);
+        assert_eq!(snapshot.as_ref().unwrap().last_event_sequence, Some(4.0));
+        assert!(connection.snapshot_assemblies.lock().unwrap().is_empty());
+    }
 
     fn flat_node(id: &str, parent: Option<&str>, timestamp: &str) -> AgentConnectionSessionTreeFlatNode {
         AgentConnectionSessionTreeFlatNode {
@@ -4183,6 +4222,58 @@ mod tests {
         assert_eq!(tree[0].entry.id(), "a");
         let children: Vec<&str> = tree[0].children.iter().map(|child| child.entry.id()).collect();
         assert_eq!(children, vec!["c", "b"]);
+    }
+
+    #[test]
+    fn canonical_session_tree_response_preserves_branches_and_compaction() {
+        let mut nodes = vec![
+            json!({"type":"model_change", "id":"model", "parentId":null, "provider":"fixture", "modelId":"fixture"}),
+            json!({"type":"thinking_level_change", "id":"effort", "parentId":"model", "thinkingLevel":"xhigh"}),
+            json!({"type":"message", "id":"message", "parentId":"effort", "message":{"role":"user", "content":"hello", "timestamp":1}}),
+            json!({"type":"compaction", "id":"compact", "parentId":"message", "summary":"summary", "firstKeptEntryId":"message", "tokensBefore":250000}),
+            json!({"type":"branch_summary", "id":"branch", "parentId":"message", "fromId":"compact", "summary":"branch"}),
+        ];
+        for node in &mut nodes { node["timestamp"] = json!("2026-09-16T00:00:00Z"); }
+        let response = json!({"flatNodes": nodes.iter().map(|entry| json!({"entry":entry})).collect::<Vec<_>>(), "leafId":"branch"});
+        let parsed = parse_session_tree_response(response).unwrap();
+        assert_eq!(parsed.tree.len(), 1);
+        assert_eq!(parsed.tree[0].entry.id(), "model");
+        let message = &parsed.tree[0].children[0].children[0];
+        assert_eq!(message.entry.id(), "message");
+        assert_eq!(message.children.iter().map(|node| node.entry.id()).collect::<Vec<_>>(), vec!["compact", "branch"]);
+        assert_eq!(parsed.leaf_id.as_deref(), Some("branch"));
+        let snapshot = parse_session_snapshot(&json!({"sessionTree": {"tree":parsed.tree, "leafId":"branch"}})).unwrap();
+        assert_eq!(snapshot.session_tree.unwrap().tree[0].children[0].entry.parent_id(), Some("model"));
+    }
+
+    #[test]
+    fn malformed_session_tree_is_an_explicit_error_not_an_empty_tree() {
+        for response in [json!({}), json!({"flatNodes":null}), json!({"flatNodes":[{"entry":{"type":"model_change", "id":"bad"}}]})] {
+            assert!(parse_session_tree_response(response).unwrap_err().starts_with("Daemon returned an invalid session tree:"));
+        }
+        assert!(parse_session_tree_response(json!({"flatNodes":[], "leafId":null})).unwrap().tree.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires a fresh private daemon response captured from the candidate executable"]
+    fn candidate_daemon_tree_wire_reaches_the_ui_decoder() {
+        let path = std::env::var("OPTIMUS_SAFETY_TREE_WIRE").expect("private wire artifact path");
+        assert!(path.contains("optimus-safety-fixes-20260916") || path.contains("optimus-nine-fixes-20260916"));
+        let wire: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let expected: Vec<&str> = wire["flatNodes"].as_array().unwrap().iter()
+            .map(|node| node["entry"]["id"].as_str().unwrap()).collect();
+        let parsed = parse_session_tree_response(wire.clone()).unwrap();
+        assert!(!expected.is_empty());
+        let mut stack: Vec<_> = parsed.tree.iter().collect();
+        let mut observed = Vec::new();
+        while let Some(node) = stack.pop() {
+            observed.push(node.entry.id());
+            let source = wire["flatNodes"].as_array().unwrap().iter().find(|item| item["entry"]["id"].as_str() == Some(node.entry.id())).unwrap();
+            assert_eq!(node.entry.parent_id(), source["entry"]["parentId"].as_str());
+            stack.extend(node.children.iter());
+        }
+        assert_eq!(observed.len(), expected.len());
+        assert!(expected.iter().all(|id| observed.contains(id)));
     }
 
     #[test]
