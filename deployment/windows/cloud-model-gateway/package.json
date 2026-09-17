@@ -1,0 +1,8 @@
+{
+  "name": "optimus-cloud-model-gateway",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "engines": { "node": ">=22.8.0", "npm": ">=11.10.0" },
+  "dependencies": { "ws": "8.21.3" }
+}

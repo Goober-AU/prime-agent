@@ -1,0 +1,44 @@
+# Independent Windows model gateway
+
+This is the source-managed successor to the installed Optimus gateway. It adds
+Azure OpenAI Responses WebSockets; GitHub Copilot connects directly from the Rust
+provider. Ollama and Foundry chat-completions HTTP behavior is unchanged.
+
+Deployment state is deliberately excluded from Git: `deployment.json`, the local
+bearer credential, encrypted secrets, trusted Azure modules, logs and PID records.
+The gateway fails startup when configuration is absent or invalid. A guarded
+deployment must preserve these files and the scheduled-task launch independently
+of the agent. Do not launch or replace production from these tests.
+
+`deployment-config.mjs::extractLegacyDeployment` extracts the old Azure endpoints
+and identities without executing the old gateway. Verify the old source hash and
+exact HTTP route equivalence before persisting its output to `deployment.json`.
+It uses the documented WebSocket URL and a separately configurable Azure audience;
+it never changes the working HTTP audience. Validate actual account connectivity
+before setting `websocketEnabled: true`. It defaults to false, preserving HTTP.
+
+Install only this package's locked dependency with
+`npm ci --ignore-scripts --no-audit --no-fund`. Run:
+
+```text
+node --test gateway.test.mjs http-proxy-acceptance.test.mjs azure-responses-websocket.test.mjs
+```
+
+These tests use injected credentials and fake upstreams, never paid providers.
+The model-contract fixture contains only model metadata, not credentials.
+
+Authenticated `/health` advertises `responsesWebSocket.version: 1`, its path and
+eligible models only when the deployment explicitly enables WebSockets. Otherwise
+`enabled` is false and `models` is empty, so the client retains HTTP.
+Each connection permits one foreground, `store:false` response at a time. Every
+turn validates and reserves the full inherited input and output, including images.
+Unknown previous IDs, model changes and unbounded opaque references fail closed.
+Full-context turns reset the previous window, including after compaction.
+
+Closing the connection cancels owned credential/admission/provider work. The
+adapter never retries a submitted response; only an authentication-rejected
+handshake can refresh once before sending. Timeouts, connection lifetime, memory,
+connection count and outbound buffering are bounded. Neither prompts nor provider
+output are logged. Gateway/helper build IDs must be deployed together.
+
+Protocol source: [Azure Responses WebSockets](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/websockets).

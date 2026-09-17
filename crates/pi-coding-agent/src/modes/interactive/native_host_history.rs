@@ -140,11 +140,9 @@ impl HistoryRuntime {
         warning
     }
 
-    pub(super) fn request(&mut self, mode: &InteractiveMode) {
-        if mode.connection_state.as_ref()
-            .is_some_and(|s| s.is_streaming || s.is_compacting || s.is_bash_running) {
-            return;
-        }
+    pub(super) fn request(&mut self, _mode: &InteractiveMode) {
+        // Local snapshots and remote ranges both retain an immutable history pin.
+        // Live rows are separate; poll rejects a replaced generation before merging.
         if let Some(full) = &self.full_history {
             self.full_history_requested = full.start > 0;
             return;
@@ -405,6 +403,63 @@ mod tests {
         let history = valid_window(&ids.iter().map(String::as_str).collect::<Vec<_>>());
         let messages = (0..count).map(|i| user_message(&format!("MESSAGE_{i:03}"))).collect();
         (history, messages)
+    }
+
+    #[test]
+    fn busy_local_backfill_preserves_live_rows_and_draft() {
+        for activity in ["stream", "compact", "bash"] {
+            let (transcript, editor, mut runtime) = fixture(activity);
+            let mode = transcript.borrow().mode.clone();
+            mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+                session_id: activity.into(), is_streaming: activity == "stream",
+                is_compacting: activity == "compact", is_bash_running: activity == "bash",
+                ..Default::default()
+            });
+            let ui = Rc::new(RefCell::new(TUI::new(Box::new(pi_tui::terminal::ProcessTerminal::new()), None)));
+            let (_, messages) = large_snapshot(100);
+            runtime.reset(None, messages, &transcript, &editor);
+            editor.borrow_mut().editor_mut().set_text("keep draft");
+            transcript.borrow_mut().message(user_message("LIVE_TURN"), false);
+            runtime.request(&mode.borrow());
+            runtime.poll(&mode, &transcript, &ui);
+            assert_eq!(runtime.full_history.as_ref().unwrap().start, 20, "{activity}");
+            let text = transcript_text(&transcript);
+            assert_eq!(text.matches("LIVE_TURN").count(), 1);
+            assert!(text.contains("MESSAGE_020"));
+            assert_eq!(editor.borrow().editor().get_text(), "keep draft");
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_remote_backfill_ignores_old_generation_and_preserves_live_rows() {
+        let (transcript, editor, mut runtime) = fixture("busy-remote");
+        let mode = transcript.borrow().mode.clone();
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "busy-remote".into(), is_streaming: true, is_compacting: true,
+            ..Default::default()
+        });
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(pi_tui::terminal::ProcessTerminal::new()), None)));
+        let (history, messages) = large_snapshot(100);
+        runtime.reset(Some(history.clone()), messages.clone(), &transcript, &editor);
+        transcript.borrow_mut().message(user_message("LIVE_TURN"), false);
+        runtime.request(&mode.borrow());
+        let request = runtime.task.take().expect("busy state must still schedule the pinned remote history request");
+        // Current-thread runtime: abort before yielding so the unused fixture
+        // transport never connects. Response merging is supplied deterministically.
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        let range = wire::AgentConnectionHistoryRange {
+            window: wire::AgentConnectionHistoryWindow {
+                entry_ids: history.entry_ids[..60].to_vec(), ..history
+            }, messages: messages[..60].to_vec(),
+        };
+        runtime.send.send((runtime.generation - 1, Ok(range.clone()))).unwrap();
+        runtime.poll(&mode, &transcript, &ui);
+        assert_eq!(runtime.loaded.as_ref().unwrap().messages.len(), 40);
+        runtime.send.send((runtime.generation, Ok(range))).unwrap();
+        runtime.poll(&mode, &transcript, &ui);
+        assert_eq!(runtime.loaded.as_ref().unwrap().messages.len(), 100);
+        assert_eq!(transcript_text(&transcript).matches("LIVE_TURN").count(), 1);
     }
 
     #[test]

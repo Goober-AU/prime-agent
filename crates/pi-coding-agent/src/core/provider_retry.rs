@@ -70,6 +70,18 @@ pub fn provider_stream_failure_kind(message: &AssistantMessage) -> Option<String
     kind.as_str().map(|kind| kind.to_string())
 }
 
+/// Reissuing an uncertain request or already-started response could replay work.
+/// Empty block placeholders alone are not evidence that output was produced.
+pub fn cannot_replay_provider_failure(message: &AssistantMessage) -> bool {
+    message.stop_reason == pi_ai::types::STOP_REASON_ERROR
+        && (provider_stream_failure_kind(message).as_deref() == Some("request_interrupted")
+            || message.content.iter().any(|block| match block {
+                pi_ai::types::ContentBlock::Text(text) => !text.text.is_empty(),
+                pi_ai::types::ContentBlock::Thinking(thinking) => !thinking.thinking.is_empty(),
+                pi_ai::types::ContentBlock::ToolCall(_) => true,
+            }))
+}
+
 /// `providerStreamFailureRetryAfterMs(message)`.
 pub fn provider_stream_failure_retry_after_ms(message: &AssistantMessage) -> Option<f64> {
     let value = provider_stream_failure_details(message)?.get("retryAfterMs").cloned()?;
@@ -86,7 +98,7 @@ pub fn provider_stream_failure_retry_after_ms(message: &AssistantMessage) -> Opt
 /// Deterministic rejections never retry; auth gets one retry before it can be
 /// marked stale.
 pub fn is_permanent_provider_failure_kind(kind: Option<&str>, retries_performed: f64) -> bool {
-    if matches!(kind, Some("invalid_request") | Some("refusal") | Some("permission")) {
+    if matches!(kind, Some("invalid_request") | Some("refusal") | Some("permission") | Some("request_interrupted")) {
         return true;
     }
     retries_performed > 0.0 && kind == Some("auth")
@@ -289,6 +301,7 @@ where
         if retries_performed >= max_retries
             || is_agent_lifecycle_failure(&message)
             || is_faux_provider_queue_exhausted(&message)
+            || cannot_replay_provider_failure(&message)
         {
             return message;
         }
@@ -636,6 +649,31 @@ mod tests {
         .await;
         assert_eq!(message.stop_reason, STOP_REASON_ERROR);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn completion_retry_preserves_partial_or_uncertain_response_without_replay() {
+        for (kind, content) in [
+            ("request_interrupted", vec![]),
+            ("server_error", vec![pi_ai::types::ContentBlock::Text(pi_ai::types::TextContent::new("partial"))]),
+            ("server_error", vec![pi_ai::types::ContentBlock::Thinking(pi_ai::types::ThinkingContent::new("partial reasoning"))]),
+            ("server_error", vec![pi_ai::types::ContentBlock::ToolCall(pi_ai::types::ToolCall::new("id", "tool", Default::default()))]),
+        ] {
+            let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = attempts.clone();
+            let mut options = ProviderRetryExecutionOptions::default();
+            options.sleep = Some(Arc::new(|_, _| Box::pin(async {})));
+            let response = error_message(Some(kind));
+            let response = AssistantMessage { content, ..response };
+            let expected = response.clone();
+            let actual = complete_with_provider_retry(move || {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let response = response.clone();
+                async move { response }
+            }, options).await;
+            assert_eq!(actual, expected);
+            assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1, "{kind}");
+        }
     }
 
     #[tokio::test]

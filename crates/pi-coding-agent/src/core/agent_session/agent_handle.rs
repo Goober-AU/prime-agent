@@ -52,6 +52,10 @@ impl AgentHandle for Arc<Agent> {
         Agent::set_state(self, state);
     }
 
+    fn update_state(&self, update: Box<dyn FnOnce(&mut AgentState) + Send>) {
+        Agent::update_state(self, update);
+    }
+
     fn subscribe(
         &self,
         listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>,

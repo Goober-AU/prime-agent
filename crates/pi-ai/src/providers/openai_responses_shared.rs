@@ -800,6 +800,9 @@ pub async fn process_responses_stream(
             if is_message {
                 let part = get(&event, "part").cloned().unwrap_or(Value::Null);
                 let part_type = item_type(&part);
+                if part_type == Some("refusal") {
+                    output.stop_reason_raw = Some("refusal".to_string());
+                }
                 if part_type == Some("output_text") || part_type == Some("refusal") {
                     if let Some(item) = current_item.as_mut() {
                         push_content_part(item, part);
@@ -839,6 +842,7 @@ pub async fn process_responses_stream(
                 }
             }
         } else if event_type == "response.refusal.delta" {
+            output.stop_reason_raw = Some("refusal".to_string());
             let is_message = current_item
                 .as_ref()
                 .map(|item| item_type(item) == Some("message"))
@@ -931,6 +935,12 @@ pub async fn process_responses_stream(
                 callback(item).await;
             }
             let item = get(&event, "item").cloned().unwrap_or(Value::Null);
+
+            if item_type(&item) == Some("message") && item.get("content").and_then(Value::as_array)
+                .map(|parts| parts.iter().any(|part| item_type(part) == Some("refusal"))).unwrap_or(false)
+            {
+                output.stop_reason_raw = Some("refusal".to_string());
+            }
 
             if item_type(&item) == Some("reasoning") && matches!(current_block, Some(CurrentBlock::Thinking { .. })) {
                 let summary_text = joined_part_text(&item, "summary");
@@ -1718,6 +1728,28 @@ mod tests {
                 );
             }
             other => panic!("unexpected block {}", other.content_type()),
+        }
+    }
+
+    #[tokio::test]
+    async fn refusal_marker_survives_deltas_or_done_items_and_successful_completion() {
+        for streamed_parts in [true, false] {
+            let model = text_model();
+            let mut output = empty_output(&model);
+            let stream = AssistantMessageEventStream::new();
+            let mut events = vec![
+                json!({"type":"response.output_item.added","item":{"type":"message","id":"refusal","content":[]}}),
+            ];
+            if streamed_parts {
+                events.push(json!({"type":"response.content_part.added","part":{"type":"refusal","refusal":""}}));
+                events.push(json!({"type":"response.refusal.delta","delta":"Cannot summarize."}));
+            }
+            events.push(json!({"type":"response.output_item.done","item":{"type":"message","id":"refusal","content":[{"type":"refusal","refusal":"Cannot summarize."}]}}));
+            events.push(json!({"type":"response.completed","response":{"status":"completed"}}));
+            process_responses_stream(event_stream(events), &mut output, &stream, &model, None).await.unwrap();
+            assert_eq!(output.stop_reason, "stop", "ordinary visible refusal behavior stays unchanged");
+            assert_eq!(output.stop_reason_raw.as_deref(), Some("refusal"));
+            assert_eq!(output.content[0].as_text().unwrap().text, "Cannot summarize.");
         }
     }
 

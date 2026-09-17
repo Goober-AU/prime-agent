@@ -253,6 +253,8 @@ pub type OnResponse = Arc<dyn Fn(ProviderResponse, &Model) -> BoxFuture<()> + Se
 /// `onUsageObservation?: (observation, model) => void | Promise<void>`
 pub type OnUsageObservation =
     Arc<dyn Fn(ProviderUsageObservation, &Model) -> BoxFuture<()> + Send + Sync>;
+/// Content-free local transport phases; never sent in provider requests.
+pub type OnStreamObservation = Arc<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -291,6 +293,8 @@ pub struct StreamOptions {
     /// Local observation only. Providers must never serialize this callback.
     #[serde(skip)]
     pub on_usage_observation: Option<OnUsageObservation>,
+    #[serde(skip)]
+    pub on_stream_observation: Option<OnStreamObservation>,
     /// Optional custom HTTP headers to include in API requests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<IndexMap<String, String>>,
@@ -757,7 +761,7 @@ pub struct AssistantMessage {
     pub usage: Usage,
     #[serde(rename = "stopReason")]
     pub stop_reason: StopReason,
-    /// Provider's raw stop/finish reason when it mapped to "error" (e.g. "refusal", "SAFETY").
+    /// Provider's raw finish/refusal signal when available (e.g. "refusal", "SAFETY").
     #[serde(rename = "stopReasonRaw", skip_serializing_if = "Option::is_none")]
     pub stop_reason_raw: Option<String>,
     #[serde(rename = "errorMessage", skip_serializing_if = "Option::is_none")]

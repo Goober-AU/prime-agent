@@ -25,6 +25,7 @@ pub enum PerformanceMetricOperation {
     Compaction,
     FileRetry,
     SessionReopen,
+    SessionInput,
     Recorder,
 }
 
@@ -38,6 +39,7 @@ impl PerformanceMetricOperation {
             PerformanceMetricOperation::Compaction => "compaction",
             PerformanceMetricOperation::FileRetry => "file_retry",
             PerformanceMetricOperation::SessionReopen => "session_reopen",
+            PerformanceMetricOperation::SessionInput => "session_input",
             PerformanceMetricOperation::Recorder => "recorder",
         }
     }
@@ -71,6 +73,13 @@ pub enum PerformanceMetricMeasurement {
     DispatchToResponseHeadersMs,
     DispatchToFirstEventMs,
     DispatchToFirstVisibleMs,
+    DispatchToFirstRawMs,
+    DispatchToFirstThinkingMs,
+    DispatchToFirstToolMs,
+    DispatchToFirstTextMs,
+    DispatchToNetworkTerminalMs,
+    LocalDrainMs,
+    TransportWebsocket,
     LocalGatewayWaitMs,
     UpstreamWaitMs,
     SerializationMs,
@@ -96,6 +105,13 @@ impl PerformanceMetricMeasurement {
             PerformanceMetricMeasurement::DispatchToResponseHeadersMs => "dispatch_to_response_headers_ms",
             PerformanceMetricMeasurement::DispatchToFirstEventMs => "dispatch_to_first_event_ms",
             PerformanceMetricMeasurement::DispatchToFirstVisibleMs => "dispatch_to_first_visible_ms",
+            PerformanceMetricMeasurement::DispatchToFirstRawMs => "dispatch_to_first_raw_ms",
+            PerformanceMetricMeasurement::DispatchToFirstThinkingMs => "dispatch_to_first_thinking_ms",
+            PerformanceMetricMeasurement::DispatchToFirstToolMs => "dispatch_to_first_tool_ms",
+            PerformanceMetricMeasurement::DispatchToFirstTextMs => "dispatch_to_first_text_ms",
+            PerformanceMetricMeasurement::DispatchToNetworkTerminalMs => "dispatch_to_network_terminal_ms",
+            PerformanceMetricMeasurement::LocalDrainMs => "local_drain_ms",
+            PerformanceMetricMeasurement::TransportWebsocket => "transport_websocket",
             PerformanceMetricMeasurement::LocalGatewayWaitMs => "local_gateway_wait_ms",
             PerformanceMetricMeasurement::UpstreamWaitMs => "upstream_wait_ms",
             PerformanceMetricMeasurement::SerializationMs => "serialization_ms",
@@ -152,6 +168,8 @@ pub type PerformanceMetricMeasurements = IndexMap<PerformanceMetricMeasurement, 
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PerformanceMetricCorrelation {
+    #[serde(rename = "actionId", default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
     #[serde(rename = "logicalRequestId", default, skip_serializing_if = "Option::is_none")]
     pub logical_request_id: Option<String>,
     #[serde(rename = "providerAttemptId", default, skip_serializing_if = "Option::is_none")]
@@ -263,6 +281,8 @@ pub struct PerformanceMetricRecordV1 {
 /// `PerformanceMetricCorrelation & { sessionId: string }`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PerformanceMetricRecordCorrelation {
+    #[serde(rename = "actionId", default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<String>,
     #[serde(rename = "sessionId")]
     pub session_id: String,
     #[serde(rename = "logicalRequestId", default, skip_serializing_if = "Option::is_none")]

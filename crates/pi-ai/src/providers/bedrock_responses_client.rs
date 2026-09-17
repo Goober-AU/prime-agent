@@ -33,6 +33,7 @@ use serde_json::Value;
 
 use crate::types::{Model, StreamOptions};
 use crate::utils::now_ms;
+use crate::utils::sse_frames::SseFrames;
 use crate::utils::stream_failure::ThrownStreamError;
 
 use super::amazon_bedrock::{resolve_aws_credentials, sign_request_for_service, AwsCredentials};
@@ -490,34 +491,18 @@ pub enum BedrockSseFrame {
 
 /// The local SSE reader for the Responses transport (`data: ...` frames).
 ///
-/// Frames are read the way the SDK's `SSEDecoder` does: `\n\n` delimits a chunk, `data:`
-/// lines are joined with `\n`, `[DONE]` ends the stream, and anything that is not JSON or that
+/// CR, LF and CRLF terminate lines; `data:` lines are joined with `\n` and `[DONE]`
+/// is ignored. Anything that is not JSON or that
 /// carries a truthy `error` is an error rather than a silently dropped frame.
 #[derive(Default)]
 pub struct BedrockResponsesSseBuffer {
-	buffer: String,
+    frames: SseFrames,
 }
 
 impl BedrockResponsesSseBuffer {
 	/// Appends a chunk and returns the frames it completed, in order.
 	pub fn push(&mut self, bytes: &[u8]) -> Vec<BedrockSseFrame> {
-		self.buffer.push_str(&String::from_utf8_lossy(bytes));
-		let mut frames: Vec<BedrockSseFrame> = Vec::new();
-		while let Some(index) = self.buffer.find("\n\n") {
-			let chunk = self.buffer[..index].to_string();
-			self.buffer = self.buffer[index + 2..].to_string();
-			let data = chunk
-				.split('\n')
-				.filter(|line| line.starts_with("data:"))
-				.map(|line| line[5..].trim().to_string())
-				.collect::<Vec<_>>()
-				.join("\n");
-			let data = data.trim().to_string();
-			if !data.is_empty() && data != "[DONE]" {
-				frames.push(decode_bedrock_sse_frame(&data));
-			}
-		}
-		frames
+        self.frames.push(bytes).iter().map(|data| decode_bedrock_sse_frame(data)).collect()
 	}
 
 	/// The frames still inside an incomplete trailing chunk.
@@ -527,18 +512,7 @@ impl BedrockResponsesSseBuffer {
 	/// it never got a delimiter for. Without this, a truncated or un-delimited final frame
 	/// would be kept in `buffer` forever and silently reported as a complete response.
 	pub fn finish(&mut self) -> Vec<BedrockSseFrame> {
-		let text = std::mem::take(&mut self.buffer);
-		let data = text
-			.split('\n')
-			.filter(|line| line.starts_with("data:"))
-			.map(|line| line[5..].trim().to_string())
-			.collect::<Vec<_>>()
-			.join("\n");
-		let data = data.trim().to_string();
-		if data.is_empty() || data == "[DONE]" {
-			return Vec::new();
-		}
-		vec![decode_bedrock_sse_frame(&data)]
+        self.frames.finish().iter().map(|data| decode_bedrock_sse_frame(data)).collect()
 	}
 }
 
@@ -609,8 +583,9 @@ pub fn responses_event_stream(
 						// `throw` out of the `for await` loop: record the thrown value and end
 						// the stream; the run body re-raises it after `processResponsesStream`
 						// returns (the provider `catch`, `amazon-bedrock-responses.ts:79-90`).
-						record_bedrock_sse_failure(&error_slot, failure);
-						finished = true;
+                        record_bedrock_sse_failure(&error_slot, failure);
+                        pending.clear();
+                        finished = true;
 						continue;
 					}
 					None if finished => return None,
@@ -1077,11 +1052,11 @@ mod tests {
 		// dropping the frames and reporting a completed (empty) answer.
 		for (payload, expected) in [
 			(
-				"data: {\"type\":\"response.created\"}\n\ndata: {not json}\n\n",
+                "data: {\"type\":\"response.created\"}\n\ndata: {not json}\n\ndata: {\"type\":\"must-not-deliver\"}\n\n",
 				"Could not parse message into JSON",
 			),
 			(
-				"data: {\"type\":\"response.created\"}\n\ndata: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n",
+                "data: {\"type\":\"response.created\"}\n\ndata: {\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\ndata: {\"type\":\"must-not-deliver\"}\n\n",
 				"overloaded_error",
 			),
 		] {
@@ -1130,6 +1105,24 @@ mod tests {
 			BedrockSseFrame::ApiError(error) => panic!("unexpected api error: {error}"),
 		}
 	}
+
+    #[test]
+    fn sse_buffer_preserves_unicode_for_every_chunk_split_and_line_ending() {
+        for delimiter in ["\n", "\r\n", "\r"] {
+            let wire = format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"Ready ✓ 日本\"}}{delimiter}{delimiter}");
+            for split in 0..=wire.len() {
+                let mut buffer = BedrockResponsesSseBuffer::default();
+                let mut frames = buffer.push(&wire.as_bytes()[..split]);
+                frames.extend(buffer.push(&wire.as_bytes()[split..]));
+                assert_eq!(frames.len(), 1, "complete frame must not need finish()");
+                match frames.pop().unwrap() {
+                    BedrockSseFrame::Event(event) => assert_eq!(event["delta"], "Ready ✓ 日本"),
+                    _ => panic!("valid UTF-8 frame must not fail"),
+                }
+                assert!(buffer.finish().is_empty());
+            }
+        }
+    }
 
 	#[test]
 	fn sse_buffer_surfaces_unparseable_frames_instead_of_dropping_them() {

@@ -313,6 +313,7 @@ struct ProviderSpec {
     summary_models: Arc<Mutex<Vec<(String, String, String)>>>,
     /// When set, the summarization wire call fails with this message.
     summary_failure: Arc<Mutex<Option<String>>>,
+    summary_reply: Arc<Mutex<Option<AssistantMessage>>>,
     /// When armed, the summarization wire call blocks until released.
     summary_gate: Arc<Mutex<Option<Arc<SummaryGate>>>>,
 }
@@ -350,6 +351,7 @@ impl ProviderSpec {
             summary_calls: Arc::new(AtomicU64::new(0)),
             summary_models: Arc::new(Mutex::new(Vec::new())),
             summary_failure: Arc::new(Mutex::new(None)),
+            summary_reply: Arc::new(Mutex::new(None)),
             summary_gate: Arc::new(Mutex::new(None)),
         }
     }
@@ -608,7 +610,8 @@ fn build_reply(spec: &ProviderSpec, model: &Model, is_summary_call: bool) -> Ass
                 failed.error_message = Some(failure);
                 failed
             }
-            None => text_message("T05 summary body", "stop"),
+            None => spec.summary_reply.lock().unwrap().clone().unwrap_or_else(|| text_message(
+                "## Goal\nT05 summary body\n## Constraints & Preferences\nNone.\n## Progress\nSummarized.\n## Key Decisions\nPreserve evidence.\n## Next Steps\nContinue.\n## Critical Context\nFixture.\n## Original Request\nFixture task.\n## Early Progress\nSummarized.\n## Context for Suffix\nContinue.", "stop")),
         }
     } else {
         let next = spec.replies.lock().unwrap().pop();
@@ -1294,6 +1297,36 @@ async fn seed_large_transcript(fixture: &Fixture) {
     fixture.turn(&long_user_text("old-user-1", 8000)).await;
     fixture.turn(&long_user_text("old-user-2", 8000)).await;
     fixture.turn(&long_user_text("old-user-3", 8000)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn opt030_invalid_summary_never_changes_transcript_or_live_context() {
+    let _guard = lock_suite();
+    let fixture = Fixture::build(FixtureOptions {
+        case_name: "opt030-summary-guard".to_string(),
+        text_only_provider: true,
+        compaction_enabled: false,
+        keep_recent_tokens: 100.0,
+        persist: true,
+        ..Default::default()
+    }).await;
+    seed_messages(&fixture, &[("preserve-a", 1000), ("preserve-b", 1000), ("tail", 200)]);
+    let before = fixture.live_texts();
+    let branch_before = fixture.branch();
+    let bytes_before = std::fs::read(fixture.session_file.as_ref().unwrap()).unwrap();
+    for (text, stop) in [
+        ("I'm sorry, but I cannot assist with that request.", "stop"),
+        ("", "stop"),
+        ("## Goal\nOnly the beginning survives.", "length"),
+        ("Provider error: not available", "stop"),
+    ] {
+        *fixture.spec.summary_reply.lock().unwrap() = Some(text_message(text, stop));
+        assert!(fixture.compact(None).await.is_err(), "must reject {text}");
+        assert_eq!(fixture.live_texts(), before);
+        assert_eq!(fixture.branch(), branch_before);
+        assert_eq!(std::fs::read(fixture.session_file.as_ref().unwrap()).unwrap(), bytes_before);
+        assert!(fixture.compaction_entries().is_empty());
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

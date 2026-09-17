@@ -183,8 +183,8 @@ pub fn stream_simple_bedrock_responses(
 /// });
 /// ```
 ///
-/// `buildBaseOptions` never copies `onUsageObservation` (`simple-options.ts:3-19`), so the
-/// re-add at `amazon-bedrock-responses.ts:108` is this provider's own responsibility.
+/// Unlike the original TypeScript base builder, the shared Rust builder now preserves
+/// monitoring callbacks. This provider's explicit forwarding retains the same callback.
 pub fn build_simple_stream_options(
 	model: &Model,
 	options: Option<&SimpleStreamOptions>,
@@ -870,9 +870,8 @@ mod tests {
 
 	#[test]
 	fn usage_observation_is_forwarded_from_simple_options() {
-		// TS `amazon-bedrock-responses.ts:108` (`onUsageObservation: options?.onUsageObservation`)
-		// re-adds the observer that `buildBaseOptions` (`simple-options.ts:3-19`) does not copy,
-		// so the forwarding owner is this provider's own simple-options builder - not the base.
+		// The shared base builder now preserves monitoring callbacks. The provider's
+		// explicit forwarding must retain the same observer, not drop or replace it.
 		let simple = SimpleStreamOptions {
 			stream: StreamOptions {
 				on_usage_observation: Some(Arc::new(
@@ -887,14 +886,14 @@ mod tests {
 		};
 		let mut reasoning_model = model("openai.gpt-6-astra");
 		reasoning_model.max_tokens = 1000.0;
-		// `buildBaseOptions` itself drops the observer (simple-options.ts:3-19)...
 		let base = build_base_options(&reasoning_model, Some(&simple), None);
-		assert!(base.on_usage_observation.is_none());
-		// ...and `amazon-bedrock-responses.ts:108` puts it back on the provider options.
+		let expected = simple.stream.on_usage_observation.as_ref().unwrap();
+		assert!(Arc::ptr_eq(base.on_usage_observation.as_ref().unwrap(), expected));
 		let provider_options = build_simple_stream_options(&reasoning_model, Some(&simple));
-		assert!(provider_options.stream.on_usage_observation.is_some());
+		assert!(Arc::ptr_eq(provider_options.stream.on_usage_observation.as_ref().unwrap(), expected));
 		assert_eq!(provider_options.reasoning_effort.as_deref(), Some("high"));
 		// No observer requested: nothing to forward, and the field stays unset.
+		assert!(build_base_options(&reasoning_model, None, None).on_usage_observation.is_none());
 		let provider_options = build_simple_stream_options(&reasoning_model, None);
 		assert!(provider_options.stream.on_usage_observation.is_none());
 

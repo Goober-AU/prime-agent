@@ -1,0 +1,7 @@
+node_modules/
+deployment.json
+local-token.txt
+secrets/
+trusted-modules/
+gateway.log*
+gateway.pid.json

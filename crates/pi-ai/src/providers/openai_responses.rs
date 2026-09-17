@@ -347,41 +347,38 @@ async fn run_openai_responses(
         }
     }
 
-    let response = send_request(&client, &params, options).await?;
+    let (events, response_metadata) = match super::responses_transport::try_websocket(model, &client, &params, options)
+        .await.map_err(|error| if error.sent {
+            RunError::Value(ThrownValue(serde_json::json!({"message":error.message,
+                "error":{"code":"responses_request_interrupted","message":error.message}})))
+        } else { RunError::Message(error.message) })? {
+        Some(result) => result,
+        None => {
+            let response = send_request(&client, &params, options, &model.provider).await?;
+            let mut headers = header_map_to_record(response.headers());
+            headers.insert("x-optimus-transport".into(), "sse".into());
+            let metadata = ProviderResponse { status: response.status().as_u16() as i64, headers };
+            let events: ResponsesEventStream = Box::pin(response.bytes_stream()
+                .scan(SseBuffer::default(), |buffer, chunk| {
+                    let ready = match chunk {
+                        Ok(bytes) => buffer.push(&bytes),
+                        Err(error) => {
+                            buffer.error = Some(error.to_string());
+                            vec![serde_json::json!({"type":"error","code":"responses_request_interrupted","message":"Responses body read failed"})]
+                        }
+                    };
+                    futures::future::ready(Some(ready))
+                }).flat_map(futures::stream::iter));
+            (events, metadata)
+        }
+    };
+    let request_id = response_metadata.headers.get("x-request-id").cloned();
     if let Some(on_response) = options.stream.on_response.clone() {
-        on_response(
-            ProviderResponse {
-                status: response.status().as_u16() as i64,
-                headers: header_map_to_record(response.headers()),
-            },
-            model,
-        )
-        .await;
+        on_response(response_metadata, model).await;
     }
-    let request_id = response
-        .headers()
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
     stream.push(AssistantMessageEvent::Start {
         partial: output.clone(),
     });
-
-    let events: ResponsesEventStream = Box::pin(
-        response
-            .bytes_stream()
-            .scan(SseBuffer::default(), |buffer, chunk| {
-                let ready = match chunk {
-                    Ok(bytes) => buffer.push(&bytes),
-                    Err(error) => {
-                        buffer.error = Some(error.to_string());
-                        Vec::new()
-                    }
-                };
-                futures::future::ready(Some(ready))
-            })
-            .flat_map(futures::stream::iter),
-    );
 
     let stream_options = OpenAIResponsesStreamOptions {
         on_output_item_done: None,
@@ -399,9 +396,20 @@ async fn run_openai_responses(
         on_usage_observation: options.stream.on_usage_observation.clone(),
     };
 
-    process_responses_stream(events, output, stream, model, Some(&stream_options))
-        .await
-        .map_err(|error| match error {
+    let observation_options = options.stream.clone();
+    let events = Box::pin(events.inspect(move |event| super::responses_transport::observe_event(&observation_options, event)));
+    let parse = process_responses_stream(events, output, stream, model, Some(&stream_options));
+    // The producer is a separate task: ending the UI queue alone does not drop
+    // a pending SSE body. Cancelling here releases that request as well.
+    let parsed = match options.stream.signal.as_ref() {
+        Some(signal) => tokio::select! {
+            biased;
+            _ = signal.cancelled() => return Err(RunError::Message("Request was aborted".to_string())),
+            result = parse => result,
+        },
+        None => parse.await,
+    };
+    parsed.map_err(|error| match error {
             ResponsesStreamError::StreamFailure(failure) => RunError::Failure(failure),
             ResponsesStreamError::Message(message) => RunError::Message(message),
         })?;
@@ -732,6 +740,7 @@ async fn send_request(
     client: &ResponsesClient,
     params: &Map<String, Value>,
     options: &OpenAIResponsesOptions,
+    provider: &str,
 ) -> Result<reqwest::Response, RunError> {
     let url = format!("{}/responses", client.base_url.trim_end_matches('/'));
     let mut headers = reqwest::header::HeaderMap::new();
@@ -752,7 +761,7 @@ async fn send_request(
         }
     }
 
-    let mut request = reqwest::Client::new()
+    let mut request = super::responses_transport::http_client(provider)
         .post(&url)
         .headers(headers)
         .json(&Value::Object(params.clone()));
@@ -875,6 +884,11 @@ mod tests {
     use crate::types::{InputModality, ModelCost, Tool};
     use indexmap::IndexMap;
     use serde_json::json;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::Notify;
+    use tokio_util::sync::CancellationToken;
 
     fn model() -> Model {
         let mut model = Model::new("gpt-5.4", "GPT-5.4", "openai-responses", "openai", "https://api.openai.com/v1");
@@ -882,6 +896,74 @@ mod tests {
         model.input = vec![InputModality::Text];
         model.cost = ModelCost::default();
         model
+    }
+
+    #[tokio::test]
+    async fn sse_cancellation_disconnects_pending_body_without_replay() {
+        for provider in ["azure-openai-managed", "github-copilot"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 4096];
+                // Drain the POST body before using the read half as a disconnect oracle.
+                loop {
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                    assert!(request.len() < 64 * 1024);
+                    if let Some(header_end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&request[..header_end]);
+                        assert!(headers.starts_with("POST /responses "));
+                        let length = headers.lines().find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<usize>().unwrap())
+                        }).unwrap();
+                        if request.len() >= header_end + 4 + length { break; }
+                    }
+                }
+                let frame = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"pending\"}}\n\n";
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{}\r\n",
+                    frame.len(), frame,
+                ).as_bytes()).await.unwrap();
+                // No terminal event or end-of-body is sent. Only client cancellation
+                // can close this connection; finishing the UI stream is insufficient.
+                let closed = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut buffer))
+                    .await.expect("cancelled provider left the SSE socket open");
+                match closed {
+                    Ok(0) => {}
+                    Err(error) if matches!(error.kind(), std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::BrokenPipe) => {}
+                    other => panic!("expected client disconnect, got {other:?}"),
+                }
+                assert!(tokio::time::timeout(Duration::from_millis(100), listener.accept()).await.is_err(),
+                    "cancelled request was replayed");
+            });
+            let mut model = model();
+            model.provider = provider.into();
+            model.base_url = format!("http://{address}");
+            let cancel = CancellationToken::new();
+            let raw_event = Arc::new(Notify::new());
+            let observed = raw_event.clone();
+            let options = OpenAIResponsesOptions { stream: StreamOptions {
+                api_key: Some("fake-test-key".into()), signal: Some(cancel.clone()),
+                transport: Some("sse".into()), session_id: Some("pending-body-test".into()),
+                on_stream_observation: Some(Arc::new(move |phase| {
+                    if phase == "raw_event" { observed.notify_one(); }
+                })),
+                ..Default::default()
+            }, ..Default::default() };
+            let events = stream_openai_responses(&model, &Context::default(), Some(options));
+            tokio::time::timeout(Duration::from_secs(5), raw_event.notified()).await.unwrap();
+            assert!(matches!(events.next().await, Some(AssistantMessageEvent::Start { .. })));
+            cancel.cancel();
+            let end = tokio::time::timeout(Duration::from_secs(5), events.next()).await.unwrap();
+            assert!(matches!(end, Some(AssistantMessageEvent::Error { reason, .. }) if reason == "aborted"));
+            assert!(events.next().await.is_none());
+            server.await.unwrap();
+        }
     }
 
     #[test]

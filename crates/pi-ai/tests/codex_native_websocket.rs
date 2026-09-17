@@ -1,11 +1,12 @@
 //! Local wire regressions: no credentials, external endpoints, or model tokens.
 use std::time::Duration;
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use pi_ai::providers::openai_codex_responses::{
     close_openai_codex_web_socket_sessions, get_openai_codex_web_socket_debug_stats,
-    stream_openai_codex_responses, OpenAICodexResponsesOptions, JWT_CLAIM_PATH,
+    stream_openai_codex_responses, try_compact_openai_codex_responses, OpenAICodexResponsesOptions, JWT_CLAIM_PATH,
     OPENAI_BETA_RESPONSES_WEBSOCKETS,
 };
 use pi_ai::types::{
@@ -95,8 +96,11 @@ async fn answer(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_default_transport_reuses_connection_and_sends_only_followup_delta() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let (model, mut context, options) =
+    let (model, mut context, mut options) =
         fixture(listener.local_addr().unwrap().port(), "native-delta");
+    let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let capture = observed.clone();
+    options.stream.on_stream_observation = Some(Arc::new(move |stage| capture.lock().unwrap().push(stage.to_string())));
     let server = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut socket =
@@ -161,6 +165,10 @@ async fn native_default_transport_reuses_connection_and_sends_only_followup_delt
         (1, 2, 1, 2)
     );
     assert_eq!(stats.sse_fallbacks, 0);
+    let stages = observed.lock().unwrap().clone();
+    assert!(stages.iter().any(|stage| stage == "raw_event"));
+    assert_eq!(stages.iter().filter(|stage| *stage == "text").count(), 3);
+    assert_eq!(stages.iter().filter(|stage| *stage == "terminal").count(), 3);
     close_openai_codex_web_socket_sessions(Some("native-delta"));
     server.await.unwrap();
 }
@@ -179,11 +187,161 @@ async fn read_http(socket: &mut TcpStream) -> String {
     String::from_utf8(request).unwrap()
 }
 
+async fn stalled_body_server(status: u16, initial: String) -> (u16, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut tcp, _) = listener.accept().await.unwrap();
+        let header = read_http(&mut tcp).await;
+        assert!(header.starts_with("POST "));
+        let length: usize = header.lines().find_map(|line| line.to_ascii_lowercase()
+            .strip_prefix("content-length:").map(|length| length.trim().parse().unwrap())).unwrap();
+        let mut body = vec![0; length];
+        tcp.read_exact(&mut body).await.unwrap();
+        let response = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: text/event-stream\r\nContent-Length: 1000000\r\nConnection: close\r\n\r\n{initial}");
+        tcp.write_all(response.as_bytes()).await.unwrap();
+        // Never finish the advertised body. Cancellation must drop this connection.
+        let mut byte = [0];
+        let closed = tokio::time::timeout(Duration::from_secs(4), tcp.read(&mut byte)).await.unwrap();
+        assert!(matches!(closed, Ok(0) | Err(_)), "cancel must close the pending HTTP body");
+        assert!(tokio::time::timeout(Duration::from_millis(150), listener.accept()).await.is_err(),
+            "an aborted request must not reconnect or replay");
+    });
+    (port, server)
+}
+
+#[tokio::test]
+async fn codex_sse_cancel_drops_pending_body_before_or_after_partial_text() {
+    for (status, partial) in [(200, false), (200, true), (400, false)] {
+        let initial = if partial {
+            events("partial").into_iter().take(4).map(|event| format!("data: {event}\r\n\r\n")).collect()
+        } else { String::new() };
+        let (port, server) = stalled_body_server(status, initial).await;
+        let (model, context, mut options) = fixture(port, &format!("sse-cancel-body-{status}-{partial}"));
+        let signal = CancellationToken::new();
+        let headers_received = CancellationToken::new();
+        let ready = headers_received.clone();
+        options.stream.signal = Some(signal.clone());
+        options.stream.transport = Some("sse".into());
+        options.stream.on_response = Some(Arc::new(move |_, _| {
+            ready.cancel(); Box::pin(async {})
+        }));
+        let stream = stream_openai_codex_responses(&model, &context, Some(options));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            if status != 200 { headers_received.cancelled().await; return; }
+            while let Some(event) = stream.next().await {
+                if (!partial && matches!(event, pi_ai::types::AssistantMessageEvent::Start { .. }))
+                    || (partial && matches!(event, pi_ai::types::AssistantMessageEvent::TextDelta { .. })) { break; }
+            }
+        }).await.expect("response headers/partial text must arrive");
+        signal.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), stream.result()).await
+            .expect("SSE abort must not wait for another body chunk");
+        assert_eq!(result.stop_reason, "aborted");
+        if partial { assert_eq!(result.content[0].as_text().unwrap().text, "Hello"); }
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn codex_compaction_cancel_drops_pending_sse_or_error_body_without_checkpoint() {
+    for (status, partial) in [(200, false), (200, true), (400, false)] {
+        let initial = if partial {
+            format!("data: {}\r\n\r\n", json!({"type":"response.output_item.done","item":{"type":"compaction_summary","encrypted_content":"not-complete"}}))
+        } else { String::new() };
+        let (port, server) = stalled_body_server(status, initial).await;
+        let (model, context, options) = fixture(port, &format!("compact-cancel-body-{status}-{partial}"));
+        let signal = CancellationToken::new();
+        let ready = CancellationToken::new();
+        let mut options = pi_ai::compaction::CompactionOptions {
+            simple: pi_ai::types::SimpleStreamOptions { stream: options.stream, ..Default::default() },
+            ..Default::default()
+        };
+        options.simple.stream.signal = Some(signal.clone());
+        if partial {
+            let ready = ready.clone();
+            options.simple.stream.on_stream_observation = Some(Arc::new(move |_| ready.cancel()));
+        } else {
+            let ready = ready.clone();
+            options.simple.stream.on_response = Some(Arc::new(move |_, _| {
+                ready.cancel(); Box::pin(async {})
+            }));
+        }
+        let task = tokio::spawn(async move { try_compact_openai_codex_responses(&model, &context, Some(&options)).await });
+        tokio::time::timeout(Duration::from_secs(2), ready.cancelled()).await.unwrap();
+        signal.cancel();
+        let result = tokio::time::timeout(Duration::from_secs(2), task).await
+            .expect("native compaction abort must not wait for another body chunk").unwrap();
+        assert!(result.unwrap_err().contains("aborted"), "cancel cannot commit a partial checkpoint or fall back");
+        server.await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn shared_compaction_cancel_drops_pending_json_body() {
+    let (port, server) = stalled_body_server(200, "{\"output\":".into()).await;
+    let (model, _, _) = fixture(port, "compact-json-cancel");
+    let signal = CancellationToken::new();
+    let ready = CancellationToken::new();
+    let mut options = pi_ai::compaction::CompactionOptions::default();
+    options.simple.stream.signal = Some(signal.clone());
+    let received = ready.clone();
+    options.simple.stream.on_response = Some(Arc::new(move |_, _| {
+        received.cancel(); Box::pin(async {})
+    }));
+    let task = tokio::spawn(async move {
+        pi_ai::providers::openai_compaction::request_openai_compaction(
+            &model, &format!("http://127.0.0.1:{port}/responses/compact"),
+            &Default::default(), Default::default(), Some(&options), None,
+        ).await
+    });
+    tokio::time::timeout(Duration::from_secs(2), ready.cancelled()).await.unwrap();
+    signal.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), task).await
+        .expect("JSON compaction abort must not wait for another body chunk").unwrap();
+    assert!(result.unwrap_err().message.contains("aborted"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn native_compaction_decodes_crlf_checkpoint_once_and_preserves_user_window() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (model, context, options) = fixture(listener.local_addr().unwrap().port(), "native-compact-crlf");
+    let server = tokio::spawn(async move {
+        let (mut tcp, _) = listener.accept().await.unwrap();
+        let head = read_http(&mut tcp).await;
+        assert!(head.starts_with("POST /codex/responses "));
+        let length: usize = head.lines().find_map(|line| line.to_ascii_lowercase()
+            .strip_prefix("content-length:").map(|length| length.trim().parse().unwrap())).unwrap();
+        let mut body = vec![0; length];
+        tcp.read_exact(&mut body).await.unwrap();
+        let request: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(request["input"].as_array().unwrap().last().unwrap()["type"], "compaction_trigger");
+        let payload = [
+            json!({"type":"response.output_item.done","item":{"type":"compaction_summary","id":"checkpoint","encrypted_content":"opaque-fixture"}}),
+            json!({"type":"response.completed","response":{"id":"compact-complete","status":"completed","usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}),
+        ].into_iter().map(|event| format!("data: {event}\r\n\r\n")).collect::<String>();
+        tcp.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}", payload.len()).as_bytes()).await.unwrap();
+    });
+    let mut compact_options = pi_ai::compaction::CompactionOptions::default();
+    compact_options.simple.stream = options.stream;
+    let result = tokio::time::timeout(Duration::from_secs(5), try_compact_openai_codex_responses(
+        &model, &context, Some(&compact_options),
+    )).await.unwrap().unwrap().expect("checkpoint result");
+    assert_eq!(result.checkpoint.items.iter().filter(|item| item.get("type").and_then(Value::as_str) == Some("compaction")).count(), 1);
+    assert_eq!(result.checkpoint.items.iter().filter(|item| item.get("role").and_then(Value::as_str) == Some("user")).count(), 1);
+    assert!(result.checkpoint.items.iter().all(|item| item.get("type").and_then(Value::as_str) != Some("compaction_trigger")));
+    server.await.unwrap();
+}
+
 #[tokio::test]
 async fn native_upgrade_rejection_falls_back_to_sse_and_remembers_session_choice() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let (model, context, options) =
+    let (model, context, mut options) =
         fixture(listener.local_addr().unwrap().port(), "native-fallback");
+    let observed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let capture = observed.clone();
+    options.stream.on_stream_observation = Some(Arc::new(move |stage| capture.lock().unwrap().push(stage.to_string())));
     let server = tokio::spawn(async move {
         for index in 0..4 {
             let (mut tcp, _) = listener.accept().await.unwrap();
@@ -209,7 +367,7 @@ async fn native_upgrade_rejection_falls_back_to_sse_and_remembers_session_choice
                     .is_none());
                 let data = events("resp_sse")
                     .into_iter()
-                    .map(|event| format!("data: {event}\n\n"))
+                    .map(|event| format!("data: {event}\r\n\r\n"))
                     .collect::<String>();
                 tcp.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).as_bytes()).await.unwrap();
             }
@@ -224,6 +382,9 @@ async fn native_upgrade_rejection_falls_back_to_sse_and_remembers_session_choice
     let stats = get_openai_codex_web_socket_debug_stats("native-fallback").unwrap();
     assert_eq!(stats.sse_fallbacks, 2);
     assert_eq!(stats.websocket_failures, 1);
+    let stages = observed.lock().unwrap().clone();
+    assert_eq!(stages.iter().filter(|stage| *stage == "text").count(), 2);
+    assert_eq!(stages.iter().filter(|stage| *stage == "terminal").count(), 2);
     server.await.unwrap();
 }
 

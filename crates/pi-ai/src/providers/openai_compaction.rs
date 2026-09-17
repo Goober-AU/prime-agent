@@ -259,41 +259,57 @@ pub async fn request_openai_compaction(
 	))));
 
 	let status = response.status().as_u16() as i64;
-	if matches!(status, 404 | 405 | 501) {
-		return Ok(None);
-	}
-	if !(200..300).contains(&status) {
-		// Do not include response bodies: providers may echo prompt or credential data.
-		if status == 400 || status == 413 {
-			let failure: Value = response.json().await.unwrap_or(Value::Null);
-			// Preserve the direct OpenAI/Codex fallback contract. A validated gateway
-			// route may fall back only for an explicitly unsupported endpoint above;
-			// size and validation failures remain visible failures.
-			if validated_native_compaction_endpoint(model).is_none()
-				&& (status == 413
-					|| record(&failure)
-						.and_then(|map| map.get("error"))
-						.and_then(record)
-						.and_then(|error| error.get("code"))
-						.and_then(Value::as_str)
-						== Some("context_length_exceeded"))
-			{
-				return Ok(None);
-			}
+	// Cancellation must cover body reads too, not only response headers. This owns
+	// both custom SSE decoders and JSON/error bodies; dropping it closes the body.
+	let read_payload = async {
+		if matches!(status, 404 | 405 | 501) {
+			return Ok(None);
 		}
-		return Err(CompactionRequestError::new(
-			format!("Server compaction failed (HTTP {status})"),
-			status,
-			retry_after_ms,
-		));
-	}
+		if !(200..300).contains(&status) {
+			// Do not include response bodies: providers may echo prompt or credential data.
+			if status == 400 || status == 413 {
+				let failure: Value = response.json().await.unwrap_or(Value::Null);
+				// Preserve the direct OpenAI/Codex fallback contract. A validated gateway
+				// route may fall back only for an explicitly unsupported endpoint above;
+				// size and validation failures remain visible failures.
+				if validated_native_compaction_endpoint(model).is_none()
+					&& (status == 413
+						|| record(&failure)
+							.and_then(|map| map.get("error"))
+							.and_then(record)
+							.and_then(|error| error.get("code"))
+							.and_then(Value::as_str)
+							== Some("context_length_exceeded"))
+				{
+					return Ok(None);
+				}
+			}
+			return Err(CompactionRequestError::new(
+				format!("Server compaction failed (HTTP {status})"),
+				status,
+				retry_after_ms,
+			));
+		}
 
-	let payload: Value = match decode {
-		Some(decode) => decode(response).await?,
-		None => response
-			.json::<Value>()
-			.await
-			.map_err(|error| CompactionRequestError::new(error.to_string(), 0, None))?,
+		let payload: Value = match decode {
+			Some(decode) => decode(response).await?,
+			None => response
+				.json::<Value>()
+				.await
+				.map_err(|error| CompactionRequestError::new(error.to_string(), 0, None))?,
+		};
+		Ok(Some(payload))
+	};
+	let payload = match signal.as_ref() {
+		Some(signal) => tokio::select! {
+			biased;
+			_ = signal.cancelled() => return Err(CompactionRequestError::new("Request was aborted", 0, None)),
+			result = read_payload => result?,
+		},
+		None => read_payload.await?,
+	};
+	let Some(payload) = payload else {
+		return Ok(None);
 	};
 	if payload.is_null() && validated_native_compaction_endpoint(model).is_none() {
 		return Ok(None);

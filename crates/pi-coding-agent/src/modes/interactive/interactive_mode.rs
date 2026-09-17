@@ -2176,7 +2176,7 @@ impl InteractiveMode {
             || self
                 .connection_state
                 .as_ref()
-                .map(|state| state.session_actions.active.is_some())
+                .map(|state| state.session_actions.active.is_some() || state.session_actions.queued_count > 0)
                 .unwrap_or(false)
     }
 
@@ -3036,6 +3036,7 @@ impl InteractiveMode {
         // accumulating. The baseline is managed at turn end (refreshConnectionContextUsage) and
         // reset on a new user message.
         self.session_recap = state.recap.clone();
+        self.update_pending_messages_display();
         self.update_working_pulse();
     }
 
@@ -3046,6 +3047,29 @@ impl InteractiveMode {
         };
         patch(state);
         self.update_working_pulse();
+    }
+
+    /// Render authoritative accepted queue state without resetting the editor.
+    fn update_pending_messages_display(&mut self) {
+        let queue = self.get_connection_queue();
+        self.queued_messages_container.clear();
+        let total = queue.steering.len() + queue.follow_up.len();
+        for (text, label) in queue.steering.iter().map(|text| (text, QueueLabel::Steering))
+            .chain(queue.follow_up.iter().map(|text| (text, QueueLabel::FollowUp))).take(4)
+        {
+            let bounded: String = text.split_whitespace().flat_map(|word| word.chars().chain(std::iter::once(' '))).take(240).collect();
+            self.queued_messages_container.add_child(Box::new(
+                super::interactive_mode_services::TruncatedText::new(
+                    theme().fg("dim", &format_queued_message_preview(&bounded, label)), 1, 0,
+                ),
+            ));
+        }
+        if total > 4 {
+            self.queued_messages_container.add_child(Box::new(Text::new(
+                theme().fg("dim", &format!("{} more queued messages", total - 4)), 1, 0,
+            )));
+        }
+        self.ui.request_render();
     }
 
     /// Port of `setGoalAnnouncementBaseline`.
@@ -4012,6 +4036,7 @@ impl InteractiveMode {
                 self.patch_connection_state(|state| {
                     state.session_actions = actions.clone();
                 });
+                self.update_pending_messages_display();
             }
             AgentConnectionSessionEvent::CompactionStart { .. } => {
                 self.patch_connection_state(|state| state.is_compacting = true);
@@ -5018,6 +5043,32 @@ mod tests {
         assert_eq!(mode.get_queued_action_count(), 2);
         assert!(mode.should_suppress_feature_hint());
         assert_eq!(mode.browse_queue_selection("draft", -1), Some("f1".to_string()));
+    }
+
+    #[test]
+    fn accepted_queue_previews_survive_stream_refresh_and_clear_authoritatively() {
+        use super::super::interactive_mode_services::Component;
+        let mut mode = test_mode();
+        mode.apply_connection_state_snapshot(AgentConnectionState {
+            session_id: "queue-preview".into(), is_streaming: true,
+            session_actions: super::super::interactive_mode_services::SessionActionSnapshot {
+                steering: vec!["first human".into(), "second human".into()],
+                follow_ups: vec!["after run".into()], queued_count: 3,
+                ..Default::default()
+            }, ..Default::default()
+        });
+        let rendered = mode.queued_messages_container.render(80).join("\n");
+        assert!(rendered.contains("Steering: first human"));
+        assert!(rendered.find("first human") < rendered.find("second human"));
+        assert!(rendered.contains("Follow-up: after run"));
+        mode.patch_connection_state(|state| state.message_count += 1.0);
+        assert_eq!(mode.queued_messages_container.render(80).join("\n"), rendered);
+        let mut actions = mode.connection_state.as_ref().unwrap().session_actions.clone();
+        actions.steering.remove(0);
+        mode.update_connection_state_from_event(&AgentConnectionSessionEvent::SessionActionUpdate { actions });
+        assert!(!mode.queued_messages_container.render(80).join("\n").contains("first human"));
+        mode.apply_connection_state_snapshot(AgentConnectionState { session_id: "other".into(), ..Default::default() });
+        assert!(mode.queued_messages_container.is_empty());
     }
 
     #[test]
