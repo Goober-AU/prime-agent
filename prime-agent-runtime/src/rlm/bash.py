@@ -218,7 +218,7 @@ class BashHandle:
 
     A handle awaited before any other API use (the `await bash(cmd)` one-shot
     form, including `h = bash(cmd)` awaited immediately) owns the command:
-    cancelling that await kills the process group. Touching .pid/.running/
+    cancelling that await kills the process tree. Touching .pid/.running/
     .output()/.tail()/.poll()/.kill() first marks the handle as a background
     handle; later awaits only wait and cancelling them leaves it running.
     """
@@ -245,6 +245,10 @@ class BashHandle:
         self._callback_lock = threading.Lock()
         # Serializes kill/reap so a pid fallback can never outlive the process handle.
         self._kill_lock = threading.Lock()
+        # Descendants that left the command's process group/session (GNU
+        # timeout, setsid, detached browsers); _group_alive probes them and
+        # _reap_group re-kills them so they cannot outlive the journal record.
+        self._escaped: set[int] = set()
         self._started = time.monotonic()
         # POSIX: own process group so kill() signals the whole pipeline; Windows
         # contains the tree in a kill-on-close job object.
@@ -398,15 +402,21 @@ class BashHandle:
                     except OSError:
                         pass
             return
-        _signal_group(self._pid, sig)
+        self._signal_own_tree(sig)
         if sig == signal.SIGTERM:
             timer = threading.Timer(grace, self._force_kill)
             timer.daemon = True
             timer.start()
 
+    def _signal_own_tree(self, sig: int) -> bool:
+        """Signal the group plus every descendant, remembering the escapes."""
+        descendants = _descendant_pids(self._pid) if _IS_POSIX else []
+        self._escaped.update(descendants)
+        return _signal_tree(self._pid, sig, descendants)
+
     def _force_kill(self) -> None:
         if not self._reaped:
-            _signal_group(self._pid, signal.SIGKILL)
+            self._signal_own_tree(signal.SIGKILL)
 
     def _pump(self) -> None:
         stdout = self._proc.stdout
@@ -538,8 +548,9 @@ class BashHandle:
             _live_handles.discard(self)
 
     def _reap_group(self) -> bool:
-        # Group liveness, not leader death, gates the inactive record: members
-        # that outlive the leader would leak behind a stale journal anchor.
+        # Tree liveness, not leader death, gates the inactive record: members
+        # that outlive the leader (including escaped groups/sessions) would
+        # leak behind a stale journal anchor.
         if not _IS_POSIX:
             # Terminate then close the last handle: kill-on-close reaps
             # stragglers. An unproven terminate falls back to taskkill; if
@@ -550,13 +561,7 @@ class BashHandle:
                 job, self._job = self._job, None
                 _winjob.close(job)
             return delivered or _taskkill_tree(self._pid)
-        try:
-            os.killpg(self._pid, 0)
-        except ProcessLookupError:
-            return True  # group already gone
-        except PermissionError:
-            pass
-        return _signal_group(self._pid, signal.SIGKILL)
+        return _signal_tree(self._pid, signal.SIGKILL, sorted(self._escaped))
 
     def _read_status(self) -> int | None:
         if self._status_read < 0:
@@ -777,6 +782,14 @@ class BashHandle:
                 if empty is not None:
                     return not empty
             return self._proc.poll() is None
+        for child in self._escaped:
+            try:
+                os.kill(child, 0)
+            except ProcessLookupError:
+                continue
+            except OSError:
+                pass
+            return True
         try:
             os.killpg(self._pid, 0)
         except ProcessLookupError:
@@ -805,7 +818,7 @@ class BashHandle:
                     except OSError:
                         pass
             self._status_read = self._wake_read = self._wake_write = -1
-            delivered = _signal_group(self._pid, signal.SIGKILL)
+            delivered = self._signal_own_tree(signal.SIGKILL)
         else:
             with self._kill_lock:
                 delivered = False
@@ -872,13 +885,15 @@ def bash(command: str) -> BashHandle:
     """Start a shell command immediately; await the handle for the result.
 
     `await bash(cmd)` is a one-shot: cancelling the await (e.g. an interrupt)
-    kills the command's process group. `h = bash(cmd)` used as a background
-    handle (any .pid/.running/.output()/.tail()/.poll()/.kill() access before
-    the first await) survives cancellation; awaiting it only waits. Leak
-    containment is per-platform: process groups plus the orphan journal on
-    POSIX; a kill-on-close job object on Windows entered while the child is
-    still suspended, so no descendant can escape it and kill()/crash cleanup
-    are unconditional -- bash() raises if containment cannot be established.
+    kills the command's process tree, including descendants that left the
+    group (GNU timeout, setsid, detached browsers). `h = bash(cmd)` used as a
+    background handle (any .pid/.running/.output()/.tail()/.poll()/.kill()
+    access before the first await) survives cancellation; awaiting it only
+    waits. Leak containment is per-platform: process groups, descendant
+    enumeration, and the orphan journal on POSIX; a kill-on-close job object on
+    Windows entered while the child is still suspended, so no descendant can
+    escape it and kill()/crash cleanup are unconditional -- bash() raises if
+    containment cannot be established.
     Output written after the completion fence (e.g. by an EXIT trap or a
     background job) is not in BashResult.output but stays visible via
     handle.output()/tail().
@@ -960,6 +975,82 @@ def _signal_group(pid: int, sig: int) -> bool:
     except OSError:
         return False  # not delivered: the record must stay active for the host reaper
     return True
+
+
+def _signal_pid(pid: int, sig: int) -> bool:
+    """True when the signal was delivered or the process is already gone."""
+    try:
+        os.kill(pid, sig)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _descendant_pids(root: int) -> list[int]:
+    """Every live descendant of root, parents before children.
+
+    A group signal alone misses descendants that moved themselves to a new
+    process group or session: GNU timeout calls setpgid, and Playwright
+    detaches browsers with setsid. Collect the tree before signaling, because
+    killing the leader reparents the survivors and loses their place in it.
+    """
+    children: dict[int, list[int]] = {}
+    if os.path.isdir("/proc"):
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", "rb") as stat_file:
+                    stat = stat_file.read()
+            except OSError:
+                continue
+            try:
+                fields = stat[stat.rindex(b")") + 2:].split()
+                ppid = int(fields[1])
+            except (ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(entry))
+    else:
+        try:
+            listing = subprocess.run(
+                ["ps", "-eo", "pid=,ppid="], capture_output=True, text=True, timeout=5
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            return []
+        for line in listing.splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            try:
+                pid, ppid = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue
+            children.setdefault(ppid, []).append(pid)
+    result: list[int] = []
+    pending = [root]
+    while pending:
+        for child in children.get(pending.pop(), ()):
+            result.append(child)
+            pending.append(child)
+    return result
+
+
+def _signal_tree(pid: int, sig: int, descendants: list[int]) -> bool:
+    """Signal the command's process group plus descendants that escaped it.
+
+    Callers collect the descendants before any signal is sent: once the leader
+    dies the survivors are reparented and can no longer be found from it. Only
+    POSIX callers use this; Windows contains the tree in a job object.
+    """
+    if not _IS_POSIX:
+        return True
+    delivered = _signal_group(pid, sig)
+    for child in descendants:
+        if not _signal_pid(child, sig):
+            delivered = False
+    return delivered
 
 
 def _system32(*parts: str) -> str:
@@ -1081,7 +1172,8 @@ def _kill_live_handles() -> None:
         handles = list(_live_handles)
     for handle in handles:
         if _IS_POSIX:
-            delivered = _signal_group(handle._pid, signal.SIGKILL)
+            handle._escaped.update(_descendant_pids(handle._pid))
+            delivered = _signal_tree(handle._pid, signal.SIGKILL, sorted(handle._escaped))
         else:
             with handle._kill_lock:
                 if handle._reaped:
