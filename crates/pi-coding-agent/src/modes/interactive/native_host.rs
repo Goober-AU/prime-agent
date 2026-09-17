@@ -979,10 +979,9 @@ async fn escape_repeat_step(
     let repeat_action = mode.borrow_mut().take_escape_repeat_action();
     match repeat_action {
         Some("tree") => {
-            // The tree flow dispatches the tree command from the owner loop
-            // context (interactive-mode.ts:6924-6936); the inline await keeps
-            // it deterministic for the caller.
-            let _ = dispatch_submission(connection, send, "/tree", false, None).await;
+            // The tree command waits for a dialog response. The owner loop must
+            // remain free to display that dialog and accept its input.
+            submit(connection, send, "/tree".into(), false, None);
             return true;
         }
         Some("clear") => {
@@ -6385,9 +6384,12 @@ mod tests {
         let (send, receive) = mpsc::channel();
         assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
         assert!(escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
-        let status = receive
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("the tree dispatch must answer");
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(event) = receive.try_recv() { break event; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the tree dispatch must answer");
         match status {
             HostEvent::Status(text) => assert_eq!(text, "No entries in session"),
             other => panic!(
@@ -6395,6 +6397,43 @@ mod tests {
                 event_names(std::slice::from_ref(&other))
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn escape_repeat_nonempty_tree_does_not_block_the_input_owner() {
+        let mode = Rc::new(RefCell::new(stash_mode("escape-tree-owner")));
+        let (terminal, _) = RecordingTerminal::new();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(terminal), None)));
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            ui.clone(), editor_theme(), CustomEditorOptions::default(),
+        )));
+        let recorder = Arc::new(RecordingConnection::new());
+        *recorder.session_tree.lock().unwrap() = serde_json::from_value(serde_json::json!({
+            "tree": [{"entry": {"type": "session_info", "id": "entry", "parentId": null,
+                "timestamp": "2026-09-17T00:00:00Z", "name": "large chat"}, "children": []}],
+            "leafId": "entry"
+        })).unwrap();
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, receive) = mpsc::channel();
+        assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
+        assert!(tokio::time::timeout(Duration::from_millis(500),
+            escape_repeat_step(&mode, &editor, &ui, &connection, &send),
+        ).await.expect("input owner must return before the tree dialog is answered"));
+        // The owner can still edit input, then display and cancel the dialog.
+        editor.borrow_mut().editor_mut().set_text("still responsive");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match receive.try_recv() {
+                    Ok(HostEvent::CommandDialog(native_commands::Dialog::Tree(_, _, reply))) => {
+                        assert_eq!(editor.borrow().editor().get_text(), "still responsive");
+                        let _ = reply.send(None);
+                    }
+                    Ok(HostEvent::Completed(result)) => { result.unwrap(); break; }
+                    _ => tokio::task::yield_now().await,
+                }
+            }
+        }).await.expect("cancelled tree must settle");
+        recorder.only_call("get_session_tree");
     }
 
     /// A-06 fix: only lines that reach the model enter the up-arrow history.

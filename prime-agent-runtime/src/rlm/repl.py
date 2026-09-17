@@ -34,6 +34,7 @@ from .bash import BashHandle, _kill_live_handles
 from .snapshot import (
     DEFAULT_SNAPSHOT_MAX_BYTES,
     DEFAULT_SNAPSHOT_MAX_VARIABLE_BYTES,
+    _count_envelope,
     _fsync_directory,
     cas_root_for_legacy_path,
     cas_state_present,
@@ -41,6 +42,7 @@ from .snapshot import (
     restore_cas_v2,
     snapshot_cas_v2,
 )
+from .snapshot_serializer import dump_snapshot_value
 
 PROTOCOL_VERSION = 3
 
@@ -702,7 +704,7 @@ def _snapshot_state(
         serialization_started = time.monotonic_ns()
         serialization_cpu_started = thread_clock() if thread_clock is not None else None
         try:
-            dill.dump(value, _CappedWriter(buffer, limit))
+            dump_snapshot_value(dill, value, buffer, _CappedWriter(buffer, limit))
             blob = buffer.getvalue()
         except _SnapshotSizeLimitExceeded:
             if not prune_oversized and remaining < max_variable_bytes:
@@ -757,6 +759,28 @@ def _snapshot_state(
     previous = None
     try:
         try:
+            # Fit the legacy envelope without repeatedly writing hundreds of MB
+            # to disk. Values are already serialized immutable bytes here.
+            count_started = time.monotonic_ns()
+            count_cpu_started = thread_clock() if thread_clock is not None else None
+            envelope_bytes = _count_envelope(dill, payload, max_bytes)
+            if envelope_bytes is None:
+                items = list(payload.items())
+                if _count_envelope(dill, {}, max_bytes) is None:
+                    return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
+                low, high = 0, len(items) - 1
+                while low < high:
+                    mid = (low + high + 1) // 2
+                    if _count_envelope(dill, dict(items[:mid]), max_bytes) is None:
+                        high = mid - 1
+                    else:
+                        low = mid
+                for name, _ in items[low:]:
+                    skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
+                payload = dict(items[:low])
+            outer_serialization_wall_ns += time.monotonic_ns() - count_started
+            if count_cpu_started is not None and thread_clock is not None:
+                serialization_cpu_ns += thread_clock() - count_cpu_started
             fh, tmp = stage_temp(path, "wb")
             with fh:
                 def dump_to_temp(candidate: dict[str, bytes]) -> int | None:
@@ -777,31 +801,9 @@ def _snapshot_state(
                             serialization_cpu_ns += thread_clock() - cpu_started
                     return writer.written
 
-                def redump_to_temp(candidate: dict[str, bytes]) -> int | None:
-                    fh.seek(0)
-                    fh.truncate()
-                    return dump_to_temp(candidate)
-
                 bytes_written = dump_to_temp(payload)
                 if bytes_written is None:
-                    # Prefix pickle size is monotonic because each prefix only adds a string key and bytes value.
-                    items = list(payload.items())
-                    if redump_to_temp({}) is None:
-                        return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
-                    low, high = 0, len(items) - 1
-                    while low < high:
-                        mid = (low + high + 1) // 2
-                        if redump_to_temp(dict(items[:mid])) is None:
-                            high = mid - 1
-                        else:
-                            low = mid
-                    for name, _ in items[low:]:
-                        skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
-                    payload = dict(items[:low])
-                    # The search's last attempt may have overflowed the temp; rewrite the chosen prefix.
-                    bytes_written = redump_to_temp(payload)
-                    if bytes_written is None:
-                        return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
+                    return {"error": "write failed: snapshot exceeds aggregate snapshot size cap"}
             saved = sorted(payload.keys())
             pruned = sorted(name for name in oversized if name in ns) if prune_oversized else []
             manifest = {
