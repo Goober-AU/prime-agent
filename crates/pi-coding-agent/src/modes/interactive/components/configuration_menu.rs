@@ -890,6 +890,64 @@ mod tests {
     }
 
     #[test]
+    fn mounted_large_models_menu_keeps_search_cursor_and_filter_across_updates() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        crate::core::keybindings::KeybindingsManager::new(Default::default(), None).install();
+        let ui = tui();
+        let models: Vec<Model> = (0..1296).map(|index| {
+            Model::new(format!("model-{index:04}"), format!("Model {index}"),
+                "openai-completions", "test-provider", "http://127.0.0.1")
+        }).collect();
+        let cancelled = Rc::new(std::cell::Cell::new(false));
+        let on_cancel = cancelled.clone();
+        let selected = Rc::new(RefCell::new(None));
+        let on_select = selected.clone();
+        let menu = Rc::new(RefCell::new(ConfigurationMenuComponent::new(ConfigurationMenuOptions {
+            initial_tab: "models", tui: ui.clone(),
+            auth_storage: Rc::new(RefCell::new(auth_storage())),
+            model_registry: Rc::new(RefCell::new(model_registry())),
+            provider_options: vec![], current_model: None, scoped_models: vec![],
+            available_models: models.clone(), configured_providers: Default::default(),
+            recent_models: None, initial_model_search: None,
+            get_rows: Some(Box::new(|| 30.0)), request_render: Box::new(|| {}),
+            on_select_provider: Box::new(|_| {}), on_select_mcp_connection: Box::new(|_| {}),
+            on_select_model: Box::new(move |model| *on_select.borrow_mut() = Some(model.id.clone())),
+            on_cancel: Box::new(move || on_cancel.set(true)),
+        })));
+        let handle = ui.borrow_mut().show_overlay(menu.clone(), Default::default());
+        assert!(handle.is_focused());
+        let focused = ui.borrow().focused_component().unwrap();
+        let start = std::time::Instant::now();
+        for ch in "model-1234".chars() {
+            focused.borrow_mut().handle_input(&ch.to_string());
+            menu.borrow_mut().render(90.0);
+        }
+        assert_eq!(menu.borrow_mut().get_search_value(None), "model-1234");
+        let rendered = menu.borrow_mut().render(90.0).join("\n");
+        assert!(rendered.contains("model-1234"));
+        assert!(!rendered.contains("model-0000"));
+        focused.borrow_mut().handle_input("\x1b[D");
+        // Catalog/roster updates must not reset a mid-field cursor or search.
+        menu.borrow_mut().update_models(None, Some(&models), None);
+        focused.borrow_mut().handle_input("\x7f");
+        assert_eq!(menu.borrow_mut().get_search_value(None), "model-124");
+        focused.borrow_mut().handle_input("\x1b[200~3\x1b[201~");
+        assert_eq!(menu.borrow_mut().get_search_value(None), "model-1234");
+        focused.borrow_mut().handle_input("\t");
+        focused.borrow_mut().handle_input("\x1b[Z");
+        assert_eq!(menu.borrow().get_active_tab(), "models");
+        assert_eq!(menu.borrow_mut().get_search_value(None), "model-1234");
+        focused.borrow_mut().handle_input("\r");
+        assert_eq!(selected.borrow().as_deref(), Some("model-1234"));
+        focused.borrow_mut().handle_input("\x1b");
+        assert!(cancelled.get());
+        eprintln!("mounted 1296-model edit/filter/update/select/cancel: {:?}", start.elapsed());
+        handle.hide();
+        ui.borrow_mut().sync_overlays();
+        assert!(!ui.borrow().has_overlay());
+    }
+
+    #[test]
     fn tab_constants_and_labels_match_typescript() {
         assert_eq!(
             CONFIGURATION_MENU_TABS,

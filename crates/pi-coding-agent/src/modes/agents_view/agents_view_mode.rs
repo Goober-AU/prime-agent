@@ -2434,8 +2434,18 @@ impl<'a> AgentsViewMode<'a> {
     }
 
     async fn wait_with_input<T>(&mut self, pending: impl std::future::Future<Output = T>) -> Result<Option<T>, String> {
+        self.wait_with_input_progress(pending, None).await
+    }
+
+    async fn wait_with_input_progress<T>(
+        &mut self,
+        pending: impl std::future::Future<Output = T>,
+        progress: Option<Arc<std::sync::atomic::AtomicI64>>,
+    ) -> Result<Option<T>, String> {
         tokio::pin!(pending);
         let mut ticker = tokio::time::interval(std::time::Duration::from_millis(16));
+        let mut animation_at = tokio::time::Instant::now();
+        let mut progress_at = animation_at;
         loop {
             tokio::select! {
                 result = &mut pending => return Ok(Some(result)),
@@ -2448,7 +2458,16 @@ impl<'a> AgentsViewMode<'a> {
                         },
                     }
                     if self.stopped { return Ok(None); }
-                    self.tick_animation();
+                    if animation_at.elapsed().as_millis() >= WORKING_ICON_INTERVAL_MS as u128 {
+                        self.tick_animation();
+                        animation_at = tokio::time::Instant::now();
+                    }
+                    if progress_at.elapsed().as_millis() >= 100 {
+                        if let Some(progress) = progress.as_ref() {
+                            self.saved_catalog_progress = progress.load(std::sync::atomic::Ordering::Relaxed);
+                        }
+                        progress_at = tokio::time::Instant::now();
+                    }
                     self.present_current_view()?;
                 }
             }
@@ -2606,14 +2625,19 @@ impl<'a> AgentsViewMode<'a> {
         if !attached? {
             return Err("Daemon lost the agent_roster capability during reconnect".to_string());
         }
-        if !self.refresh_heartbeats(true).await {
+        let heartbeats_refreshed = self.refresh_heartbeats(true).await;
+        if !heartbeats_refreshed && !client.is_connected() {
             return Err("Heartbeat catalog did not refresh during reconnect".to_string());
         }
         let sessions = self.roster_store.summaries().await;
         self.daemon_shutdown_received = false;
         self.reconnect_timed_out = false;
         self.reconnect_started = false;
-        self.set_status_message(Some("Daemon reconnected"), false, None, false);
+        if heartbeats_refreshed {
+            self.set_status_message(Some("Daemon reconnected"), false, None, false);
+        } else {
+            self.set_status_message(Some("Daemon reconnected; scheduled-task coverage is incomplete, retrying"), false, Some(StatusTone::Warning), false);
+        }
         self.apply_session_list(sessions, true);
         self.arm_saved_search_fetch(true);
         Ok(())
@@ -2751,6 +2775,12 @@ impl<'a> AgentsViewMode<'a> {
                 self.heartbeats = heartbeats.clone();
                 self.persistent_state.heartbeats = Some(heartbeats);
                 self.reconcile_catalogs();
+                if self.status_message.as_deref().is_some_and(|message|
+                    message.starts_with("Failed to refresh heartbeats:")
+                        || message == "Scheduled tasks are still loading; coverage is incomplete, retrying"
+                        || message == "Daemon reconnected; scheduled-task coverage is incomplete, retrying") {
+                    self.set_status_message(None, true, None, false);
+                }
                 true
             }
             Err(error) => {
@@ -2759,12 +2789,14 @@ impl<'a> AgentsViewMode<'a> {
                     if !connected {
                         self.start_client_reconnect(&error);
                     } else if !self.status_message_sticky {
-                        self.set_status_message(
-                            Some(&format_error("Failed to refresh heartbeats", &error)),
-                            true,
-                            None,
-                            false,
-                        );
+                        let pending = error == "Cannot list heartbeats while session worker is starting"
+                            || error == "Cannot list heartbeats while session worker is recovering";
+                        let message = if pending {
+                            "Scheduled tasks are still loading; coverage is incomplete, retrying".to_string()
+                        } else {
+                            format_error("Failed to refresh heartbeats", &error)
+                        };
+                        self.set_status_message(Some(&message), true, pending.then_some(StatusTone::Warning), false);
                     }
                 }
                 false
@@ -2816,7 +2848,7 @@ impl<'a> AgentsViewMode<'a> {
             progress_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
         let pending = list_daemon_saved_sessions(&client, &context, "all", Some(on_session), None);
-        let result = match self.wait_with_input(pending).await {
+        let result = match self.wait_with_input_progress(pending, Some(progress_cell)).await {
             Ok(Some(result)) => result,
             Ok(None) => { self.saved_catalog_refresh_pending = false; return false; }
             Err(error) => Err(error),
@@ -6055,6 +6087,101 @@ mod tests {
         })));
         assert!(mode.refresh_heartbeats(false).await);
         assert_eq!(mode.heartbeat_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn heartbeat_recovery_clears_only_its_own_status() {
+        let mut mode = build_mode(Vec::new()).await;
+        mode.set_status_message(Some("Failed to refresh heartbeats: disconnected"), false, None, false);
+        mode.push_response(ok_response(serde_json::json!({"heartbeats":[]})));
+        assert!(mode.refresh_heartbeats(false).await);
+        assert!(mode.status_message().is_none());
+        mode.set_status_message(Some("Failed to rename session: denied"), false, None, false);
+        mode.push_response(ok_response(serde_json::json!({"heartbeats":[]})));
+        assert!(mode.refresh_heartbeats(false).await);
+        assert_eq!(mode.status_message(), Some("Failed to rename session: denied"));
+    }
+
+    #[tokio::test]
+    async fn starting_heartbeat_warning_retains_last_known_catalog() {
+        let mut mode = build_mode(Vec::new()).await;
+        mode.push_response(ok_response(serde_json::json!({"heartbeats":[{"job":{
+            "id":"retained-job", "status":"active", "activeSessionId":"a-1", "sessionId":"a-1",
+            "sessionFile":"C:/isolated/a.jsonl", "prompt":"tick", "schedule":{"kind":"interval","expression":"1h"},
+            "createdAt":"2026-01-01T00:00:00Z", "updatedAt":"2026-01-01T00:00:00Z", "runCount":0
+        }}]})));
+        assert!(mode.refresh_heartbeats(false).await);
+        assert_eq!(mode.heartbeat_count(), 1);
+        mode.push_response(DaemonResponse {command: "heartbeats_list".into(), success:false, data:None,
+            error:Some("Cannot list heartbeats while session worker is starting".into())});
+        assert!(!mode.refresh_heartbeats(false).await);
+        assert_eq!(mode.heartbeat_count(), 1);
+        assert_eq!(mode.status_message(), Some("Scheduled tasks are still loading; coverage is incomplete, retrying"));
+        mode.push_response(ok_response(serde_json::json!({"heartbeats":[]})));
+        assert!(mode.refresh_heartbeats(false).await);
+        assert!(mode.status_message().is_none());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_startup_does_not_block_roster_reconnect() {
+        let mut mode = build_mode(vec![roster_entry("a-1", "Alpha")]).await;
+        mode.reconnect_started = true;
+        // The same live client/hello keeps its roster subscription; only the
+        // heartbeat request is sent on this reconnect completion path.
+        mode.push_response(DaemonResponse {command:"heartbeats_list".into(), success:false, data:None,
+            error:Some("Cannot list heartbeats while session worker is starting".into())});
+        let client = mode.require_client().unwrap();
+        mode.finish_reconnect_attempt(&client).await.unwrap();
+        assert!(!mode.reconnect_started);
+        assert!(mode.rows().iter().any(|row| row.title.contains("Alpha")));
+        assert_eq!(mode.status_message(), Some("Daemon reconnected; scheduled-task coverage is incomplete, retrying"));
+    }
+
+    #[tokio::test]
+    async fn pending_catalog_displays_progress_without_rebuilding_cached_rows() {
+        struct ProgressDriver {
+            frames: StdMutex<Vec<Vec<String>>>,
+            first_paint: tokio_util::sync::CancellationToken,
+            second_paint: tokio_util::sync::CancellationToken,
+        }
+        impl AgentsViewTerminal for ProgressDriver {
+            fn rows(&self) -> usize { 50 }
+            fn columns(&self) -> usize { 180 }
+            fn request_render(&self, _force: bool) {}
+            fn set_title(&self, _title: &str) {}
+            fn poll_input(&self) -> Result<Option<Vec<String>>, String> { Ok(Some(Vec::new())) }
+            fn present(&self, lines: Vec<String>, _dock: Vec<String>) -> Result<(), String> {
+                if lines.iter().any(|line| line.contains("loading saved chats (8)")) { self.first_paint.cancel(); }
+                if lines.iter().any(|line| line.contains("loading saved chats (16)")) { self.second_paint.cancel(); }
+                self.frames.lock().unwrap().push(lines);
+                Ok(())
+            }
+        }
+        let mut mode = build_mode(vec![roster_entry("a-1", "Alpha")]).await;
+        mode.saved_catalog_refresh_pending = true;
+        let terminal = Arc::new(ProgressDriver {
+            frames: StdMutex::new(Vec::new()),
+            first_paint: tokio_util::sync::CancellationToken::new(),
+            second_paint: tokio_util::sync::CancellationToken::new(),
+        });
+        mode.terminal = terminal.clone();
+        let progress = Arc::new(std::sync::atomic::AtomicI64::new(0));
+        let producer = progress.clone();
+        let first_paint = terminal.first_paint.clone();
+        let second_paint = terminal.second_paint.clone();
+        let pending = async move {
+            producer.store(8, std::sync::atomic::Ordering::Relaxed);
+            first_paint.cancelled().await;
+            producer.store(16, std::sync::atomic::Ordering::Relaxed);
+            second_paint.cancelled().await;
+        };
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(3),
+            mode.wait_with_input_progress(pending, Some(progress))).await.unwrap().unwrap().is_some());
+        assert_eq!(mode.saved_catalog_progress, 16);
+        let frames = terminal.frames.lock().unwrap();
+        assert!(frames.iter().flatten().any(|line| line.contains("loading saved chats (8)")));
+        assert!(frames.iter().flatten().any(|line| line.contains("loading saved chats (16)")));
+        assert!(mode.rows().iter().any(|row| row.title.contains("Alpha")));
     }
 
     #[tokio::test]

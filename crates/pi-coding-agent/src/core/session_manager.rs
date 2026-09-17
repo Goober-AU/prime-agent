@@ -2509,18 +2509,22 @@ fn scan_session_lines(
     if state.acc.invalid || state.offset >= size {
         return Ok(None);
     }
-    let range = ReadLinesRange {
-        start: Some(state.offset as i64),
-        end: Some(size as i64 - 1),
-    };
-    for line_buffer in read_lines_as_buffers(file_path, Some(&range), None)? {
-        let line_end = state.offset + line_buffer.len() as u64;
-        if line_end >= size {
-            return Ok(Some(line_buffer));
-        }
+    use std::io::{BufRead, Read, Seek};
+    let mut file = std::fs::File::open(file_path)?;
+    file.seek(std::io::SeekFrom::Start(state.offset))?;
+    // Preserve the stat boundary and append-resume semantics without holding
+    // every line of a potentially hundreds-of-MB transcript at once.
+    let mut reader = std::io::BufReader::with_capacity(64 * 1024, file.take(size - state.offset));
+    let mut line_buffer = Vec::new();
+    loop {
+        line_buffer.clear();
+        let bytes_read = reader.read_until(b'\n', &mut line_buffer)?;
+        if bytes_read == 0 { break; }
+        if line_buffer.last() != Some(&b'\n') { return Ok(Some(line_buffer)); }
+        line_buffer.pop();
         fold_session_scan_line(&mut state.acc, &line_buffer);
         state.tail = advance_scan_tail(&state.tail, &line_buffer);
-        state.offset = line_end + 1;
+        state.offset += bytes_read as u64;
         if state.acc.invalid {
             break;
         }
@@ -2529,7 +2533,7 @@ fn scan_session_lines(
 }
 
 fn fold_session_scan_line(acc: &mut SessionScanAccumulator, line_buffer: &[u8]) {
-    let line = String::from_utf8_lossy(line_buffer).to_string();
+    let line = String::from_utf8_lossy(line_buffer);
     if line.trim().is_empty() {
         return;
     }
@@ -2636,7 +2640,7 @@ fn fold_session_scan_line(acc: &mut SessionScanAccumulator, line_buffer: &[u8]) 
     acc.message_count += 1;
 
     let message = match message_of(&entry) {
-        Some(message) => message.clone(),
+        Some(message) => message,
         None => return,
     };
     if message.get("role").and_then(Value::as_str) == Some("assistant") {
@@ -5601,6 +5605,53 @@ mod tests {
         assert_eq!(Path::new(&for_cwd).file_name().unwrap(), "newer.jsonl");
         assert!(find_most_recent_session_for_cwd(&dir.to_string_lossy(), "/other").is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn streamed_catalog_scan_preserves_torn_tail_and_append_metadata() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("streamed.jsonl");
+        let path = file.to_string_lossy().into_owned();
+        let header = serde_json::json!({"type":"session","id":"streamed","version":3,"timestamp":"2026-01-01T00:00:00Z","cwd":"/workspace"});
+        let user = serde_json::json!({"type":"message","id":"user-1","message":{"role":"user","content":"catalog title","timestamp":1}});
+        let tool = serde_json::json!({"type":"message","id":"tool-1","message":{"role":"toolResult","content":[{"type":"text","text":"x".repeat(2 * 1024 * 1024)}],"timestamp":2}});
+        let tail = serde_json::json!({"type":"session_info","id":"name-1","name":"Renamed after output"}).to_string();
+        std::fs::write(&file, format!("{header}\r\n{user}\r\n{tool}\n{tail}")).unwrap();
+        let initial = read_session_info(&path).await.unwrap();
+        assert_eq!(initial.message_count, 2);
+        assert_eq!(initial.first_message, "catalog title");
+        assert_eq!(initial.name.as_deref(), Some("Renamed after output"));
+        let warm = read_session_info(&path).await.unwrap();
+        assert_eq!(warm, initial);
+
+        let next = serde_json::json!({"type":"message","id":"user-2","message":{"role":"user","content":"later searchable text","timestamp":3}});
+        let mut writer = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(writer, "\n{next}").unwrap();
+        drop(writer);
+        let appended = read_session_info(&path).await.unwrap();
+        assert_eq!(appended.message_count, 3);
+        assert_eq!(appended.name, initial.name);
+        assert!(appended.all_messages_text.contains("later searchable text"));
+        drop_session_scan_state(&path);
+    }
+
+    #[test]
+    fn streamed_catalog_scan_obeys_captured_size_during_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bounded.jsonl");
+        let path = file.to_string_lossy().into_owned();
+        let first = format!("{}\n", serde_json::json!({"type":"session","id":"bounded","cwd":"/workspace"}));
+        std::fs::write(&file, format!("{first}{}\n", serde_json::json!({"type":"session_info","name":"later"}))).unwrap();
+        let mut state = SessionScanState {
+            file_size:0, mtime:None, dev:0, ino:0, offset:0, tail:Vec::new(),
+            acc:create_session_scan_accumulator(), info:None, accounted_usage_entries:0,
+        };
+        assert!(scan_session_lines(&path, &mut state, first.len() as u64).unwrap().is_none());
+        assert_eq!(state.offset, first.len() as u64);
+        assert!(state.acc.name.is_none());
+        assert!(scan_session_lines(&path, &mut state, std::fs::metadata(&file).unwrap().len()).unwrap().is_none());
+        assert_eq!(state.acc.name.as_deref(), Some("later"));
     }
 
     #[test]

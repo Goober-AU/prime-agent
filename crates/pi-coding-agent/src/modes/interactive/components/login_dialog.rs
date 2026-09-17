@@ -542,6 +542,15 @@ impl LoginDialogComponent {
         message: &str,
         placeholder: Option<&str>,
     ) -> tokio::sync::oneshot::Receiver<String> {
+        if self.provider_id == "github-copilot" && self.auth_url.is_none() {
+            // This prompt precedes device authorization; it is not a network wait.
+            self.start_content();
+            self.add_muted_text(&key_hint(
+                "tui.select.confirm",
+                "use github.com, or enter your GitHub Enterprise domain below",
+                &KeyTextOptions::default(),
+            ));
+        }
         self.add_section_spacer();
         self.add_section_title(message);
         if let Some(placeholder) = placeholder {
@@ -833,6 +842,10 @@ impl LoginDialogComponent {
             if let Some(resolve) = self.input_resolver.take() {
                 let _ = resolve.send(self.input.borrow().get_value());
                 self.input_rejecter = None;
+                if self.provider_id == "github-copilot" && self.auth_url.is_none() {
+                    self.start_content();
+                    self.show_waiting("Requesting GitHub sign-in link...");
+                }
                 return;
             }
         }
@@ -1069,6 +1082,66 @@ mod tests {
             .any(|line| line.contains("test-code")));
         component.handle_input("\r");
         assert_eq!(receiver.try_recv().unwrap(), "test-code");
+    }
+
+    #[test]
+    fn mounted_copilot_domain_prompt_accepts_blank_and_enterprise_input() {
+        for value in ["", "company.ghe.com"] {
+            let ui = tui();
+            let component = Rc::new(RefCell::new(LoginDialogComponent::new(
+                ui.clone(), "github-copilot", Box::new(|_, _| {}), None, None,
+            )));
+            component.borrow_mut().show_progress("Starting sign-in...");
+            let handle = ui.borrow_mut().show_overlay(component.clone(), Default::default());
+            let mut receiver = component.borrow_mut().show_prompt(
+                "GitHub Enterprise URL/domain (blank for github.com)", Some("company.ghe.com"),
+            );
+            assert!(handle.is_focused());
+            assert!(component.borrow().input.borrow().focused());
+            let rendered = component.borrow_mut().render(90.0).join("\n");
+            assert!(rendered.contains("use github.com"), "{rendered}");
+            assert!(!rendered.contains("Starting sign-in"), "{rendered}");
+            assert!(!rendered.contains("Preparing authentication"), "{rendered}");
+            let focused = ui.borrow().focused_component().unwrap();
+            focused.borrow_mut().handle_input(&format!("\x1b[200~{value}\x1b[201~"));
+            focused.borrow_mut().handle_input("\r");
+            assert_eq!(receiver.try_recv().unwrap(), value);
+            let waiting = component.borrow_mut().render(90.0).join("\n");
+            assert!(waiting.contains("Requesting GitHub sign-in link"), "{waiting}");
+            assert!(!waiting.contains("GitHub Enterprise URL/domain"), "{waiting}");
+            handle.hide();
+            ui.borrow_mut().sync_overlays();
+            assert!(!ui.borrow().has_overlay());
+        }
+    }
+
+    #[test]
+    fn mounted_copilot_prompt_cancellation_does_not_wait_for_authentication() {
+        for key in ["\x1b", "\x03"] {
+            let ui = tui();
+            let cancelled = Rc::new(std::cell::Cell::new(false));
+            let report = cancelled.clone();
+            let component = Rc::new(RefCell::new(LoginDialogComponent::new(
+                ui.clone(), "github-copilot",
+                Box::new(move |success, error| {
+                    assert!(!success);
+                    assert_eq!(error.as_deref(), Some("Login cancelled"));
+                    report.set(true);
+                }), None, None,
+            )));
+            let handle = ui.borrow_mut().show_overlay(component.clone(), Default::default());
+            let mut receiver = component.borrow_mut().show_prompt(
+                "GitHub Enterprise URL/domain (blank for github.com)", None,
+            );
+            let focused = ui.borrow().focused_component().unwrap();
+            focused.borrow_mut().handle_input(key);
+            assert!(cancelled.get(), "cancellation must settle synchronously");
+            assert!(component.borrow().signal_aborted());
+            assert_eq!(receiver.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Closed));
+            handle.hide();
+            ui.borrow_mut().sync_overlays();
+            assert!(!ui.borrow().has_overlay());
+        }
     }
 
     #[test]

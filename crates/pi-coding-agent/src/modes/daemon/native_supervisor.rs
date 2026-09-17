@@ -1259,6 +1259,10 @@ impl Supervisor {
                         self.launch_worker(&body, String::new(), Some(descriptor)).await
                     }.await;
                     if let Err(error) = recovered { self.park_worker_recovery_failure(&worker, &error); }
+                } else {
+                    // A process lost before create completed has no durable session
+                    // to recover. Retain its record, but never leave it starting forever.
+                    self.park_worker_recovery_failure(&worker, "Session worker exited before creation completed; open a new session to retry");
                 }
                 continue;
             }

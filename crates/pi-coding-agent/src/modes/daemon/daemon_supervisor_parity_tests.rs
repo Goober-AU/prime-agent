@@ -411,6 +411,48 @@ async fn t09_idless_commands_have_defined_scope() {
 
 // ---------------------------------------------------------------------------
 // C-07: a timed-out stop must still finish its cleanup
+#[tokio::test]
+async fn adoption_parks_dead_incomplete_create_without_poisoning_heartbeats() {
+    let mut fixture = SupervisorFixture::new("heartbeat-dead-incomplete-create").await;
+    let stale = add_descriptor_only_worker(&fixture, "dead-start", "dead-root", "test-token", DAEMON_WORKER_LIFECYCLE_STARTING);
+    let descriptor = {
+        let mut descriptor = stale.descriptor.lock().unwrap();
+        descriptor.pid = i32::MAX;
+        descriptor.process_start_id = None;
+        descriptor.root_session_id = None;
+        descriptor.clone()
+    };
+    fixture.supervisor.persist_worker(&descriptor).unwrap();
+    fixture.supervisor.adopt_workers().await.unwrap();
+    let adopted = fixture.supervisor.workers.lock().unwrap().get("dead-start").cloned().unwrap();
+    assert_eq!(adopted.descriptor.lock().unwrap().lifecycle, DAEMON_WORKER_LIFECYCLE_FAILED);
+    assert!(adopted.descriptor.lock().unwrap().last_error.as_deref().unwrap().contains("before creation completed"));
+    let persisted: DaemonWorkerDescriptor = serde_json::from_slice(
+        &std::fs::read(fixture.supervisor.descriptor_dir.join("dead-start.json")).unwrap()).unwrap();
+    assert_eq!(persisted.lifecycle, DAEMON_WORKER_LIFECYCLE_FAILED);
+    // Durable descriptors deliberately redact raw failures; keep that privacy boundary.
+    assert_eq!(persisted.last_error.as_deref(), Some("Waiting for a client with fresh runtime context"));
+
+    let healthy = add_descriptor_only_worker(&fixture, "healthy", "healthy-root", "test-token", DAEMON_WORKER_LIFECYCLE_READY);
+    healthy.heartbeat_snapshot.lock().unwrap().store_if_current(0, vec![serde_json::json!({"job":{"id":"healthy-job"}})]);
+    let response = fixture.send(serde_json::json!({"type":"heartbeats_list","id":"healthy-with-dead"})).await;
+    assert_eq!(response["success"], true, "{response}");
+    assert_eq!(response["data"]["heartbeats"][0]["job"]["id"], "healthy-job");
+}
+
+#[tokio::test]
+async fn starting_worker_keeps_heartbeat_coverage_incomplete_until_ready() {
+    let mut fixture = SupervisorFixture::new("heartbeat-genuine-starting").await;
+    let worker = add_descriptor_only_worker(&fixture, "starting", "starting-root", "test-token", DAEMON_WORKER_LIFECYCLE_STARTING);
+    let response = fixture.send(serde_json::json!({"type":"heartbeats_list","id":"starting-check"})).await;
+    assert_eq!(response["success"], false);
+    assert!(response["error"].as_str().unwrap().contains("starting"));
+    worker.descriptor.lock().unwrap().lifecycle = DAEMON_WORKER_LIFECYCLE_READY.into();
+    worker.heartbeat_snapshot.lock().unwrap().store_if_current(0, Vec::new());
+    let response = fixture.send(serde_json::json!({"type":"heartbeats_list","id":"ready-check"})).await;
+    assert_eq!(response["success"], true, "{response}");
+}
+
 // ---------------------------------------------------------------------------
 
 /// C-07: TS `scheduleWorkerStopFinalization` (daemon-supervisor.ts:6889-6996) keeps
