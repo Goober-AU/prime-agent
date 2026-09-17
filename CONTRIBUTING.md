@@ -1,52 +1,74 @@
-# Contributing to Prime Agent
+# Contributing to Optimus Agent
 
-Thanks for your interest in contributing to Prime Agent! Prime Agent is developed in public, and we welcome bug reports, feature requests, questions, and other feedback. To keep the project maintainable, public contributions begin in [GitHub Discussions](https://github.com/PrimeIntellect-ai/prime-agent/discussions).
+Thank you for your interest in contributing to Optimus Agent.
 
-With the influx of agent-generated contributions, we do not review unsolicited pull requests or use public Issues as the initial intake queue. While we are open to contributions by agents, you are responsible for your code and must understand how it interacts with the entire project.
+We welcome code contributions, feature suggestions, documentation improvements, general feedback, and bug reports.
 
-## Start with a Discussion
+## Getting Started
 
-Choose the category that best matches what you want to share:
+Before starting significant work, please check the existing Issues and Discussions to see whether the topic has already been raised.
 
-- [General discussion or question](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general)
-- [Bug report](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports)
-- [Feature request](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests)
+For questions, ideas, or proposals, use GitHub Discussions:
 
-Search existing Discussions before creating a new one. Include enough detail for someone else to understand and reproduce the problem, but do not share API keys, tokens, private prompts, or other sensitive information.
+https://github.com/telemusai/optimus-agent/discussions
 
-For security vulnerabilities, follow [SECURITY.md](SECURITY.md) instead of posting publicly.
+For confirmed bugs or clearly defined tasks, you may open a GitHub Issue:
 
-## Issues
+https://github.com/telemusai/optimus-agent/issues
 
-GitHub Issues track work that maintainers have accepted and intend to investigate or implement. A maintainer may create an Issue from a Discussion when the scope is clear and the work fits the roadmap. An existing Issue does not automatically mean that an external pull request is wanted. Wait for a maintainer to invite implementation before starting substantial work.
+When reporting a problem, please include enough information to reproduce and understand the issue, including relevant environment details, logs, or screenshots where appropriate.
 
-Issues opened by unapproved contributors are automatically closed and redirected to Discussions. To contribute, share interest in Discussions or corresponding issues, and maintainers can invite implementation for requested work.
+Do not include API keys, access tokens, credentials, personal information, or other sensitive data.
 
-## Pull Requests and Trusted Contributors
+For security vulnerabilities, please follow [SECURITY.md](SECURITY.md) rather than reporting the issue publicly.
 
-Prime Agent runs on user machines and can execute code with the user's permissions. We therefore limit pull requests to maintainers and trusted contributors who have been explicitly vouched for. Maintainers may vouch for someone after they have consistently demonstrated a useful understanding of the project through Discussions, issue investigation, testing, documentation, or other collaboration. There is no separate application process and no guarantee that participation will result in approval.
+## Pull Requests
 
-Pull requests from unvouched contributors are automatically closed. If you are interested in contributing code, begin with a Discussion and work with the maintainers on the problem first.
+Pull requests are welcome.
 
-## Preparing an Approved Pull Request
+Before submitting a pull request:
 
-If a maintainer has invited a pull request:
+1. Keep changes focused and reasonably scoped.
+2. Follow the existing project structure and coding conventions.
+3. Add or update tests where appropriate.
+4. Run the relevant checks locally before submitting.
+5. Clearly describe what the change does and why it is needed.
+6. Avoid unrelated refactoring or dependency changes unless they are necessary for the contribution.
 
-1. Keep the change focused on the accepted Issue or Discussion.
-2. Follow the repository's development rules and existing conventions.
-3. Add or update tests for behavioral changes.
-4. Run the relevant checks locally and describe the validation in the pull request.
-5. Avoid unrelated refactors or dependency changes.
+For larger changes or new functionality, we recommend opening an Issue or Discussion first so the proposed approach can be considered before significant development work is undertaken.
 
-Development setup and commands are documented in the [development guide](packages/coding-agent/docs/development.md).
+Contributors using coding agents or other AI-assisted development tools are welcome. Contributors remain responsible for reviewing, understanding, testing, and validating the code they submit.
 
-## Changelog entries
+## Development
 
-Do not edit `packages/*/CHANGELOG.md` directly. Instead, add one fragment
-file per PR per touched package: `packages/<pkg>/.changes/<slug>.md`, where `<slug>` is a kebab-case name
-derived from your branch or ticket (e.g. `eng-1234-fix-resize.md`). The file contains exactly the bullet
-line(s) that describe the change, e.g. `- Fixed the frobnicator dropping input on resize.`. The release
-script aggregates fragments into the release section and deletes them. PRs that change `packages/<pkg>/src`
-without a fragment fail CI; apply the `no-changelog` label to opt out.
+Development setup, build instructions, and relevant commands are documented in the [development guide](packages/coding-agent/docs/development.md).
 
-Maintainers may close a pull request that changes scope, cannot be validated safely, or no longer fits the project roadmap.
+Please follow the repository's existing development and formatting conventions when making changes.
+
+## Changelog Entries
+
+Do not edit `packages/*/CHANGELOG.md` directly.
+
+For changes requiring a changelog entry, add a fragment for each affected package:
+
+`packages/<pkg>/.changes/<slug>.md`
+
+The `<slug>` should be a short kebab-case description of the change or associated issue, for example:
+
+`fix-terminal-resize.md`
+
+Each fragment should contain the relevant changelog bullet, for example:
+
+`- Fixed terminal input handling when resizing the window.`
+
+The release process aggregates these fragments into the appropriate changelog and removes the individual fragment files.
+
+Changes to `packages/<pkg>/src` may require a changelog fragment to pass CI. Where a changelog entry is not appropriate, the `no-changelog` label may be used.
+
+## Review
+
+Pull requests are reviewed based on correctness, scope, maintainability, compatibility with the project, and successful validation.
+
+Maintainers may request changes before merging or close contributions that are no longer applicable or do not align with the direction of the project.
+
+Thank you for helping improve Optimus Agent.
