@@ -1219,17 +1219,16 @@ fn kill_process(pid: i64, signal_number: i32) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Daemon transport stand-ins (ca-daemon-b slice).
+// Startup probes share the native client transport, including Windows pipe retry.
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
 async fn daemon_connect(
     socket_path: &str,
     timeout_ms: f64,
-) -> Result<tokio::net::UnixStream, String> {
+) -> Result<crate::modes::daemon::daemon_client::DaemonSocketStream, String> {
     match tokio::time::timeout(
         std::time::Duration::from_millis(timeout_ms.max(1.0) as u64),
-        tokio::net::UnixStream::connect(socket_path),
+        crate::modes::daemon::daemon_client::connect_daemon_socket(socket_path),
     )
     .await
     {
@@ -1243,15 +1242,6 @@ async fn daemon_connect(
     }
 }
 
-#[cfg(windows)]
-async fn daemon_connect(
-    socket_path: &str,
-    timeout_ms: f64,
-) -> Result<tokio::net::TcpStream, String> {
-    let _ = (socket_path, timeout_ms);
-    Err("Windows named-pipe daemon transport is not implemented in this slice".to_string())
-}
-
 fn daemon_endpoint_details(socket_path: &str) -> String {
     format!("(daemon socket: {})", socket_path)
 }
@@ -1260,36 +1250,24 @@ async fn can_connect_to_daemon(socket_path: &str, timeout_ms: f64) -> bool {
     daemon_connect(socket_path, timeout_ms).await.is_ok()
 }
 
-#[cfg(unix)]
 async fn daemon_exchange(
     socket_path: &str,
     command: Option<serde_json::Value>,
     response_timeout_ms: f64,
 ) -> Result<Vec<serde_json::Value>, String> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
 
     let stream = daemon_connect(socket_path, 1000.0).await?;
-    let (read_half, mut write_half) = stream.into_split();
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     let mut lines: Vec<serde_json::Value> = Vec::new();
 
-    let mut buffer = String::new();
-    let read = tokio::time::timeout(
-        std::time::Duration::from_millis(2000),
-        reader.read_line(&mut buffer),
-    )
-    .await;
-    match read {
-        Ok(Ok(0)) | Err(_) => {}
-        Ok(Ok(_)) => {
-            if let Ok(value) = serde_json::from_str::<serde_json::Value>(buffer.trim()) {
-                lines.push(value);
-            }
-        }
-        Ok(Err(error)) => return Err(error.to_string()),
-    }
+    lines.push(read_daemon_record(&mut reader, response_timeout_ms, |value| value["type"] == "daemon_hello").await?);
 
-    if let Some(command) = command {
+    if let Some(mut command) = command {
+        let id = command.get("id").and_then(serde_json::Value::as_str)
+            .map(str::to_string).unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        command["id"] = serde_json::Value::String(id.clone());
         let line = format!(
             "{}\n",
             serde_json::to_string(&command).map_err(|error| error.to_string())?
@@ -1298,45 +1276,39 @@ async fn daemon_exchange(
             .write_all(line.as_bytes())
             .await
             .map_err(|error| error.to_string())?;
-        let mut response_buffer = String::new();
-        let read = tokio::time::timeout(
-            std::time::Duration::from_millis(response_timeout_ms.max(1.0) as u64),
-            reader.read_line(&mut response_buffer),
-        )
-        .await;
-        match read {
-            Ok(Ok(0)) | Err(_) => {}
-            Ok(Ok(_)) => {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(response_buffer.trim())
-                {
-                    lines.push(value);
-                }
-            }
-            Ok(Err(error)) => return Err(error.to_string()),
-        }
+        lines.push(read_daemon_record(&mut reader, response_timeout_ms, |value| value["type"] == "response" && value["id"] == id).await?);
     }
 
     Ok(lines)
 }
 
-#[cfg(windows)]
-async fn daemon_exchange(
-    socket_path: &str,
-    command: Option<serde_json::Value>,
-    response_timeout_ms: f64,
-) -> Result<Vec<serde_json::Value>, String> {
-    let _ = (command, response_timeout_ms);
-    daemon_connect(socket_path, 1000.0)
-        .await
-        .map(|_| Vec::new())
+async fn read_daemon_record(
+    reader: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    timeout_ms: f64,
+    accept: impl Fn(&serde_json::Value) -> bool,
+) -> Result<serde_json::Value, String> {
+    use tokio::io::AsyncBufReadExt;
+    // Keep one deadline across blank keepalives and unrelated broadcasts.
+    tokio::time::timeout(std::time::Duration::from_millis(timeout_ms.max(1.0) as u64), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).await.map_err(|error| error.to_string())? == 0 {
+                return Err("Daemon connection closed before the expected record".to_string());
+            }
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) {
+                if accept(&value) { return Ok(value); }
+            }
+        }
+    }).await.map_err(|_| format!("Timed out after {timeout_ms}ms waiting for a daemon record"))?
 }
 
 async fn daemon_request(
     socket_path: &str,
     command: serde_json::Value,
-    _timeout_ms: Option<f64>,
+    timeout_ms: Option<f64>,
 ) -> Result<serde_json::Value, String> {
-    let lines = daemon_exchange(socket_path, Some(command), 30_000.0).await?;
+    let lines = daemon_exchange(socket_path, Some(command), timeout_ms.unwrap_or(30_000.0)).await?;
     let response = lines
         .iter()
         .rev()
@@ -1469,6 +1441,39 @@ fn signal_name(signal: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn startup_windows_probe_and_request_use_named_pipe() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::windows::named_pipe::ServerOptions;
+        let socket = format!(r"\\.\pipe\optimus-startup-test-{}", uuid::Uuid::new_v4());
+        let mut server = ServerOptions::new().first_pipe_instance(true).create(&socket).unwrap();
+        let listen_path = socket.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                server.connect().await.unwrap();
+                let connected = server;
+                server = ServerOptions::new().create(&listen_path).unwrap();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(connected);
+                    let hello = serde_json::json!({"type":"daemon_hello","protocol":{"version":DAEMON_PROTOCOL_VERSION},"schemaId":DAEMON_SCHEMA_ID,"appVersion":VERSION});
+                    if writer.write_all(format!("\n{hello}\n").as_bytes()).await.is_err() { return; }
+                    let mut line = String::new();
+                    if BufReader::new(reader).read_line(&mut line).await.unwrap_or(0) == 0 { return; }
+                    let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                    let response = serde_json::json!({"type":"response","id":request["id"],"command":request["type"],"success":true,"data":{"sessions":[]}});
+                    let _ = writer.write_all(format!("\n{{\"type\":\"heartbeats_changed\"}}\n{response}\n").as_bytes()).await;
+                });
+            }
+        });
+        let version = probe_daemon_version(&socket, 500.0).await;
+        assert!(matches!(version, DaemonVersionProbe::Current(_)), "{version:?}");
+        let response = daemon_request(&socket, serde_json::json!({"type":"list","id":"probe"}), Some(500.0)).await.unwrap();
+        assert_eq!(response["id"], "probe");
+        assert_eq!(response["success"], true);
+        task.abort();
+    }
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()

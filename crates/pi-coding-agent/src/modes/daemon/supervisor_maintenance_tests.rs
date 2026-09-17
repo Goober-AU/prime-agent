@@ -196,7 +196,7 @@ async fn nine_supervisor_large_attach_spills_and_preserves_all_messages() {
     let expected = messages.clone();
     let summary = SessionSummary { id: "active".into(), session_id: "saved".into(), ..Default::default() };
     let state = crate::modes::agent_connection::types::AgentConnectionState::default();
-    let mut response = DaemonResponse::success(Some("attach"), "attach", Some(json!({"activeSessionId":"active","snapshot":{"activeSessionId":"active","messages":messages,"summary":summary,"state":state,"lastEventSequence":7,"lastEventCursor":{"generation":"generation","sequence":7}}})));
+    let mut response = DaemonResponse::success(Some("attach"), "attach", Some(json!({"activeSessionId":"active","snapshot":{"activeSessionId":"active","messages":messages,"summary":summary,"state":state,"lastEventSequence":7.0,"lastEventCursor":{"generation":"generation","sequence":7}}})));
     let supervisor = fixture.supervisor.clone(); let client = fixture.client.clone();
     let task = tokio::spawn(async move { supervisor.stream_cached_attach(&client, "active", &mut response).await });
     let first = fixture.next_frame(Duration::from_secs(10)).await.unwrap();
@@ -222,6 +222,23 @@ async fn nine_supervisor_large_attach_spills_and_preserves_all_messages() {
     let expected_messages: Vec<pi_agent_core::types::AgentMessage> = serde_json::from_value(json!(expected)).unwrap();
     assert_eq!(client_messages, expected_messages);
     assert!(!fixture.supervisor.descriptor_dir.join("snapshot-cache").join(snapshot_id).exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_snapshot_accepts_empty_legacy_worker_float_sequence() {
+    let mut fixture = SupervisorFixture::new("startup-empty-snapshot").await;
+    let summary = SessionSummary { id: "active".into(), session_id: "saved".into(), ..Default::default() };
+    let state = crate::modes::agent_connection::types::AgentConnectionState::default();
+    // Captured from the real worker: its JS-number port emitted 0.0 rather than 0.
+    let mut response = DaemonResponse::success(Some("attach"), "attach", Some(json!({"activeSessionId":"active","snapshot":{"activeSessionId":"active","messages":[],"summary":summary,"state":state,"lastEventSequence":0.0,"lastEventCursor":{"generation":"generation","sequence":0}}})));
+    let supervisor = fixture.supervisor.clone(); let client = fixture.client.clone();
+    let task = tokio::spawn(async move { supervisor.stream_cached_attach(&client, "active", &mut response).await });
+    let mut frames = Vec::new();
+    for _ in 0..3 { frames.push(fixture.next_frame(Duration::from_secs(5)).await.unwrap()); }
+    task.await.unwrap().unwrap();
+    let messages = crate::modes::agent_connection::daemon_agent_connection::test_decode_cached_attach_frames(&frames).await;
+    assert!(messages.is_empty());
+    assert_eq!(frames[2]["lastEventSequence"].as_u64(), Some(0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

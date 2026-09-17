@@ -581,7 +581,7 @@ fn notify_closed_boxed(
     })
 }
 
-async fn connect_daemon_socket(socket_path: &str) -> std::io::Result<DaemonSocketStream> {
+pub(crate) async fn connect_daemon_socket(socket_path: &str) -> std::io::Result<DaemonSocketStream> {
     #[cfg(unix)]
     {
         tokio::net::UnixStream::connect(socket_path).await

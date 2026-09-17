@@ -229,6 +229,15 @@ impl Supervisor {
     pub(super) async fn stream_cached_attach(&self, public: &Arc<PublicClient>, active: &str, response: &mut DaemonResponse) -> Result<(), String> {
         let data = response.data.as_mut().and_then(Value::as_object_mut).ok_or("Missing attach result")?;
         let snapshot = data.get_mut("snapshot").and_then(Value::as_object_mut).ok_or("Missing attach snapshot")?;
+        // Older Rust workers emitted JS-style whole floats (0.0). The public
+        // snapshot protocol requires an integer; otherwise the UI silently drops
+        // both begin/end records and times out. Preserve the exact sequence.
+        let sequence = snapshot.get("lastEventSequence").and_then(|value| {
+            value.as_u64().or_else(|| value.as_f64().filter(|number|
+                number.is_finite() && *number >= 0.0 && *number <= 9_007_199_254_740_991.0 && number.fract() == 0.0
+            ).map(|number| number as u64))
+        }).ok_or("Invalid attach snapshot event sequence")?;
+        snapshot.insert("lastEventSequence".into(), json!(sequence));
         let messages = match snapshot.remove("messages") { Some(Value::Array(messages)) => messages, _ => return Err("Invalid attach transcript".into()) };
         let count = messages.len();
         let snapshot_id = format!("supervisor-{}", uuid::Uuid::new_v4());
