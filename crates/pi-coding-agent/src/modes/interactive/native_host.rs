@@ -20,6 +20,7 @@ use crate::modes::interactive::components::{
     prime_onboarding_splash::{PrimeOnboardingSplashComponent, PrimeOnboardingSplashOptions},
     thinking_selector::ThinkingSelectorComponent,
     tool_execution::{ToolExecutionComponent, ToolExecutionOptions, ToolExecutionResult},
+    refinement_outcome_message::RefinementOutcomeMessageComponent,
     user_message::UserMessageComponent,
 };
 use crate::modes::interactive::interactive_mode_services as local;
@@ -76,6 +77,8 @@ mod native_extensions;
 mod native_extension_bridge;
 #[path = "native_host_subagents.rs"]
 mod native_subagents;
+#[path = "native_host_recovery_notice.rs"]
+mod native_recovery_notice;
 
 pub(crate) async fn run_interactive_mode(
     options: InteractiveModeSeamOptions,
@@ -119,6 +122,8 @@ impl<T: TuiComponent> TuiComponent for SharedComponent<T> {
 }
 
 struct Transcript {
+    recovery_notices: Vec<Rc<RefCell<native_recovery_notice::RecoveryNotice>>>,
+    refinement_outcomes: Vec<Rc<RefCell<RefinementOutcomeMessageComponent>>>,
     subagents: Option<Rc<RefCell<native_subagents::Bar>>>,
     agent_messages: Vec<Rc<RefCell<crate::modes::interactive::components::agent_message::AgentMessageComponent>>>,
     extension_surfaces: Option<Rc<RefCell<native_extensions::Surfaces>>>,
@@ -197,6 +202,8 @@ impl Transcript {
 
     fn new(mode: Rc<RefCell<InteractiveMode>>) -> Self {
         Self {
+            recovery_notices: Vec::new(),
+            refinement_outcomes: Vec::new(),
             subagents: None,
             agent_messages: Vec::new(),
             extension_surfaces: None,
@@ -217,6 +224,8 @@ impl Transcript {
         self.assistant = None;
         self.assistants.clear();
         self.agent_messages.clear();
+        self.recovery_notices.clear();
+        self.refinement_outcomes.clear();
         for message in initial_render_messages(messages) {
             self.message(message, false);
         }
@@ -240,6 +249,11 @@ impl Transcript {
             .cloned()
             .chain(self.history.iter().flat_map(|h| h.all_tools()))
             .collect()
+    }
+    fn set_recovery_notices_expanded(&mut self, expanded: bool) {
+        for notice in &self.recovery_notices { notice.borrow_mut().set_expanded(expanded); }
+        for outcome in &self.refinement_outcomes { outcome.borrow_mut().set_expanded(expanded); }
+        if let Some(history) = &mut self.history { history.set_recovery_notices_expanded(expanded); }
     }
     fn sent_agent_message(&mut self, tool_call_id: &str, message: wire::KernelSentAgentMessage) {
         if let Some(tool) = self.tools.get(tool_call_id) {
@@ -319,7 +333,24 @@ impl Transcript {
                 if matches!(&message, pi_agent_core::types::CustomAgentMessage::Custom { display: false, .. }) {
                     return;
                 }
+                if let pi_agent_core::types::CustomAgentMessage::Custom { custom_type, content: pi_agent_core::types::CustomMessageContent::Text(text), .. } = &message {
+                    if custom_type == crate::core::messages::IPYTHON_STATE_RESTORED_CUSTOM_TYPE {
+                        let component = Rc::new(RefCell::new(native_recovery_notice::RecoveryNotice::new(text.clone(), self.mode.borrow().tool_output_expanded)));
+                        self.rows.push(Box::new(SharedComponent(component.clone())));
+                        self.recovery_notices.push(component);
+                        return;
+                    }
+                }
                 if let pi_agent_core::types::CustomAgentMessage::Custom { custom_type, details: Some(details), .. } = &message {
+                    if custom_type == crate::core::messages::REFINEMENT_OUTCOME_CUSTOM_TYPE {
+                        if let Ok(details) = serde_json::from_value(details.clone()) {
+                            let component = Rc::new(RefCell::new(RefinementOutcomeMessageComponent::new(details)));
+                            component.borrow_mut().set_expanded(self.mode.borrow().tool_output_expanded);
+                            self.rows.push(Box::new(SharedComponent(component.clone())));
+                            self.refinement_outcomes.push(component);
+                            return;
+                        }
+                    }
                     if custom_type == crate::core::agent_messages::AGENT_MESSAGE_CUSTOM_TYPE {
                         if let Ok(details) = serde_json::from_value(details.clone()) {
                             let component = Rc::new(RefCell::new(crate::modes::interactive::components::agent_message::AgentMessageComponent::new(details, false)));
@@ -979,10 +1010,9 @@ async fn escape_repeat_step(
     let repeat_action = mode.borrow_mut().take_escape_repeat_action();
     match repeat_action {
         Some("tree") => {
-            // The tree flow dispatches the tree command from the owner loop
-            // context (interactive-mode.ts:6924-6936); the inline await keeps
-            // it deterministic for the caller.
-            let _ = dispatch_submission(connection, send, "/tree", false, None).await;
+            // The tree command waits for a dialog response. The owner loop must
+            // remain free to display that dialog and accept its input.
+            submit(connection, send, "/tree".into(), false, None);
             return true;
         }
         Some("clear") => {
@@ -1821,6 +1851,7 @@ async fn run_terminal(
                 }
                 InputAction::ToggleTools => {
                     mode.borrow_mut().toggle_tool_output_expansion();
+                    transcript.borrow_mut().set_recovery_notices_expanded(mode.borrow().tool_output_expanded);
                     side_pane.borrow_mut().set_expanded(mode.borrow().tool_output_expanded);
                     for tool in transcript.borrow().all_tools() {
                         tool.borrow_mut()
@@ -1968,6 +1999,7 @@ async fn run_terminal(
                         Event::Paste(text) => editor.borrow_mut().handle_input(&format!("\x1b[200~{text}\x1b[201~")),
                         Event::ToolsExpanded(expanded) => {
                             mode.borrow_mut().set_tools_expanded(expanded);
+                            transcript.borrow_mut().set_recovery_notices_expanded(expanded);
                             for tool in transcript.borrow().all_tools() { tool.borrow_mut().set_expanded(expanded); }
                         }
                         Event::Widget(key, factory, options) => {
@@ -4115,14 +4147,18 @@ fn apply_event(
                 .and_then(|value| serde_json::from_value::<AgentMessage>(value.clone()).ok())
             {
                 let kind = event.type_name();
+                // Durable refinement outcomes emit MessageStart only; the old
+                // end-only custom path hid successful automatic learning live.
+                let refinement_outcome = matches!(&message, AgentMessage::Custom(pi_agent_core::types::CustomAgentMessage::Custom { custom_type, .. }) if custom_type == crate::core::messages::REFINEMENT_OUTCOME_CUSTOM_TYPE);
                 if message.role() == "assistant"
-                    || (kind == "message_end" && message.role() != "assistant")
+                    || (kind == "message_start" && refinement_outcome)
+                    || (kind == "message_end" && !refinement_outcome && message.role() != "assistant")
                 {
                     transcript
                         .borrow_mut()
                         .message(message, kind != "message_end");
                 }
-                if kind == "message_end" {
+                if (kind == "message_end" && !refinement_outcome) || (kind == "message_start" && refinement_outcome) {
                     mode.borrow_mut()
                         .patch_connection_state(|s| s.message_count += 1.0);
                 }
@@ -4960,6 +4996,80 @@ mod tests {
             _listener: wire::AgentConnectionBeforeSessionInvalidateListener,
         ) -> Box<dyn Fn() + Send + Sync> {
             Box::new(|| {})
+        }
+    }
+
+    #[test]
+    fn recovery_notice_refinement_start_event_is_visible_once_and_reopens_as_a_card() {
+        use pi_agent_core::types::{CustomAgentMessage, CustomMessageContent};
+        let mode = Rc::new(RefCell::new(stash_mode("refinement-display-test")));
+        let transcript = Rc::new(RefCell::new(Transcript::new(mode.clone())));
+        let message = AgentMessage::Custom(CustomAgentMessage::Custom {
+            custom_type: crate::core::messages::REFINEMENT_OUTCOME_CUSTOM_TYPE.into(),
+            content: CustomMessageContent::Text("Refinement complete: Saved a useful lesson".into()),
+            display: true,
+            details: Some(serde_json::json!({"refinementId":"test", "summary":"Saved a useful lesson", "scope":"local", "edits":[]})), timestamp: 1,
+        });
+        apply_event(&mode, &transcript, wire::AgentConnectionSessionEvent::MessageStart { message: message.clone() });
+        let display = transcript.borrow_mut().render(100.0).join("\n");
+        assert!(display.contains("[refinement]"));
+        assert!(display.contains("Saved a useful lesson"));
+        apply_event(&mode, &transcript, wire::AgentConnectionSessionEvent::MessageEnd { message: message.clone() });
+        assert_eq!(transcript.borrow().refinement_outcomes.len(), 1);
+        transcript.borrow_mut().replace(vec![message.clone()]);
+        assert_eq!(transcript.borrow().refinement_outcomes.len(), 1);
+        transcript.borrow_mut().set_recovery_notices_expanded(true);
+        assert!(transcript.borrow().refinement_outcomes[0].borrow().expanded());
+        transcript.borrow_mut().replace_history(vec![message], 1.0);
+        transcript.borrow_mut().set_recovery_notices_expanded(false);
+        assert!(!transcript.borrow().history.as_ref().unwrap().refinement_outcomes[0].borrow().expanded());
+    }
+
+    #[test]
+    fn recovery_notice_is_compact_live_reopened_and_paged_without_changing_context() {
+        use pi_agent_core::types::{CustomAgentMessage, CustomMessageContent};
+        let mode = Rc::new(RefCell::new(stash_mode("recovery-test")));
+        let text = format!("<ipython_state_restored>\nYour Python kernel state was revived from your previous session. These names are available again: {}.\n</ipython_state_restored>", (0..4000).map(|n| format!("saved_variable_{n}")).collect::<Vec<_>>().join(", "));
+        let message = AgentMessage::Custom(CustomAgentMessage::Custom {
+            custom_type: crate::core::messages::IPYTHON_STATE_RESTORED_CUSTOM_TYPE.into(),
+            content: CustomMessageContent::Text(text.clone()), display: true,
+            details: Some(serde_json::json!({"restored": true})), timestamp: 1,
+        });
+        let original = serde_json::to_string(&message).unwrap();
+        let mut transcript = Transcript::new(mode);
+        for route in 0..3 {
+            match route {
+                0 => transcript.message(message.clone(), true),
+                1 => transcript.replace(vec![message.clone()]),
+                _ => { transcript.replace(vec![]); transcript.replace_history(vec![message.clone()], 1.0); }
+            }
+            for width in [40.0, 80.0, 150.0] {
+                let lines = transcript.render(width);
+                assert!(lines.len() <= 4, "route={route}, width={width}: {} lines", lines.len());
+                assert!(lines.join("\n").contains("4000 variables"));
+                assert!(!lines.join("\n").contains("saved_variable_3999"));
+            }
+            transcript.set_recovery_notices_expanded(true);
+            assert!(transcript.render(150.0).join("\n").contains("saved_variable_3999"));
+            transcript.set_recovery_notices_expanded(false);
+            assert!(!transcript.render(150.0).join("\n").contains("saved_variable_3999"));
+        }
+        assert_eq!(serde_json::to_string(&message).unwrap(), original);
+    }
+
+    #[test]
+    fn recovery_notice_failures_remain_visible_when_collapsed() {
+        let _mode = stash_mode("recovery-warning-test");
+        for text in [
+            "These names are available again: alpha, beta.\nThese could not be restored and must be recreated if needed: missing_dataframe, missing_module.",
+            "Your previous Python kernel state could not be revived; the kernel is starting fresh, so re-create any variables, imports, or loaded data you need.",
+            "Unknown future recovery format",
+        ] {
+            let mut notice = native_recovery_notice::RecoveryNotice::new(text.into(), false);
+            let display = notice.render(40.0).join("\n");
+            assert!(display.contains("not restored") || display.contains("check details"));
+            notice.set_expanded(true);
+            assert!(notice.render(200.0).join("\n").contains(text.lines().next().unwrap()));
         }
     }
 
@@ -6385,9 +6495,12 @@ mod tests {
         let (send, receive) = mpsc::channel();
         assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
         assert!(escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
-        let status = receive
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("the tree dispatch must answer");
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Ok(event) = receive.try_recv() { break event; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("the tree dispatch must answer");
         match status {
             HostEvent::Status(text) => assert_eq!(text, "No entries in session"),
             other => panic!(
@@ -6395,6 +6508,43 @@ mod tests {
                 event_names(std::slice::from_ref(&other))
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn escape_repeat_nonempty_tree_does_not_block_the_input_owner() {
+        let mode = Rc::new(RefCell::new(stash_mode("escape-tree-owner")));
+        let (terminal, _) = RecordingTerminal::new();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(terminal), None)));
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            ui.clone(), editor_theme(), CustomEditorOptions::default(),
+        )));
+        let recorder = Arc::new(RecordingConnection::new());
+        *recorder.session_tree.lock().unwrap() = serde_json::from_value(serde_json::json!({
+            "tree": [{"entry": {"type": "session_info", "id": "entry", "parentId": null,
+                "timestamp": "2026-09-17T00:00:00Z", "name": "large chat"}, "children": []}],
+            "leafId": "entry"
+        })).unwrap();
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let (send, receive) = mpsc::channel();
+        assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
+        assert!(tokio::time::timeout(Duration::from_millis(500),
+            escape_repeat_step(&mode, &editor, &ui, &connection, &send),
+        ).await.expect("input owner must return before the tree dialog is answered"));
+        // The owner can still edit input, then display and cancel the dialog.
+        editor.borrow_mut().editor_mut().set_text("still responsive");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match receive.try_recv() {
+                    Ok(HostEvent::CommandDialog(native_commands::Dialog::Tree(_, _, reply))) => {
+                        assert_eq!(editor.borrow().editor().get_text(), "still responsive");
+                        let _ = reply.send(None);
+                    }
+                    Ok(HostEvent::Completed(result)) => { result.unwrap(); break; }
+                    _ => tokio::task::yield_now().await,
+                }
+            }
+        }).await.expect("cancelled tree must settle");
+        recorder.only_call("get_session_tree");
     }
 
     /// A-06 fix: only lines that reach the model enter the up-arrow history.

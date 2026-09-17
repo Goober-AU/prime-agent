@@ -23,6 +23,8 @@ import uuid
 from collections.abc import Iterator
 from typing import Any
 
+from .snapshot_serializer import dump_snapshot_value
+
 CAS_FORMAT = "prime-agent-kernel-snapshot-cas"
 CAS_VERSION = 2
 CAS_FORMAT_MARKER = b"prime-agent-kernel-snapshot-cas-v2\n"
@@ -576,7 +578,7 @@ def _serialize_namespace(
 
         buffer = io.BytesIO()
         try:
-            dill.dump(value, CappedWriter(buffer, limit))
+            dump_snapshot_value(dill, value, buffer, CappedWriter(buffer, limit))
             blob = buffer.getvalue()
         except SnapshotSizeLimitExceeded:
             if not prune_oversized and remaining < max_variable_bytes:

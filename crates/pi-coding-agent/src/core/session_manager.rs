@@ -4098,8 +4098,8 @@ impl SessionManager {
     }
 
     pub fn get_session_name(&self) -> Option<String> {
-        let entries = self.get_entries();
-        for entry in entries.iter().rev() {
+        // Metadata is read on every streamed event; do not clone the transcript.
+        for entry in self.file_entries.iter().rev() {
             if entry_type(entry) == "session_info" {
                 return entry
                     .get("name")
@@ -4112,8 +4112,7 @@ impl SessionManager {
     }
 
     pub fn get_session_state(&self) -> Option<SessionState> {
-        let entries = self.get_entries();
-        for entry in entries.iter().rev() {
+        for entry in self.file_entries.iter().rev() {
             if entry_type(entry) == "session_state" {
                 let status = entry
                     .get("state")

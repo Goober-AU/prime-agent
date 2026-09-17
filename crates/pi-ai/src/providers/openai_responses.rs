@@ -828,29 +828,41 @@ async fn api_error_from_response(response: reqwest::Response) -> ThrownValue {
 /// Local SSE buffer for the OpenAI Responses transport (`data: ...` frames).
 #[derive(Default)]
 pub struct SseBuffer {
-    buffer: String,
+    line: Vec<u8>,
+    data: Vec<String>,
+    skip_lf: bool,
     pub error: Option<String>,
 }
 
 impl SseBuffer {
     /// Appends a chunk and returns the complete `data:` payloads it completed.
     pub fn push(&mut self, bytes: &[u8]) -> Vec<Value> {
-        self.buffer.push_str(&String::from_utf8_lossy(bytes));
         let mut events: Vec<Value> = Vec::new();
-        while let Some(index) = self.buffer.find("\n\n") {
-            let chunk = self.buffer[..index].to_string();
-            self.buffer = self.buffer[index + 2..].to_string();
-            let data = chunk
-                .split('\n')
-                .filter(|line| line.starts_with("data:"))
-                .map(|line| line[5..].trim().to_string())
-                .collect::<Vec<_>>()
-                .join("\n");
-            let data = data.trim().to_string();
-            if !data.is_empty() && data != "[DONE]" {
-                if let Ok(parsed) = serde_json::from_str::<Value>(&data) {
-                    events.push(parsed);
+        for &byte in bytes {
+            if self.skip_lf {
+                self.skip_lf = false;
+                if byte == b'\n' { continue; }
+            }
+            if byte != b'\r' && byte != b'\n' {
+                self.line.push(byte);
+                continue;
+            }
+            self.skip_lf = byte == b'\r';
+            // Decode only complete lines: a UTF-8 scalar can span body chunks.
+            if self.line.is_empty() {
+                let data = self.data.join("\n");
+                self.data.clear();
+                if !data.is_empty() && data.trim() != "[DONE]" {
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&data) {
+                        events.push(parsed);
+                    }
                 }
+            } else {
+                let line = String::from_utf8_lossy(&self.line);
+                if let Some(data) = line.strip_prefix("data:") {
+                    self.data.push(data.strip_prefix(' ').unwrap_or(data).to_string());
+                }
+                self.line.clear();
             }
         }
         events
@@ -1226,6 +1238,22 @@ mod tests {
             Some(&Some("session-1".to_string()))
         );
         assert_eq!(client.default_headers.get("x-test"), Some(&Some("1".to_string())));
+    }
+
+    #[test]
+    fn sse_buffer_accepts_crlf_and_preserves_split_unicode_immediately() {
+        let frame = "event: response.output_text.delta\r\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"Ready ✓ 日本\"}\r\n\r\n";
+        let mut buffer = SseBuffer::default();
+        let events: Vec<_> = frame.as_bytes().iter().flat_map(|byte| buffer.push(&[*byte])).collect();
+        assert_eq!(events.len(), 1, "a complete frame must not wait for stream close");
+        assert_eq!(events[0]["delta"], json!("Ready ✓ 日本"));
+    }
+
+    #[test]
+    fn sse_buffer_handles_mixed_newlines_multiline_and_comments() {
+        let mut buffer = SseBuffer::default();
+        let events = buffer.push(b": keepalive\r\rdata: {\"type\":\rdata: \"response.created\"}\r\rdata: [DONE]\n\n");
+        assert_eq!(events, vec![json!({"type":"response.created"})]);
     }
 
     #[test]
