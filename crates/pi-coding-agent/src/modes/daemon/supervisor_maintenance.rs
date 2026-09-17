@@ -29,6 +29,13 @@ fn same_registration(left: &DaemonWorkerDescriptor, right: &DaemonWorkerDescript
         && left.owner_client_id == right.owner_client_id
 }
 
+pub(super) fn permanent_stop_cleanup_error(error: &str) -> bool {
+    matches!(error,
+        "Uncertain operation has no saved transcript; recovery journal retained"
+        | "Malformed orphan record; recovery journal retained"
+        | "Unverified orphan record; recovery journal retained")
+}
+
 impl Supervisor {
     pub(super) fn invalidate_worker_input_pauses(&self, worker: &Arc<Worker>) {
         let mut owners = HashSet::new();
@@ -127,25 +134,44 @@ impl Supervisor {
     }
 
     pub(super) fn park_worker_recovery_failure(&self, worker: &Arc<Worker>, error: &str) {
+        let id = worker.descriptor.lock().unwrap().worker_id.clone();
         let descriptor = {
+            let workers = self.workers.lock().unwrap();
+            if !workers.get(&id).is_some_and(|current| Arc::ptr_eq(current, worker)) { return; }
             let mut descriptor = worker.descriptor.lock().unwrap();
             // A failed relaunch may already have installed a newer generation.
             // Never let the retired Arc overwrite its replacement's descriptor.
-            if !self.workers.lock().unwrap().get(&descriptor.worker_id).is_some_and(|current| Arc::ptr_eq(current, worker)) { return; }
             descriptor.lifecycle = DAEMON_WORKER_LIFECYCLE_FAILED.into();
             descriptor.last_error = Some(error.into());
             descriptor.last_failure_at = Some(chrono::Utc::now().to_rfc3339());
+            if let Err(error) = self.persist_worker(&descriptor) { eprintln!("Could not persist failed recovery {}: {error}", descriptor.worker_id); }
             descriptor.clone()
         };
-        if let Err(error) = self.persist_worker(&descriptor) { eprintln!("Could not persist failed recovery {}: {error}", descriptor.worker_id); }
         self.mark_worker_roster_entries(worker, Some(DAEMON_WORKER_LIFECYCLE_FAILED));
         eprintln!("Session worker {} recovery parked: {error}", descriptor.worker_id);
+    }
+
+    pub(super) fn park_worker_stop_cleanup_failure(&self, worker: &Arc<Worker>, error: &str) {
+        let id = worker.descriptor.lock().unwrap().worker_id.clone();
+        {
+            let workers = self.workers.lock().unwrap();
+            if !workers.get(&id).is_some_and(|current| Arc::ptr_eq(current, worker)) { return; }
+            let mut descriptor = worker.descriptor.lock().unwrap();
+            if descriptor.stop_requested_at.is_none() { return; }
+            descriptor.lifecycle = DAEMON_WORKER_LIFECYCLE_FAILED.into();
+            descriptor.last_error = Some(format!("Stop cleanup parked; retained descriptor and journals require attention: {error}"));
+            descriptor.last_failure_at = Some(chrono::Utc::now().to_rfc3339());
+            if let Err(error) = self.persist_worker(&descriptor) { eprintln!("Could not persist parked stop cleanup {id}: {error}"); }
+        }
+        self.mark_worker_roster_entries(worker, Some(DAEMON_WORKER_LIFECYCLE_FAILED));
+        eprintln!("Session worker {id} stop cleanup parked; recovery evidence retained: {error}");
     }
 
     pub(super) async fn reclaim_stale_worker_registration(self: &Arc<Self>, worker: &Arc<Worker>) -> Result<bool, String> {
         let descriptor = worker.descriptor.lock().unwrap().clone();
         if worker.client.lock().unwrap().as_ref().is_some_and(|client| client.is_connected()) || worker.recovery.load(Ordering::SeqCst) { return Ok(false); }
         if descriptor.stop_requested_at.is_none() && (descriptor.lifecycle != DAEMON_WORKER_LIFECYCLE_FAILED || descriptor.owner_client_id.is_some()) { return Ok(false); }
+        if stop_cleanup_is_parked(&descriptor) { return Err("Session worker stop cleanup is parked; retained recovery journals require attention".into()); }
         if is_stopping_process_alive(&ProcessIdentity { pid: descriptor.pid as i64, process_start_id: descriptor.process_start_id.clone() }) { return Ok(false); }
         if descriptor.stop_requested_at.is_some() {
             self.stop_worker(worker, descriptor.archive_on_stop == Some(true), false).await?;

@@ -13174,7 +13174,15 @@ impl AgentSession {
         let local_state = local_dir
             .as_deref()
             .map(|dir| load_harness_state(dir, HarnessScope::Local));
-        let planning_state = merge_harness_states(&global_state, local_state.as_ref());
+        let requested_scope = if options.global.unwrap_or(false) {
+            HarnessScope::Global
+        } else {
+            HarnessScope::Local
+        };
+        let planning_state = match requested_scope {
+            HarnessScope::Global => global_state.clone(),
+            HarnessScope::Local => merge_harness_states(&global_state, local_state.as_ref()),
+        };
         let history = self.load_refinement_history();
         let rollback_target = options
             .rollback_id
@@ -13182,7 +13190,7 @@ impl AgentSession {
             .and_then(|rollback_id| history.iter().find(|item| &item.id == rollback_id));
         let mut baseline_scope = rollback_target
             .and_then(infer_refinement_result_scope)
-            .unwrap_or(HarnessScope::Local);
+            .unwrap_or(requested_scope);
         let mut baseline_dir = match baseline_scope {
             HarnessScope::Global => Some(global_dir.clone()),
             HarnessScope::Local => local_dir.clone(),
@@ -13226,11 +13234,6 @@ impl AgentSession {
         if options.rollback_id.is_none()
             && self.has_extension_handlers("session_before_refine")
         {
-            let requested_scope = if options.global.unwrap_or(false) {
-                HarnessScope::Global
-            } else {
-                HarnessScope::Local
-            };
             let conversation_text = serialize_conversation(&convert_to_llm(
                 &self.agent.state().messages,
                 &Default::default(),
@@ -15409,7 +15412,9 @@ impl AgentSession {
             .iter()
             .filter_map(compaction_session_entry_from)
             .collect();
-        // TS 8312: the summarizer never sees harness digests.
+        // tokensBefore measures the active context, including unpersisted outcomes,
+        // not transcript size. Native compaction receives this same context.
+        // Harness digests are regenerated and excluded from both.
         let messages = without_harness_digests_for_compaction(&self.messages());
         let preparation = prepare_compaction(
             &path_entries,
@@ -15501,7 +15506,13 @@ impl AgentSession {
             },
             None => {
                 let provider_context = self.compaction_provider_context(&messages, &signal).await;
-                let request_options = self.compaction_request_options();
+                let mut request_options = self.compaction_request_options();
+                // Native compaction does not use the text-summary call runner.
+                request_options.simple.stream.headers = if auth.headers.is_empty() {
+                    None
+                } else {
+                    Some(auth.headers.clone())
+                };
                 // TS 8322: `providerRetryPolicy(this.settingsManager)`.
                 let retry = self.provider_retry_policy();
                 crate::core::compaction::compaction::compact(
@@ -15723,26 +15734,26 @@ fn compaction_session_entry_from(entry: &SessionEntry) -> Option<CompactionSessi
                 message: agent_message_from_value(message),
             })
         }
-        "custom" => {
-            let message = entry.get("message")?;
+        "custom_message" => {
             Some(CompactionSessionEntry::CustomMessage {
                 id,
                 parent_id,
-                custom_type: message
+                custom_type: entry
                     .get("customType")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_string(),
-                content: serde_json::from_value(message.get("content").cloned().unwrap_or(Value::Null))
+                content: serde_json::from_value(entry.get("content").cloned().unwrap_or(Value::Null))
                     .unwrap_or(CustomMessageContent::Text(String::new())),
-                details: message.get("details").cloned(),
-                display: message
+                details: entry.get("details").cloned(),
+                display: entry
                     .get("display")
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
-                timestamp: message
+                timestamp: entry
                     .get("timestamp")
-                    .map(|value| value.to_string())
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
                     .unwrap_or_default(),
             })
         }
@@ -15803,6 +15814,36 @@ fn compaction_session_entry_from(entry: &SessionEntry) -> Option<CompactionSessi
             parent_id,
             entry_type: other.to_string(),
         }),
+    }
+}
+
+#[cfg(test)]
+mod core001_entry_tests {
+    use super::*;
+
+    #[test]
+    fn core001_real_custom_message_is_a_turn_anchor_with_unquoted_timestamp() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().to_str().unwrap();
+        let mut manager = SessionManager::in_memory(Some(dir), Some(dir)).unwrap();
+        let id = manager.append_custom_message_entry(
+            "ipython_state",
+            &crate::core::session_manager::CustomMessageEntryContent::Text("restored kernel".to_string()),
+            false,
+            Some(serde_json::json!({"count": 2})),
+        ).unwrap();
+        manager.append_custom_entry("metadata", Some(serde_json::json!({"internal": true}))).unwrap();
+        let entries = manager.get_branch(None);
+        let converted: Vec<_> = entries.iter().filter_map(compaction_session_entry_from).collect();
+        let index = converted.iter().position(|entry| entry.id() == id).unwrap();
+        let CompactionSessionEntry::CustomMessage { timestamp, display, details, .. } = &converted[index] else {
+            panic!("custom_message must be a compaction message, not Other");
+        };
+        assert!(chrono::DateTime::parse_from_rfc3339(timestamp).is_ok());
+        assert!(!display);
+        assert_eq!(details.as_ref().unwrap()["count"], 2);
+        assert_eq!(crate::core::compaction::compaction::find_turn_start_index(&converted, index, 0), Some(index));
+        assert!(matches!(converted.last(), Some(CompactionSessionEntry::Other { entry_type, .. }) if entry_type == "custom"));
     }
 }
 
@@ -20217,6 +20258,76 @@ mod t11_refinement_lifecycle_tests {
         );
         t.session.dispose_async(Some(false)).await;
         t2.session.dispose_async(Some(false)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn core002_refinement_plans_and_baselines_use_the_requested_scope() {
+        let log: EventLog = Arc::new(Mutex::new(Vec::new()));
+        let t = T11Session::new(
+            "core002-scope", false, serde_json::json!({"enabled": false}),
+            vec![logging_extension(&["session_before_refine"], Arc::clone(&log), Some(serde_json::json!({
+                "proposal": {
+                    "summary": "update global fixture", "rationale": "scope regression", "expectedOutcome": "scoped edit",
+                    "edits": [{"action": "update", "kind": "memory", "id": "global-only", "title": "global-only", "content": "updated global fixture"}]
+                }
+            })))],
+        ).await;
+        append_user_turn(&t);
+        let global_dir = get_global_harness_state_dir(&crate::config::get_agent_dir());
+        for (scope, dir, id) in [
+            (HarnessScope::Global, global_dir.clone(), "global-only"),
+            (HarnessScope::Local, t.local_harness_dir(), "local-only"),
+        ] {
+            let mut state = load_harness_state(&dir, scope);
+            let entry = crate::core::refinement::refinement::HarnessEntry {
+                id: id.to_string(), kind: crate::core::refinement::refinement::RefinementKind::Memory,
+                scope: Some(scope), title: id.to_string(), content: format!("original {id}"),
+                path: "general".to_string(), reference: serde_json::Map::new(),
+                arguments: serde_json::Map::new(), metadata: serde_json::Map::new(),
+                source: "core002".to_string(), created_at: now_iso(), updated_at: now_iso(), version: 1,
+            };
+            state.entries.get_mut("memory").unwrap().insert(id.to_string(), entry);
+            save_harness_state(&dir, &state).unwrap();
+        }
+        let options = RefineOptions { global: Some(true), ..Default::default() };
+        let plan = t.session.plan_refine_with_options(&options).await.unwrap();
+        let prep = log.lock().unwrap()[0]["preparation"].clone();
+        assert!(prep["planningState"]["entries"]["memory"].get("global-only").is_some());
+        assert!(prep["planningState"]["entries"]["memory"].get("local-only").is_none());
+        let baseline = &plan.baseline_state.as_ref().unwrap().entries["memory"];
+        assert!(baseline.contains_key("global-only"));
+        assert!(!baseline.contains_key("local-only"));
+        let result = t.session.apply_refine(&plan, &options, REFINEMENT_SOURCE_USER, None).await.unwrap();
+        assert!(result.applied_edits[0].applied, "global update must not fail against a local baseline: {:?}", result.applied_edits);
+        assert_eq!(load_harness_state(&global_dir, HarnessScope::Global).entries["memory"]["global-only"].content, "updated global fixture");
+        assert_eq!(t.local_harness().entries["memory"]["local-only"].content, "original local-only");
+
+        let local_plan = t.session.plan_refine_with_options(&RefineOptions::default()).await.unwrap();
+        let prep = log.lock().unwrap().last().unwrap()["preparation"].clone();
+        assert!(prep["planningState"]["entries"]["memory"].get("global-only").is_some());
+        assert!(prep["planningState"]["entries"]["memory"].get("local-only").is_some());
+        let baseline = &local_plan.baseline_state.as_ref().unwrap().entries["memory"];
+        assert!(baseline.contains_key("local-only"));
+        assert!(!baseline.contains_key("global-only"));
+
+        let mut invalid_plan = t.session.plan_refine_with_options(&options).await.unwrap();
+        invalid_plan.proposal.edits[0].id = Some("local:local-only".to_string());
+        let rejected = t.session.apply_refine(&invalid_plan, &options, REFINEMENT_SOURCE_USER, None).await.unwrap();
+        assert!(!rejected.applied_edits[0].applied);
+        assert_eq!(rejected.applied_edits[0].error.as_deref(), Some("entry not found"));
+        assert_eq!(t.local_harness().entries["memory"]["local-only"].content, "original local-only");
+        assert!(!load_harness_state(&global_dir, HarnessScope::Global).entries["memory"].contains_key("local-only"));
+
+        let stale_plan = t.session.plan_refine_with_options(&options).await.unwrap();
+        let mut global = load_harness_state(&global_dir, HarnessScope::Global);
+        global.entries.get_mut("memory").unwrap().get_mut("global-only").unwrap().content = "newer concurrent edit".to_string();
+        save_harness_state(&global_dir, &global).unwrap();
+        let rejected = t.session.apply_refine(&stale_plan, &options, REFINEMENT_SOURCE_USER, None).await.unwrap();
+        assert!(!rejected.applied_edits[0].applied);
+        assert_eq!(rejected.applied_edits[0].error.as_deref(), Some("entry changed during refinement planning"));
+        assert_eq!(load_harness_state(&global_dir, HarnessScope::Global).entries["memory"]["global-only"].content, "newer concurrent edit");
+        assert_eq!(t.provider.call_count(), 0, "extension test must stay offline");
+        t.session.dispose_async(Some(false)).await;
     }
 
     /// H-04: `refine_complete` must reach the installed extension runner after

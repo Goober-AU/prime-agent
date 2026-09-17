@@ -1780,12 +1780,10 @@ impl InteractiveMode {
         let Some(model_fallback_message) = model_fallback_message else {
             return ModelFallbackWarningAction::Suppress;
         };
-        // The no-models warning is a snapshot from whichever process created the
-        // session; trust the live connection over it (e.g. credentials only
-        // visible to the daemon, or added after the snapshot was taken).
-        if crate::core::auth_guidance::is_no_models_available_message(Some(model_fallback_message))
-            && self.get_current_model().is_some()
-        {
+        let model = self.get_current_model();
+        if crate::core::auth_guidance::is_obsolete_model_fallback_message(
+            Some(model_fallback_message), model.as_ref().map(|model| (model.provider.as_str(), model.id.as_str())),
+        ) {
             return ModelFallbackWarningAction::Suppress;
         }
         ModelFallbackWarningAction::Show
@@ -3021,6 +3019,18 @@ impl InteractiveMode {
     pub fn apply_connection_state_snapshot(&mut self, state: AgentConnectionState) {
         self.bind_prompt_stash_session(&state.session_id);
         self.connection_state = Some(state.clone());
+        if let Some(warning) = self.options.model_fallback_message.clone() {
+            if self.get_model_fallback_warning_action(Some(&warning)) == ModelFallbackWarningAction::Suppress {
+                let rendered = theme().fg("warning", &format!("\u{26a0} {warning}"));
+                let before = self.chat_container.len();
+                self.chat_container.children.retain(|child| child.as_any().downcast_ref::<Text>().is_none_or(|text| text.text() != rendered));
+                if before != self.chat_container.len() {
+                    self.last_status_text_index = None;
+                    self.last_status_spacer_index = None;
+                }
+                self.options.model_fallback_message = None;
+            }
+        }
         // Don't touch contextUsageTokenBaseline: a mid-stream snapshot reflects only completed
         // turns (the in-flight message isn't persisted yet), so the in-flight delta must keep
         // accumulating. The baseline is managed at turn end (refreshConnectionContextUsage) and
@@ -5178,6 +5188,29 @@ mod tests {
             mode.get_model_fallback_warning_action(Some(&no_models)),
             ModelFallbackWarningAction::Suppress
         );
+    }
+
+    #[test]
+    fn successful_model_change_removes_only_obsolete_restore_warning() {
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
+        let mut mode = test_mode();
+        let warning = "Could not restore model github-copilot/gpt-5.6-sol. Using ollama-cloud/glm-5.3-flash";
+        mode.options.model_fallback_message = Some(warning.into());
+        mode.apply_connection_state_snapshot(AgentConnectionState {
+            model: Some(Model::new("glm-5.3-flash", "GLM", "openai-completions", "ollama-cloud", "https://x.invalid")),
+            ..Default::default()
+        });
+        assert_eq!(mode.get_model_fallback_warning_action(Some(warning)), ModelFallbackWarningAction::Show);
+        mode.show_warning(warning);
+        mode.show_error("keep this error");
+        mode.apply_connection_state_snapshot(AgentConnectionState {
+            model: Some(Model::new("gpt-5.6-sol", "Sol", "openai-responses", "github-copilot", "https://x.invalid")),
+            ..Default::default()
+        });
+        let rendered = mode.chat_container.children.iter().flat_map(|child| child.render(120)).collect::<Vec<_>>().join("\n");
+        assert!(!rendered.contains("Could not restore"));
+        assert!(rendered.contains("keep this error"));
+        assert!(mode.options.model_fallback_message.is_none());
     }
 
     #[test]

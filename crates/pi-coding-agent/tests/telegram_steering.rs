@@ -62,6 +62,10 @@ struct Harness {
 
 impl Harness {
     fn new(streaming: bool, paired: bool) -> Self {
+        Self::with_fetcher(streaming, paired, Arc::new(NoNetwork))
+    }
+
+    fn with_fetcher(streaming: bool, paired: bool, fetcher: Arc<dyn TelegramFetcher>) -> Self {
         let directory = tempfile::tempdir().unwrap();
         let store = TelegramStore::new(directory.path().to_str().unwrap());
         let transport = Arc::new(RecordingTransport {
@@ -83,7 +87,7 @@ impl Harness {
             session_file: None, paired_user_id: paired.then_some(42.0),
             pairing: (!paired).then_some(pairing),
         };
-        let api = Arc::new(TelegramApi::new(&settings.bot_token, "https://unused.invalid", Arc::new(NoNetwork)).unwrap());
+        let api = Arc::new(TelegramApi::new(&settings.bot_token, "https://unused.invalid", fetcher).unwrap());
         let connection = Arc::new(DaemonAgentConnection::new(
             transport.clone(), "telegram-test".into(), DaemonAgentConnectionOptions::default(),
         ));
@@ -103,6 +107,116 @@ impl Harness {
         }).await.unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(2), self.bridge.wait_for_dispatch()).await.unwrap();
     }
+}
+
+struct PendingPoll {
+    started: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl TelegramFetcher for PendingPoll {
+    fn fetch(&self, url: String, _: String, _: u64) -> BoxFuture<Result<TelegramHttpResponse, String>> {
+        let polling = url.ends_with("/getUpdates");
+        let started = self.started.clone();
+        Box::pin(async move {
+            if polling {
+                started.store(true, std::sync::atomic::Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+            Ok(TelegramHttpResponse { ok: true, status: 200.0, body: br#"{"ok":true,"result":true}"#.to_vec() })
+        })
+    }
+}
+
+#[tokio::test]
+async fn long_poll_does_not_lock_out_replies_or_worker_timers() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    let started = Arc::new(AtomicBool::new(false));
+    let harness = Harness::with_fetcher(false, true, Arc::new(PendingPoll { started: started.clone() }));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let bridge = harness.bridge.clone();
+    let cancel_watch = cancel.clone();
+    let watcher = async move {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !started.load(Ordering::SeqCst) { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        let (sent, mut received) = tokio::sync::oneshot::channel();
+        // A separate OS thread keeps a baseline mutex stall from blocking test cancellation.
+        let thread = std::thread::spawn(move || { let _ = sent.send(bridge.enqueue_reply("Synthetic reply")); });
+        let queued = tokio::time::timeout(Duration::from_millis(400), &mut received).await.is_ok();
+        cancel_watch.cancel();
+        (queued, thread)
+    };
+    let (run, (queued, thread)) = tokio::join!(harness.bridge.run(Some(cancel)), watcher);
+    run.unwrap();
+    thread.join().unwrap();
+    assert!(queued, "Telegram held its state lock across the long poll, blocking replies and worker progress");
+}
+
+#[derive(Default)]
+struct PollAndReply {
+    offsets: Mutex<Vec<f64>>,
+    sent: Mutex<Vec<String>>,
+}
+
+impl TelegramFetcher for PollAndReply {
+    fn fetch(&self, url: String, body: String, _: u64) -> BoxFuture<Result<TelegramHttpResponse, String>> {
+        let body: Value = serde_json::from_str(&body).unwrap();
+        let result = if url.ends_with("/getUpdates") {
+            let mut offsets = self.offsets.lock().unwrap();
+            offsets.push(body["offset"].as_f64().unwrap());
+            if offsets.len() > 1 {
+                return Box::pin(std::future::pending());
+            }
+            let update = json!({"update_id": 1, "message": {
+                "message_id": 2, "date": 1000, "from": {"id": 42, "is_bot": false},
+                "chat": {"id": 42, "type": "private"}, "text": "Polled steering message"
+            }});
+            // Duplicate delivery must still dispatch only once.
+            json!([update.clone(), update])
+        } else if url.ends_with("/sendMessage") {
+            self.sent.lock().unwrap().push(body["text"].as_str().unwrap().to_owned());
+            json!({"message_id": 3})
+        } else { json!(true) };
+        Box::pin(async move { Ok(TelegramHttpResponse {
+            ok: true, status: 200.0, body: serde_json::to_vec(&json!({"ok": true, "result": result})).unwrap(),
+        }) })
+    }
+}
+
+#[tokio::test]
+async fn running_bridge_polls_steers_delivers_and_cancels_without_duplicate_dispatch() {
+    use std::time::Duration;
+    let server = Arc::new(PollAndReply::default());
+    let harness = Harness::with_fetcher(true, true, server.clone());
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let watcher = async {
+        let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if harness.transport.requests.lock().unwrap().iter().any(|request| request["type"] == "prompt") { break; }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            harness.bridge.enqueue_reply("Synthetic polling reply").unwrap();
+            while server.sent.lock().unwrap().is_empty() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await;
+        cancel.cancel();
+        delivered
+    };
+    let (run, delivered) = tokio::join!(harness.bridge.run(Some(cancel.clone())), watcher);
+    run.unwrap();
+    delivered.expect("incoming messages and periodic replies must progress while polling");
+    let requests = harness.transport.requests.lock().unwrap();
+    let prompts: Vec<_> = requests.iter().filter(|request| request["type"] == "prompt").collect();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0]["message"], "Polled steering message");
+    assert_eq!(prompts[0]["streamingBehavior"], "steer");
+    assert_eq!(*server.sent.lock().unwrap(), vec!["Synthetic polling reply"]);
+    assert_eq!(*server.offsets.lock().unwrap(), vec![0.0, 2.0]);
+    let state = harness.store.state(7.0).unwrap();
+    assert!(state.inbox.is_empty());
+    assert!(state.outbox.is_empty());
 }
 
 #[tokio::test]

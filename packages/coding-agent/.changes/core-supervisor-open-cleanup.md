@@ -1,0 +1,2 @@
+- Fixed unrelated chats waiting behind one stalled session opening while preserving duplicate-open protection.
+- Fixed failed worker cleanup retrying indefinitely, retaining recovery evidence for manual attention after bounded retries.

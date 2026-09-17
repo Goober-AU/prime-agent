@@ -260,6 +260,19 @@ fn exec_sync_hidden_with_timeout(
 /// `executeCommandUncached(commandConfig)`.
 fn execute_command_uncached(command_config: &str) -> Option<String> {
     let command = &command_config[1..];
+    #[cfg(windows)]
+    if let Some((executable, args)) = literal_powershell_file_command(command) {
+        return configured_shell_result(spawn_sync_hidden_with_timeout(
+            &executable,
+            &args,
+            SpawnOptions {
+                capture_stdout: true,
+                ..Default::default()
+            },
+            CONFIG_VALUE_TIMEOUT_MS,
+        ))
+        .value;
+    }
     if process_platform_is_win32() {
         let configured_result = execute_with_configured_shell(command);
         if configured_result.executed {
@@ -270,6 +283,45 @@ fn execute_command_uncached(command_config: &str) -> Option<String> {
     } else {
         execute_with_default_shell(command)
     }
+}
+
+/// Avoid Git Bash's native-process descendants for literal PowerShell helpers.
+/// Shell expressions and script arguments deliberately retain the shell path.
+#[cfg(windows)]
+fn literal_powershell_file_command(command: &str) -> Option<(String, Vec<String>)> {
+    if command.contains(['\r', '\n']) {
+        return None;
+    }
+    static PATTERN: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pattern = PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?ix)^\s*
+            (?:"(?P<quoted_exe>[^"$`\r\n]+)"|'(?P<single_exe>[^'\r\n]+)'|(?P<bare_exe>[^\s"'\\$`;&|<>()\[\]*?!{}]+))
+            (?P<options>(?:\s+-(?:NoLogo|NoProfile|NonInteractive|ExecutionPolicy\s+(?:Bypass|RemoteSigned|AllSigned|Restricted|Unrestricted)|WindowStyle\s+Hidden))*)
+            \s+-File\s+
+            (?:"(?P<quoted_path>[^"$`\r\n]+)"|'(?P<single_path>[^'\r\n]+)'|(?P<bare_path>[^\s"'\\$`;&|<>()\[\]*?!{}]+))\s*$"#,
+        )
+        .expect("literal PowerShell helper pattern")
+    });
+    let captures = pattern.captures(command)?;
+    let field = |names: &[&str]| {
+        names.iter().find_map(|name| captures.name(name).map(|value| value.as_str()))
+    };
+    let executable = field(&["quoted_exe", "single_exe", "bare_exe"])?;
+    let name = executable.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    if !matches!(name.as_str(), "powershell" | "powershell.exe" | "pwsh" | "pwsh.exe") {
+        return None;
+    }
+    let script = field(&["quoted_path", "single_path", "bare_path"])?;
+    if !std::path::Path::new(script).is_absolute() || !script.to_ascii_lowercase().ends_with(".ps1") {
+        return None;
+    }
+    let mut args: Vec<String> = captures["options"].split_whitespace().map(str::to_string).collect();
+    if !args.iter().any(|arg| arg.eq_ignore_ascii_case("-WindowStyle")) {
+        args.extend(["-WindowStyle".to_string(), "Hidden".to_string()]);
+    }
+    args.extend(["-File".to_string(), script.to_string()]);
+    Some((executable.to_string(), args))
 }
 
 /// `process.platform === "win32"`.
@@ -356,6 +408,59 @@ pub fn resolve_headers_or_throw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_file_credential_runs_directly_without_a_shell_or_console() {
+        let directory = tempfile::Builder::new().prefix("credential helper ").tempdir().unwrap();
+        let path = directory.path().join("helper with space's.ps1");
+        std::fs::write(&path, r#"$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CredentialWindowProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'
+$parentId = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID").ParentProcessId
+Write-Output ($parentId.ToString() + ':' + [CredentialWindowProbe]::GetConsoleWindow().ToInt64().ToString() + ':isolated-test-key')
+"#).unwrap();
+        let config = format!(
+            "!powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+            path.to_string_lossy().replace('\\', "/")
+        );
+        assert_eq!(
+            resolve_config_value_uncached(&config),
+            Some(format!("{}:0:isolated-test-key", std::process::id())),
+            "literal PowerShell helpers must be direct children with no console, not Bash descendants"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_file_command_preserves_literal_paths_and_flags() {
+        let command = r#""C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "C:\helper with space's\credential.ps1""#;
+        let (executable, args) = literal_powershell_file_command(command).unwrap();
+        assert_eq!(executable, r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe");
+        assert_eq!(args, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", r"C:\helper with space's\credential.ps1"]);
+        let (_, args) = literal_powershell_file_command(
+            "pwsh -WindowStyle Hidden -File 'C:/helper path/credential.ps1'"
+        ).unwrap();
+        assert_eq!(args, ["-WindowStyle", "Hidden", "-File", "C:/helper path/credential.ps1"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_file_command_does_not_reinterpret_shell_expressions() {
+        for command in [
+            "powershell -File 'C:/helper.ps1' | head -1",
+            "powershell -File 'C:/helper.ps1' && echo second",
+            "powershell -File \"$HOME/helper.ps1\"",
+            "powershell -File \"C:/$(echo name).ps1\"",
+            "powershell -File relative.ps1",
+            "powershell -File 'C:/helper.ps1' argument",
+            "powershell -Command 'Write-Output value'",
+            "echo powershell -File 'C:/helper.ps1'",
+            "powershell -WindowStyle Normal -File 'C:/helper.ps1'",
+            "powershell\n-File 'C:/helper.ps1'",
+        ] {
+            assert!(literal_powershell_file_command(command).is_none(), "{command}");
+        }
+    }
 
     const VAR: &str = "PRIME_AGENT_TEST_CREDENTIAL_VAR";
 

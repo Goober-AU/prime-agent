@@ -1131,9 +1131,12 @@ impl TelegramBridge {
         }
         let mut failures = 0.0f64;
         while !controller.is_cancelled() {
+            // Drop the state guard before polling or accepting an update. Holding
+            // it through the match blocks replies, delivery timers and accept().
+            let offset = self.shared.state.lock().unwrap().offset;
             match self
                 .api
-                .updates(self.shared.state.lock().unwrap().offset, request_signal.clone())
+                .updates(offset, request_signal.clone())
                 .await
             {
                 Ok(updates) => {

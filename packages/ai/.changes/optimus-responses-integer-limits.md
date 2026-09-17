@@ -1,0 +1,1 @@
+- Fixed Responses API output-token limits being serialized as decimals; normal chat and summary requests now send integer counts and reject invalid limits locally.

@@ -63,11 +63,16 @@ mod supervisor_messaging_safety_tests;
 #[path = "supervisor_maintenance_tests.rs"]
 mod supervisor_maintenance_tests;
 
+#[cfg(test)]
+#[path = "supervisor_core_backlog_tests.rs"]
+mod supervisor_core_backlog_tests;
+
 #[cfg(all(test, windows))]
 #[path = "worker_stop_safety_tests.rs"]
 mod worker_stop_safety_tests;
 
 const REQUEST_TIMEOUT: u64 = 24 * 60 * 60 * 1000;
+const STOP_CLEANUP_MAX_ATTEMPTS: usize = 3;
 const MAX_PUBLIC_LINE: usize = super::super::daemon_client::DAEMON_MAX_LINE_LENGTH;
 
 /// `ROSTER_WATCHDOG_INTERVAL_MS` / `ROSTER_STALE_AFTER_MS` (daemon-supervisor.ts:194-195).
@@ -173,6 +178,16 @@ fn prompt_admission_key(connection_id: &str, active_session_id: &str, public_adm
 /// (daemon-supervisor.ts:747, 3101). A joiner awaits `done` and reads the same outcome the
 /// original caller received, which is what `await pending` does at :3153.
 struct OpeningWorker { done: CancellationToken, result: Mutex<Option<Result<Value, String>>> }
+struct OpeningWorkerGuard { supervisor: Arc<Supervisor>, key: String, opening: Arc<OpeningWorker> }
+impl Drop for OpeningWorkerGuard {
+    fn drop(&mut self) {
+        let mut openings = self.supervisor.opening_workers.lock().unwrap();
+        if openings.get(&self.key).is_some_and(|current| Arc::ptr_eq(current, &self.opening)) {
+            openings.remove(&self.key);
+        }
+        self.opening.done.cancel();
+    }
+}
 /// The `finally { if (admission) this.deletePromptAdmission(admission); }` (daemon-supervisor.ts:2842)
 /// of `handleLine`: every exit path of a prompt command removes its registration.
 ///
@@ -194,11 +209,9 @@ struct Supervisor {
     ownership: DaemonSupervisorOwnership,
     workers: Mutex<HashMap<String, Arc<Worker>>>,
     clients: Mutex<HashMap<String, Arc<PublicClient>>>,
-    /// The port's original global create/recover gate, held by `retry_worker` and by the
-    /// registered opener in `create_for_owner`. TS instead groups callers through
-    /// `this.openingWorkers` per key (daemon-supervisor.ts:747); the join map below adds that
-    /// per-key sharing, while this gate keeps the pre-existing serialization against `retry_worker`.
-    opening: AsyncMutex<()>,
+    /// Opens share this fence; eviction takes it exclusively. Per-session joins below
+    /// prevent duplicate creates/retries without serializing unrelated workers.
+    opening: tokio::sync::RwLock<()>,
     /// `this.openingWorkers` (daemon-supervisor.ts:747) keyed as at :3060-3062: the canonical
     /// session path, or `new:<createCommandIdempotencyKey(clientId, command.id)>`. A second
     /// identical create joins the in-flight one instead of double-launching a worker (:3063-3066).
@@ -263,7 +276,7 @@ pub(crate) async fn run_daemon_supervisor_mode(socket_path: Option<String>, mut 
     let supervisor = Arc::new(Supervisor {
         eviction_fence: tokio::sync::RwLock::new(()), idle_eviction_task: Mutex::new(None),
         socket_path: socket_path.clone(), journal: Mutex::new(journal),
-        descriptor_dir, config, ownership, workers: Mutex::new(HashMap::new()), clients: Mutex::new(HashMap::new()), opening: AsyncMutex::new(()), pauses: Mutex::new(HashMap::new()),
+        descriptor_dir, config, ownership, workers: Mutex::new(HashMap::new()), clients: Mutex::new(HashMap::new()), opening: tokio::sync::RwLock::new(()), pauses: Mutex::new(HashMap::new()),
         catalog: Arc::new(DaemonCatalogClient::new(Arc::new(|message| eprintln!("Daemon catalog: {message}")))), stopped: CancellationToken::new(),
         roster: Mutex::new(None), pending_roster_changed: Mutex::new(HashSet::new()), pending_roster_removed: Mutex::new(HashSet::new()),
         published_roster_ids: Mutex::new(HashSet::new()), roster_push_scheduled: AtomicBool::new(false),
@@ -797,7 +810,7 @@ impl Supervisor {
         if candidates.is_empty() { return Ok(()); }
         let _fence = tokio::time::timeout(Duration::from_secs(5), self.eviction_fence.write()).await
             .map_err(|_| "Timed out draining daemon commands for idle eviction".to_string())?;
-        let _opening = tokio::time::timeout(Duration::from_secs(5), self.opening.lock()).await
+        let _opening = tokio::time::timeout(Duration::from_secs(5), self.opening.write()).await
             .map_err(|_| "Timed out draining worker opens for idle eviction".to_string())?;
         for worker in candidates {
             if self.stopped.is_cancelled() { break; }
@@ -1242,6 +1255,10 @@ impl Supervisor {
             if !is_stopping_process_alive(&identity) {
                 let worker = self.install_worker(descriptor.clone(), Arc::new(DaemonWorkerClient::new(&descriptor.socket_path)));
                 worker.client.lock().unwrap().take();
+                if stop_cleanup_is_parked(&descriptor) {
+                    self.mark_worker_roster_entries(&worker, Some(DAEMON_WORKER_LIFECYCLE_FAILED));
+                    continue;
+                }
                 if descriptor.stop_requested_at.is_some() || descriptor.owner_client_id.is_some() {
                     if let Err(error) = self.stop_worker(&worker, descriptor.archive_on_stop == Some(true), false).await {
                         eprintln!("Retaining stopped worker cleanup record {}: {error}", descriptor.worker_id);
@@ -1316,6 +1333,11 @@ impl Supervisor {
                 .map(|id| create_command_idempotency_key(&owner, id))
                 .unwrap_or_else(|| create_active_session_id(None))),
         };
+        self.with_worker_open(opening_key, self.create_named_worker(owner, body)).await
+    }
+
+    async fn with_worker_open<F>(self: &Arc<Self>, opening_key: String, operation: F) -> Result<Value, String>
+    where F: std::future::Future<Output = Result<Value, String>> {
         // `const pending = this.openingWorkers.get(key); const opened = this.openingWorkers.get(key);`
         // (:3063, 3073): the map is the only gate, so the check and the registration are one
         // critical section and a concurrent opener either joins or becomes the single opener.
@@ -1343,14 +1365,18 @@ impl Supervisor {
         }
         let opening = self.opening_workers.lock().unwrap().get(&opening_key).cloned()
             .ok_or("Session worker open was interrupted; retry opening the session")?;
-        // The registered opener still serializes against `retry_worker` on the port's global open
-        // gate (that gate predates the join map); a joiner never takes it, it joins above, so the
-        // two mechanisms cannot deadlock.
-        let _opening = self.opening.lock().await;
+        let _guard = OpeningWorkerGuard { supervisor: Arc::clone(self), key: opening_key, opening: Arc::clone(&opening) };
+        let _opening = self.opening.read().await;
+        let result = if self.stopped.is_cancelled() { Err("Daemon is shutting down".to_string()) } else { operation.await };
+        *opening.result.lock().unwrap() = Some(result.clone());
+        result
+    }
+
+    async fn create_named_worker(self: &Arc<Self>, owner: String, body: &Map<String, Value>) -> Result<Value, String> {
         // `if (!createCommand.name) return this.launchWorker(createCommand, undefined, ownerClientId);`
         // (daemon-supervisor.ts:3085): the name check only guards a named create. The target is the
         // saved sibling when the path is known (:3086-3090), else the synthetic new-root summary.
-        let result = match body.get("name").and_then(Value::as_str) {
+        match body.get("name").and_then(Value::as_str) {
             None => self.create_for_owner_inner(owner, body).await,
             Some(name) => {
                 // `const savedSiblings = createCommand.sessionPath ? await
@@ -1385,14 +1411,7 @@ impl Supervisor {
                     supervisor.create_for_owner_inner(owner, body).await
                 }).await
             }
-        };
-        // The registered opener publishes its outcome before it wakes the joiners.
-        *opening.result.lock().unwrap() = Some(result.clone());
-        // `finally { if (this.openingWorkers.get(key) === opening) this.openingWorkers.delete(key); }`
-        // (:3104-3107).
-        self.opening_workers.lock().unwrap().remove(&opening_key);
-        opening.done.cancel();
-        result
+        }
     }
     /// The guarded body of `createOrReuseWorker` (daemon-supervisor.ts:3033) behind the
     /// `openingWorkers` join.
@@ -1427,6 +1446,78 @@ impl Supervisor {
         }
         self.launch_worker(body, owner, None).await
     }
+
+    fn retry_worker_descriptor(&self, requested: &str) -> Result<(Option<Arc<Worker>>, DaemonWorkerDescriptor), String> {
+        let workers: Vec<_> = self.workers.lock().unwrap().values().cloned().collect();
+        for worker in workers {
+            let descriptor = worker.descriptor.lock().unwrap().clone();
+            if descriptor.root_active_session_id == requested || descriptor.root_session_id.as_deref() == Some(requested) {
+                return Ok((Some(worker), descriptor));
+            }
+        }
+        for entry in std::fs::read_dir(&self.descriptor_dir).map_err(|error| error.to_string())? {
+            let path = entry.map_err(|error| error.to_string())?.path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
+            if let Some(descriptor) = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<DaemonWorkerDescriptor>(&bytes).ok()) {
+                if descriptor.root_active_session_id == requested || descriptor.root_session_id.as_deref() == Some(requested) {
+                    return Ok((None, descriptor));
+                }
+            }
+        }
+        Err(format!("Unknown active session: {requested}"))
+    }
+
+    async fn retry_worker(self: &Arc<Self>, owner: String, requested: &str) -> Result<Value, String> {
+        let (_, descriptor) = self.retry_worker_descriptor(requested)?;
+        if descriptor.owner_client_id.as_deref().is_some_and(|client| client != owner) { return Err(format!("Unknown active session: {requested}")); }
+        let key = descriptor.session_file.as_ref().or(descriptor.create_command.session_path.as_ref())
+            .map(|path| canonical_session_path(path)).unwrap_or_else(|| format!("worker:{}", descriptor.worker_id));
+        self.with_worker_open(key, async {
+            // Another create/retry may have completed before we became the opener.
+            let (worker, descriptor) = self.retry_worker_descriptor(requested)?;
+            if descriptor.stop_requested_at.is_some() { return Err("Session worker is stopping".into()); }
+            if descriptor.owner_client_id.as_deref().is_some_and(|client| client != owner) { return Err(format!("Unknown active session: {requested}")); }
+            if let Some(worker) = worker {
+                if matches_exact_process_identity(&ProcessIdentity { pid: descriptor.pid as i64, process_start_id: descriptor.process_start_id.clone() }) {
+                    return Ok(self.refresh(&worker).await?.into_iter().find(|summary| summary.get("id").and_then(Value::as_str) == Some(&descriptor.root_active_session_id)).unwrap_or(Value::Null));
+                }
+            }
+            if descriptor.owner_client_id.is_some() { return Err("Client-owned session recovery requires the owning client environment".into()); }
+            let recovery = recovery_command(&descriptor)?;
+            self.launch_worker(&recovery, owner, Some(descriptor)).await
+        }).await
+    }
+
+    fn mark_created_worker_ready(&self, worker: &Arc<Worker>, expected: &DaemonWorkerDescriptor, summary: &Value) -> Result<(), String> {
+        let workers = self.workers.lock().unwrap();
+        if !workers.get(&expected.worker_id).is_some_and(|current| Arc::ptr_eq(current, worker)) {
+            return Err("Session worker registration changed while opening".into());
+        }
+        let mut current = worker.descriptor.lock().unwrap();
+        if self.stopped.is_cancelled() || current.stop_requested_at.is_some()
+            || current.worker_instance_id != expected.worker_instance_id || current.pid != expected.pid
+            || current.process_start_id != expected.process_start_id {
+            return Err("Session worker stopped or changed generation while opening".into());
+        }
+        current.root_session_id = summary.get("sessionId").and_then(Value::as_str).map(str::to_string);
+        current.session_file = summary.get("sessionFile").and_then(Value::as_str).map(str::to_string);
+        current.lifecycle = DAEMON_WORKER_LIFECYCLE_READY.into();
+        self.persist_worker(&current)
+    }
+
+    fn fail_created_worker(&self, worker: &Arc<Worker>, expected: &DaemonWorkerDescriptor, error: &str) {
+        let mut workers = self.workers.lock().unwrap();
+        if !workers.get(&expected.worker_id).is_some_and(|current| Arc::ptr_eq(current, worker)) { return; }
+        let mut descriptor = worker.descriptor.lock().unwrap().clone();
+        if descriptor.stop_requested_at.is_some() || descriptor.worker_instance_id != expected.worker_instance_id
+            || descriptor.pid != expected.pid || descriptor.process_start_id != expected.process_start_id { return; }
+        workers.remove(&descriptor.worker_id);
+        descriptor.lifecycle = DAEMON_WORKER_LIFECYCLE_FAILED.into();
+        descriptor.last_error = Some(error.into());
+        descriptor.consecutive_failures += 1;
+        let _ = self.persist_worker(&descriptor);
+    }
+
     async fn launch_worker(self: &Arc<Self>, body: &Map<String, Value>, owner: String, existing: Option<DaemonWorkerDescriptor>) -> Result<Value, String> {
         self.ownership.assert_current().await.map_err(|error| error.to_string())?;
         let override_config = body.get("config").map(|value| serde_json::from_value::<AgentSessionRuntimeConfig>(value.clone())).transpose().map_err(|error| error.to_string())?;
@@ -1494,7 +1585,7 @@ impl Supervisor {
             });
         }
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let mut descriptor = DaemonWorkerDescriptor {
+        let descriptor = DaemonWorkerDescriptor {
             version: 2, worker_id, pid: pid as i32, process_start_id: get_process_start_id(pid as i64), socket_path: socket.clone(),
             recovery_journal_path: recovery, orphan_process_journal_path: Some(orphan), supervisor_socket_path: self.socket_path.clone(),
             authentication_token: token, worker_instance_id: Some(instance), root_active_session_id: root.clone(),
@@ -1504,12 +1595,14 @@ impl Supervisor {
             create_command: DurableDaemonCreateCommand { type_: "create".into(), session_path: body.get("sessionPath").and_then(Value::as_str).map(str::to_string), no_session: body.get("noSession").and_then(Value::as_bool), extra: Map::new() },
             consecutive_failures: 0, stop_requested_at: None, archive_on_stop: None, last_failure_at: None, last_error: None,
         };
+        let mut launched_worker = None;
         let result: Result<Value, String> = async {
             self.persist_worker(&descriptor)?;
             let client = Arc::new(DaemonWorkerClient::new(&socket));
             // Listeners before authentication: the worker flushes its roster
             // snapshot immediately after auth succeeds.
             let worker = self.install_worker(descriptor.clone(), client);
+            launched_worker = Some(Arc::clone(&worker));
             commit_gate(gate).await?;
             let client = { worker.client.lock().unwrap().clone().ok_or("Session worker is not connected")? };
             self.authenticate(&client, &descriptor).await?;
@@ -1518,13 +1611,8 @@ impl Supervisor {
             let response = client.request_worker(forwarded, REQUEST_TIMEOUT).await.map_err(|error| error.to_string())?;
             let summary = response_data(response)?;
             if summary.get("activeSessionId").or_else(|| summary.get("id")).and_then(Value::as_str) != Some(&root) { return Err("Session worker did not preserve its assigned active session id".into()); }
-            {
-                let mut current = worker.descriptor.lock().unwrap();
-                current.root_session_id = summary.get("sessionId").and_then(Value::as_str).map(str::to_string);
-                current.session_file = summary.get("sessionFile").and_then(Value::as_str).map(str::to_string);
-                current.lifecycle = DAEMON_WORKER_LIFECYCLE_READY.into();
-                self.persist_worker(&current)?;
-            }
+            self.ownership.assert_current().await.map_err(|error| error.to_string())?;
+            self.mark_created_worker_ready(&worker, &descriptor, &summary)?;
             let summary_row = worker_roster_entry_from_value(&summary).ok_or("Session worker returned an invalid create response")?;
             self.write_roster_entry(summary_row, Some(&worker), None);
             self.subscribe(&worker, &root).await?;
@@ -1535,9 +1623,9 @@ impl Supervisor {
         }.await;
         if let Err(error) = &result {
             let _ = child.kill().await;
-            self.workers.lock().unwrap().remove(&descriptor.worker_id);
-            descriptor.lifecycle = "failed".into(); descriptor.last_error = Some(error.clone()); descriptor.consecutive_failures += 1;
-            let _ = self.persist_worker(&descriptor);
+            if self.ownership.assert_current().await.is_ok() {
+                if let Some(worker) = launched_worker.as_ref() { self.fail_created_worker(worker, &descriptor, error); }
+            }
         }
         tokio::spawn(async move { let _ = child.wait().await; });
         result
@@ -2178,6 +2266,7 @@ impl Supervisor {
     /// repeated timeout does not stack escalation loops and no registration field is needed.
     fn schedule_worker_stop_finalization(self: &Arc<Self>, worker: &Arc<Worker>) {
         let descriptor = worker.descriptor.lock().unwrap().clone();
+        if stop_cleanup_is_parked(&descriptor) { return; }
         let worker_id = descriptor.worker_id.clone();
         {
             let mut scheduled = stop_finalizations().lock().unwrap();
@@ -2273,7 +2362,11 @@ impl Supervisor {
         let client = { worker.client.lock().unwrap().take() };
         if let Some(client) = client { client.close().await; }
         if let Err(error) = self.recover_uncertain_worker_operations(worker).await {
-            self.schedule_worker_stop_finalization(worker);
+            if supervisor_maintenance::permanent_stop_cleanup_error(&error) {
+                self.park_worker_stop_cleanup_failure(worker, &error);
+            } else {
+                self.schedule_worker_stop_finalization(worker);
+            }
             return Err(error);
         }
         self.invalidate_worker_input_pauses(worker);
@@ -2282,11 +2375,12 @@ impl Supervisor {
             return Err(error);
         }
         assert_stop_current()?;
+        remove_file_durably(&self.descriptor_dir.join(format!("{}.json", descriptor.worker_id)).to_string_lossy(), RemoveFileDurablyOptions { fsync_dir: true, platform: None }).await.map_err(|error| error.to_string())?;
+        assert_stop_current()?;
         self.workers.lock().unwrap().remove(&descriptor.worker_id);
         // The registration is gone, so its rows stop being live: owned rows die
         // with it, resident rows are passivated.
         self.flip_worker_roster_entries_inactive(worker);
-        remove_file_durably(&self.descriptor_dir.join(format!("{}.json", descriptor.worker_id)).to_string_lossy(), RemoveFileDurablyOptions { fsync_dir: true, platform: None }).await.map_err(|error| error.to_string())?;
         self.broadcast_heartbeats_changed();
         Ok(())
     }
@@ -2329,34 +2423,8 @@ impl Supervisor {
             }
             "retry_worker" => {
                 let requested = body.get("activeSessionId").and_then(Value::as_str).ok_or("retry_worker requires activeSessionId")?;
-                let _opening = self.opening.lock().await;
-                let worker = self.workers.lock().unwrap().values().find(|worker| {
-                    let descriptor = worker.descriptor.lock().unwrap();
-                    descriptor.root_active_session_id == requested || descriptor.root_session_id.as_deref() == Some(requested)
-                }).cloned();
-                let descriptor = if let Some(worker) = worker {
-                    let descriptor = worker.descriptor.lock().unwrap().clone();
-                    if matches_exact_process_identity(&ProcessIdentity { pid: descriptor.pid as i64, process_start_id: descriptor.process_start_id.clone() }) {
-                        let summary = self.refresh(&worker).await?.into_iter().find(|summary| summary.get("id").and_then(Value::as_str) == Some(&descriptor.root_active_session_id));
-                        return Ok(success(summary));
-                    }
-                    descriptor
-                } else {
-                    let mut descriptor = None;
-                    for entry in std::fs::read_dir(&self.descriptor_dir).map_err(|error| error.to_string())? {
-                        let path = entry.map_err(|error| error.to_string())?.path();
-                        if path.extension().and_then(|value| value.to_str()) != Some("json") { continue; }
-                        if let Some(candidate) = std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice::<DaemonWorkerDescriptor>(&bytes).ok()) {
-                            if candidate.root_active_session_id == requested || candidate.root_session_id.as_deref() == Some(requested) { descriptor = Some(candidate); break; }
-                        }
-                    }
-                    descriptor.ok_or_else(|| format!("Unknown active session: {requested}"))?
-                };
-                if descriptor.stop_requested_at.is_some() { return Err("Session worker is stopping".into()); }
-                if descriptor.owner_client_id.as_deref().is_some_and(|owner| owner != public.identity()) { return Err(format!("Unknown active session: {requested}")); }
-                if descriptor.owner_client_id.is_some() { return Err("Client-owned session recovery requires the owning client environment".into()); }
-                let recovery = recovery_command(&descriptor)?;
-                return Ok(success(Some(self.launch_worker(&recovery, public.identity(), Some(descriptor)).await?)));
+                let summary = self.retry_worker(public.identity(), requested).await?;
+                return Ok(success((!summary.is_null()).then_some(summary)));
             }
             // `case "agent_messages_status"` (daemon-supervisor.ts:2425-2435): without an
             // `activeSessionId` the id-less form is served, not rejected. The port is a
@@ -3182,14 +3250,22 @@ fn descriptor_key(socket: &str) -> String { format!("{:x}", Sha256::digest(socke
 /// A stop that timed out left a tombstoned registration behind. Keep escalating until the exact
 /// process generation is gone (a replaced pid counts as gone, so a recycled pid is never
 /// signalled; an unobservable identity counts as alive), then finish the interrupted cleanup by
-/// re-running the stop with `removeDescriptor = true` until it succeeds. The loop stops when the
-/// supervisor shuts down or when the registration is no longer the one being stopped.
+/// re-running the stop with a bounded cleanup budget. Permanent failures retain their
+/// journals and a failed stop record. The loop also stops on shutdown or replacement.
 /// `worker.stopFinalization` (daemon-supervisor.ts:6891-6896): the worker ids whose timed-out
 /// stop finalizer is already running. A process-wide set is equivalent to the per-registration
 /// field because one supervisor owns the process; the entry is released when the finalizer ends.
 fn stop_finalizations() -> &'static Mutex<HashSet<String>> {
     static SCHEDULED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     SCHEDULED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn stop_cleanup_is_parked(descriptor: &DaemonWorkerDescriptor) -> bool {
+    descriptor.stop_requested_at.is_some() && descriptor.lifecycle == DAEMON_WORKER_LIFECYCLE_FAILED
+}
+
+fn stop_cleanup_should_retry(error: &str, attempts: usize) -> bool {
+    !supervisor_maintenance::permanent_stop_cleanup_error(error) && attempts < STOP_CLEANUP_MAX_ATTEMPTS
 }
 
 fn is_stopping_process_alive(identity: &ProcessIdentity) -> bool {
@@ -3238,13 +3314,23 @@ async fn finalize_timed_out_worker_stop(supervisor: Arc<Supervisor>, worker: Arc
         }
         tokio::time::sleep(Duration::from_millis(super::STOP_FINALIZATION_RECHECK_MS)).await;
     }
-    // Retry transient cleanup failures so a dead worker is never stranded permanently.
+    // Retry transient failures within a fixed budget. Permanent failures retain the
+    // tombstone and journals for repair rather than spinning after every restart.
+    let mut attempts = 0;
     while !supervisor.stopped.is_cancelled() {
         if !is_stop_generation_current() { return; }
+        if stop_cleanup_is_parked(&worker.descriptor.lock().unwrap()) { return; }
+        attempts += 1;
         match supervisor.stop_worker(&worker, archive_on_stop, true).await {
             Ok(()) => return,
             Err(error) => {
                 eprintln!("Failed to finalize timed-out worker stop {worker_id}: {error}");
+                if supervisor.ownership.assert_current().await.is_err() || !is_stop_generation_current() { return; }
+                if stop_cleanup_is_parked(&worker.descriptor.lock().unwrap()) { return; }
+                if !stop_cleanup_should_retry(&error, attempts) {
+                    supervisor.park_worker_stop_cleanup_failure(&worker, &error);
+                    return;
+                }
                 tokio::time::sleep(Duration::from_millis(super::STOP_FINALIZATION_RETRY_MS)).await;
             }
         }

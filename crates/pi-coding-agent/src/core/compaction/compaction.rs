@@ -1448,7 +1448,6 @@ pub async fn compact(
                     merged.simple.stream.api_key = Some(api_key);
                     merged.simple.stream.signal = signal;
                     merged.custom_instructions = custom_instructions;
-                    let headers = merged.simple.stream.headers.clone();
                     let model_for_request = model.clone();
                     let context_for_request = context.clone();
                     let merged_for_request = merged.clone();
@@ -1460,7 +1459,6 @@ pub async fn compact(
                             async move { compact_simple(&model, &context, Some(&options)).await },
                         )
                     };
-                    let _ = headers;
                     // `compactSimple` resolves to the value (or undefined); the
                     // retry layer owns the error channel, so a provider failure is
                     // mapped to `ProviderRequestError` here.

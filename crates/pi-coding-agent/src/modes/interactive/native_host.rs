@@ -1248,7 +1248,9 @@ async fn run_terminal(
         controller.show_status("Welcome to Optimus. Connect a provider with /login, then choose a model with /model. Type /help for commands.", "accent");
     }
     if let Some(warning) = &options.model_fallback_message {
-        controller.show_warning(&warning);
+        if controller.get_model_fallback_warning_action(Some(warning)) == ModelFallbackWarningAction::Show {
+            controller.show_warning(warning);
+        }
     }
     let mode = Rc::new(RefCell::new(controller));
     native_subagents::seed(&mode, &snapshot);
