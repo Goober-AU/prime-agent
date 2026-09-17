@@ -50,6 +50,7 @@ pub fn is_background_only(value: &Value) -> bool {
 fn is_background_only_fields(fields: &serde_json::Map<String, Value>) -> bool {
     let get = |key: &str| fields.get(key).unwrap_or(&Value::Null);
     get("runtimeKind") == "subagent"
+        && (get("activity").is_null() || get("activity") == "idle")
         && get("activeSessionId").as_str().is_some_and(|s| !s.is_empty())
         && get("isSessionActive") == true
         && get("isStreaming") == false

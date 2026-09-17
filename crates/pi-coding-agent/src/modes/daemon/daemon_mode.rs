@@ -28,6 +28,10 @@ mod agent_message_transport;
 #[path = "daemon_parity_tests.rs"]
 mod daemon_parity_tests;
 
+#[cfg(test)]
+#[path = "daemon_snapshot_backlog_tests.rs"]
+mod daemon_snapshot_backlog_tests;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -1532,6 +1536,7 @@ pub struct DaemonClientHandle {
         StdMutex<HashMap<String, tokio_util::sync::CancellationToken>>,
     /// `client.snapshotTransferTails`.
     pub snapshot_transfer_tails: StdMutex<HashMap<String, u64>>,
+    deferred_snapshot_frames: StdMutex<HashMap<String, (usize, Vec<DaemonOutbound>)>>,
     /// `client.detachInput()`.
     pub detach_input: Arc<dyn Fn() + Send + Sync>,
     /// The private-frame decoder state for `transport === "private-framed"`.
@@ -1552,6 +1557,7 @@ impl DaemonClientHandle {
             catchup_retry_timer: AtomicBool::new(false),
             snapshot_transfer_abort_controllers: StdMutex::new(HashMap::new()),
             snapshot_transfer_tails: StdMutex::new(HashMap::new()),
+            deferred_snapshot_frames: StdMutex::new(HashMap::new()),
             detach_input,
             frame_decoder: Arc::new(StdMutex::new(PrivateFrameDecoder::new())),
         }
@@ -3209,9 +3215,11 @@ pub trait DaemonSession: Send + Sync {
     fn is_bash_running(&self) -> bool;
     fn is_retrying(&self) -> bool;
     fn is_session_active(&self) -> bool;
+    fn is_foreground_active(&self) -> bool { self.is_session_active() }
     fn has_running_rlm_children(&self) -> bool;
     fn unfinished_action_count(&self) -> f64;
     fn messages(&self) -> Vec<AgentMessage>;
+    fn message_count(&self) -> usize { self.messages().len() }
     fn model_identity(&self) -> Option<pi_ai::types::Model>;
     fn rlm_depth(&self) -> Option<i64>;
     fn thinking_level(&self) -> Option<String>;
@@ -4518,6 +4526,16 @@ impl AgentDaemon {
                     .lock()
                     .expect("active session poisoned")
                     .pending_attaches += 1;
+                // Admit the viewer before capture so events emitted during the
+                // asynchronous snapshot work are retained, not missed entirely.
+                {
+                    let mut guard = state.lock().expect("active session poisoned");
+                    if !guard.clients.iter().any(|candidate| Arc::ptr_eq(candidate, &client.state)) {
+                        guard.clients.push(client.state.clone());
+                    }
+                }
+                client.state.lock().expect("daemon client poisoned").attached_active_session_ids.insert(state_active_session_id.clone());
+                if streams_snapshot { mark_client_snapshot_streaming(client, &state_active_session_id); }
                 let result = self.create_attach_result(client, &state, command).await;
                 if result.is_ok() {
                     let current = self
@@ -4550,7 +4568,6 @@ impl AgentDaemon {
                 {
                     let mut state_guard = state.lock().expect("active session poisoned");
                     state_guard.pending_attaches = state_guard.pending_attaches.saturating_sub(1);
-                    state_guard.clients.push(Arc::clone(&client.state));
                 }
                 client
                     .state
@@ -6840,6 +6857,7 @@ impl AgentDaemon {
             session_name: session.session_name(),
             session_file: session.session_file(),
             is_session_active: session.is_session_active(),
+            is_foreground_active: Some(session.is_foreground_active()),
             is_streaming: session.is_streaming(),
             is_compacting: session.is_compacting(),
             messages_len: session.messages().len(),
@@ -6867,6 +6885,11 @@ impl AgentDaemon {
                 state: Arc::clone(&state),
                 session: Arc::clone(&session),
                 runtime_metadata: runtime_metadata.clone(),
+                snapshot_boundary: StdMutex::new(Some({
+                    let messages = Arc::new(session.messages());
+                    let state = state.lock().expect("active session poisoned");
+                    PublishedTranscript { messages, streaming_message: state.runtime.session.streaming_message.clone(), state_flags: (state.runtime.session.is_session_active, state.runtime.session.is_streaming, state.runtime.session.is_compacting), sequence: state.last_event_sequence, generation: state.event_generation.clone() }
+                })),
             }),
         );
         self.binding_sessions
@@ -7186,6 +7209,17 @@ pub struct DaemonSessionState {
     pub state: Arc<StdMutex<ActiveSessionState>>,
     pub session: Arc<dyn DaemonSession>,
     pub runtime_metadata: AgentSessionRuntimeMetadata,
+    /// Transcript and cursor published at the same event boundary. Explicit view
+    /// refreshes must not advance this cursor to an unbroadcast live mutation.
+    pub snapshot_boundary: StdMutex<Option<PublishedTranscript>>,
+}
+
+pub struct PublishedTranscript {
+    messages: Arc<Vec<AgentMessage>>,
+    streaming_message: Option<AgentMessage>,
+    state_flags: (bool, bool, bool),
+    sequence: u64,
+    generation: String,
 }
 
 /// Adapts the session slice's `bindExtensions` surface to the binding module.
@@ -7719,30 +7753,43 @@ impl DaemonSessionState {
             .get_cwd()
     }
 
-    /// Keep the `ActiveSessionState.runtime.session` view aligned with the live
-    /// session. The TypeScript reads those fields straight off the session
-    /// object, so the port refreshes them at every read boundary instead.
+    /// Full refresh at explicit snapshot/read boundaries, never for token deltas.
     pub fn sync_view(&self) {
-        let streaming_message = self.state.lock().expect("active session poisoned").runtime.session.streaming_message.clone();
-        let view = {
-            let session = &self.session;
-            ActiveSessionRuntimeSession {
-                session_id: session.session_id(),
-                session_name: session.session_name(),
-                session_file: session.session_file(),
-                is_session_active: session.is_session_active(),
-                is_streaming: session.is_streaming(),
-                is_compacting: session.is_compacting(),
-                messages_len: session.messages().len(),
-                messages: session.messages(),
-                streaming_message,
-                has_running_rlm_children: session.has_running_rlm_children(),
-                rlm_depth: session.rlm_depth(),
-                ..ActiveSessionRuntimeSession::default()
-            }
-        };
+        self.sync_event_view(true);
+    }
+
+    fn sync_event_view(&self, refresh_history: bool) {
+        let session = &self.session;
+        // Read the session before taking the view lock; getters may take their
+        // own locks. Retain the existing registry/status writer and other fields.
+        let session_id = session.session_id();
+        let session_name = session.session_name();
+        let session_file = session.session_file();
+        let is_session_active = session.is_session_active();
+        let is_foreground_active = session.is_foreground_active();
+        let is_streaming = session.is_streaming();
+        let is_compacting = session.is_compacting();
+        let has_running_rlm_children = session.has_running_rlm_children();
+        let rlm_depth = session.rlm_depth();
+        let model_identity = session.model_identity();
+        let thinking_level = session.thinking_level();
+        let messages = refresh_history.then(|| session.messages());
+        let messages_len = messages.as_ref().map(Vec::len).unwrap_or_else(|| session.message_count());
         let mut state = self.state.lock().expect("active session poisoned");
-        state.runtime.session = view;
+        let view = &mut state.runtime.session;
+        view.session_id = session_id;
+        view.session_name = session_name;
+        view.session_file = session_file;
+        view.is_session_active = is_session_active;
+        view.is_foreground_active = Some(is_foreground_active);
+        view.is_streaming = is_streaming;
+        view.is_compacting = is_compacting;
+        view.has_running_rlm_children = has_running_rlm_children;
+        view.rlm_depth = rlm_depth;
+        view.model_identity = model_identity;
+        view.thinking_level = thinking_level;
+        view.messages_len = messages_len;
+        if let Some(messages) = messages { view.messages = messages; }
         state.runtime.metadata = Some(self.runtime_metadata.clone());
     }
 
@@ -7750,12 +7797,11 @@ impl DaemonSessionState {
     pub fn handle_event(&self, event: &Value) -> Value {
         let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
         let mut state = self.state.lock().expect("active session poisoned");
-        let mut view = state.runtime.session.clone();
+        let view = &mut state.runtime.session;
         match event_type {
-            "message_start" | "message_update" | "message_end" => {
+            "message_start" | "message_update" => {
                 if let Some(message) = event.get("message") {
                     if message.get("role").and_then(Value::as_str) == Some("assistant") {
-                        view.messages_len = self.session.messages().len();
                         if !message.is_null() {
                             if let Ok(parsed) = serde_json::from_value::<AgentMessage>(message.clone())
                             {
@@ -7765,22 +7811,21 @@ impl DaemonSessionState {
                     }
                 }
             }
+            "message_end" => {
+                // The completed message is already in retained history.
+                view.streaming_message = None;
+            }
             "agent_start" => {
                 view.is_session_active = true;
                 view.streaming_message = None;
-                view.messages = self.session.messages();
-                view.messages_len = view.messages.len();
             }
             "agent_end" => {
                 view.is_session_active = false;
                 view.is_streaming = false;
                 view.streaming_message = None;
-                view.messages = self.session.messages();
-                view.messages_len = view.messages.len();
             }
             _ => {}
         }
-        state.runtime.session = view;
         event.clone()
     }
 }
@@ -7788,7 +7833,12 @@ impl DaemonSessionState {
 impl AgentDaemon {
     /// `broadcastToSession(state, message)`.
     fn broadcast_to_session(self: &Arc<Self>, entry: &Arc<DaemonSessionState>, message: DaemonOutbound) {
-        entry.sync_view();
+        let mut published = entry.snapshot_boundary.lock().expect("snapshot boundary poisoned");
+        // Retained history changes at message/lifecycle boundaries, not on each
+        // assistant or tool partial. Explicit snapshot reads still refresh it.
+        let partial = matches!(&message, DaemonOutbound::SessionEvent { event, .. }
+            if matches!(event.get("type").and_then(Value::as_str), Some("message_update" | "tool_execution_update")));
+        entry.sync_event_view(!partial);
         let state = entry.state.clone();
         if let DaemonOutbound::SessionEvent { event, .. } = &message {
             entry.handle_event(event);
@@ -7824,6 +7874,19 @@ impl AgentDaemon {
         let message = self.stamp_rlm_child_active_session_id(message);
         self.observe_roster_event(&state, &message);
         let sequenced = self.add_session_event_meta(&state, message);
+        {
+            let state = state.lock().expect("active session poisoned");
+            let messages = if partial {
+                published.as_ref().map(|snapshot| snapshot.messages.clone())
+            } else { None }.unwrap_or_else(|| Arc::new(state.runtime.session.messages.clone()));
+            *published = Some(PublishedTranscript {
+                messages,
+                streaming_message: state.runtime.session.streaming_message.clone(),
+                state_flags: (state.runtime.session.is_session_active, state.runtime.session.is_streaming, state.runtime.session.is_compacting),
+                sequence: state.last_event_sequence,
+                generation: state.event_generation.clone(),
+            });
+        }
         let active_session_id = state
             .lock()
             .expect("active session poisoned")
@@ -7849,6 +7912,8 @@ impl AgentDaemon {
                 continue;
             }
             if sequenced.type_name() == "session_closed" {
+                abort_client_snapshot_streaming(&client, Some(&active_session_id));
+                client.deferred_snapshot_frames.lock().expect("deferred frames poisoned").remove(&active_session_id);
                 {
                     let mut state_guard = client.state.lock().expect("daemon client poisoned");
                     if let Some(ids) = state_guard.catchup_active_session_ids.as_mut() {
@@ -7861,26 +7926,7 @@ impl AgentDaemon {
                 self.write(&client, &sequenced);
                 continue;
             }
-            let streaming_snapshot = client
-                .state
-                .lock()
-                .expect("daemon client poisoned")
-                .snapshot_active_session_ids
-                .as_ref()
-                .map(|ids| ids.contains(&active_session_id))
-                .unwrap_or(false);
-            if streaming_snapshot {
-                self.queue_client_catchup(
-                    &client,
-                    &active_session_id,
-                    if sequenced.type_name() == "session_replaced" {
-                        "replacement"
-                    } else {
-                        "resync"
-                    },
-                );
-                continue;
-            }
+            if self.defer_snapshot_frame(&client, &active_session_id, &sequenced) { continue; }
             if client.is_backpressured() {
                 self.queue_client_catchup(
                     &client,
@@ -7924,6 +7970,7 @@ impl AgentDaemon {
                 self.write_serialized(&client, &line, Some(&sequenced));
             }
         }
+        drop(published);
     }
 
     fn clone_arc(self: &Arc<Self>) -> Arc<Self> {
@@ -8391,6 +8438,7 @@ impl AgentDaemon {
                     state: Arc::clone(state),
                     session: Arc::new(MissingSession::new(&active_session_id)),
                     runtime_metadata: AgentSessionRuntimeMetadata::default(),
+                    snapshot_boundary: StdMutex::new(None),
                 })
             })
     }
@@ -8844,10 +8892,8 @@ impl AgentDaemon {
         let snapshot = self
             .create_session_snapshot(state, capabilities.contains("history_ranges"))
             .await?;
-        let (last_event_sequence, event_generation) = {
-            let state = state.lock().expect("active session poisoned");
-            (state.last_event_sequence, state.event_generation.clone())
-        };
+        let last_event_sequence = snapshot.get("lastEventSequence").and_then(Value::as_u64).unwrap_or(0);
+        let event_generation = snapshot.get("lastEventCursor").and_then(|cursor| cursor.get("generation")).and_then(Value::as_str).unwrap_or("").to_string();
         // `command.resumeCursor` is a `DaemonResumeCursor` (daemon-protocol.ts:350).
         let resume_cursor = command
             .body
@@ -8925,7 +8971,7 @@ impl AgentDaemon {
         recent_first_history: bool,
     ) -> Result<Value, String> {
         let entry = self.session_entry_for_state(state);
-        entry.sync_view();
+        entry.sync_event_view(false);
         let metadata = entry.runtime_metadata.clone();
         let parent = if metadata.parent_active_session_id.is_some()
             || metadata.parent_session_id.is_some()
@@ -8952,7 +8998,7 @@ impl AgentDaemon {
         let mut session_identity = entry.session.session_id();
         let mut children = self.build_rlm_child_snapshots_with_passive(state).await?;
         for _ in 0..MAX_SESSION_SNAPSHOT_STABILIZATION_RETRIES {
-            entry.sync_view();
+            entry.sync_event_view(false);
             let current = entry.session.session_id();
             if current == session_identity {
                 break;
@@ -8960,8 +9006,23 @@ impl AgentDaemon {
             session_identity = current;
             children = self.build_rlm_child_snapshots_with_passive(state).await?;
         }
-        entry.sync_view();
-        let connection_state = self.create_connection_state(state);
+        entry.sync_event_view(false);
+        let mut connection_state = self.create_connection_state(state);
+        let (published_messages, published_streaming, state_flags, last_event_sequence, event_generation) = {
+            let mut published = entry.snapshot_boundary.lock().expect("snapshot boundary poisoned");
+            if published.is_none() {
+                let messages = Arc::new(entry.session.messages());
+                let state = state.lock().expect("active session poisoned");
+                *published = Some(PublishedTranscript { messages, streaming_message: state.runtime.session.streaming_message.clone(), state_flags: (state.runtime.session.is_session_active, state.runtime.session.is_streaming, state.runtime.session.is_compacting), sequence: state.last_event_sequence, generation: state.event_generation.clone() });
+            }
+            let published = published.as_ref().expect("published transcript initialized");
+            (published.messages.clone(), published.streaming_message.clone(), published.state_flags, published.sequence, published.generation.clone())
+        };
+        if let Some(state) = connection_state.as_object_mut() {
+            state.insert("isSessionActive".to_string(), Value::Bool(state_flags.0));
+            state.insert("isStreaming".to_string(), Value::Bool(state_flags.1));
+            state.insert("isCompacting".to_string(), Value::Bool(state_flags.2));
+        }
         // Runtime hydration still parses the complete JSONL once. This capability
         // only avoids serializing/transferring/rendering the complete resident
         // transcript on attach.
@@ -8973,7 +9034,7 @@ impl AgentDaemon {
                 .lock()
                 .expect("session manager poisoned")
                 .build_session_context_with_entry_ids(None);
-            let live_messages = entry.session.messages();
+            let live_messages = published_messages.as_ref();
             let aligns = persisted_context.messages.len() == live_messages.len()
                 && persisted_context
                     .messages
@@ -9011,11 +9072,7 @@ impl AgentDaemon {
             Some(history) => Some(slice_pinned_session_history(
                 history,
                 &SlicePinnedSessionHistoryOptions {
-                    generation: state
-                        .lock()
-                        .expect("active session poisoned")
-                        .event_generation
-                        .clone(),
+                    generation: event_generation.clone(),
                     representation: session_history_representation(
                         entry.session.model_identity().as_ref(),
                     ),
@@ -9025,13 +9082,9 @@ impl AgentDaemon {
             )?),
             None => None,
         };
-        let (last_event_sequence, event_generation) = {
-            let state = state.lock().expect("active session poisoned");
-            (state.last_event_sequence, state.event_generation.clone())
-        };
         let messages = match &initial_history {
             Some(history) => history.messages.clone(),
-            None => entry.session.messages(),
+            None => published_messages.as_ref().clone(),
         };
         let messages = messages
             .into_iter()
@@ -9053,6 +9106,9 @@ impl AgentDaemon {
             serde_json::to_value(self.summary_for_state(state)).unwrap_or(Value::Null),
         );
         snapshot.insert("state".to_string(), connection_state);
+        if let Some(summary) = snapshot.get_mut("summary").and_then(Value::as_object_mut) {
+            summary.insert("streamingMessage".to_string(), serde_json::to_value(published_streaming).unwrap_or(Value::Null));
+        }
         snapshot.insert("messages".to_string(), Value::Array(messages));
         if let Some(history) = &initial_history {
             let mut window = Map::new();
@@ -9129,7 +9185,10 @@ impl AgentDaemon {
         {
             let mut state_guard = state.lock().expect("active session poisoned");
             state_guard.pending_attaches = state_guard.pending_attaches.saturating_sub(1);
+            state_guard.clients.retain(|candidate| !Arc::ptr_eq(candidate, &client.state));
         }
+        client.state.lock().expect("daemon client poisoned").attached_active_session_ids.remove(&active_session_id);
+        client.deferred_snapshot_frames.lock().expect("deferred frames poisoned").remove(&active_session_id);
         remove_daemon_client_session_capabilities(client, &active_session_id);
         if streams_snapshot {
             finish_client_snapshot_streaming(client, &active_session_id);
@@ -9151,7 +9210,8 @@ impl AgentDaemon {
             .expect("active session poisoned")
             .active_session_id
             .clone();
-        let signal = mark_client_snapshot_streaming(client, &active_session_id);
+        let existing_signal = { client.snapshot_transfer_abort_controllers.lock().expect("snapshot abort controllers poisoned").get(&active_session_id).cloned() };
+        let signal = existing_signal.unwrap_or_else(|| mark_client_snapshot_streaming(client, &active_session_id));
         let messages: Vec<AgentMessage> = snapshot_messages
             .iter()
             .filter_map(|value| serde_json::from_value(value.clone()).ok())
@@ -9262,11 +9322,9 @@ impl AgentDaemon {
             finish_client_snapshot_streaming(&mut client_mut, &active_session_id);
             return Ok(());
         }
-        let (last_event_sequence, event_generation) = {
-            let state = state.lock().expect("active session poisoned");
-            (state.last_event_sequence, state.event_generation.clone())
-        };
         let mut snapshot_without_messages = snapshot.clone();
+        let last_event_sequence = snapshot.get("lastEventSequence").and_then(Value::as_i64).ok_or("Snapshot is missing its captured event sequence")?;
+        let event_generation = snapshot.get("lastEventCursor").and_then(|cursor| cursor.get("generation")).and_then(Value::as_str).ok_or("Snapshot is missing its captured event generation")?.to_string();
         if let Some(object) = snapshot_without_messages.as_object_mut() {
             object.remove("messages");
         }
@@ -9325,6 +9383,7 @@ impl AgentDaemon {
         }
         let mut chunk_count = 0usize;
         let mut chunks = transcript;
+        let mut completed = false;
         loop {
             if transfer_signal.is_cancelled() {
                 let message = format!("Snapshot {stream_id} was aborted");
@@ -9341,8 +9400,7 @@ impl AgentDaemon {
                     "lastEventSequence": last_event_sequence,
                     "lastEventCursor": { "generation": event_generation, "sequence": last_event_sequence },
                 });
-                self.write_worker_snapshot_record(client, &end, purpose, Some(0))
-                    .await;
+                completed = self.write_worker_snapshot_record(client, &end, purpose, Some(0)).await;
                 break;
             };
             let chunk = match chunk {
@@ -9383,7 +9441,10 @@ impl AgentDaemon {
             }
             chunk_count += 1;
         }
-        finish_client_snapshot_streaming(client, &active_session_id);
+        if !completed && !transfer_signal.is_cancelled() {
+            self.queue_client_catchup(client, &active_session_id, if purpose == "replacement" { "replacement" } else { "resync" });
+        }
+        self.finish_snapshot_and_replay(client, &active_session_id, last_event_sequence, &event_generation, !completed || transfer_signal.is_cancelled());
         if !client.snapshot_streaming() {
             // Box only this edge of the catch-up cycle; every call and await stays the same.
             let catchup = Box::pin(self.catch_up_backpressured_client(Arc::clone(client)));
@@ -13319,7 +13380,7 @@ impl AgentDaemon {
         let summary = SessionSummary {
             active_session_id: Some(endpoint.active_session_id.clone()),
             runtime_kind: metadata.as_ref().and_then(|metadata| metadata.kind.clone()),
-            activity: if session.is_session_active() {
+            activity: if session.is_foreground_active() {
                 "working".to_string()
             } else {
                 "idle".to_string()
@@ -13637,14 +13698,11 @@ impl AgentDaemon {
         self: &Arc<Self>,
         client: Arc<DaemonClientHandle>,
     ) -> Result<(), String> {
-        if client.catchup_running.load(Ordering::SeqCst) {
-            return Ok(());
-        }
         if client.snapshot_streaming() || client.is_backpressured() {
             return Ok(());
         }
+        if client.catchup_running.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() { return Ok(()); }
         self.clear_client_catchup_retry(&client);
-        client.catchup_running.store(true, Ordering::SeqCst);
         let result = self.drain_backpressured_client_catchup_queue(&client).await;
         client.catchup_running.store(false, Ordering::SeqCst);
         result
@@ -13766,12 +13824,16 @@ impl AgentDaemon {
                 type_: "attach".to_string(),
                 body: serde_json::json!({ "activeSessionId": active_session_id }),
             };
+            let private_framed = { client.state.lock().expect("daemon client poisoned").transport.as_deref() == Some("private-framed") };
+            let chunked = private_framed && client.capabilities_for_session(active_session_id).contains("chunked_snapshot");
+            let snapshot_signal = chunked.then(|| mark_client_snapshot_streaming(client, active_session_id));
             let result = match self
                 .create_attach_result(client, &state, &attach_command)
                 .await
             {
                 Ok(result) => result,
                 Err(error) => {
+                    if chunked { finish_client_snapshot_streaming(client, active_session_id); }
                     for (remaining, remaining_purpose) in &pending[index..] {
                         self.queue_client_catchup(client, remaining, remaining_purpose);
                     }
@@ -13797,24 +13859,13 @@ impl AgentDaemon {
                 .iter()
                 .any(|candidate| Arc::ptr_eq(candidate, &client.state));
             if !resident || !still_attached {
+                if chunked { finish_client_snapshot_streaming(client, active_session_id); }
                 continue;
             }
-            let chunked = client
-                .state
-                .lock()
-                .expect("daemon client poisoned")
-                .transport
-                .as_deref()
-                == Some("private-framed")
-                && client
-                    .capabilities_for_session(active_session_id)
-                    .contains("chunked_snapshot");
+            let last_event_sequence = result.last_event_sequence;
+            let event_generation = result.snapshot.get("lastEventCursor").and_then(|cursor| cursor.get("generation")).and_then(Value::as_str).unwrap_or("").to_string();
             if chunked {
                 if purpose == "replacement" {
-                    let (last_event_sequence, event_generation) = {
-                        let state = state.lock().expect("active session poisoned");
-                        (state.last_event_sequence, state.event_generation.clone())
-                    };
                     self.write(
                         client,
                         &DaemonOutbound::Raw(serde_json::json!({
@@ -13834,8 +13885,7 @@ impl AgentDaemon {
                     );
                 }
                 let snapshot_id = snapshot_transfer_id(&result.snapshot);
-                let mut client_mut = Arc::clone(client);
-                let signal = mark_client_snapshot_streaming(&mut client_mut, active_session_id);
+                let signal = snapshot_signal.expect("chunked snapshot reserved before capture");
                 let snapshot_messages = result
                     .snapshot
                     .get("messages")
@@ -13879,10 +13929,6 @@ impl AgentDaemon {
                 }
                 continue;
             }
-            let (last_event_sequence, event_generation) = {
-                let state = state.lock().expect("active session poisoned");
-                (state.last_event_sequence, state.event_generation.clone())
-            };
             let meta = serde_json::to_value(create_daemon_event_meta(
                 active_session_id,
                 last_event_sequence,
@@ -13917,6 +13963,43 @@ impl AgentDaemon {
     }
 
     /// `queueClientCatchup(client, activeSessionId, purpose = "resync")`.
+    fn defer_snapshot_frame(&self, client: &Arc<DaemonClientHandle>, active_session_id: &str, message: &DaemonOutbound) -> bool {
+        let mut deferred = client.deferred_snapshot_frames.lock().expect("deferred frames poisoned");
+        let streaming = client.state.lock().expect("daemon client poisoned").snapshot_active_session_ids.as_ref().is_some_and(|ids| ids.contains(active_session_id));
+        if !streaming { return false; }
+        let (bytes, frames) = deferred.entry(active_session_id.to_string()).or_default();
+        // A slow viewer must not retain an unbounded stream. Overflow requests
+        // one authoritative catch-up; ordinary streams replay incrementally.
+        let incoming = serde_json::to_vec(&message.to_value()).map(|bytes| bytes.len()).unwrap_or(0);
+        if message.type_name() == "session_replaced" || frames.len() >= 512 || bytes.saturating_add(incoming) > 4 * 1024 * 1024 {
+            frames.clear();
+            *bytes = 0;
+            self.queue_client_catchup(client, active_session_id, if message.type_name() == "session_replaced" { "replacement" } else { "resync" });
+        } else {
+            *bytes += incoming;
+            frames.push(message.clone());
+        }
+        true
+    }
+
+    fn finish_snapshot_and_replay(self: &Arc<Self>, client: &Arc<DaemonClientHandle>, active_session_id: &str, sequence: i64, generation: &str, aborted: bool) {
+        // Serialize the final replay with broadcasters. They either queue before
+        // this drain or write after streaming has been cleared, never overtake it.
+        let mut deferred = client.deferred_snapshot_frames.lock().expect("deferred frames poisoned");
+        let (_, frames) = deferred.remove(active_session_id).unwrap_or_default();
+        if !aborted {
+            for frame in frames {
+                let value = frame.to_value();
+                let meta = value.get("meta");
+                let frame_sequence = meta.and_then(|meta| meta.get("sequence")).and_then(Value::as_i64);
+                let frame_generation = meta.and_then(|meta| meta.get("cursor")).and_then(|cursor| cursor.get("generation")).and_then(Value::as_str);
+                if frame_generation == Some(generation) && frame_sequence.is_some_and(|value| value <= sequence) { continue; }
+                if !self.write(client, &frame) { break; }
+            }
+        }
+        finish_client_snapshot_streaming(client, active_session_id);
+    }
+
     fn queue_client_catchup(
         &self,
         client: &Arc<DaemonClientHandle>,
@@ -16771,6 +16854,7 @@ mod cron_error_propagation_tests {
                 state: Arc::clone(&state),
                 session: Arc::clone(&session),
                 runtime_metadata: AgentSessionRuntimeMetadata::default(),
+                snapshot_boundary: StdMutex::new(None),
             }),
         );
         let job = daemon
@@ -17080,6 +17164,9 @@ mod agent_observe_parity_tests {
                 Some(session) => session.messages(),
                 None => Vec::new(),
             }
+        }
+        fn message_count(&self) -> usize {
+            self.agent_session.as_ref().map(|session| session.message_count()).unwrap_or(0)
         }
         fn model_identity(&self) -> Option<pi_ai::types::Model> {
             self.agent_session.as_ref().and_then(|session| session.model())
@@ -17471,6 +17558,7 @@ mod agent_observe_parity_tests {
                     state: Arc::clone(&target_state),
                     session: Arc::clone(&session_handle),
                     runtime_metadata: AgentSessionRuntimeMetadata::default(),
+                    snapshot_boundary: StdMutex::new(None),
                 }),
             );
             let current_state = match parent_session_file {
@@ -17505,6 +17593,7 @@ mod agent_observe_parity_tests {
                             state: Arc::clone(&state),
                             session: Arc::clone(&parent_handle),
                             runtime_metadata: AgentSessionRuntimeMetadata::default(),
+                            snapshot_boundary: StdMutex::new(None),
                         }),
                     );
                     state
@@ -17631,6 +17720,47 @@ mod agent_observe_parity_tests {
         fixture: ObserveFixture,
         #[allow(dead_code)]
         session: Arc<ObserveSession>,
+    }
+
+    #[test]
+    fn backlog_streaming_view_retains_history_storage_and_model_metadata() {
+        for history_size in [1, 256] {
+            let model = pi_ai::models::get_model("openai", "gpt-4o").expect("test model");
+            let (_scratch, parts) = observe_fixture(
+                "stream-view", &["retained"],
+                pi_agent_core::types::AgentState {
+                    model: model.clone(),
+                    messages: (0..history_size).map(|i| assistant_message(&"x".repeat(4096), i)).collect(),
+                    ..Default::default()
+                }, 0, true, true,
+            );
+            let entry = parts.fixture.daemon.sessions.lock().unwrap().get("stream-view").unwrap().clone();
+            entry.sync_view();
+            let original_ptr = {
+                let mut state = entry.state.lock().unwrap();
+                state.runtime.session.leaf_id = Some("preserved-leaf".into());
+                state.runtime.session.messages.as_ptr() as usize
+            };
+            for _ in 0..50 {
+                entry.sync_event_view(false);
+                entry.handle_event(&serde_json::json!({
+                    "type": "message_update", "message": assistant_message("partial", 999)
+                }));
+                let state = entry.state.lock().unwrap();
+                assert_eq!(state.runtime.session.messages.as_ptr() as usize, original_ptr);
+                assert_eq!(state.runtime.session.messages.len(), history_size as usize);
+                assert_eq!(state.runtime.session.messages_len, history_size as usize);
+                assert_eq!(state.runtime.session.model_identity.as_ref().map(|value| value.id.as_str()), Some(model.id.as_str()));
+                assert_eq!(state.runtime.session.leaf_id.as_deref(), Some("preserved-leaf"));
+            }
+            entry.sync_event_view(true);
+            entry.handle_event(&serde_json::json!({
+                "type": "message_end", "message": assistant_message(&"x".repeat(4096), history_size - 1)
+            }));
+            let state = entry.state.lock().unwrap();
+            assert_eq!(state.runtime.session.messages.len(), history_size as usize);
+            assert!(state.runtime.session.streaming_message.is_none(), "completed history must not also appear as a streaming message");
+        }
     }
 
     /// A real `AgentSession` whose session file is the caller's transcript: the session

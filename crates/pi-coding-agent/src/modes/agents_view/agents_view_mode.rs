@@ -1231,6 +1231,13 @@ pub async fn delete_daemon_saved_session(
     })
 }
 
+struct PendingClient(Option<DaemonTransportClient>);
+impl Drop for PendingClient {
+    fn drop(&mut self) {
+        if let Some(client) = self.0.take() { client.close(); }
+    }
+}
+
 /// `connectAgentsViewDaemonClient(socketPath)`.
 pub async fn connect_agents_view_daemon_client(
     socket_path: &str,
@@ -1238,8 +1245,9 @@ pub async fn connect_agents_view_daemon_client(
 ) -> Result<DaemonTransportClient, String> {
     let transport = transport.fresh_transport().unwrap_or(transport);
     let client = DaemonTransportClient::new(transport);
+    let mut pending = PendingClient(Some(client.clone()));
     match client.connect(3000).await {
-        Ok(()) => Ok(client),
+        Ok(()) => { pending.0 = None; Ok(client) },
         Err(error) => {
             client.close();
             Err(error)
@@ -1292,6 +1300,8 @@ pub struct InteractiveModeOptions {
     pub agents_view_owns_startup_notices: bool,
     pub session_depth: Option<i64>,
     pub session_has_children: Option<bool>,
+    /// Metadata already obtained by attach; do not fetch the full chat again before mounting its UI.
+    pub source_summary: SessionSummary,
 }
 
 pub trait DaemonAgentConnectionFactory: Send + Sync {
@@ -1324,6 +1334,7 @@ pub async fn open_agents_view_session(
         .clone()
         .ok_or_else(|| "Agents view daemon socket is not configured".to_string())?;
     let mut client = connect_agents_view_daemon_client(&socket_path, transport.clone()).await?;
+    let mut pending = PendingClient(Some(client.clone()));
     if let Some(active_session_id) = summary.active_session_id.clone() {
         let attached = factory
             .attach(
@@ -1331,14 +1342,14 @@ pub async fn open_agents_view_session(
                 &active_session_id,
                 AttachOptions {
                     close_client_on_dispose: Some(true),
-                    supports_extension_ui: None,
+                    supports_extension_ui: Some(true),
                     reconnect_timeout_ms: options.reconnect_timeout_ms,
                     telemetry_disabled: options.config.telemetry_disabled,
                 },
             )
             .await;
         match attached {
-            Ok(connection) => return Ok((connection, summary.clone(), None)),
+            Ok(connection) => { pending.0 = None; return Ok((connection, summary.clone(), None)); },
             Err(error) => {
                 client.close();
                 // Recovering takes the saved-session path too; its create/open route
@@ -1350,6 +1361,7 @@ pub async fn open_agents_view_session(
                     return Err(error);
                 }
                 client = connect_agents_view_daemon_client(&socket_path, transport.clone()).await?;
+                pending.0 = Some(client.clone());
             }
         }
     }
@@ -1367,14 +1379,14 @@ pub async fn open_agents_view_session(
                     &active_session_id,
                     AttachOptions {
                         close_client_on_dispose: Some(true),
-                        supports_extension_ui: None,
+                        supports_extension_ui: Some(true),
                         reconnect_timeout_ms: options.reconnect_timeout_ms,
                         telemetry_disabled: options.config.telemetry_disabled,
                     },
                 )
                 .await;
             match attached {
-                Ok(connection) => Ok((connection, resumed, cwd_fallback_notice)),
+                Ok(connection) => { pending.0 = None; Ok((connection, resumed, cwd_fallback_notice)) },
                 Err(error) => {
                     client.close();
                     Err(error)
@@ -1577,7 +1589,15 @@ impl AgentsViewRunner<'_> {
                 self.persistent_state.status_message = Some(status_message);
             }
 
-            let opened = open_agents_view_session(&self.options, &summary, self.transport.clone(), self.factory).await;
+            let opened = wait_for_session_open(
+                self.terminal.as_ref(),
+                &summary,
+                open_agents_view_session(&self.options, &summary, self.transport.clone(), self.factory),
+            ).await?;
+            let Some(opened) = opened else {
+                self.persistent_state.status_message = Some("Opening cancelled; the agent was left running".into());
+                continue;
+            };
             match opened {
                 Ok((connection, opened_summary, cwd_fallback_notice)) => {
                     self.persistent_state.back_session = Some(opened_summary.clone());
@@ -1607,6 +1627,7 @@ impl AgentsViewRunner<'_> {
                         agents_view_owns_startup_notices: true,
                         session_depth: opened_summary.rlm_depth,
                         session_has_children: result_has_children(&result),
+                        source_summary: opened_summary.clone(),
                     });
                     match interactive.run().await {
                         Ok(interactive_result) => {
@@ -1692,6 +1713,32 @@ impl AgentsViewRunner<'_> {
                     log_client_error("Failed to open agent", &error);
                     self.persistent_state.status_message = Some(format_error("Failed to open agent", &error));
                 }
+            }
+        }
+    }
+}
+
+async fn wait_for_session_open<T>(
+    terminal: &dyn AgentsViewTerminal,
+    summary: &SessionSummary,
+    pending: impl std::future::Future<Output = T>,
+) -> Result<Option<T>, String> {
+    tokio::pin!(pending);
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(16));
+    let started = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            result = &mut pending => return Ok(Some(result)),
+            _ = ticker.tick() => {
+                let Some(input) = terminal.poll_input()? else { return Ok(None); };
+                if input.iter().any(|key| matches_key(key, "tui.select.cancel") || matches_key(key, "app.clear")) {
+                    return Ok(None);
+                }
+                let name = summary.session_name.as_deref().unwrap_or(&summary.session_id);
+                terminal.present(
+                    vec![format!("Opening {name}… ({:.1}s)", started.elapsed().as_secs_f64())],
+                    vec![format!("{} cancel opening · agent work is not stopped", key_text(default_keybinding("tui.select.cancel")))],
+                )?;
             }
         }
     }
@@ -2252,16 +2299,34 @@ impl<'a> AgentsViewMode<'a> {
     /// ordering, no background mutation.
     pub async fn run(&mut self) -> Result<AgentsViewRunResult, String> {
         let socket_path = self.require_socket_path()?;
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        self.resolve_run = Some(tx);
+        // Paint the cached list before any daemon/catalog round trip. Keep one
+        // terminal owner polling keys while read-only refreshes are outstanding.
+        self.reconcile_catalogs();
+        self.load_startup_notices();
+        self.editor.focus();
+        self.focused = true;
+        if let Some(message) = self.persistent_state.status_message.take() {
+            self.set_status_message(Some(&message), false, None, false);
+        }
+        self.present_current_view()?;
         let client = match self.persistent_state.roster_client.clone() {
             Some(client) => client,
             None => {
-                let client = connect_agents_view_daemon_client(&socket_path, self.transport.clone()).await?;
+                let transport = self.transport.clone();
+                let Some(client) = self.wait_with_input(connect_agents_view_daemon_client(&socket_path, transport)).await? else {
+                    return rx.await.map_err(|_| "agents view ended during connection".to_string());
+                };
+                let client = client?;
                 self.persistent_state.roster_client = Some(client.clone());
                 client
             }
         };
         if !client.is_connected() {
-            let _ = client.reconnect(1000).await;
+            if self.wait_with_input(client.reconnect(1000)).await?.is_none() {
+                return rx.await.map_err(|_| "agents view ended during reconnect".to_string());
+            }
         }
         let heartbeats_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let heartbeats_changed_listener = heartbeats_changed.clone();
@@ -2273,13 +2338,16 @@ impl<'a> AgentsViewMode<'a> {
         self.unsubscribe_client_message = Some(unsubscribe_message);
         self.client = Some(client.clone());
 
-        if !self.roster_store.attach(client.clone()).await? {
+        let store = self.roster_store.clone();
+        let Some(attached) = self.wait_with_input(store.attach(client.clone())).await? else {
+            store.dispose().await;
+            return rx.await.map_err(|_| "agents view ended during roster refresh".to_string());
+        };
+        if !attached? {
             return Err(STALE_ROSTER_DAEMON_MESSAGE.to_string());
         }
         self.subscribe_to_client_close(client.clone());
 
-        let (tx, mut rx) = tokio::sync::oneshot::channel();
-        self.resolve_run = Some(tx);
         let roster_changed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let roster_changed_listener = roster_changed.clone();
         let listener_index = self.roster_store.on_update(Arc::new(move || {
@@ -2291,12 +2359,6 @@ impl<'a> AgentsViewMode<'a> {
         self.arm_saved_search_fetch(false);
         self.resolve_missing_selection_anchor();
         let _ = self.refresh_heartbeats(false).await;
-        self.load_startup_notices();
-        self.editor.focus();
-        self.focused = true;
-        if let Some(message) = self.persistent_state.status_message.take() {
-            self.set_status_message(Some(&message), false, None, false);
-        }
         self.terminal.request_render(true);
         let width = self.terminal.columns();
         let lines = self.render(width);
@@ -2360,6 +2422,34 @@ impl<'a> AgentsViewMode<'a> {
                     let width = self.terminal.columns();
                     let lines = self.render(width);
                     self.terminal.present(lines, self.render_dock(width))?;
+                }
+            }
+        }
+    }
+
+    fn present_current_view(&mut self) -> Result<(), String> {
+        let width = self.terminal.columns();
+        let lines = self.render(width);
+        self.terminal.present(lines, self.render_dock(width))
+    }
+
+    async fn wait_with_input<T>(&mut self, pending: impl std::future::Future<Output = T>) -> Result<Option<T>, String> {
+        tokio::pin!(pending);
+        let mut ticker = tokio::time::interval(std::time::Duration::from_millis(16));
+        loop {
+            tokio::select! {
+                result = &mut pending => return Ok(Some(result)),
+                _ = ticker.tick() => {
+                    match self.terminal.poll_input()? {
+                        None => self.finish(AgentsViewRunResult::Exit),
+                        Some(input) => for data in input {
+                            self.handle_input(&data);
+                            if self.stopped { break; }
+                        },
+                    }
+                    if self.stopped { return Ok(None); }
+                    self.tick_animation();
+                    self.present_current_view()?;
                 }
             }
         }
@@ -2479,22 +2569,23 @@ impl<'a> AgentsViewMode<'a> {
             && !self.daemon_shutdown_received
             && super::agents_view_state::now_ms() < deadline
         {
-            let recovered = match &self.recover_daemon {
-                Some(recover) => recover().await,
-                None => Ok(()),
+            let recover = self.recover_daemon.clone();
+            let reconnect = async {
+                if let Some(recover) = recover { recover().await?; }
+                client.reconnect(1000).await
             };
-            let attempt = match recovered {
-                Ok(()) => match client.reconnect(1000).await {
-                    Ok(()) => self.finish_reconnect_attempt(&client).await,
-                    Err(error) => Err(error),
-                },
+            let Some(reconnected) = self.wait_with_input(reconnect).await? else { return Ok(()); };
+            let attempt = match reconnected {
+                Ok(()) => self.finish_reconnect_attempt(&client).await,
                 Err(error) => Err(error),
             };
             match attempt {
                 Ok(()) => return Ok(()),
                 Err(error) => last_error = error,
             }
-            tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_RETRY_MS)).await;
+            if self.wait_with_input(tokio::time::sleep(std::time::Duration::from_millis(RECONNECT_RETRY_MS))).await?.is_none() {
+                return Ok(());
+            }
         }
         if !self.stopped && !self.daemon_shutdown_received {
             self.reconnect_timed_out = true;
@@ -2510,7 +2601,9 @@ impl<'a> AgentsViewMode<'a> {
     }
 
     async fn finish_reconnect_attempt(&mut self, client: &DaemonTransportClient) -> Result<(), String> {
-        if !self.roster_store.attach(client.clone()).await? {
+        let store = self.roster_store.clone();
+        let Some(attached) = self.wait_with_input(store.attach(client.clone())).await? else { return Ok(()); };
+        if !attached? {
             return Err("Daemon lost the agent_roster capability during reconnect".to_string());
         }
         if !self.refresh_heartbeats(true).await {
@@ -2644,7 +2737,13 @@ impl<'a> AgentsViewMode<'a> {
             Ok(client) => client,
             Err(_) => return false,
         };
-        match list_daemon_heartbeats(&client, None).await {
+        let pending = list_daemon_heartbeats(&client, None);
+        let result = match self.wait_with_input(pending).await {
+            Ok(Some(result)) => result,
+            Ok(None) => return false,
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(heartbeats) => {
                 if generation != self.heartbeat_catalog_generation {
                     return false;
@@ -2716,7 +2815,12 @@ impl<'a> AgentsViewMode<'a> {
             // complete catalog visible.
             progress_for_callback.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         });
-        let result = list_daemon_saved_sessions(&client, &context, "all", Some(on_session), None).await;
+        let pending = list_daemon_saved_sessions(&client, &context, "all", Some(on_session), None);
+        let result = match self.wait_with_input(pending).await {
+            Ok(Some(result)) => result,
+            Ok(None) => { self.saved_catalog_refresh_pending = false; return false; }
+            Err(error) => Err(error),
+        };
         match result {
             Ok(sessions) => {
                 if generation != self.saved_catalog_generation || self.stopped || self.daemon_shutdown_received {
@@ -5200,6 +5304,23 @@ mod tests {
 
     struct FakeConnectionFactory;
 
+    struct InputDriver {
+        input: StdMutex<std::collections::VecDeque<Vec<String>>>,
+        frames: StdMutex<Vec<Vec<String>>>,
+    }
+    impl AgentsViewTerminal for InputDriver {
+        fn rows(&self) -> usize { 30 }
+        fn columns(&self) -> usize { 80 }
+        fn request_render(&self, _force: bool) {}
+        fn set_title(&self, _title: &str) {}
+        fn poll_input(&self) -> Result<Option<Vec<String>>, String> {
+            Ok(Some(self.input.lock().unwrap().pop_front().unwrap_or_default()))
+        }
+        fn present(&self, lines: Vec<String>, _dock: Vec<String>) -> Result<(), String> {
+            self.frames.lock().unwrap().push(lines); Ok(())
+        }
+    }
+
     /// Stateless, so the tests borrow one `'static` instance like the module-level
     /// factory the reference passes into the mode.
     static FAKE_CONNECTION_FACTORY: FakeConnectionFactory = FakeConnectionFactory;
@@ -5970,6 +6091,93 @@ mod tests {
             resolve_attach_model_fallback_message(&summary, Some("startup")),
             Some("from summary".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn both_browser_open_paths_enable_extension_dialogs() {
+        struct RecordingFactory(StdMutex<Vec<AttachOptions>>);
+        impl DaemonAgentConnectionFactory for RecordingFactory {
+            fn attach(&self, _client: DaemonTransportClient, _active: &str, options: AttachOptions)
+                -> TransportFuture<Result<Arc<dyn DaemonAgentConnectionHandle>, String>> {
+                self.0.lock().unwrap().push(options);
+                Box::pin(async { Ok(Arc::new(FakeAgentConnection) as Arc<dyn DaemonAgentConnectionHandle>) })
+            }
+        }
+        let mode = build_mode(Vec::new()).await;
+        let factory = RecordingFactory(StdMutex::new(Vec::new()));
+        let transport = FakeTransport::new(&["agent_roster"]);
+        let live = summary("a-1", "Live");
+        open_agents_view_session(&mode.options, &live, transport.clone(), &factory).await.unwrap();
+        let mut saved = live.clone();
+        saved.active_session_id = None;
+        saved.cwd = std::env::current_dir().unwrap().to_string_lossy().into_owned();
+        saved.session_file = Some("C:/isolated/saved.jsonl".into());
+        transport.push(Ok(ok_response(serde_json::to_value(&live).unwrap())));
+        open_agents_view_session(&mode.options, &saved, transport, &factory).await.unwrap();
+        let options = factory.0.lock().unwrap();
+        assert_eq!(options.len(), 2);
+        assert!(options.iter().all(|options| options.supports_extension_ui == Some(true)));
+    }
+
+    #[tokio::test]
+    async fn cancelled_open_closes_only_its_pending_client() {
+        struct PendingFactory;
+        impl DaemonAgentConnectionFactory for PendingFactory {
+            fn attach(&self, _client: DaemonTransportClient, _active: &str, _options: AttachOptions)
+                -> TransportFuture<Result<Arc<dyn DaemonAgentConnectionHandle>, String>> {
+                Box::pin(std::future::pending())
+            }
+        }
+        let mode = build_mode(Vec::new()).await;
+        let transport = FakeTransport::new(&["agent_roster"]);
+        let terminal = InputDriver {
+            input: StdMutex::new(std::collections::VecDeque::from([Vec::new(), vec!["\x1b".into()]])),
+            frames: StdMutex::new(Vec::new()),
+        };
+        let chat = summary("a-1", "Live");
+        let opened = tokio::time::timeout(std::time::Duration::from_secs(2), wait_for_session_open(
+            &terminal, &chat, open_agents_view_session(&mode.options, &chat, transport.clone(), &PendingFactory),
+        )).await.unwrap().unwrap();
+        assert!(opened.is_none());
+        assert!(!transport.is_connected());
+        assert!(transport.requests().is_empty(), "cancel must not send abort, stop or shutdown");
+        assert!(terminal.frames.lock().unwrap().iter().flatten().any(|line| line.contains("Opening Live")));
+    }
+
+    #[tokio::test]
+    async fn pending_catalog_keeps_cached_rows_keyboard_navigation_and_exit_live() {
+        let mut mode = build_mode(vec![roster_entry("a-1", "Alpha"), roster_entry("b-1", "Beta")]).await;
+        let terminal = Arc::new(InputDriver {
+            input: StdMutex::new(std::collections::VecDeque::from([
+                vec!["\x1b[B".into()], vec!["\x03".into(), "\x03".into()],
+            ])),
+            frames: StdMutex::new(Vec::new()),
+        });
+        mode.terminal = terminal.clone();
+        let (done, receive) = tokio::sync::oneshot::channel();
+        mode.resolve_run = Some(done);
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2),
+            mode.wait_with_input(std::future::pending::<()>())).await.unwrap().unwrap();
+        assert!(result.is_none());
+        assert_eq!(receive.await.unwrap(), AgentsViewRunResult::Exit);
+        assert_eq!(mode.selected_index(), 1);
+        assert!(terminal.frames.lock().unwrap().iter().flatten().any(|line| line.contains("Beta")));
+    }
+
+    #[tokio::test]
+    async fn unavailable_daemon_reconnect_does_not_trap_the_browser() {
+        let mut mode = build_mode(vec![roster_entry("a-1", "Alpha")]).await;
+        mode.terminal = Arc::new(InputDriver {
+            input: StdMutex::new(std::collections::VecDeque::from([vec!["\x03".into(), "\x03".into()]])),
+            frames: StdMutex::new(Vec::new()),
+        });
+        mode.recover_daemon = Some(Arc::new(|| Box::pin(std::future::pending())));
+        let (done, receive) = tokio::sync::oneshot::channel();
+        mode.resolve_run = Some(done);
+        mode.start_client_reconnect("offline");
+        tokio::time::timeout(std::time::Duration::from_secs(2), mode.reconnect_client("offline")).await.unwrap().unwrap();
+        assert_eq!(receive.await.unwrap(), AgentsViewRunResult::Exit);
+        assert!(mode.stopped);
     }
 
     #[tokio::test]

@@ -436,11 +436,33 @@ fn format_error_sentence(error: &str) -> String {
 /// `updateTransportReconnects` weak map, kept as a per-client single-flight slot.
 /// Clears `reconnect_in_flight` and wakes `dispose` when the recovery attempt ends,
 /// mirroring the TypeScript promise settling (`daemon-agent-connection.ts:1643-1646`).
-struct ReconnectScope(Arc<Mutex<Option<tokio::sync::broadcast::Sender<()>>>>);
+struct ReconnectAttempt {
+    result: tokio::sync::watch::Sender<Option<Result<(), String>>>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+struct ReconnectScope {
+    slot: Arc<Mutex<Option<Arc<ReconnectAttempt>>>>,
+    attempt: Arc<ReconnectAttempt>,
+}
 impl Drop for ReconnectScope {
     fn drop(&mut self) {
-        if let Some(sender) = self.0.lock().unwrap().take() {
-            let _ = sender.send(());
+        if self.attempt.result.borrow().is_none() {
+            self.attempt.result.send_replace(Some(Err("Daemon reconnect cancelled".to_string())));
+        }
+        let mut slot = self.slot.lock().unwrap();
+        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, &self.attempt)) {
+            slot.take();
+        }
+    }
+}
+
+struct AttachScope(Option<Arc<DaemonAgentConnection>>);
+impl Drop for AttachScope {
+    fn drop(&mut self) {
+        if let Some(connection) = self.0.take() {
+            // Cancelling navigation must release only this viewer, never its session.
+            tokio::spawn(async move { connection.dispose_inner().await; });
         }
     }
 }
@@ -463,6 +485,8 @@ fn reconnect_daemon_transport_after_update(client: Arc<dyn DaemonTransportClient
 
 #[derive(Debug, Clone, Default)]
 pub struct DaemonAgentConnectionOptions {
+    /// Interactive viewers release buffered updates when their first listener is installed.
+    pub defer_session_events: bool,
     pub close_client_on_dispose: bool,
     /// Secondary watchers pass false to stay on the shared control-plane socket.
     pub direct_transport: bool,
@@ -781,6 +805,40 @@ struct DaemonSnapshotAssembly {
     failed: Option<String>,
 }
 
+#[derive(Default)]
+struct DeferredSessionEvents {
+    queue: VecDeque<(usize, DaemonOutbound)>,
+    bytes: usize,
+    draining: bool,
+    failure: Option<String>,
+}
+
+impl DeferredSessionEvents {
+    fn push(&mut self, message: DaemonOutbound) -> bool {
+        let size = match &message {
+            DaemonOutbound::SessionEvent { event, .. } => serde_json::to_vec(event).map(|bytes| bytes.len()).unwrap_or(0),
+            DaemonOutbound::ExtensionUiRequest { payload, .. } => serde_json::to_vec(payload).map(|bytes| bytes.len()).unwrap_or(0),
+            DaemonOutbound::SessionResynced { snapshot, .. } => snapshot.messages.iter().map(|message| serde_json::to_vec(message).map(|bytes| bytes.len()).unwrap_or(0)).sum(),
+            DaemonOutbound::SessionReplaced { messages, .. } => messages.iter().map(|message| serde_json::to_vec(message).map(|bytes| bytes.len()).unwrap_or(0)).sum(),
+            _ => 1024,
+        };
+        let update = matches!(&message, DaemonOutbound::SessionEvent { event: AgentConnectionSessionEvent::MessageUpdate { .. }, .. });
+        if update && self.queue.back().is_some_and(|(_, previous)| matches!(previous, DaemonOutbound::SessionEvent { event: AgentConnectionSessionEvent::MessageUpdate { .. }, .. })) {
+            if let Some((previous_size, _)) = self.queue.pop_back() { self.bytes = self.bytes.saturating_sub(previous_size); }
+        }
+        if self.queue.len() >= 4096 || self.bytes.saturating_add(size) > 8 * 1024 * 1024 { return false; }
+        self.bytes += size;
+        self.queue.push_back((size, message));
+        true
+    }
+    fn pop(&mut self) -> Option<DaemonOutbound> {
+        let (size, message) = self.queue.pop_front()?;
+        self.bytes = self.bytes.saturating_sub(size);
+        Some(message)
+    }
+    fn clear(&mut self) { self.queue.clear(); self.bytes = 0; }
+}
+
 #[derive(Clone)]
 struct SnapshotBegin {
     snapshot: DaemonSessionSnapshot,
@@ -815,7 +873,7 @@ pub struct DaemonAgentConnection {
     /// `this.reconnectPromise` (`daemon-agent-connection.ts:255`): the in-flight recovery
     /// attempt that `dispose()` races against `OWNED_SESSION_DISPOSE_RECONNECT_WAIT_MS`
     /// (`daemon-agent-connection.ts:1594-1598`).
-    reconnect_in_flight: Arc<Mutex<Option<tokio::sync::broadcast::Sender<()>>>>,
+    reconnect_in_flight: Arc<Mutex<Option<Arc<ReconnectAttempt>>>>,
     last_event_cursor: Arc<Mutex<Option<DaemonEventCursor>>>,
     retired_event_generations: Arc<Mutex<HashSet<String>>>,
     last_event_sequence: Arc<Mutex<Option<i64>>>,
@@ -833,6 +891,10 @@ pub struct DaemonAgentConnection {
     completed_snapshots: Arc<Mutex<VecDeque<(String, DaemonSessionSnapshot)>>>,
     pending_reattach_active_session_ids: Arc<Mutex<HashSet<String>>>,
     ignored_snapshot_ids: Arc<Mutex<VecDeque<String>>>,
+    snapshot_in_progress: Arc<Mutex<Option<String>>>,
+    deferred_session_events: Arc<Mutex<DeferredSessionEvents>>,
+    defer_session_events: Arc<Mutex<bool>>,
+    attach_snapshot_pending: Arc<Mutex<bool>>,
     roster_store: Arc<Mutex<Option<Arc<dyn AgentConnectionRosterStore>>>>,
     initial_attach_pending: Arc<Mutex<bool>>,
     initial_control_plane_close: Arc<Mutex<Option<String>>>,
@@ -861,6 +923,7 @@ impl DaemonAgentConnection {
         if options.recover_daemon {
             client.enable_request_recovery();
         }
+        let defer_session_events = options.defer_session_events;
         Self {
             client,
             active_session_id: Arc::new(Mutex::new(active_session_id)),
@@ -891,6 +954,10 @@ impl DaemonAgentConnection {
             completed_snapshots: Arc::new(Mutex::new(VecDeque::new())),
             pending_reattach_active_session_ids: Arc::new(Mutex::new(HashSet::new())),
             ignored_snapshot_ids: Arc::new(Mutex::new(VecDeque::new())),
+            snapshot_in_progress: Arc::new(Mutex::new(None)),
+            deferred_session_events: Arc::new(Mutex::new(DeferredSessionEvents::default())),
+            defer_session_events: Arc::new(Mutex::new(defer_session_events)),
+            attach_snapshot_pending: Arc::new(Mutex::new(false)),
             roster_store: Arc::new(Mutex::new(None)),
             initial_attach_pending: Arc::new(Mutex::new(false)),
             initial_control_plane_close: Arc::new(Mutex::new(None)),
@@ -1095,13 +1162,15 @@ impl DaemonAgentConnection {
 
     fn reject_snapshot_assemblies(&self, error: String) {
         let assemblies = std::mem::take(&mut *self.snapshot_assemblies.lock().unwrap());
-        for (_, assembly) in assemblies {
+        for (id, assembly) in assemblies {
+            self.ignore_snapshot_id(&id);
             let mut guard = assembly.lock().unwrap();
             guard.timeout_armed = false;
             guard.failed = Some(error.clone());
         }
         self.completed_snapshots.lock().unwrap().clear();
-        self.ignored_snapshot_ids.lock().unwrap().clear();
+        self.snapshot_in_progress.lock().unwrap().take();
+        self.deferred_session_events.lock().unwrap().clear();
     }
 
     fn observe_rlm_child_update(&self, child: AgentConnectionRlmChildAgentSnapshot) {
@@ -1115,7 +1184,7 @@ impl DaemonAgentConnection {
         }
     }
 
-    fn observe_streaming_message(&self, event: &AgentConnectionSessionEvent) {
+    fn observe_streaming_message(&self, event: &AgentConnectionSessionEvent, sequenced: bool) {
         let mut snapshot_guard = self.latest_snapshot.lock().unwrap();
         if snapshot_guard.is_none() {
             return;
@@ -1130,12 +1199,30 @@ impl DaemonAgentConnection {
                     snapshot.streaming_message = Some(message.clone());
                 }
             }
-            AgentConnectionSessionEvent::MessageEnd { .. } if role == Some("assistant") => {
+            AgentConnectionSessionEvent::MessageEnd { message } => {
                 if let Some(snapshot) = snapshot_guard.as_mut() {
-                    snapshot.streaming_message = None;
+                    if role == Some("assistant") { snapshot.streaming_message = None; }
+                    if sequenced || snapshot.messages.last() != Some(message) {
+                        snapshot.messages.push(message.clone());
+                        snapshot.state.message_count += 1.0;
+                        if let Some(history) = snapshot.history.as_mut() { history.total_message_count += 1.0; }
+                    }
                 }
             }
             _ => {}
+        }
+        if let Some(snapshot) = snapshot_guard.as_mut() {
+            match event.type_name() {
+                "agent_start" => { snapshot.state.is_streaming = true; }
+                "agent_end" => { snapshot.state.is_streaming = false; snapshot.streaming_message = None; }
+                "compaction_start" => snapshot.state.is_compacting = true,
+                "compaction_end" => snapshot.state.is_compacting = false,
+                "bash_start" => snapshot.state.is_bash_running = true,
+                "bash_end" => snapshot.state.is_bash_running = false,
+                _ => {}
+            }
+            snapshot.last_event_sequence = self.last_event_sequence.lock().unwrap().map(|sequence| sequence as f64);
+            snapshot.last_event_cursor = self.last_event_cursor.lock().unwrap().as_ref().map(|cursor| AgentConnectionEventCursor { generation: cursor.generation.clone(), sequence: cursor.sequence as f64 });
         }
     }
 
@@ -1151,7 +1238,7 @@ impl DaemonAgentConnection {
         }
         {
             let mut sequence = self.last_event_sequence.lock().unwrap();
-            *sequence = max_event_sequence(*sequence, snapshot.last_event_sequence);
+            *sequence = snapshot.last_event_sequence;
         }
         *self.attached_session_id.lock().unwrap() = Some(snapshot.state.session_id.clone());
         *self.attached_session_file.lock().unwrap() = snapshot.state.session_file.clone();
@@ -1226,6 +1313,7 @@ impl DaemonAgentConnection {
                 .unwrap()
                 .insert(Arc::as_ptr(&connection) as usize, connection.clone());
             connection.bind_transport(&connection);
+            let mut attach_scope = AttachScope(Some(connection.clone()));
             *connection.initial_attach_pending.lock().unwrap() = true;
             let initial = connection.attach_once(true).await;
             if let Err(error) = initial {
@@ -1249,11 +1337,15 @@ impl DaemonAgentConnection {
                 }
                 connection.handle_transport_close(initial_close).await;
             }
+            attach_scope.0 = None;
             Ok(connection)
         })
     }
 
     async fn attach_once(&self, recoverable: bool) -> Result<(), String> {
+        self.reject_snapshot_assemblies("Superseded by a new attachment".to_string());
+        self.deferred_session_events.lock().unwrap().failure = None;
+        *self.attach_snapshot_pending.lock().unwrap() = true;
         let supports_extension_ui = self.options.lock().unwrap().supports_extension_ui;
         let owned_session = self.options.lock().unwrap().owned_session;
         let mut capabilities: Vec<Value> = vec![
@@ -1307,8 +1399,13 @@ impl DaemonAgentConnection {
             ));
         }
         let command = command_body("attach", fields);
-        let data = self.request_data_with_recovery(command, None, recoverable).await?;
-        self.apply_attach_result(&data).await
+        let result = match self.request_data_with_recovery(command, None, recoverable).await {
+            Ok(data) => self.apply_attach_result(&data).await,
+            Err(error) => Err(error),
+        };
+        *self.attach_snapshot_pending.lock().unwrap() = false;
+        if result.is_ok() { self.drain_deferred_session_events().await?; }
+        result
     }
 
     async fn apply_attach_result(&self, data: &Value) -> Result<(), String> {
@@ -1323,31 +1420,19 @@ impl DaemonAgentConnection {
         self.capture_daemon_log_path();
         *self.update_reconnect_failed.lock().unwrap() = false;
         *self.terminal_close_emitted.lock().unwrap() = false;
-        if let Some(cursor) = &attach_result.snapshot.last_event_cursor {
-            self.observe_event_cursor(cursor.clone());
-        }
-        {
-            let mut sequence = self.last_event_sequence.lock().unwrap();
-            *sequence = max_event_sequence(*sequence,
-                summary.last_event_sequence.or(attach_result.snapshot.last_event_sequence));
-        }
         let snapshot = match &attach_result.snapshot_stream {
             Some(stream) => self.wait_for_snapshot(&stream.id).await?,
             None => attach_result.snapshot.clone(),
         };
-        let mut mapped = map_daemon_session_snapshot(&snapshot, attach_result.replay.as_ref())?;
+        if *self.disposed.lock().unwrap() { return Err("Daemon connection disposed during attach".to_string()); }
+        if let Some(error) = self.deferred_session_events.lock().unwrap().failure.clone() { return Err(error); }
+        let mapped = map_daemon_session_snapshot(&snapshot, attach_result.replay.as_ref())?;
         if snapshot.children.is_some() {
             *self.child_roster_sequence.lock().unwrap() = snapshot.last_event_sequence;
         }
-        if let Some(sequence) = *self.last_event_sequence.lock().unwrap() {
-            mapped.last_event_sequence = Some(sequence as f64);
-        }
-        if let Some(cursor) = self.last_event_cursor.lock().unwrap().clone() {
-            mapped.last_event_cursor = Some(AgentConnectionEventCursor {
-                generation: cursor.generation,
-                sequence: cursor.sequence as f64,
-            });
-        }
+        *self.last_event_sequence.lock().unwrap() = snapshot.last_event_sequence;
+        if let Some(cursor) = &snapshot.last_event_cursor { self.observe_event_cursor(cursor.clone()); }
+        *self.last_event_cursor.lock().unwrap() = snapshot.last_event_cursor.clone();
         *self.latest_snapshot.lock().unwrap() = Some(mapped);
         *self.latest_snapshot_is_fresh.lock().unwrap() = true;
         // The roster bar is an accessory: its subscribe failure must never fail an
@@ -1357,6 +1442,7 @@ impl DaemonAgentConnection {
         if let Some(store) = roster {
             let _ = store.attach(self.client.clone()).await;
         }
+        if let Some(error) = self.deferred_session_events.lock().unwrap().failure.clone() { return Err(error); }
         Ok(())
     }
 
@@ -1422,12 +1508,12 @@ impl DaemonAgentConnection {
             return;
         };
         tokio::spawn(async move {
-            connection
-                .emit(AgentConnectionEvent::ConnectionStatus {
-                    status: "reconnecting".to_string(),
-                    error: Some("The Prime Agent daemon is restarting for an update.".to_string()),
-                })
-                .await;
+            let _ = connection.reconnect("The Prime Agent daemon is restarting for an update.".to_string()).await;
+        });
+    }
+
+    async fn reconnect_update_owner(&self) -> Result<(), String> {
+            let connection = self;
             let client = connection.client.clone();
             let result = reconnect_daemon_transport_after_update(client).await;
             let restore = match result {
@@ -1457,7 +1543,7 @@ impl DaemonAgentConnection {
                     }
                 }
             }
-        });
+            Ok(())
     }
 
     /// The connection hands its own `Arc` to spawned recovery tasks.
@@ -1661,11 +1747,45 @@ impl DaemonAgentConnection {
 
     /// `reconnect(cause)`: single-flight through `reconnectPromise`.
     async fn reconnect(&self, cause: String) -> Result<(), String> {
+        let (attempt, owner) = {
+            let mut slot = self.reconnect_in_flight.lock().unwrap();
+            match slot.as_ref() {
+                Some(attempt) => (attempt.clone(), false),
+                None => {
+                    let (result, _) = tokio::sync::watch::channel(None);
+                    let attempt = Arc::new(ReconnectAttempt { result, cancel: tokio_util::sync::CancellationToken::new() });
+                    *slot = Some(attempt.clone());
+                    (attempt, true)
+                }
+            }
+        };
+        if !owner {
+            let mut result = attempt.result.subscribe();
+            loop {
+                if let Some(result) = result.borrow().clone() { return result; }
+                if result.changed().await.is_err() { return Err("Daemon reconnect cancelled".to_string()); }
+            }
+        }
+        let _scope = ReconnectScope { slot: self.reconnect_in_flight.clone(), attempt: attempt.clone() };
+        let result = tokio::select! {
+            _ = attempt.cancel.cancelled() => Err("Daemon reconnect cancelled".to_string()),
+            result = async {
+                if !*self.update_restart_pending.lock().unwrap() {
+                    self.reconnect_owner(cause).await?;
+                }
+                if !*self.disposed.lock().unwrap() && *self.update_restart_pending.lock().unwrap() {
+                    self.reconnect_update_owner().await?;
+                }
+                Ok(())
+            } => result,
+        };
+        attempt.result.send_replace(Some(result.clone()));
+        result
+    }
+
+    async fn reconnect_owner(&self, cause: String) -> Result<(), String> {
         // Publish `this.reconnectPromise`'s completion signal so `dispose` can await it
         // (`daemon-agent-connection.ts:1643-1646` stores the promise; `:1594` races it).
-        let (reconnect_done, _) = tokio::sync::broadcast::channel::<()>(1);
-        *self.reconnect_in_flight.lock().unwrap() = Some(reconnect_done.clone());
-        let _reconnect_scope = ReconnectScope(self.reconnect_in_flight.clone());
         self.emit(AgentConnectionEvent::ConnectionStatus {
             status: "reconnecting".to_string(),
             error: Some(cause.clone()),
@@ -1681,6 +1801,7 @@ impl DaemonAgentConnection {
         let mut attempt = 0u32;
         let mut last_error = cause;
         while !*self.disposed.lock().unwrap() {
+            if *self.update_restart_pending.lock().unwrap() { return Ok(()); }
             // A held direct link owns session liveness: control-plane recovery retries unbounded,
             // and the bounded session-plane deadline arms only once the direct link is gone.
             let direct_session_held = self.client.has_direct_transport();
@@ -1780,6 +1901,7 @@ impl DaemonAgentConnection {
     }
 
     async fn get_initial_snapshot_inner(&self, recoverable: bool) -> Result<AgentConnectionSnapshot, String> {
+        if let Some(error) = self.deferred_session_events.lock().unwrap().failure.clone() { return Err(error); }
         if *self.latest_snapshot_is_fresh.lock().unwrap() {
             if let Some(snapshot) = self.latest_snapshot.lock().unwrap().clone() {
                 return Ok(snapshot);
@@ -1862,6 +1984,10 @@ impl DaemonAgentConnection {
 
     /// `waitForSnapshot(snapshotId)`.
     async fn wait_for_snapshot(&self, snapshot_id: &str) -> Result<DaemonSessionSnapshot, String> {
+        if let Some(error) = self.deferred_session_events.lock().unwrap().failure.clone() { return Err(error); }
+        if *self.disposed.lock().unwrap() || self.is_ignored_snapshot_id(snapshot_id) {
+            return Err(format!("Snapshot {snapshot_id} is no longer available"));
+        }
         let completed = {
             let mut snapshots = self.completed_snapshots.lock().unwrap();
             snapshots.iter().position(|(id, _)| id == snapshot_id)
@@ -1879,6 +2005,8 @@ impl DaemonAgentConnection {
             .unwrap_or(DAEMON_SNAPSHOT_TIMEOUT_MS);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
+            if *self.disposed.lock().unwrap() { return Err("Daemon connection disposed during snapshot transfer".to_string()); }
+            if let Some(error) = self.deferred_session_events.lock().unwrap().failure.clone() { return Err(error); }
             {
                 let guard = assembly.lock().unwrap();
                 if let Some(error) = &guard.failed {
@@ -1932,17 +2060,15 @@ impl DaemonAgentConnection {
         assembly: &Arc<Mutex<DaemonSnapshotAssembly>>,
         error: String,
     ) {
-        let purpose = {
+        {
             let mut guard = assembly.lock().unwrap();
             guard.timeout_armed = false;
             guard.failed = Some(error);
-            guard.begin.as_ref().map(|begin| begin.purpose.clone())
-        };
-        if let Some(purpose) = purpose {
-            if purpose != "attach" {
-                self.snapshot_assemblies.lock().unwrap().remove(snapshot_id);
-            }
         }
+        self.snapshot_assemblies.lock().unwrap().remove(snapshot_id);
+        self.ignore_snapshot_id(snapshot_id);
+        let mut current = self.snapshot_in_progress.lock().unwrap();
+        if current.as_deref() == Some(snapshot_id) { current.take(); }
     }
 
     async fn recover_failed_snapshot(&self, purpose: &str, snapshot_error: String) {
@@ -1984,7 +2110,9 @@ impl DaemonAgentConnection {
     }
 
     async fn complete_snapshot_assembly(&self, snapshot_id: &str, chunk_count: usize, last_event_sequence: i64, last_event_cursor: Option<DaemonEventCursor>) {
-        let assembly = self.get_snapshot_assembly(snapshot_id);
+        if *self.disposed.lock().unwrap() || self.is_ignored_snapshot_id(snapshot_id) { return; }
+        let assembly = { self.snapshot_assemblies.lock().unwrap().get(snapshot_id).cloned() };
+        let Some(assembly) = assembly else { self.ignore_snapshot_id(snapshot_id); return; };
         let begin = { assembly.lock().unwrap().begin.clone() };
         let Some(begin) = begin else {
             self.reject_snapshot_assembly(
@@ -1994,6 +2122,14 @@ impl DaemonAgentConnection {
             );
             return;
         };
+        if self.snapshot_in_progress.lock().unwrap().as_deref() != Some(snapshot_id)
+            || begin.snapshot.state.active_session_id.as_deref().is_some_and(|id| id != self.active_session_id())
+            || begin.snapshot.last_event_sequence.is_some_and(|sequence| sequence != last_event_sequence)
+            || begin.snapshot.last_event_cursor.as_ref().is_some_and(|cursor| Some(cursor) != last_event_cursor.as_ref())
+        {
+            self.reject_snapshot_assembly(snapshot_id, &assembly, format!("Snapshot {snapshot_id} was superseded or changed its captured cursor"));
+            return;
+        }
         let chunk_len = { assembly.lock().unwrap().chunks.len() };
         if chunk_len != chunk_count {
             self.reject_snapshot_assembly(
@@ -2034,19 +2170,11 @@ impl DaemonAgentConnection {
         snapshot.messages = messages.clone();
         snapshot.last_event_sequence = Some(last_event_sequence);
         snapshot.last_event_cursor = last_event_cursor.clone();
-        if let Some(cursor) = &last_event_cursor {
-            self.observe_event_cursor(cursor.clone());
+        let purpose = begin.purpose.clone();
+        if purpose != "attach" {
+            self.apply_replacement_snapshot(&snapshot, None);
         }
-        {
-            let mut sequence = self.last_event_sequence.lock().unwrap();
-            *sequence = max_event_sequence(*sequence, Some(last_event_sequence));
-        }
-        *self.attached_session_id.lock().unwrap() = Some(snapshot.state.session_id.clone());
-        *self.attached_session_file.lock().unwrap() = snapshot.state.session_file.clone();
-        if let Ok(mapped) = map_daemon_session_snapshot(&snapshot, None) {
-            *self.latest_snapshot.lock().unwrap() = Some(mapped);
-        }
-        *self.latest_snapshot_is_fresh.lock().unwrap() = true;
+        self.snapshot_in_progress.lock().unwrap().take();
         {
             let mut guard = assembly.lock().unwrap();
             // wait_for_snapshot returns the saved begin snapshot. Publish the
@@ -2057,7 +2185,6 @@ impl DaemonAgentConnection {
             }
             guard.completed = true;
         }
-        let purpose = begin.purpose.clone();
         if purpose != "attach" {
             self.snapshot_assemblies.lock().unwrap().remove(snapshot_id);
             if self
@@ -2084,9 +2211,18 @@ impl DaemonAgentConnection {
             let mapped = self.latest_snapshot.lock().unwrap().clone().unwrap_or_default();
             self.emit(AgentConnectionEvent::SessionResynced { snapshot: mapped }).await;
         }
+        if purpose != "attach" { let _ = self.drain_deferred_session_events().await; }
     }
 
     async fn handle_daemon_message(&self, message: DaemonOutbound) -> Result<(), String> {
+        self.handle_daemon_message_inner(message, false).await
+    }
+
+    async fn handle_daemon_message_inner(&self, message: DaemonOutbound, replaying: bool) -> Result<(), String> {
+        if *self.disposed.lock().unwrap() { return Ok(()); }
+        // A bounded opening buffer must fail visibly, never continue beyond a
+        // missing prefix. A fresh attachment explicitly resets this failure.
+        if self.deferred_session_events.lock().unwrap().failure.is_some() { return Ok(()); }
         if matches!(message, DaemonOutbound::HeartbeatsChanged { .. }) {
             self.emit(AgentConnectionEvent::HeartbeatsChanged).await;
             return Ok(());
@@ -2096,15 +2232,6 @@ impl DaemonAgentConnection {
         }
         if let Some(snapshot_id) = message.snapshot_id() {
             if self.is_ignored_snapshot_id(snapshot_id) {
-                if matches!(
-                    message,
-                    DaemonOutbound::SessionSnapshotEnd { .. } | DaemonOutbound::SessionSnapshotFailed { .. }
-                ) {
-                    self.ignored_snapshot_ids
-                        .lock()
-                        .unwrap()
-                        .retain(|entry| entry != snapshot_id);
-                }
                 return Ok(());
             }
         }
@@ -2116,6 +2243,23 @@ impl DaemonAgentConnection {
                 purpose,
                 ..
             } => {
+                if snapshot.last_event_cursor.as_ref().is_some_and(|cursor| self.retired_event_generations.lock().unwrap().contains(&cursor.generation)) {
+                    self.ignore_snapshot_id(snapshot_id);
+                    return Ok(());
+                }
+                let stale = match (&snapshot.last_event_cursor, &*self.last_event_cursor.lock().unwrap()) {
+                    (Some(incoming), Some(current)) => incoming.generation == current.generation && incoming.sequence < current.sequence,
+                    _ => false,
+                };
+                if stale && !*self.attach_snapshot_pending.lock().unwrap() {
+                    self.ignore_snapshot_id(snapshot_id);
+                    return Ok(());
+                }
+                let previous = self.snapshot_in_progress.lock().unwrap().replace(snapshot_id.clone());
+                if let Some(previous) = previous.filter(|previous| previous != snapshot_id) {
+                    let old = { self.snapshot_assemblies.lock().unwrap().get(&previous).cloned() };
+                    if let Some(old) = old { self.reject_snapshot_assembly(&previous, &old, "Snapshot superseded".to_string()); }
+                }
                 let assembly = self.get_snapshot_assembly(snapshot_id);
                 let mut guard = assembly.lock().unwrap();
                 guard.begin = Some(SnapshotBegin {
@@ -2132,8 +2276,8 @@ impl DaemonAgentConnection {
                 messages,
                 ..
             } => {
-                let assembly = self.get_snapshot_assembly(snapshot_id);
-                assembly.lock().unwrap().chunks.insert(*index, messages.clone());
+                let assembly = { self.snapshot_assemblies.lock().unwrap().get(snapshot_id).cloned() };
+                if let Some(assembly) = assembly { assembly.lock().unwrap().chunks.insert(*index, messages.clone()); }
                 return Ok(());
             }
             DaemonOutbound::SessionSnapshotEnd {
@@ -2179,6 +2323,27 @@ impl DaemonAgentConnection {
             }
             _ => {}
         }
+        let deferred = {
+            let mut pending = self.deferred_session_events.lock().unwrap();
+            if !replaying && !matches!(message, DaemonOutbound::SessionClosed { .. })
+            && (pending.draining || *self.defer_session_events.lock().unwrap()
+                || *self.attach_snapshot_pending.lock().unwrap()
+                || self.snapshot_in_progress.lock().unwrap().is_some())
+            {
+                if pending.push(message.clone()) { 1 } else {
+                    pending.clear();
+                    pending.failure = Some("Opening this busy conversation exceeded the bounded update buffer. Reopen it to load a fresh snapshot; the running session is preserved.".to_string());
+                    2
+                }
+            } else { 0 }
+        };
+        if deferred == 2 {
+            *self.terminal_close_emitted.lock().unwrap() = true;
+            let error = self.deferred_session_events.lock().unwrap().failure.clone();
+            self.emit(AgentConnectionEvent::Closed { error }).await;
+            return Ok(());
+        }
+        if deferred == 1 { return Ok(()); }
         if self.is_stale_sequenced_message(&message) {
             return Ok(());
         }
@@ -2188,7 +2353,7 @@ impl DaemonAgentConnection {
         match message {
             DaemonOutbound::SessionEvent { event, .. } => {
                 if event.type_name() != "refine_complete" && event.type_name() != "refine_failed" {
-                    self.observe_streaming_message(&event);
+                    self.observe_streaming_message(&event, message_sequence.is_some());
                 }
                 if let AgentConnectionSessionEvent::RlmChildUpdate { child } = &event {
                     {
@@ -2197,7 +2362,19 @@ impl DaemonAgentConnection {
                     }
                     self.observe_rlm_child_update(child.clone());
                 }
-                *self.latest_snapshot_is_fresh.lock().unwrap() = false;
+                // Only locally represented events retain freshness. Metadata
+                // transitions (retry, model, effort, etc.) need an authoritative
+                // read, but per-token deltas never cause a history refetch.
+                let cached = matches!(event.type_name(),
+                    "message_start" | "message_update" | "message_end" |
+                    "tool_execution_start" | "tool_execution_update" |
+                    "agent_start" | "agent_end" | "compaction_start" |
+                    "bash_start" | "bash_end" | "rlm_child_update");
+                let paged_message_end = event.type_name() == "message_end"
+                    && self.latest_snapshot.lock().unwrap().as_ref().is_some_and(|snapshot| snapshot.history.is_some());
+                if !cached || paged_message_end {
+                    *self.latest_snapshot_is_fresh.lock().unwrap() = false;
+                }
                 self.emit(AgentConnectionEvent::SessionEvent { event }).await;
                 Ok(())
             }
@@ -2322,6 +2499,9 @@ impl DaemonAgentConnection {
             return;
         }
         *self.disposing.lock().unwrap() = true;
+        if let Some(attempt) = self.reconnect_in_flight.lock().unwrap().as_ref() {
+            attempt.cancel.cancel();
+        }
         // `if (this.options.ownedSession && !this.client.isConnected && this.reconnectPromise)
         //      await Promise.race([this.reconnectPromise, delay(...)])`
         // (`daemon-agent-connection.ts:1594-1598`). Dispose must not tear the connection
@@ -2332,12 +2512,14 @@ impl DaemonAgentConnection {
                 .lock()
                 .unwrap()
                 .as_ref()
-                .map(|sender| sender.subscribe());
+                .map(|attempt| attempt.result.subscribe());
             if let Some(mut receiver) = in_flight {
                 let _ = tokio::time::timeout(
                     Duration::from_millis(OWNED_SESSION_DISPOSE_RECONNECT_WAIT_MS),
                     async {
-                        while receiver.recv().await.is_ok() {}
+                        while receiver.borrow().is_none() {
+                            if receiver.changed().await.is_err() { break; }
+                        }
                     },
                 )
                 .await;
@@ -2383,6 +2565,46 @@ impl DaemonAgentConnection {
             .lock()
             .unwrap()
             .retain(|_, connection| connection.client_id != self.client_id);
+    }
+
+    async fn drain_deferred_session_events(&self) -> Result<(), String> {
+        self.drain_deferred_session_events_inner(false).await
+    }
+
+    async fn drain_deferred_session_events_inner(&self, release_initial: bool) -> Result<(), String> {
+        let failure = {
+            let pending = self.deferred_session_events.lock().unwrap();
+            if release_initial { *self.defer_session_events.lock().unwrap() = false; }
+            pending.failure.clone()
+        };
+        if let Some(error) = failure {
+            self.emit(AgentConnectionEvent::Closed { error: Some(error.clone()) }).await;
+            return Err(error);
+        }
+        {
+            let mut pending = self.deferred_session_events.lock().unwrap();
+            if release_initial { *self.defer_session_events.lock().unwrap() = false; }
+            if pending.draining || *self.defer_session_events.lock().unwrap() { return Ok(()); }
+            pending.draining = true;
+        }
+        loop {
+            if *self.disposed.lock().unwrap() || *self.defer_session_events.lock().unwrap()
+                || *self.attach_snapshot_pending.lock().unwrap() || self.snapshot_in_progress.lock().unwrap().is_some() {
+                self.deferred_session_events.lock().unwrap().draining = false;
+                return Ok(());
+            }
+            let event = {
+                let mut pending = self.deferred_session_events.lock().unwrap();
+                let event = pending.pop();
+                if event.is_none() { pending.draining = false; }
+                event
+            };
+            let Some(event) = event else { return Ok(()); };
+            if let Err(error) = Box::pin(self.handle_daemon_message_inner(event, true)).await {
+                self.deferred_session_events.lock().unwrap().draining = false;
+                return Err(error);
+            }
+        }
     }
 
     async fn abort_side_question_inner(&self, id: &str) -> Result<bool, String> {
@@ -2459,6 +2681,15 @@ impl AgentConnection for DaemonAgentConnection {
     fn subscribe(&self, listener: AgentConnectionEventListener) -> Box<dyn Fn() + Send + Sync> {
         let this = self.clone();
         this.listeners.lock().unwrap().push(listener.clone());
+        let was_deferred = *this.defer_session_events.lock().unwrap();
+        if was_deferred {
+            let connection = this.clone();
+            tokio::spawn(async move {
+                // Keep the queue locked until deferral is released and its drain
+                // takes ownership; newer transport frames cannot overtake it.
+                let _ = connection.drain_deferred_session_events_inner(true).await;
+            });
+        }
         let listeners = this.listeners.clone();
         Box::new(move || {
             let mut guard = listeners.lock().unwrap();
@@ -2488,17 +2719,11 @@ impl AgentConnection for DaemonAgentConnection {
 
     fn get_state(&self) -> BoxFuture<Result<AgentConnectionState, String>> {
         let this = self.clone();
+        let opening_error = this.deferred_session_events.lock().unwrap().failure.clone();
+        if let Some(error) = opening_error { return Box::pin(async move { Err(error) }); }
         if *this.latest_snapshot_is_fresh.lock().unwrap() {
             if let Some(snapshot) = this.latest_snapshot.lock().unwrap().clone() {
-                // A busy attachment may precede run settlement without another
-                // event edge. Reconcile that state with the worker, not the cache.
-                if !snapshot.state.is_streaming
-                    && !snapshot.state.is_compacting
-                    && !snapshot.state.is_bash_running
-                    && snapshot.state.retry_attempt == 0.0
-                {
-                    return Box::pin(async move { Ok(snapshot.state) });
-                }
+                return Box::pin(async move { Ok(snapshot.state) });
             }
         }
         let command = command_body(
@@ -4176,6 +4401,10 @@ pub(crate) async fn test_decode_cached_attach_frames(frames: &[Value]) -> Vec<Ag
     let snapshot = connection.latest_snapshot.lock().unwrap().clone().unwrap();
     snapshot.messages
 }
+
+#[cfg(test)]
+#[path = "daemon_backlog_tests.rs"]
+mod daemon_backlog_tests;
 
 #[cfg(test)]
 mod tests {

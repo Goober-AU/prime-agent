@@ -477,7 +477,8 @@ pub fn summary_for_active_session(
             None
         },
         roster_status: None,
-        status_label: None,
+        status_label: (session.is_session_active && session.is_foreground_active == Some(false))
+            .then(|| "background helper".to_string()),
         last_heard_from_at: None,
         worker_state: None,
         worker_pid: None,
@@ -597,24 +598,12 @@ pub fn has_live_session_work(state: &ActiveSessionState) -> bool {
 
 pub fn active_activity_for_session(state: &ActiveSessionState) -> SessionActivity {
     // The session's own work only, ignoring the classification verdict.
-    if state.runtime.session.is_session_active {
+    if state.runtime.session.is_foreground_active.unwrap_or(state.runtime.session.is_session_active) {
         return SessionActivity::Working;
     }
-    // A finished subagent is resident but never gets a summarizer verdict, so
-    // don't hold it at "working" waiting for one.
-    if state.runtime.metadata.as_ref().and_then(|metadata| metadata.kind.as_deref()) == Some("subagent") {
-        return SessionActivity::Idle;
-    }
-    // An empty session never gets a summarizer verdict either.
-    if state.runtime.session.messages_len == 0 {
-        return SessionActivity::Idle;
-    }
-    // Hold at "working" until the idle verdict is current.
-    if is_summary_current(state) {
-        SessionActivity::Idle
-    } else {
-        SessionActivity::Working
-    }
+    // A resident worker or an outstanding status classifier is not agent work.
+    // Delegated work remains represented separately by has_running_rlm_children.
+    SessionActivity::Idle
 }
 
 /// Lifecycle for an on-disk session not resident in the daemon.
@@ -849,7 +838,7 @@ mod tests {
 
         state.runtime.session.messages_len = 2;
         assert_eq!(active_lifecycle_for_session(&state), SessionLifecycle::Live);
-        assert_eq!(active_activity_for_session(&state), SessionActivity::Working);
+        assert_eq!(active_activity_for_session(&state), SessionActivity::Idle);
         state.summary_state = Some(super::super::active_session_state::AgentStatus {
             summary: "done".to_string(),
             task_state: Some("completed".to_string()),
@@ -860,9 +849,36 @@ mod tests {
         state.runtime.session.is_session_active = true;
         assert_eq!(active_activity_for_session(&state), SessionActivity::Working);
         assert!(has_live_session_work(&state));
+        state.runtime.session.is_foreground_active = Some(false);
+        assert_eq!(active_activity_for_session(&state), SessionActivity::Idle);
+        assert!(has_live_session_work(&state), "background helper must still prevent unsafe passivation");
+        state.runtime.session.is_foreground_active = Some(true);
+        assert_eq!(active_activity_for_session(&state), SessionActivity::Working);
+        state.runtime.session.is_foreground_active = None;
         state.runtime.session.is_session_active = false;
         state.runtime.session.has_running_rlm_children = true;
         assert!(has_live_session_work(&state));
+        assert_eq!(active_activity_for_session(&state), SessionActivity::Idle);
+        state.summary_state.as_mut().unwrap().based_on_message_count = 1;
+        assert!(!is_summary_current(&state));
+        assert_eq!(active_activity_for_session(&state), SessionActivity::Idle);
+    }
+
+    #[test]
+    fn background_only_summary_keeps_liveness_and_labels_the_helper() {
+        let mut runtime = super::super::active_session_state::AgentSessionRuntime::default();
+        runtime.session.session_id = "helper-owner".into();
+        runtime.session.is_session_active = true;
+        runtime.session.is_foreground_active = Some(false);
+        let state = Arc::new(StdMutex::new(ActiveSessionState::new("helper-owner", runtime)));
+        let summary = summary_for_active_session(&state, None, false, false, false);
+        assert!(summary.is_session_active);
+        assert_eq!(summary.activity, "idle");
+        assert_eq!(summary.status_label.as_deref(), Some("background helper"));
+        state.lock().unwrap().runtime.session.is_foreground_active = Some(true);
+        let summary = summary_for_active_session(&state, None, false, false, false);
+        assert_eq!(summary.activity, "working");
+        assert!(summary.status_label.is_none());
     }
 
     #[test]

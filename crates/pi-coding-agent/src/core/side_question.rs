@@ -2,7 +2,7 @@
 
 pub(crate) mod native;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pi_agent_core::types::{AgentEvent, AgentMessage, AgentState, StreamFn};
@@ -53,7 +53,8 @@ pub struct SideQuestionRun {
 }
 
 /// `const SIDE_QUESTION_INSTRUCTION`.
-const SIDE_QUESTION_INSTRUCTION: &str = "Answer this side question using only the conversation context above. Do not use tools. The user may send follow-up side questions; none of this side conversation is added to the main session.";
+const SIDE_QUESTION_INSTRUCTION: &str = "The user asked this via `/btw` — a temporary side thread cloned from the main conversation to answer a question without interrupting the main work. Tools (including `ipython`) are deactivated in this side thread and return an error if called; answer using only the conversation context above. The user may send follow-up side questions. Nothing here is added to the main session, so don't start or plan main-session work from this thread.";
+pub(super) const SIDE_QUESTION_TOOL_BLOCKED: &str = "Tools are deactivated in this side thread. Answer from the conversation context.";
 
 /// `sideQuestionPrompt(question, isFirstTurn)`.
 pub fn side_question_prompt(question: &str, is_first_turn: bool) -> String {
@@ -200,14 +201,24 @@ pub fn start_side_question(
 
     let mut initial_messages = parent_state.messages.clone();
     initial_messages.extend(previous_turn_messages);
+    let cloned_message_count = initial_messages.len();
+    let turn_count = AtomicUsize::new(0);
+    let preferred_effort = match parent_state.thinking_level {
+        pi_agent_core::types::ThinkingLevel::Off => "off",
+        pi_agent_core::types::ThinkingLevel::Minimal => "minimal",
+        _ => "low",
+    };
+    let auxiliary_effort = serde_json::from_value(serde_json::Value::String(
+        pi_ai::models::clamp_thinking_level(&model, preferred_effort),
+    )).unwrap_or(pi_agent_core::types::ThinkingLevel::Off);
     let side_agent = agent_factory(SideQuestionAgentOptions {
         initial_state: AgentState {
             model: model.clone(),
             system_prompt: parent_state.system_prompt.clone(),
             messages: initial_messages,
-            thinking_level: pi_agent_core::types::ThinkingLevel::Off,
+            thinking_level: auxiliary_effort,
             service_tier: parent_state.service_tier.clone(),
-            tools: Some(Vec::new()),
+            tools: parent_state.tools.clone(),
             ..Default::default()
         },
         convert_to_llm: parent.convert_to_llm(),
@@ -217,7 +228,10 @@ pub fn start_side_question(
         get_api_key: parent.get_api_key(),
         on_payload: parent.on_payload(),
         on_response: parent.on_response(),
-        should_stop_after_turn: Arc::new(|_context| true),
+        should_stop_after_turn: Arc::new(move |context| {
+            turn_count.fetch_add(1, Ordering::SeqCst) + 1 >= 3
+                || !context.message.content.iter().any(|block| matches!(block, pi_ai::types::ContentBlock::ToolCall(_)))
+        }),
         session_id: parent.session_id(),
         thinking_budgets: parent.thinking_budgets(),
         transport: "sse".to_string(),
@@ -260,7 +274,7 @@ pub fn start_side_question(
             let next_answer = read_assistant_text(&message);
             {
                 let mut current = answer.lock().expect("side question answer poisoned");
-                if *current == next_answer {
+                if next_answer.is_empty() || *current == next_answer {
                     return Box::pin(async {}) as BoxFuture<()>;
                 }
                 *current = next_answer;
@@ -281,6 +295,7 @@ pub fn start_side_question(
         let started = Arc::clone(&started);
         let retry_abort_controller = retry_abort_controller.clone();
         let retry = retry.unwrap_or_else(default_provider_retry_policy);
+        let answer = Arc::clone(&answer);
         Box::pin(async move {
             emit(SIDE_QUESTION_STATUS_RUNNING, None).await;
             if abort_requested.load(Ordering::SeqCst) {
@@ -324,7 +339,7 @@ pub fn start_side_question(
                                 .map(|error| error.to_string())
                         };
                         let state = side_agent.state();
-                        match state.messages.last() {
+                        match state.messages.iter().skip(cloned_message_count).rev().find(|message| matches!(message, AgentMessage::Message(pi_ai::types::Message::Assistant(_)))) {
                             Some(AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)))
                                 if failure.is_none() =>
                             {
@@ -382,6 +397,13 @@ pub fn start_side_question(
                 emit(SIDE_QUESTION_STATUS_ERROR, Some(error_message)).await;
                 return;
             }
+            let final_answer = if message.content.iter().any(|block| matches!(block, pi_ai::types::ContentBlock::ToolCall(_))) {
+                side_agent.state().messages.iter().skip(cloned_message_count).rev()
+                    .map(read_assistant_text).find(|text| !text.is_empty()).unwrap_or_default()
+            } else {
+                read_assistant_text(&AgentMessage::Message(pi_ai::types::Message::Assistant(message)))
+            };
+            *answer.lock().expect("side question answer poisoned") = final_answer;
             emit(SIDE_QUESTION_STATUS_COMPLETE, None).await;
         })
     };

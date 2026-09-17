@@ -476,6 +476,7 @@ impl view::DaemonAgentConnectionFactory for ConnectionFactory {
                     client_owned: Some(false),
                     no_session: None,
                     supports_extension_ui: options.supports_extension_ui,
+                    defer_session_events: true,
                 },
             )
             .await;
@@ -503,25 +504,8 @@ impl view::InteractiveModeHandle for NativeInteractive {
                 .expect("attached connection poisoned")
                 .take()
                 .ok_or_else(|| "No attached agents-view session".to_string())?;
-            let snapshot = connection.get_state().await?;
-            let mut source = super::agents_view_state::SessionSummary::new(
-                snapshot
-                    .active_session_id
-                    .as_deref()
-                    .unwrap_or(&snapshot.session_id),
-                &snapshot.session_id,
-                &snapshot.cwd,
-            );
-            source.active_session_id = snapshot.active_session_id;
-            source.session_file = snapshot.session_file;
-            source.session_name = snapshot.session_name;
+            let mut source = options.source_summary.clone();
             source.rlm_depth = options.session_depth;
-            source.model = snapshot
-                .model
-                .map(|model| super::agents_view_state::ModelRef {
-                    provider: model.provider,
-                    id: model.id,
-                });
             with_ui(NativeUi::pause);
             let result = crate::modes::interactive::native_host::run_interactive_mode_for_agents(
                 InteractiveModeSeamOptions {

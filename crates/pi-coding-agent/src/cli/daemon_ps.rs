@@ -1616,22 +1616,7 @@ fn get_process_start_id(pid: i64) -> Option<String> {
 }
 
 fn get_windows_process_start_id(pid: i64) -> Option<String> {
-    let script = format!(
-        "([System.Diagnostics.Process]::GetProcessById({})).StartTime.ToUniversalTime().Ticks",
-        pid
-    );
-    let output = spawn_sync_hidden(
-        "powershell.exe",
-        &["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", &script],
-    )?;
-    if output.0 != 0 {
-        return None;
-    }
-    let ticks = output.1.trim().to_string();
-    if ticks.is_empty() || !ticks.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    Some(format!("win:{}", ticks))
+    crate::core::session_lease::get_windows_process_start_id(pid, None)
 }
 
 fn get_ps_process_start_id(pid: i64) -> Option<String> {
@@ -1656,6 +1641,12 @@ fn spawn_sync_hidden(command: &str, args: &[&str]) -> Option<(i32, String)> {
 fn spawn_sync_hidden_env(command: &str, args: &[&str], env: &[(&str, &str)]) -> Option<(i32, String)> {
     let mut process = std::process::Command::new(command);
     process.args(args);
+    process.stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        process.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
     for (key, value) in env {
         process.env(key, value);
     }
@@ -2437,6 +2428,15 @@ u_str  LISTEN 0      4096   /tmp/foreign.sock 1 * 0 users:((\"other-app\",pid=2,
         assert_eq!(verify_hello_supervisor_pid(Some(pid), None), Some(pid));
         assert_eq!(verify_hello_supervisor_pid(Some(pid), Some("mismatch")), None);
         assert_eq!(verify_hello_supervisor_pid(Some(pid), get_process_start_id(pid).as_deref()), Some(pid));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn backlog_daemon_process_helper_does_not_create_a_console() {
+        let script = r#"Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class DaemonConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'; [DaemonConsoleProbe]::GetConsoleWindow().ToInt64()"#;
+        let (code, output) = spawn_sync_hidden("powershell.exe", &["-NoProfile", "-NonInteractive", "-Command", script]).expect("probe process");
+        assert_eq!(code, 0);
+        assert_eq!(output.trim(), "0", "noninteractive daemon helper must have no console window");
     }
 
     #[test]

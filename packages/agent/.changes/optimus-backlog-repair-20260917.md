@@ -1,0 +1,1 @@
+- Reduced Rust agent status-refresh overhead by reading individual state fields without copying conversation history.

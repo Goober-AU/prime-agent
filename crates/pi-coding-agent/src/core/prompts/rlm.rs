@@ -254,7 +254,7 @@ pub fn build_subagent_guidance(options: SubagentGuidanceOptions) -> String {
     if options.has_agent_observe.unwrap_or(false) {
         lines.push("Use `agent_observe` for bounded transcript inspection.".to_string());
     }
-    lines.push("Have children write files and read those files for fan-in.".to_string());
+    lines.push("Collect bounded direct-child result previews with `await rlm.collect(targets, timeout_ms=0)` without steering the parent. Targets may be handles, names or ids; omit targets for all direct children. A positive timeout waits only for settlement or that deadline, then returns current snapshots. Large outputs belong in files read selectively.".to_string());
     lines.push(
         "Delegate parallel context-heavy research or independent implementation; do a single known lookup, edit, or command inline.".to_string(),
     );
@@ -349,7 +349,8 @@ mod tests {
     fn builds_the_subagent_guidance_block() {
         let guidance = build_subagent_guidance(SubagentGuidanceOptions::default());
         assert!(guidance.starts_with("# Delegating to sub-agents"));
-        assert!(guidance.contains("Have children write files and read those files for fan-in."));
+        assert!(guidance.contains("await rlm.collect(targets, timeout_ms=0)"));
+        assert!(guidance.contains("Large outputs belong in files read selectively"));
         assert!(guidance.ends_with(
             "Persist genuinely reusable delegation patterns with `await refine.run()`."
         ));

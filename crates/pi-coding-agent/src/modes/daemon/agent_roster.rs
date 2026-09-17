@@ -67,7 +67,11 @@ pub fn classify_session_roster_status(summary: &RosterSummaryView, queued_child:
     classify_agent_status(AgentStatusInput {
         resident: summary.active_session_id.is_some(),
         queued_child,
-        busy: summary.activity.as_deref() == Some("working") || summary.is_session_active == Some(true),
+        busy: match summary.activity.as_deref() {
+            Some("working") => true,
+            Some("idle") => false,
+            _ => summary.is_session_active == Some(true),
+        },
     })
 }
 
@@ -613,6 +617,22 @@ mod tests {
             ),
             AgentRosterStatus::Idle
         );
+    }
+
+    #[test]
+    fn background_residency_does_not_override_foreground_idle_but_queued_work_does() {
+        let mut summary = RosterSummaryView {
+            active_session_id: Some("a".into()),
+            activity: Some("idle".into()),
+            is_session_active: Some(true),
+        };
+        assert_eq!(classify_session_roster_status(&summary, false), AgentRosterStatus::Idle);
+        assert!(is_session_summary_busy(true, None), "display classification must not weaken shutdown safety");
+        assert_eq!(classify_session_roster_status(&summary, true), AgentRosterStatus::Running);
+        summary.activity = Some("working".into());
+        assert_eq!(classify_session_roster_status(&summary, false), AgentRosterStatus::Running);
+        summary.activity = None;
+        assert_eq!(classify_session_roster_status(&summary, false), AgentRosterStatus::Running);
     }
 
     #[test]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import types
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +51,20 @@ class RLMSubagent:
     def name(self) -> str:
         """Compatibility alias for the canonical session_name field."""
         return self.session_name
+
+
+@dataclass(frozen=True)
+class RLMChildResult:
+    rlm_child_id: str
+    session_name: str | None
+    session_dir: Path | None
+    status: str
+    settled: bool
+    answer_preview: str | None
+    error: str | None
+    duration_ms: float | None
+    tool_use_count: float | None
+    replied_since_task: bool | None
 
 
 def _spawn_handle_from_payload(payload: Any) -> RLMSpawnHandle:
@@ -232,6 +247,72 @@ async def list_subagents() -> list[RLMSubagent]:
     return [_subagent_from_payload(entry) for entry in entries]
 
 
+def _collect_target_selector(target: Any) -> str:
+    if isinstance(target, (RLMSpawnHandle, RLMSubagent)):
+        return target.rlm_child_id
+    if isinstance(target, str) and target.strip():
+        return target.strip()
+    raise TypeError("collect target must be a spawn handle, subagent row, or non-empty name/id")
+
+
+def _child_result_from_payload(payload: Any) -> RLMChildResult:
+    if not isinstance(payload, dict):
+        raise RuntimeError("rlm.collect returned an invalid result entry")
+    child_id = payload.get("rlm_child_id")
+    status = payload.get("status")
+    settled = payload.get("settled")
+    if not isinstance(child_id, str) or not child_id:
+        raise RuntimeError("rlm.collect entry is missing rlm_child_id")
+    if not isinstance(status, str) or status not in {"queued", "running", "done", "error", "cancelled"}:
+        raise RuntimeError("rlm.collect entry has invalid status")
+    if not isinstance(settled, bool):
+        raise RuntimeError("rlm.collect entry has invalid settled flag")
+
+    def optional_string(field: str) -> str | None:
+        value = payload.get(field)
+        if value is not None and not isinstance(value, str):
+            raise RuntimeError(f"rlm.collect entry has invalid {field}")
+        return value
+
+    def optional_number(field: str) -> float | None:
+        value = payload.get(field)
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+            raise RuntimeError(f"rlm.collect entry has invalid {field}")
+        return value
+
+    replied = payload.get("replied_since_task")
+    if replied is not None and not isinstance(replied, bool):
+        raise RuntimeError("rlm.collect entry has invalid replied_since_task")
+    directory = optional_string("session_dir")
+    return RLMChildResult(child_id, optional_string("session_name"), Path(directory) if directory else None,
+                          status, settled, optional_string("answer_preview"), optional_string("error"),
+                          optional_number("duration_ms"), optional_number("tool_use_count"), replied)
+
+
+async def collect(targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
+    """Read bounded result previews for direct children without steering the parent.
+
+    Omitted targets select all direct children. A positive timeout waits for
+    settlement up to its deadline; pending children are returned on timeout.
+    Existing automatic parent-result delivery remains unchanged.
+    """
+    if isinstance(timeout_ms, bool) or not isinstance(timeout_ms, int) or not 0 <= timeout_ms <= 2_147_483_647:
+        raise TypeError("timeout_ms must be a non-negative int up to 2147483647")
+    if targets is None:
+        selectors = []
+    elif isinstance(targets, (RLMSpawnHandle, RLMSubagent, str)):
+        selectors = [_collect_target_selector(targets)]
+    elif isinstance(targets, (list, tuple)):
+        selectors = [_collect_target_selector(target) for target in targets]
+    else:
+        raise TypeError("targets must be a target or list of targets")
+    payload = await host_request("rlm.collect", {"targets": selectors, "timeout_ms": timeout_ms})
+    results = payload.get("results")
+    if not isinstance(results, list):
+        raise RuntimeError("rlm.collect returned an invalid results list")
+    return [_child_result_from_payload(result) for result in results]
+
+
 async def delete_subagent(target: str | RLMSubagent) -> RLMSubagent:
     """Delete one running or retained direct child from the current parent session."""
     if isinstance(target, RLMSubagent):
@@ -318,6 +399,9 @@ class _RLMCallable:
     async def list_subagents(self) -> list[RLMSubagent]:
         return await list_subagents()
 
+    async def collect(self, targets: Any = None, *, timeout_ms: int = 0) -> list[RLMChildResult]:
+        return await collect(targets, timeout_ms=timeout_ms)
+
     async def delete_subagent(self, target: str | RLMSubagent) -> RLMSubagent:
         return await delete_subagent(target)
 
@@ -349,6 +433,8 @@ __all__ = [
     "RLMModel",
     "RLMSpawnHandle",
     "RLMSubagent",
+    "RLMChildResult",
+    "collect",
     "create_session",
     "RefinementEvent",
     "bash",

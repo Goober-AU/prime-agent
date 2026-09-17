@@ -531,7 +531,8 @@ pub fn classify_session_roster_status(summary: &SessionSummary, queued_child: bo
     classify_agent_status(
         summary.active_session_id.is_some(),
         queued_child,
-        summary.activity == SessionActivity::Working || summary.is_session_active,
+        summary.status_label != Some(AgentRosterStatusLabel::BackgroundHelper)
+            && (summary.activity == SessionActivity::Working || summary.is_session_active),
     )
 }
 
@@ -2222,6 +2223,19 @@ mod tests {
         assert_eq!(classify_agent_status(false, false, true), AgentRosterStatus::Inactive);
         assert_eq!(classify_agent_status(true, false, true), AgentRosterStatus::Running);
         assert_eq!(classify_agent_status(true, false, false), AgentRosterStatus::Idle);
+    }
+
+    #[test]
+    fn background_helper_fallback_is_idle_without_hiding_queued_recovery_status() {
+        let mut summary = daemon_summary("a", Some("a"), None);
+        summary.is_session_active = true;
+        summary.status_label = Some(AgentRosterStatusLabel::BackgroundHelper);
+        assert_eq!(classify_agents_view_session(&summary), AgentsViewSection::Idle);
+        summary.roster_status = Some(AgentRosterStatus::Running);
+        summary.status_label = Some(AgentRosterStatusLabel::Queued);
+        assert_eq!(classify_agents_view_session(&summary), AgentsViewSection::Running);
+        summary.status_label = Some(AgentRosterStatusLabel::Recovering);
+        assert_eq!(classify_agents_view_session(&summary), AgentsViewSection::Running);
     }
 
     #[test]

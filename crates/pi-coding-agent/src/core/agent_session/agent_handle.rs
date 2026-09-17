@@ -37,6 +37,17 @@ impl AgentHandle for Arc<Agent> {
         Agent::state(self)
     }
 
+    fn model(&self) -> pi_ai::types::Model { self.read_state(|state| state.model.clone()) }
+    fn thinking_level(&self) -> pi_agent_core::types::ThinkingLevel { self.read_state(|state| state.thinking_level) }
+    fn service_tier(&self) -> pi_ai::types::ServiceTier { self.read_state(|state| state.service_tier.clone()) }
+    fn system_prompt(&self) -> String { self.read_state(|state| state.system_prompt.clone()) }
+    fn message_count(&self) -> usize { self.read_state(|state| state.messages.len()) }
+    fn messages(&self) -> Vec<AgentMessage> { self.read_state(|state| state.messages.clone()) }
+    fn streaming_message(&self) -> Option<AgentMessage> { self.read_state(|state| state.streaming_message.clone()) }
+    fn active_tool_names(&self) -> Vec<String> {
+        self.read_state(|state| state.tools.as_deref().unwrap_or_default().iter().map(|tool| tool.name.clone()).collect())
+    }
+
     fn set_state(&self, state: AgentState) {
         Agent::set_state(self, state);
     }
@@ -110,7 +121,7 @@ impl AgentHandle for Arc<Agent> {
     }
 
     fn is_streaming(&self) -> bool {
-        Agent::state(self).is_streaming
+        self.read_state(|state| state.is_streaming)
     }
 
     fn has_queued_messages(&self) -> bool {

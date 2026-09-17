@@ -479,7 +479,9 @@ impl Supervisor {
     }
     /// `isWorkerRecoveryCandidate(worker)` (daemon-supervisor.ts:3949-3957).
     fn is_worker_recovery_candidate(&self, worker: &Arc<Worker>) -> bool {
-        let descriptor = worker.descriptor.lock().unwrap();
+        // Never nest the registry lock beneath a descriptor guard: roster/cleanup
+        // readers also visit descriptors obtained from the registry.
+        let descriptor = worker.descriptor.lock().unwrap().clone();
         !self.stopped.is_cancelled()
             && descriptor.lifecycle != DAEMON_WORKER_LIFECYCLE_STOPPING
             && descriptor.stop_requested_at.is_none()
@@ -658,7 +660,7 @@ impl Supervisor {
     /// `isWorkerRecoveryCancelled(worker)` (daemon-supervisor.ts:4365-4372).
     fn is_worker_recovery_cancelled(&self, worker: &Arc<Worker>) -> bool {
         if self.stopped.is_cancelled() { return true; }
-        let descriptor = worker.descriptor.lock().unwrap();
+        let descriptor = worker.descriptor.lock().unwrap().clone();
         descriptor.lifecycle == DAEMON_WORKER_LIFECYCLE_STOPPING
             || descriptor.stop_requested_at.is_some()
             || !self.workers.lock().unwrap().get(&descriptor.worker_id).is_some_and(|resident| Arc::ptr_eq(resident, worker))
@@ -3022,6 +3024,11 @@ impl Supervisor {
             public.write(&json!(response));
         }
     }
+    fn owned_worker_candidates(&self, owner: &str) -> Vec<Arc<Worker>> {
+        let candidates: Vec<_> = self.workers.lock().unwrap().values().cloned().collect();
+        candidates.into_iter().filter(|worker| worker.descriptor.lock().unwrap().owner_client_id.as_deref() == Some(owner)).collect()
+    }
+
     fn disconnected(self: &Arc<Self>, public: &Arc<PublicClient>) {
         self.clients.lock().unwrap().remove(&public.connection_id);
         public.roster_subscribed.store(false, Ordering::SeqCst);
@@ -3037,8 +3044,10 @@ impl Supervisor {
             if let Err(error) = supervisor.release_client_pauses(&public, None).await { eprintln!("Disconnected client pause cleanup failed: {error}"); }
             tokio::time::sleep(Duration::from_secs(30)).await;
             if supervisor.clients.lock().unwrap().values().any(|client| client.identity() == owner) { return; }
-            let workers: Vec<_> = supervisor.workers.lock().unwrap().values().filter(|worker| worker.descriptor.lock().unwrap().owner_client_id.as_deref() == Some(&owner)).cloned().collect();
+            let workers = supervisor.owned_worker_candidates(&owner);
             for worker in workers {
+                // stop_worker revalidates registration and process generation before
+                // every destructive step, including after asynchronous requests.
                 if let Err(error) = supervisor.stop_worker(&worker, true, false).await { eprintln!("Owned worker cleanup failed: {error}"); }
             }
         });
@@ -3542,6 +3551,28 @@ async fn commit_gate(mut gate: tokio::process::ChildStdin) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn backlog_recovery_and_disconnect_registry_lock_order() {
+        use super::daemon_supervisor_parity_tests::{SupervisorFixture, add_descriptor_only_worker};
+        let fixture = SupervisorFixture::new("backlog-lock-order").await;
+        let worker = add_descriptor_only_worker(&fixture, "worker", "root", "token", DAEMON_WORKER_LIFECYCLE_FAILED);
+        worker.descriptor.lock().unwrap().owner_client_id = Some("owner".into());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let recovery = {
+            let supervisor = fixture.supervisor.clone(); let worker = worker.clone(); let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                for _ in 0..1000 { barrier.wait(); assert!(supervisor.is_worker_recovery_candidate(&worker)); assert!(!supervisor.is_worker_recovery_cancelled(&worker)); }
+            })
+        };
+        for _ in 0..1000 { barrier.wait(); assert_eq!(fixture.supervisor.owned_worker_candidates("owner").len(), 1); }
+        recovery.join().unwrap();
+        let replacement = add_descriptor_only_worker(&fixture, "worker", "other-root", "other-token", DAEMON_WORKER_LIFECYCLE_FAILED);
+        assert!(!fixture.supervisor.is_worker_recovery_candidate(&worker));
+        assert!(fixture.supervisor.is_worker_recovery_cancelled(&worker));
+        assert!(fixture.supervisor.stop_worker(&worker, true, false).await.unwrap_err().contains("replaced during stop"));
+        assert!(Arc::ptr_eq(fixture.supervisor.workers.lock().unwrap().get("worker").unwrap(), &replacement));
+    }
     #[test]
     fn descriptor_and_socket_paths_match_the_typescript_hash_contract() {
         assert_eq!(descriptor_key("/tmp/daemon.sock"), format!("{:x}", Sha256::digest(b"/tmp/daemon.sock"))[..12]);

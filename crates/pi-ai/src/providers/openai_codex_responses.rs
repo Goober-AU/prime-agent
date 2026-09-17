@@ -248,6 +248,17 @@ pub fn is_codex_non_transport_error(error: &CodexThrown) -> bool {
     error.name == "CodexApiError" || error.name == "CodexProtocolError"
 }
 
+fn is_stale_codex_continuation_error(error: &CodexThrown) -> bool {
+    error.name == "CodexApiError" && error.code.as_deref().is_some_and(|code| code.eq_ignore_ascii_case("previous_response_not_found"))
+}
+
+fn is_stale_continuation_rejection(event: &Value) -> bool {
+    event.get("type").and_then(Value::as_str) == Some("error")
+        && event.get("code").and_then(Value::as_str).filter(|code| !code.is_empty())
+            .or_else(|| event.get("error").and_then(|error| error.get("code").or_else(|| error.get("type"))).and_then(Value::as_str))
+            .is_some_and(|code| code.eq_ignore_ascii_case("previous_response_not_found"))
+}
+
 /// `appendAssistantMessageDiagnostic(output, createAssistantMessageDiagnostic(...))`.
 fn append_diagnostic(output: &mut AssistantMessage, type_: &str, error: &CodexThrown, details: Map<String, Value>) {
     let diagnostic = AssistantMessageDiagnostic {
@@ -839,7 +850,7 @@ async fn run_openai_codex_responses(
         let mut websocket_error: Option<CodexThrown> = None;
         // A dead cached connection gets one fresh attempt, but a partial turn
         // must never be replayed over either transport.
-        for _websocket_attempt in 0..2 {
+        for websocket_attempt in 0..2 {
             let websocket_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let websocket_url = resolve_codex_web_socket_url(Some(&model.base_url));
             let request = process_web_socket_stream(
@@ -885,6 +896,15 @@ async fn run_openai_codex_responses(
                     return Ok(());
                 }
                 Err(error) => {
+                    let aborted = options.stream.signal.as_ref().is_some_and(|signal| signal.is_cancelled());
+                    if !aborted && websocket_attempt == 0
+                        && !websocket_started.load(std::sync::atomic::Ordering::SeqCst)
+                        && is_stale_codex_continuation_error(&error)
+                    {
+                        // process_web_socket_stream discarded the failed chain
+                        // and connection. Retry the original full body once.
+                        continue;
+                    }
                     if options
                         .stream
                         .signal
@@ -1613,6 +1633,7 @@ pub struct CachedWebSocketContinuationState {
     pub last_request_body: RequestBody,
     pub last_response_id: String,
     pub last_response_items: Vec<Value>,
+    pub socket_identity: usize,
 }
 
 /// `interface CachedWebSocketConnection`.
@@ -2461,6 +2482,11 @@ pub fn build_cached_web_socket_request_body(
         return body.clone();
     };
 
+    if continuation.socket_identity != Arc::as_ptr(&entry.socket) as *const () as usize {
+        entry.continuation = None;
+        return body.clone();
+    }
+
     let delta = get_cached_web_socket_input_delta(body, &continuation);
     let Some(delta) = delta else {
         entry.continuation = None;
@@ -2599,7 +2625,7 @@ async fn process_web_socket_stream(
         let on_start = on_start.clone();
         move |event| {
             // Even an extension event is evidence that a request is in flight.
-            if event.is_ok() {
+            if event.as_ref().is_ok_and(|event| !is_stale_continuation_rejection(event)) {
                 on_start();
             }
         }
@@ -2679,6 +2705,7 @@ async fn process_web_socket_stream(
                         last_request_body: full_body.clone(),
                         last_response_id: response_id,
                         last_response_items: response_items,
+                        socket_identity: Arc::as_ptr(&socket) as *const () as usize,
                     });
                 }
             }
@@ -3159,6 +3186,7 @@ mod tests {
             last_request_body: body.clone(),
             last_response_id: "resp_1".to_string(),
             last_response_items: vec![json!({ "type": "message", "role": "assistant", "content": "hi" })],
+            socket_identity: Arc::as_ptr(&entry.socket) as *const () as usize,
         });
         let mut followup = body.clone();
         followup.insert(
@@ -3194,6 +3222,7 @@ mod tests {
                 last_request_body: body.clone(),
                 last_response_id: "resp_1".to_string(),
                 last_response_items: vec![json!({ "type": "message", "role": "assistant", "content": "hi" })],
+                socket_identity: 0,
             }),
             connection_identity: String::new(),
         };
@@ -3332,6 +3361,81 @@ mod tests {
 
     fn fake_socket() -> Arc<FakeSocket> {
         Arc::new(FakeSocket::default())
+    }
+
+    struct ScriptedBacklogSocket {
+        inner: FakeSocket,
+        scripts: Arc<Mutex<VecDeque<Vec<Value>>>>,
+        requests: Arc<Mutex<Vec<Value>>>,
+    }
+
+    impl WebSocketLike for ScriptedBacklogSocket {
+        fn close(&self, code: Option<i32>, reason: Option<&str>) { self.inner.close(code, reason); }
+        fn ready_state(&self) -> Option<i32> { Some(1) }
+        fn add_event_listener(&self, kind: WebSocketEventType, listener: WebSocketListener) {
+            self.inner.add_event_listener(kind, listener.clone());
+            // Resolve the synthetic handshake after the connector installs its
+            // listener; ready_state alone does not emit the browser open event.
+            if kind == WebSocketEventType::Open { listener(json!({})); }
+        }
+        fn remove_event_listener(&self, kind: WebSocketEventType, listener: &WebSocketListener) { self.inner.remove_event_listener(kind, listener); }
+        fn send(&self, body: &str) {
+            self.requests.lock().unwrap().push(serde_json::from_str(body).unwrap());
+            let events = self.scripts.lock().unwrap().pop_front().expect("unexpected retry");
+            for event in events { self.inner.emit(WebSocketEventType::Message, json!({"data": event.to_string()})); }
+        }
+    }
+
+    fn backlog_response(id: &str) -> Vec<Value> {
+        vec![
+            json!({"type": "response.created", "response": {"id": id}}),
+            json!({"type": "response.completed", "response": {"id": id, "status": "completed", "output": [], "usage": {"input_tokens":1,"output_tokens":0,"total_tokens":1}}}),
+        ]
+    }
+
+    #[test]
+    fn backlog_codex_chain_reset_is_bounded_and_never_replays_observed_work() {
+        let _guard = WEB_SOCKET_TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let previous_constructor = get_web_socket_constructor();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let stale = json!({"type":"error","code":"previous_response_not_found","message":"gone"});
+            let scripts = Arc::new(Mutex::new(VecDeque::from(vec![backlog_response("r1"), vec![stale.clone()], backlog_response("r2"), backlog_response("r3")])));
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            set_web_socket_constructor(Some(Arc::new({ let scripts=scripts.clone(); let requests=requests.clone(); move |_, _| {
+                Arc::new(ScriptedBacklogSocket { inner: FakeSocket::default(), scripts:scripts.clone(), requests:requests.clone() })
+            }})));
+            let mut options = OpenAICodexResponsesOptions { stream: StreamOptions {
+                api_key: Some(token("acc_test")), session_id: Some("backlog-chain-reset".into()), transport: Some("websocket-cached".into()), timeout_ms: Some(1000.0), ..Default::default()
+            }, ..Default::default() };
+            let mut conversation = context();
+            for index in 0..3 {
+                if index > 0 { conversation.messages.push(Message::user(UserMessage::new(UserContent::Text(format!("turn {index}")), index))); }
+                let output = stream_openai_codex_responses(&model(), &conversation, Some(options.clone())).result().await;
+                assert_ne!(output.stop_reason, "error", "{:?}", output.error_message);
+            }
+            let sent = requests.lock().unwrap().clone();
+            assert_eq!(sent.len(), 4);
+            assert_eq!(sent[1]["previous_response_id"], "r1");
+            assert!(sent[2].get("previous_response_id").is_none());
+            assert_eq!(sent[2]["input"].as_array().unwrap().len(), 2);
+            assert_eq!(sent[3]["previous_response_id"], "r2");
+
+            for (name, events, expected_requests) in [
+                ("partial", vec![json!({"type":"response.created","response":{"id":"inflight"}}), stale.clone()], 1),
+                ("extension", vec![json!({"type":"unrecognized.extension"}), stale.clone()], 1),
+                ("other", vec![json!({"type":"error","code":"invalid_request","message":"bad"})], 1),
+                ("repeat", vec![stale.clone()], 2),
+            ] {
+                *scripts.lock().unwrap() = VecDeque::from(vec![events.clone(), events]);
+                requests.lock().unwrap().clear();
+                options.stream.session_id = Some(format!("backlog-chain-{name}"));
+                let output = stream_openai_codex_responses(&model(), &context(), Some(options.clone())).result().await;
+                assert_eq!(output.stop_reason, "error");
+                assert_eq!(requests.lock().unwrap().len(), expected_requests, "{name}");
+            }
+        });
+        set_web_socket_constructor(previous_constructor);
     }
 
     async fn next_socket_event(

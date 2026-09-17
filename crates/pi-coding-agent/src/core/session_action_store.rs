@@ -63,6 +63,10 @@ pub enum DeliveryPolicy {
     WhenRunIdle,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionActionPriority { Background, User, Pinned }
+
 impl DeliveryPolicy {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -313,6 +317,8 @@ impl ActionLifecycleState {
 pub struct SessionAction<TPayload = SessionActionPayload> {
     pub id: String,
     pub source: ActionSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<SessionActionPriority>,
     pub delivery: DeliveryPolicy,
     pub wake: WakePolicy,
     pub payload: TPayload,
@@ -405,6 +411,18 @@ fn legal_transitions(state: ActionLifecycleState) -> &'static [ActionLifecycleSt
 pub trait SessionPayload {
     fn records(&self) -> &[DeliveryRecord];
     fn preview(&self) -> &str;
+}
+
+impl<TPayload: SessionPayload> SessionAction<TPayload> {
+    pub fn effective_priority(&self) -> SessionActionPriority {
+        self.priority.unwrap_or_else(|| {
+            let human = matches!(self.source, ActionSource::Input(InputSource::Interactive | InputSource::Rpc));
+            let agent_traffic = self.agent_message_id.as_deref().is_some_and(|id| id.starts_with("agentmsg_"));
+            let custom = self.payload.records().iter().find(|record| record.role == DeliveryRecordRole::Primary)
+                .is_some_and(|record| matches!(record.message, DeliveryMessage::Custom(_)));
+            if human && !agent_traffic && !custom { SessionActionPriority::User } else { SessionActionPriority::Background }
+        })
+    }
 }
 
 impl SessionPayload for SessionActionPayload {
@@ -691,6 +709,7 @@ pub struct ActionStore<TAction: Clone = SessionAction> {
     id_of: Arc<dyn Fn(&TAction) -> String + Send + Sync>,
     delivery_of: Arc<dyn Fn(&TAction) -> DeliveryPolicy + Send + Sync>,
     state_of: Arc<dyn Fn(&TAction) -> ActionLifecycleState + Send + Sync>,
+    priority_of: Arc<dyn Fn(&TAction) -> SessionActionPriority + Send + Sync>,
     set_delivery: Arc<dyn Fn(&mut TAction, DeliveryPolicy) + Send + Sync>,
     transition: Arc<dyn Fn(&mut TAction, ActionLifecycle) -> Result<(), String> + Send + Sync>,
 }
@@ -702,6 +721,7 @@ impl<TAction: Clone> ActionStore<TAction> {
         id_of: Arc<dyn Fn(&TAction) -> String + Send + Sync>,
         delivery_of: Arc<dyn Fn(&TAction) -> DeliveryPolicy + Send + Sync>,
         state_of: Arc<dyn Fn(&TAction) -> ActionLifecycleState + Send + Sync>,
+        priority_of: Arc<dyn Fn(&TAction) -> SessionActionPriority + Send + Sync>,
         set_delivery: Arc<dyn Fn(&mut TAction, DeliveryPolicy) + Send + Sync>,
         transition: Arc<dyn Fn(&mut TAction, ActionLifecycle) -> Result<(), String> + Send + Sync>,
     ) -> Self {
@@ -712,6 +732,7 @@ impl<TAction: Clone> ActionStore<TAction> {
             id_of,
             delivery_of,
             state_of,
+            priority_of,
             set_delivery,
             transition,
         }
@@ -754,6 +775,29 @@ impl<TAction: Clone> ActionStore<TAction> {
     }
 
     pub fn enqueue(&mut self, action: TAction) -> Result<(), String> {
+        self.assert_new_action(&action)?;
+        let delivery = self.delivery(&action);
+        let id = self.id(&action);
+        let priority = (self.priority_of)(&action);
+        let priority_of = self.priority_of.clone();
+        let state_of = self.state_of.clone();
+        let list = self.list(delivery);
+        // Only overtake the trailing lower-priority queued work. Never jump
+        // ahead of an already selected action or reorder same-priority input.
+        let mut index = list.len();
+        for (position, item) in list.iter().enumerate().rev() {
+            if state_of(item) != ActionLifecycleState::Queued || priority_of(item) >= priority {
+                break;
+            }
+            index = position;
+        }
+        list.insert(index, action);
+        self.tickets.insert(id.clone(), Arc::new(ActionTicketController::new(&id)));
+        Ok(())
+    }
+
+    /// Recovery replays its saved order rather than reprioritizing old input.
+    pub fn enqueue_tail(&mut self, action: TAction) -> Result<(), String> {
         self.assert_new_action(&action)?;
         let delivery = self.delivery(&action);
         let id = self.id(&action);
@@ -1011,6 +1055,7 @@ impl<TPayload: SessionPayload + Clone + 'static> ActionStore<SessionAction<TPayl
             Arc::new(|action: &SessionAction<TPayload>| action.id.clone()),
             Arc::new(|action: &SessionAction<TPayload>| action.delivery),
             Arc::new(|action: &SessionAction<TPayload>| action.lifecycle.state()),
+            Arc::new(|action: &SessionAction<TPayload>| action.effective_priority()),
             Arc::new(|action: &mut SessionAction<TPayload>, delivery| action.delivery = delivery),
             Arc::new(|action: &mut SessionAction<TPayload>, next| {
                 transition_session_action(action, next, &TransitionOptions::default())
@@ -1191,6 +1236,7 @@ mod tests {
         SessionAction {
             id: id.to_string(),
             source: ActionSource::Internal,
+            priority: None,
             delivery,
             wake: WakePolicy::Immediate,
             payload: SessionActionPayload::Turn(SessionTurnPayload {
@@ -1216,6 +1262,7 @@ mod tests {
         SessionAction {
             id: id.to_string(),
             source: ActionSource::Input(InputSource::Rpc),
+            priority: None,
             delivery,
             wake: WakePolicy::OnLowerBoundary,
             payload: SessionActionPayload::SessionCommand(SessionCommandPayload {
@@ -1243,6 +1290,51 @@ mod tests {
             queued_message_lane_delivery_policy(QueuedMessageLane::FollowUp),
             DeliveryPolicy::WhenRunIdle
         );
+    }
+
+    #[test]
+    fn backlog_human_priority_preserves_fifo_active_work_and_recovery_order() {
+        let lane = DeliveryPolicy::NextTurnBoundary;
+        let mut store = SessionActionStore::new();
+        store.enqueue(turn_action("active", lane, "already selected")).unwrap();
+        store.select_first().unwrap();
+        store.enqueue(turn_action("background", lane, "machine")).unwrap();
+        let mut pinned = turn_action("pinned", lane, "goal");
+        pinned.priority = Some(SessionActionPriority::Pinned);
+        store.enqueue_front(pinned).unwrap();
+        for id in ["human-1", "human-2"] {
+            let mut human = turn_action(id, lane, id);
+            human.source = ActionSource::Input(InputSource::Interactive);
+            human.agent_message_id = Some(format!("prompt-wait-{id}"));
+            store.enqueue(human).unwrap();
+        }
+        let mut machine = turn_action("agent", lane, "agent traffic");
+        machine.source = ActionSource::Input(InputSource::Rpc);
+        machine.agent_message_id = Some("agentmsg_child".into());
+        store.enqueue(machine).unwrap();
+        assert_eq!(store.actions(None).iter().map(|action| action.id.as_str()).collect::<Vec<_>>(),
+                   vec!["active", "pinned", "human-1", "human-2", "background", "agent"]);
+        let mut recovered = SessionActionStore::new();
+        for action in store.queued_actions(None) { recovered.enqueue_tail(action).unwrap(); }
+        assert_eq!(recovered.queued_actions(None), store.queued_actions(None));
+        let mut legacy = serde_json::to_value(turn_action("old", lane, "old")).unwrap();
+        legacy.as_object_mut().unwrap().remove("priority");
+        let legacy: SessionAction = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.effective_priority(), SessionActionPriority::Background);
+
+        // A saved/manual order need not already be sorted by priority. A new
+        // human message still may not leap over an earlier human message.
+        let mut restored = SessionActionStore::new();
+        restored.enqueue_tail(turn_action("old-background", lane, "old")).unwrap();
+        let mut old_human = turn_action("old-human", lane, "old");
+        old_human.source = ActionSource::Input(InputSource::Interactive);
+        restored.enqueue_tail(old_human).unwrap();
+        restored.enqueue_tail(turn_action("tail-background", lane, "tail")).unwrap();
+        let mut new_human = turn_action("new-human", lane, "new");
+        new_human.source = ActionSource::Input(InputSource::Interactive);
+        restored.enqueue(new_human).unwrap();
+        assert_eq!(restored.actions(None).iter().map(|action| action.id.as_str()).collect::<Vec<_>>(),
+                   vec!["old-background", "old-human", "new-human", "tail-background"]);
     }
 
     #[test]
@@ -1434,7 +1526,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.queue_preview(DeliveryPolicy::NextTurnBoundary),
-            vec!["one".to_string(), "/compact".to_string()]
+            vec!["/compact".to_string(), "one".to_string()]
         );
     }
 
@@ -1482,6 +1574,7 @@ mod tests {
         store.enqueue(SessionAction {
             id: original.id,
             source: original.source,
+            priority: original.priority,
             delivery: original.delivery,
             wake: original.wake,
             payload: Prepared { payload: original.payload, preparation: "prepared content".to_string() },

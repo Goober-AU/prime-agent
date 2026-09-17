@@ -27,6 +27,18 @@ pub fn create_file_ops() -> FileOperations {
 
 /// Extract file operations from tool calls in an assistant message.
 pub fn extract_file_ops_from_message(message: &AgentMessage, file_ops: &mut FileOperations) {
+    if let AgentMessage::Message(Message::ToolResult(result)) = message {
+        if result.tool_name == "ipython" {
+            if let Some(diffs) = result.details.as_ref().and_then(|details| details.get("diffs")).and_then(Value::as_array) {
+                for diff in diffs {
+                    if let Some(path) = diff.get("path").and_then(Value::as_str).filter(|path| !path.is_empty()) {
+                        file_ops.edited.insert(path.to_string());
+                    }
+                }
+            }
+        }
+        return;
+    }
     let AgentMessage::Message(Message::Assistant(assistant)) = message else {
         return;
     };
@@ -60,9 +72,10 @@ pub fn compute_file_lists(file_ops: &FileOperations) -> (Vec<String>, Vec<String
         .read
         .iter()
         .filter(|path| !modified.contains(*path))
+        .take(200)
         .cloned()
         .collect();
-    let modified_files: Vec<String> = modified.into_iter().collect();
+    let modified_files: Vec<String> = modified.into_iter().take(200).collect();
     (read_only, modified_files)
 }
 
@@ -91,7 +104,7 @@ pub fn format_file_operations(read_files: &[String], modified_files: &[String]) 
 const TOOL_RESULT_MAX_CHARS: usize = 2000;
 
 /// Truncate text to a maximum character length for summarization.
-/// Keeps the beginning and appends a truncation marker.
+/// Keeps both the beginning and the error-heavy tail inside the same budget.
 fn truncate_for_summary(text: &str, max_chars: usize) -> String {
     // `String::chars` counts UTF-16-independent scalar values; the TypeScript
     // `slice` counts UTF-16 code units. Plain ASCII/Unicode text matches.
@@ -99,9 +112,16 @@ fn truncate_for_summary(text: &str, max_chars: usize) -> String {
     if chars.len() <= max_chars {
         return text.to_string();
     }
-    let truncated_chars = chars.len() - max_chars;
-    let kept: String = chars[..max_chars].iter().collect();
-    format!("{kept}\n\n[... {truncated_chars} more characters truncated]")
+    let tail_chars = 500.min(max_chars / 4);
+    let marker_max = format!("[... {} characters truncated; first {max_chars} and last {tail_chars} kept ...]", chars.len()).len() + 4;
+    if max_chars <= marker_max + tail_chars {
+        return chars[chars.len() - max_chars..].iter().collect();
+    }
+    let head_chars = max_chars - tail_chars - marker_max;
+    let elided = chars.len() - head_chars - tail_chars;
+    let head: String = chars[..head_chars].iter().collect();
+    let tail: String = chars[chars.len() - tail_chars..].iter().collect();
+    format!("{head}\n\n[... {elided} characters truncated; first {head_chars} and last {tail_chars} kept ...]\n\n{tail}")
 }
 
 /// Serialize LLM messages to text for summarization.
@@ -312,6 +332,24 @@ mod tests {
             1,
         ))];
         let text = serialize_conversation(&messages);
-        assert!(text.ends_with("[... 10 more characters truncated]"));
+        assert!(text.contains("characters truncated; first"));
+        assert!(text.ends_with(&"x".repeat(500)));
+        assert!(text.chars().count() <= TOOL_RESULT_MAX_CHARS + "[Tool result]: ".len());
+    }
+
+    #[test]
+    fn summary_keeps_unicode_error_tail_and_structured_python_edits() {
+        let output = format!("BEGIN{}\nERROR: failed at final step", "界".repeat(4000));
+        let summary = truncate_for_summary(&output, TOOL_RESULT_MAX_CHARS);
+        assert!(summary.starts_with("BEGIN"));
+        assert!(summary.ends_with("ERROR: failed at final step"));
+        assert!(summary.chars().count() <= TOOL_RESULT_MAX_CHARS);
+        let mut result = pi_ai::types::ToolResultMessage::new("id", "ipython", vec![], false, 1);
+        result.details = Some(json!({"diffs": [{"path": "src/a.rs"}, {"path": ""}, 4, {"path": false}]}));
+        let mut ops = create_file_ops();
+        extract_file_ops_from_message(&AgentMessage::Message(Message::ToolResult(result)), &mut ops);
+        assert_eq!(compute_file_lists(&ops).1, vec!["src/a.rs"]);
+        for index in 0..250 { ops.edited.insert(format!("file-{index:03}")); }
+        assert_eq!(compute_file_lists(&ops).1.len(), 200);
     }
 }

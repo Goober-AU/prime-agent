@@ -34,6 +34,8 @@ pub struct ActiveSessionRuntimeSession {
     pub session_file: Option<String>,
     /// The session's own work only (delegated child work is separate).
     pub is_session_active: bool,
+    /// Optional for older/test adapters; lifecycle safety still uses is_session_active.
+    pub is_foreground_active: Option<bool>,
     pub is_streaming: bool,
     pub is_compacting: bool,
     pub messages_len: usize,
@@ -65,6 +67,7 @@ impl std::fmt::Debug for ActiveSessionRuntimeSession {
             .field("session_name", &self.session_name)
             .field("session_file", &self.session_file)
             .field("is_session_active", &self.is_session_active)
+            .field("is_foreground_active", &self.is_foreground_active)
             .field("is_streaming", &self.is_streaming)
             .field("is_compacting", &self.is_compacting)
             .field("messages_len", &self.messages_len)
@@ -87,6 +90,7 @@ impl PartialEq for ActiveSessionRuntimeSession {
             && self.session_name == other.session_name
             && self.session_file == other.session_file
             && self.is_session_active == other.is_session_active
+            && self.is_foreground_active == other.is_foreground_active
             && self.is_streaming == other.is_streaming
             && self.is_compacting == other.is_compacting
             && self.messages_len == other.messages_len
