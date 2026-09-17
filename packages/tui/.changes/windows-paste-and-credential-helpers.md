@@ -1,0 +1,1 @@
+- Fixed slow or fragmented Windows pastes, lost Unicode and delayed Escape input while preserving cursor navigation and menu controls.

@@ -1742,39 +1742,11 @@ async fn run_terminal(
                         continue;
                     }
                     if mode.borrow().has_interruptible_work() {
-                        // Read the activity flags here: the mode handle is not `Send`, so it cannot cross
-                        // into the spawned task.
-                        let (compacting, bash_running, retry_attempt, streaming) = {
-                            let mode = mode.borrow();
-                            (
-                                mode.is_agent_compacting(),
-                                mode.is_bash_running(),
-                                mode.get_retry_attempt(),
-                                mode.is_agent_streaming(),
-                            )
-                        };
+                        let activity = InterruptActivity::from_mode(&mode.borrow());
                         let connection = connection.clone();
                         let send = send.clone();
                         tokio::spawn(async move {
-                            // Port of `interruptOrClearInput`: abort the owner of each in-flight activity.
-                            // The streaming abort PRESERVES the queue - it is held server-side and draining
-                            // resumes on the next submit or queued-message edit. `abort_and_clear_queue`
-                            // would silently discard follow-ups the user already typed.
-                            if retry_attempt > 0.0 {
-                                let _ = connection.abort_retry().await;
-                            }
-                            if compacting {
-                                let _ = connection.abort_compaction().await;
-                                let _ = connection.abort_branch_summary().await;
-                            }
-                            if bash_running {
-                                let _ = connection.abort_bash().await;
-                            }
-                            let result = if streaming {
-                                connection.abort().await.map(|_| ())
-                            } else {
-                                Ok(())
-                            };
+                            let result = interrupt_active_work(&connection, activity).await;
                             let _ = send.send(HostEvent::Completed(result));
                         });
                     } else {
@@ -2817,6 +2789,52 @@ async fn run_terminal(
         Some(error) => Err(error),
         None => Ok(result),
     }
+}
+
+#[derive(Clone, Copy)]
+struct InterruptActivity {
+    compacting: bool,
+    bash_running: bool,
+    retrying: bool,
+    abort_session: bool,
+}
+
+impl InterruptActivity {
+    fn from_mode(mode: &InteractiveMode) -> Self {
+        Self {
+            compacting: mode.is_agent_compacting(),
+            bash_running: mode.is_bash_running(),
+            retrying: mode.get_retry_attempt() > 0.0,
+            abort_session: mode.is_agent_streaming()
+                || mode.connection_state.as_ref().is_some_and(|state| {
+                    state.session_actions.active.is_some()
+                }),
+        }
+    }
+}
+
+async fn interrupt_active_work(
+    connection: &Arc<dyn wire::AgentConnection>,
+    activity: InterruptActivity,
+) -> Result<(), String> {
+    let mut requests = Vec::new();
+    if activity.abort_session {
+        requests.push(connection.abort());
+    }
+    if activity.retrying {
+        requests.push(connection.abort_retry());
+    }
+    if activity.compacting {
+        requests.push(connection.abort_compaction());
+        requests.push(connection.abort_branch_summary());
+    }
+    if activity.bash_running {
+        requests.push(connection.abort_bash());
+    }
+    // Issue independent cancellation requests together; an unresponsive activity
+    // must not prevent another owner from receiving its cancellation.
+    let results = futures::future::join_all(requests).await;
+    results.into_iter().collect::<Result<Vec<_>, _>>().map(|_| ())
 }
 
 /// Dispatches one submitted line.
@@ -6127,6 +6145,42 @@ mod tests {
         assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
         assert!(escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
         assert_eq!(editor.borrow().editor().get_text(), "");
+    }
+
+    #[tokio::test]
+    async fn emergency_escape_aborts_preparing_turn_without_clearing_queue() {
+        let mut mode = stash_mode("emergency-escape-preparing");
+        mode.apply_connection_state_snapshot(local::AgentConnectionState {
+            session_actions: local::SessionActionSnapshot {
+                active: Some("preparing".into()),
+                steering: vec!["keep my queued message".into()],
+                queued_count: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        assert!(mode.has_interruptible_work());
+        assert!(!mode.is_agent_streaming());
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        interrupt_active_work(&connection, InterruptActivity::from_mode(&mode)).await.unwrap();
+        assert_eq!(recorder.calls(), vec![("abort".into(), Vec::new())]);
+    }
+
+    #[tokio::test]
+    async fn emergency_escape_targets_each_busy_owner_but_not_idle_sessions() {
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        let mut mode = stash_mode("emergency-escape-owners");
+        interrupt_active_work(&connection, InterruptActivity::from_mode(&mode)).await.unwrap();
+        assert!(recorder.calls().is_empty());
+        mode.apply_connection_state_snapshot(local::AgentConnectionState {
+            is_streaming: true, is_compacting: true, is_bash_running: true, retry_attempt: 1.0,
+            ..Default::default()
+        });
+        interrupt_active_work(&connection, InterruptActivity::from_mode(&mode)).await.unwrap();
+        let names: Vec<_> = recorder.calls().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, ["abort", "abort_retry", "abort_compaction", "abort_branch_summary", "abort_bash"]);
     }
 
     /// A-02 fix: outside the 500ms window the second press re-arms.

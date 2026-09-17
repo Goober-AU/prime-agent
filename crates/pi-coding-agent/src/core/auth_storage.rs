@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use indexmap::IndexMap;
@@ -28,6 +28,9 @@ use crate::core::prime_inference_auth::{
     clear_prime_cli_credentials, get_prime_cli_config_path, load_prime_cli_config,
     save_prime_cli_api_key, save_prime_cli_team_selection, PrimeCliConfig, PrimeTeam,
     PRIME_INFERENCE_PROVIDER_ID,
+};
+pub(crate) use crate::core::resolve_config_value::{
+    resolve_config_value, resolve_config_value_or_throw, resolve_config_value_uncached,
 };
 use crate::utils::atomic_file::{realpath_if_present_sync, write_file_atomic_sync, WriteFileAtomicOptions};
 
@@ -1480,170 +1483,9 @@ fn stored_value_material_for(provider_id: &str, credential: &AuthCredential) -> 
 }
 
 // ---------------------------------------------------------------------------
-// Boundary plumbing for resolve-config-value.ts (also pending the pi-ai slice;
-// the TypeScript file lives in packages/coding-agent/src/core but is mapped to a
-// different slice, so this copy stays `pub(crate)` and private to this module).
+// Header resolution keeps the auth-specific empty-value filtering. Command
+// resolution uses the shared hidden, bounded helper above.
 // ---------------------------------------------------------------------------
-
-fn resolve_env_or_literal(config: &str) -> Option<String> {
-    // Unset env var: fall back to the literal string. Set-but-empty: missing
-    // credential, never the var name.
-    match std::env::var(config) {
-        Ok(value) => {
-            if value.is_empty() {
-                None
-            } else {
-                Some(value)
-            }
-        }
-        Err(_) => Some(config.to_string()),
-    }
-}
-
-fn execute_command_uncached(command_config: &str) -> Option<String> {
-    let command = &command_config[1..];
-    #[cfg(windows)]
-    {
-        let configured = execute_with_configured_shell(command);
-        if configured.0 {
-            return configured.1;
-        }
-        execute_with_default_shell(command)
-    }
-    #[cfg(not(windows))]
-    {
-        execute_with_default_shell(command)
-    }
-}
-
-fn shell_config() -> (String, Vec<String>) {
-    #[cfg(windows)]
-    {
-        let program_files = std::env::var("ProgramFiles").ok();
-        let program_files_x86 = std::env::var("ProgramFiles(x86)").ok();
-        let mut candidates = Vec::new();
-        if let Some(program_files) = program_files {
-            candidates.push(format!("{}\\Git\\bin\\bash.exe", program_files));
-        }
-        if let Some(program_files_x86) = program_files_x86 {
-            candidates.push(format!("{}\\Git\\bin\\bash.exe", program_files_x86));
-        }
-        for candidate in candidates {
-            if Path::new(&candidate).exists() {
-                return (candidate, vec!["-c".to_string()]);
-            }
-        }
-        ("bash.exe".to_string(), vec!["-c".to_string()])
-    }
-    #[cfg(not(windows))]
-    {
-        if Path::new("/bin/bash").exists() {
-            ("/bin/bash".to_string(), vec!["-c".to_string()])
-        } else {
-            ("bash".to_string(), vec!["-c".to_string()])
-        }
-    }
-}
-
-fn run_command_with_timeout(
-    program: &str,
-    args: &[String],
-    command: &str,
-) -> Option<(bool, Option<String>)> {
-    let mut child = std::process::Command::new(program)
-        .args(args)
-        .arg(command)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output().ok()?;
-                if !status.success() {
-                    return Some((true, None));
-                }
-                let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                return Some((true, if value.is_empty() { None } else { Some(value) }));
-            }
-            Ok(None) => {
-                if start.elapsed() > Duration::from_millis(10_000) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Some((true, None));
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(_) => return Some((true, None)),
-        }
-    }
-}
-
-fn execute_with_configured_shell(command: &str) -> (bool, Option<String>) {
-    let (shell, args) = shell_config();
-    match run_command_with_timeout(&shell, &args, command) {
-        Some(result) => result,
-        None => (false, None),
-    }
-}
-
-fn execute_with_default_shell(command: &str) -> Option<String> {
-    let (shell, args) = shell_config();
-    match run_command_with_timeout(&shell, &args, command) {
-        Some((true, value)) => value,
-        _ => None,
-    }
-}
-
-fn command_result_cache() -> &'static Mutex<HashMap<String, Option<String>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// `resolveConfigValue(config)`.
-pub(crate) fn resolve_config_value(config: &str) -> Option<String> {
-    if config.starts_with('!') {
-        let cache = command_result_cache();
-        {
-            let guard = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(cached) = guard.get(config) {
-                return cached.clone();
-            }
-        }
-        let result = execute_command_uncached(config);
-        let mut guard = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.insert(config.to_string(), result.clone());
-        return result;
-    }
-    resolve_env_or_literal(config)
-}
-
-/// `resolveConfigValueUncached(config)`.
-pub(crate) fn resolve_config_value_uncached(config: &str) -> Option<String> {
-    if config.starts_with('!') {
-        return execute_command_uncached(config);
-    }
-    resolve_env_or_literal(config)
-}
-
-/// `resolveConfigValueOrThrow(config, description)`.
-pub(crate) fn resolve_config_value_or_throw(config: &str, description: &str) -> Result<String, String> {
-    let resolved_value = resolve_config_value_uncached(config);
-    if let Some(value) = resolved_value {
-        return Ok(value);
-    }
-    if config.starts_with('!') {
-        return Err(format!(
-            "Failed to resolve {} from shell command: {}",
-            description,
-            &config[1..]
-        ));
-    }
-    Err(format!("Failed to resolve {}", description))
-}
 
 /// `resolveHeaders(headers)`.
 pub(crate) fn resolve_headers(headers: Option<&IndexMap<String, String>>) -> Option<IndexMap<String, String>> {
@@ -2463,6 +2305,76 @@ mod tests {
             error,
             "Failed to resolve API key for provider \"x\" from shell command: exit 1"
         );
+    }
+
+    #[cfg(windows)]
+    fn fake_powershell_credential_helper(script: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credential-helper.ps1");
+        std::fs::write(&path, format!("$ErrorActionPreference = 'Stop'\n{script}\n")).unwrap();
+        let path = path.to_string_lossy().replace('\\', "/");
+        let config = format!(
+            "!powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{path}\""
+        );
+        (dir, config)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn auth_credential_helper_powershell_descendant_has_no_console_window() {
+        let (_dir, config) = fake_powershell_credential_helper(
+            r#"Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class CredentialConsoleProbe { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }'
+if ([CredentialConsoleProbe]::GetConsoleWindow() -ne [IntPtr]::Zero) {
+    throw 'Credential helper unexpectedly has a console window'
+}
+Write-Output 'isolated-test-key'"#,
+        );
+        assert_eq!(
+            resolve_config_value_or_throw(&config, "isolated test credential").unwrap(),
+            "isolated-test-key"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn auth_credential_helper_drains_output_larger_than_the_pipe_buffer() {
+        let (_dir, config) = fake_powershell_credential_helper("[Console]::Out.Write(('x' * 1048576))");
+        let value = resolve_config_value_uncached(&config).expect("large helper output must not deadlock");
+        assert_eq!(value.len(), 1_048_576);
+        assert!(value.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn auth_credential_helper_shares_cache_but_uncached_refresh_still_runs() {
+        let (_dir, config) = fake_powershell_credential_helper(
+            r#"$counterPath = Join-Path $PSScriptRoot 'calls.txt'
+$count = 0
+if (Test-Path -LiteralPath $counterPath) { $count = [int](Get-Content -LiteralPath $counterPath -Raw) }
+$count += 1
+[IO.File]::WriteAllText($counterPath, [string]$count)
+Write-Output ('isolated-test-key-' + $count)"#,
+        );
+        assert_eq!(resolve_config_value(&config).as_deref(), Some("isolated-test-key-1"));
+        assert_eq!(resolve_config_value(&config).as_deref(), Some("isolated-test-key-1"));
+        assert_eq!(
+            crate::core::resolve_config_value::resolve_config_value(&config).as_deref(),
+            Some("isolated-test-key-1")
+        );
+        assert_eq!(resolve_config_value_uncached(&config).as_deref(), Some("isolated-test-key-2"));
+        assert_eq!(
+            resolve_config_value_or_throw(&config, "isolated test credential").unwrap(),
+            "isolated-test-key-3"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn auth_credential_helper_nonzero_exit_does_not_accept_stdout_as_a_key() {
+        let (_dir, config) = fake_powershell_credential_helper("Write-Output 'not-a-valid-key'\nexit 9");
+        assert_eq!(resolve_config_value_uncached(&config), None);
+        let error = resolve_config_value_or_throw(&config, "isolated test credential").unwrap_err();
+        assert!(error.starts_with("Failed to resolve isolated test credential from shell command:"));
     }
 
     #[test]
