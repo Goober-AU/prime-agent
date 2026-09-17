@@ -261,6 +261,14 @@ pub trait AgentHandle: Send + Sync {
         self.state().tools.unwrap_or_default().into_iter().map(|tool| tool.name).collect()
     }
     fn set_state(&self, state: AgentState);
+    /// Atomic live-field mutation. Callbacks must not re-enter the agent. The
+    /// default serves sequential test doubles; the real Agent overrides this
+    /// with its state lock so delayed session events cannot restore stale flags.
+    fn update_state(&self, update: Box<dyn FnOnce(&mut AgentState) + Send>) {
+        let mut state = self.state();
+        update(&mut state);
+        self.set_state(state);
+    }
     fn subscribe(&self, listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
     fn set_before_tool_call(&self, hook: BeforeToolCallHook);
     fn set_after_tool_call(&self, hook: AfterToolCallHook);
@@ -2205,11 +2213,38 @@ pub struct RlmSubagentModelSelection {
     pub model: Model,
 }
 
+#[derive(Default)]
+struct ExplicitStopState {
+    generation: Option<String>,
+    last_generation: Option<String>,
+    stopped_at: f64,
+    report_cutoff_at: f64,
+    report_ids: HashSet<String>,
+    unannounced_reports: usize,
+    persistence_error: Option<String>,
+}
+
+const EXPLICIT_STOP_ENTRY: &str = "prime-agent.explicit-stop";
+const DEFERRED_REPORT_ENTRY: &str = "prime-agent.deferred-agent-report";
+
+#[path = "agent_session/explicit_stop.rs"]
+mod explicit_stop;
+
+#[path = "agent_session/queue_metrics.rs"]
+mod queue_metrics;
+
+#[cfg(test)]
+#[path = "agent_session/queue_stop_tests.rs"]
+mod queue_stop_tests;
+
+#[cfg(test)]
+#[path = "agent_session/transport_retry_tests.rs"]
+mod transport_retry_tests;
+
 /// `AgentSession`.
 ///
-/// Fields keep the TypeScript names in `snake_case`. Mutable state that the
-/// TypeScript mutates from callbacks lives behind `Mutex` because the Rust
-/// agent callbacks are `Send + Sync` and can fire from other tasks.
+/// Fields keep the TypeScript names in `snake_case`. Mutable callback state
+/// lives behind `Mutex` because Rust callbacks can fire from other tasks.
 pub struct AgentSession {
     pub agent: Arc<dyn AgentHandle>,
     pub session_manager: Arc<Mutex<SessionManager>>,
@@ -2222,11 +2257,14 @@ pub struct AgentSession {
     /// `_agentEventQueue` - the serialized tail of agent-event work.
     agent_event_queue: Mutex<futures::future::Shared<BoxFuture<Result<(), String>>>>,
     action_store: Mutex<ActionStore<QueuedSessionAction>>,
+    action_queue_metrics: Mutex<HashMap<String, (std::time::Instant, Arc<dyn PerformanceMetricRecorder>)>>,
     session_input_pump: Mutex<futures::future::Shared<BoxFuture<Result<(), String>>>>,
     session_input_pump_requested: AtomicBool,
     session_input_pump_epoch: AtomicU64,
     session_input_arrival_epoch: AtomicU64,
     session_input_pump_suspended: AtomicBool,
+    explicit_stop: Mutex<ExplicitStopState>,
+    explicit_stop_admission: Mutex<()>,
     session_input_suspended_for_update_restart: AtomicBool,
     queued_work_pauses: Mutex<HashSet<String>>,
     session_input_admission_pauses: Mutex<HashSet<String>>,
@@ -2259,7 +2297,7 @@ pub struct AgentSession {
     retry_abort_controller: Mutex<Option<CancellationToken>>,
     retry_attempt: AtomicU64,
     retry_generation: AtomicU64,
-    retry_promise: Mutex<Option<BoxFuture<Result<(), String>>>>,
+    retry_promise: Mutex<Option<AgentMessageDeferred>>,
     retry_resolve: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     retry_metric_message: Mutex<Option<AssistantMessage>>,
     retry_auth_failure_sources: Mutex<Vec<AuthSourceToken>>,
@@ -2531,11 +2569,14 @@ impl AgentSession {
             }),
             agent_event_queue: Mutex::new(async { Ok(()) }.boxed().shared()),
             action_store: Mutex::new(ActionStore::new()),
+            action_queue_metrics: Mutex::new(HashMap::new()),
             session_input_pump: Mutex::new(async { Ok(()) }.boxed().shared()),
             session_input_pump_requested: AtomicBool::new(false),
             session_input_pump_epoch: AtomicU64::new(0),
             session_input_arrival_epoch: AtomicU64::new(0),
             session_input_pump_suspended: AtomicBool::new(false),
+            explicit_stop: Mutex::new(ExplicitStopState::default()),
+            explicit_stop_admission: Mutex::new(()),
             session_input_suspended_for_update_restart: AtomicBool::new(false),
             queued_work_pauses: Mutex::new(HashSet::new()),
             session_input_admission_pauses: Mutex::new(HashSet::new()),
@@ -2697,6 +2738,7 @@ impl AgentSession {
         *session.rlm_max_depth.lock().unwrap() = resolved_rlm_max_depth.0;
         *session.rlm_max_depth_source.lock().unwrap() = resolved_rlm_max_depth.1;
 
+        session.restore_explicit_stop();
         session.restore_rlm_continuation_state();
         *session.goal_state.lock().unwrap() = session.load_persisted_goal_state();
         // Seed initial goal from CLI --goal flag, but only for top-level sessions
@@ -3173,17 +3215,13 @@ impl AgentSession {
             messages.push(message.clone());
         }
         drop(map);
-        let mut state = self.agent.state();
-        for index in (0..state.messages.len()).rev() {
-            if append_sent_agent_message_to_tool_result(
-                &mut state.messages[index],
-                tool_call_id,
-                message,
-            ) {
-                break;
+        let tool_call_id = tool_call_id.to_string();
+        let message = message.clone();
+        self.agent.update_state(Box::new(move |state| {
+            for candidate in state.messages.iter_mut().rev() {
+                if append_sent_agent_message_to_tool_result(candidate, &tool_call_id, &message) { break; }
             }
-        }
-        self.agent.set_state(state);
+        }));
         is_new
     }
 
@@ -3478,6 +3516,7 @@ impl AgentSession {
             }
         }
         for action in &actions {
+            self.finish_action_queue_metric(&action.id, false);
             let ticket = self.action_store.lock().unwrap().ticket_for(action);
             let previous_state = previous_states
                 .get(&action.id)
@@ -4076,18 +4115,22 @@ impl AgentSession {
 
     /// `get _steeringStopPending()`.
     fn steering_stop_pending(&self) -> bool {
-        self.agent
-            .has_queued_messages()
-            && self.steering_mode.lock().unwrap().as_str() == "one-at-a-time"
+        let store = self.action_store.lock().unwrap();
+        !store.queued_actions(Some(DeliveryPolicy::NextTurnBoundary)).is_empty()
+            || store.active_actions(Some(DeliveryPolicy::NextTurnBoundary)).iter().any(|action| {
+                matches!(action.payload, QueuedActionPayload::Turn(_))
+                    && matches!(action.lifecycle.state(), ActionLifecycleState::Selected | ActionLifecycleState::Preparing)
+            })
     }
 
     /// `_shouldStopBeforeTurn`.
     fn should_stop_before_turn(&self) -> bool {
-        self.steering_stop_pending()
+        self.explicitly_stopped() || self.steering_stop_pending()
     }
 
     /// `_shouldStopAfterTurn`.
     async fn should_stop_after_turn(self: &Arc<Self>, context: ShouldStopAfterTurnContext) -> bool {
+        if self.explicitly_stopped() { return true; }
         if self.stop_goal_continuation_for_terminal_message(&context.message) {
             return true;
         }
@@ -5801,7 +5844,7 @@ impl AgentSession {
         signal: Option<CancellationToken>,
     ) -> Result<Vec<AgentMessage>, String> {
         let aborted = signal.as_ref().map(|signal| signal.is_cancelled()).unwrap_or(false);
-        if aborted {
+        if aborted || self.explicitly_stopped() {
             return Ok(Vec::new());
         }
         // Child recovery requires durable task correlation. Root continuations do
@@ -6023,9 +6066,9 @@ impl AgentSession {
                 }
                 let _ = messages;
                 if !captured.is_empty() {
-                    let mut state = self.agent.state();
-                    state.messages.retain(|message| !captured.contains(&agent_message_key_of(message)));
-                    self.agent.set_state(state);
+                    self.agent.update_state(Box::new(move |state| {
+                        state.messages.retain(|message| !captured.contains(&agent_message_key_of(message)));
+                    }));
                 }
             }
             _ => {}
@@ -6055,6 +6098,7 @@ impl AgentSession {
                         }
                         let _ = self.action_store.lock().unwrap().update_action(&next);
                         if started_primary {
+                            self.finish_action_queue_metric(&action.id, true);
                             if let Ok(ticket) = self.action_store.lock().unwrap().ticket_for(&action) {
                                 ticket.settle_delivered(DeliveryOutcome::Delivered);
                             }
@@ -6150,10 +6194,7 @@ impl AgentSession {
             let deferred = deferred.clone();
             move || deferred.resolve()
         }));
-        *self.retry_promise.lock().unwrap() = Some(Box::pin(async move {
-            let _ = deferred.wait().await;
-            Ok(())
-        }));
+        *self.retry_promise.lock().unwrap() = Some(deferred);
     }
 
     /// `_findLastAssistantInMessages`.
@@ -6190,8 +6231,9 @@ impl AgentSession {
         if !is_likely_authentication_error(&error_message) {
             return;
         }
+        let original = AgentMessage::Message(Message::Assistant(message.clone()));
         message.error_message = Some(add_login_guidance_to_auth_error(&error_message));
-        self.replace_last_assistant_in_state(&message);
+        self.replace_message_in_place(&original, AgentMessage::Message(Message::Assistant(message)));
     }
 
     /// `_processAgentEvent`.
@@ -6199,9 +6241,9 @@ impl AgentSession {
         let mut cleared_dispatch_ended = false;
         if let AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } = &event {
             if let AgentMessage::Message(Message::ToolResult(_)) = message {
-                let mut message = message.clone();
-                self.apply_late_ipython_sent_agent_messages(&mut message);
-                self.replace_message_in_place(message);
+                let mut updated = message.clone();
+                self.apply_late_ipython_sent_agent_messages(&mut updated);
+                self.replace_message_in_place(message, updated);
             }
         }
         if let AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } = &event {
@@ -6209,11 +6251,9 @@ impl AgentSession {
                 if let QueuedActionPayload::Turn(turn) = &cleared.payload {
                     if let Some(captured) = &turn.capture_run_messages {
                         let captured = captured.clone();
-                        let mut state = self.agent.state();
-                        state
-                            .messages
-                            .retain(|message| !captured.contains(&agent_message_key_of(message)));
-                        self.agent.set_state(state);
+                        self.agent.update_state(Box::new(move |state| {
+                            state.messages.retain(|message| !captured.contains(&agent_message_key_of(message)));
+                        }));
                         return;
                     }
                 }
@@ -6244,10 +6284,10 @@ impl AgentSession {
                         }
                     }
                 }
-                let mut state = self.agent.state();
-                state.messages.retain(|message| !removed.contains(&agent_message_key_of(message)));
-                state.error_message = None;
-                self.agent.set_state(state);
+                self.agent.update_state(Box::new(move |state| {
+                    state.messages.retain(|message| !removed.contains(&agent_message_key_of(message)));
+                    if !state.is_streaming { state.error_message = None; }
+                }));
                 *self.last_assistant_message.lock().unwrap() = None;
                 let _ = messages;
                 for action in cleared {
@@ -6270,11 +6310,9 @@ impl AgentSession {
                 if let QueuedActionPayload::Turn(turn) = &cleared.payload {
                     if let Some(captured) = &turn.capture_run_messages {
                         let captured = captured.clone();
-                        let mut state = self.agent.state();
-                        state
-                            .messages
-                            .retain(|message| !captured.contains(&agent_message_key_of(message)));
-                        self.agent.set_state(state);
+                        self.agent.update_state(Box::new(move |state| {
+                            state.messages.retain(|message| !captured.contains(&agent_message_key_of(message)));
+                        }));
                         return;
                     }
                 }
@@ -6523,31 +6561,34 @@ impl AgentSession {
     }
 
     /// `_replaceMessageInPlace`.
-    fn replace_message_in_place(&self, replacement: AgentMessage) {
+    fn replace_message_in_place(&self, original: &AgentMessage, replacement: AgentMessage) {
         // Agent-core stores the finalized message object in its state before emitting message_end.
         // SessionManager persistence happens later in _processAgentEvent() with event.message.
         // Mutating this object in place keeps agent state, later turn/agent events, listeners,
         // and the eventual SessionManager.appendMessage(event.message) persistence in sync.
-        let key = agent_message_key_of(&replacement);
-        let mut state = self.agent.state();
-        for message in state.messages.iter_mut() {
-            if agent_message_key_of(message) == key {
-                *message = replacement.clone();
-                break;
+        let original = original.clone();
+        self.agent.update_state(Box::new(move |state| {
+            if let Some(message) = state.messages.iter_mut().rev().find(|message| **message == original) {
+                *message = replacement;
             }
-        }
-        self.agent.set_state(state);
+        }));
     }
 
-    fn replace_last_assistant_in_state(&self, replacement: &AssistantMessage) {
-        let mut state = self.agent.state();
-        for message in state.messages.iter_mut().rev() {
-            if let AgentMessage::Message(Message::Assistant(assistant)) = message {
-                *assistant = replacement.clone();
-                break;
+    /// Remove only this failed response, tolerating our own login-help annotation.
+    /// Every other field still participates in identity, including its timestamp,
+    /// content, provider metadata and usage; a newer response is never popped.
+    fn remove_failed_assistant_from_state(&self, failed: &AssistantMessage) {
+        let failed = failed.clone();
+        let annotated_error = failed.error_message.as_deref().map(add_login_guidance_to_auth_error);
+        self.agent.update_state(Box::new(move |state| {
+            let Some(AgentMessage::Message(Message::Assistant(current))) = state.messages.last() else { return; };
+            if current.error_message != failed.error_message && current.error_message != annotated_error {
+                return;
             }
-        }
-        self.agent.set_state(state);
+            let mut comparable = current.clone();
+            comparable.error_message = failed.error_message.clone();
+            if comparable == failed { state.messages.pop(); }
+        }));
     }
 
     /// `_emitExtensionEvent`.
@@ -6621,7 +6662,7 @@ impl AgentSession {
                     .await;
                 if let Some(replacement) = replacement {
                     if let Ok(parsed) = serde_json::from_value::<AgentMessage>(replacement) {
-                        self.replace_message_in_place(parsed);
+                        self.replace_message_in_place(message, parsed);
                     }
                 }
             }
@@ -7916,6 +7957,15 @@ impl AgentSession {
                 timestamp: message.timestamp,
             }))
         });
+        if let Some(message) = &custom_message {
+            let new_parent_task = self.resume_for_new_parent_task(message)?;
+            if !new_parent_task && self.defer_stopped_report(message, options.agent_message_id.as_deref())? {
+                self.reject_agent_message(options.agent_message_id.as_deref(),
+                    "Session stopped; report saved in the deferred-agent-report journal, not delivered to the model.");
+                if let Some(preflight) = &options.preflight_result { preflight(true, true); }
+                return Ok(());
+            }
+        }
         let clear_epoch = self.agent_message_clear_epoch.load(Ordering::SeqCst);
         let admission_committed = Arc::new({
             let options = options.clone();
@@ -8163,6 +8213,7 @@ impl AgentSession {
     /// `_deferRlmTerminalNotice`.
     async fn defer_rlm_terminal_notice(self: &Arc<Self>, message: CustomMessage) -> Result<(), String> {
         self.assert_rlm_terminal_notice(&message)?;
+        if self.defer_stopped_report(&message, None)? { return Ok(()); }
         if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
             return Ok(());
         }
@@ -8380,6 +8431,16 @@ impl AgentSession {
         skip_pre_prompt_work: Option<bool>,
         return_after_accepted: Option<bool>,
     ) -> Result<(), String> {
+        // Only fresh human admission resumes a persistent explicit stop. Injected
+        // traffic and automatic checkpoint resumption cannot revoke cancellation.
+        if options.internal_prompt != Some(true) && options.custom_message.is_none()
+            && options.resume_if_idle != Some(false)
+            && !text.trim().is_empty() && !text.trim_start().starts_with('/')
+            && matches!(options.source, None | Some(crate::core::session_action_store::InputSource::Interactive)
+                | Some(crate::core::session_action_store::InputSource::Rpc))
+        {
+            self.resume_explicit_stop()?;
+        }
         let resume_suspended_input = options.resume_if_idle != Some(false);
         if !self.is_streaming() {
             if resume_suspended_input {
@@ -9362,6 +9423,22 @@ impl AgentSession {
         front: bool,
         wake: bool,
     ) -> Result<(bool, Option<Arc<crate::core::session_action_store::ActionTicketController>>, String), String> {
+        // Stop and enqueue share one short synchronous fence: a report is either
+        // admitted before the stop sweep, or durably deferred after it, never lost
+        // in the gap between a stop-state check and store.enqueue().
+        let _stop_admission = self.explicit_stop_admission.lock().unwrap();
+        if !restore {
+            if let Some(report) = Self::stopped_report(&action) {
+                if self.defer_stopped_report(&report, action.agent_message_id.as_deref())? {
+                    self.reject_agent_message(action.agent_message_id.as_deref(),
+                        "Session stopped; report saved in the deferred-agent-report journal, not delivered to the model.");
+                    return Ok((true, None, "queued".to_string()));
+                }
+            }
+            if self.explicitly_stopped() {
+                return Err("Session is explicitly stopped. Send a new user prompt or explicitly resume the queue.".into());
+            }
+        }
         // TS 6224-6231: dispose and admission-pause checks run before anything else.
         if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
             return Err(
@@ -9421,6 +9498,8 @@ impl AgentSession {
         }
         drop(store);
         // TS 6252-6258: `immediatelyEligible` alone does not decide the disposition;
+        if !restore { self.start_action_queue_metric(&action); }
+        drop(_stop_admission);
         // the store must also have had no unfinished action (or the action is fronted).
         // DEVIATION (named): TS 6258 also requires `selectFirst() === action`; the
         // Rust pump owns selection (`pump_session_inputs`, agent_session.rs:9113), so
@@ -10484,9 +10563,8 @@ impl AgentSession {
                 message.display,
                 message.details.clone(),
             );
-        let mut state = self.agent.state();
-        state.messages.push(custom_message_agent_message(&message));
-        self.agent.set_state(state);
+        let appended = custom_message_agent_message(&message);
+        self.agent.update_state(Box::new(move |state| state.messages.push(appended)));
         self.emit(AgentSessionEvent::MessageStart {
             message: custom_message_agent_message(&message),
         });
@@ -10582,15 +10660,14 @@ impl AgentSession {
                 Err(error) => return Err(error),
             }
         } else {
-            let mut state = self.agent.state();
-            state.messages.push(AgentMessage::Custom(CustomAgentMessage::Custom {
+            let appended = AgentMessage::Custom(CustomAgentMessage::Custom {
                 custom_type: message.custom_type.clone(),
                 content: message.content.clone(),
                 display: message.display,
                 details: message.details.clone(),
                 timestamp: app_message.timestamp,
-            }));
-            self.agent.set_state(state);
+            });
+            self.agent.update_state(Box::new(move |state| state.messages.push(appended)));
             self.session_manager
                 .lock()
                 .unwrap()
@@ -11000,7 +11077,7 @@ impl AgentSession {
 
     /// `get isQueuedWorkSuspended()`.
     pub fn is_queued_work_suspended(&self) -> bool {
-        !self.queued_work_pauses.lock().unwrap().is_empty()
+        self.explicitly_stopped() || !self.queued_work_pauses.lock().unwrap().is_empty()
     }
 
     /// `get isSessionActive()` (agent-session.ts:7164-7176).
@@ -11325,6 +11402,7 @@ impl AgentSession {
 
     /// `_resumeSessionInputAdmission()` (agent-session.ts:7505-7512).
     fn resume_session_input_admission(&self) {
+        if self.explicitly_stopped() { return; }
         // TS 7506: a pump that is not suspended is left untouched.
         if !self.session_input_pump_suspended.load(Ordering::SeqCst) {
             return;
@@ -11368,6 +11446,9 @@ impl AgentSession {
             if self.unfinished_action_count() == 0 && !self.is_streaming() {
                 return Ok(());
             }
+            if self.explicitly_stopped() && !self.is_streaming() {
+                return Ok(());
+            }
             if self.is_streaming() {
                 let _ = self.agent.wait_for_idle().await;
                 continue;
@@ -11392,7 +11473,7 @@ impl AgentSession {
                 && events.ptr_eq(&self.agent_event_queue.lock().unwrap())
                 && !self.session_input_pump_requested.load(Ordering::SeqCst)
                 && !self.is_streaming()
-                && self.unfinished_action_count() == 0
+                && (self.unfinished_action_count() == 0 || self.explicitly_stopped())
             {
                 return Ok(());
             }
@@ -11459,6 +11540,15 @@ impl AgentSession {
 
     /// `requestAbort()` (agent-session.ts:7632-7659).
     pub fn request_abort(self: &Arc<Self>) {
+        self.request_abort_inner(true);
+    }
+
+    fn request_abort_inner(self: &Arc<Self>, explicit: bool) {
+        let stop_admission = explicit.then(|| self.explicit_stop_admission.lock().unwrap());
+        if explicit {
+            self.begin_explicit_stop();
+            self.defer_queued_reports_for_stop();
+        }
         // TS 7633-7636: cancelled RLM child runs are abandoned for quiescence and
         // the quiescence waiters are aborted.
         let runs: Vec<Arc<Mutex<RlmChildRun>>> =
@@ -11487,6 +11577,7 @@ impl AgentSession {
         self.cancel_session_actions(
             &|action: &QueuedSessionAction| {
                 matches!(action.payload, QueuedActionPayload::Turn(ref turn) if !turn.queue_visible)
+                    && (!explicit || Self::stopped_report(action).is_none())
                     && !self
                         .durable_rlm_terminal_notice_action_ids
                         .lock()
@@ -11503,11 +11594,14 @@ impl AgentSession {
         self.abort_branch_summary();
         self.abort_bash();
         self.abort_refinement();
+        *self.pending_requested_compaction.lock().unwrap() = None;
         *self.pending_requested_refine.lock().unwrap() = None;
         self.auto_refine_branch_version.fetch_add(1, Ordering::SeqCst);
         let error = "Session input was aborted.".to_string();
         self.reject_queued_agent_message_deliveries(&error, None);
+        if explicit { self.cancel_active_rlm_child_runs("Parent session explicitly stopped"); }
         self.agent.abort();
+        drop(stop_admission);
         self.notify_session_input_checkpoint_change();
         self.emit_queue_update();
     }
@@ -11523,6 +11617,10 @@ impl AgentSession {
     /// (only `is_some()` reads exist, agent_session.rs:8793/9273), so there is no
     /// branch-summary operation to await here.
     pub async fn abort(self: &Arc<Self>) -> Result<(), String> {
+        self.abort_inner(true).await
+    }
+
+    async fn abort_inner(self: &Arc<Self>, explicit: bool) -> Result<(), String> {
         // TS 7662-7663: capture the in-flight operation before aborting it.
         let compaction_operation = self
             .compaction_operation
@@ -11530,20 +11628,32 @@ impl AgentSession {
             .unwrap()
             .as_ref()
             .map(|operation| operation.operation.clone());
-        self.request_abort();
+        self.request_abort_inner(explicit);
         // TS 7665-7666.
         self.cancel_active_rlm_child_runs("Parent session aborted");
         self.goal_abort_in_progress.store(
             self.goal_state().status == GoalStatus::Active,
             Ordering::SeqCst,
         );
-        let _ = self.agent.wait_for_idle().await;
-        self.await_agent_event_queue().await;
-        if let Some(operation) = compaction_operation {
-            let _ = operation.await;
-        }
+        let settle = async {
+            self.agent.wait_for_idle().await;
+            self.await_agent_event_queue().await;
+            if let Some(operation) = compaction_operation { let _ = operation.await; }
+        };
+        let settled = if explicit {
+            tokio::time::timeout(std::time::Duration::from_secs(10), settle).await.is_ok()
+        } else {
+            settle.await;
+            true
+        };
         // TS 7674-7676 `finally`.
         self.goal_abort_in_progress.store(false, Ordering::SeqCst);
+        if !settled {
+            return Err("Stop requested and new work is suspended, but an active tool, event handler or compaction has not settled after 10 seconds. The session is not confirmed stopped.".into());
+        }
+        if let Some(error) = self.explicit_stop.lock().unwrap().persistence_error.clone() {
+            return Err(format!("Work stopped, but the durable stop checkpoint could not be saved: {error}"));
+        }
         Ok(())
     }
 
@@ -12679,6 +12789,7 @@ impl AgentSession {
     /// runs; `clearTimeout` becomes removing the timer id from
     /// `scheduled_auto_refine_timers`, which makes the task stop.
     fn schedule_auto_refine(self: &Arc<Self>, reason: &AutoRefineReason, branch_version: Option<u64>) {
+        if self.explicitly_stopped() { return; }
         let branch_version =
             branch_version.unwrap_or_else(|| self.auto_refine_branch_version.load(Ordering::SeqCst));
         let reason = *reason;
@@ -12751,6 +12862,7 @@ impl AgentSession {
 
     /// `_maybeAutoRefine(reason)` (agent-session.ts:8704-8815).
     async fn maybe_auto_refine(self: &Arc<Self>, reason: &AutoRefineReason) -> Result<(), String> {
+        if self.explicitly_stopped() { return Ok(()); }
         if self.disposed.load(Ordering::SeqCst) || self.disposing.load(Ordering::SeqCst) {
             self.discard_pending_auto_refine(false);
             return Ok(());
@@ -14130,6 +14242,7 @@ impl AgentSession {
         settings: &CompactionSettings,
         queue_autonomous_continuation: bool,
     ) -> Result<bool, String> {
+        if self.explicitly_stopped() { return Ok(false); }
         if self.pending_requested_compaction.lock().unwrap().is_some() {
             // TS 9480-9482: `_pendingRequestedCompaction` returns
             // `_runAutoCompaction("requested", false)`; this runs before the
@@ -14205,6 +14318,7 @@ impl AgentSession {
         settings: &CompactionSettings,
         skip_aborted_check: bool,
     ) -> Option<bool> {
+        if self.explicitly_stopped() { return Some(false); }
         if assistant.stop_reason == STOP_REASON_ABORTED {
             // TS 9413-9419: an abort drops any compaction and refine request the
             // turn made; the turn that would service them never runs.
@@ -14262,16 +14376,7 @@ impl AgentSession {
             *recovery = "attempted".to_string();
         }
         // TS 9470-9476: drop the error message from agent state (history keeps it).
-        let mut state = self.agent.state();
-        if state
-            .messages
-            .last()
-            .map(|message| message.role() == "assistant")
-            .unwrap_or(false)
-        {
-            state.messages.pop();
-        }
-        self.agent.set_state(state);
+        self.remove_failed_assistant_from_state(assistant);
         // TS 9477.
         Some(self.run_auto_compaction(COMPACTION_REASON_OVERFLOW, true).await)
     }
@@ -14366,6 +14471,7 @@ impl AgentSession {
     /// Returns the TS `boolean`: true only for a successful compaction with
     /// `willRetry` (overflow recovery), which tells the caller to keep the loop.
     async fn run_auto_compaction(self: &Arc<Self>, reason: &str, will_retry: bool) -> bool {
+        if self.explicitly_stopped() { return false; }
         // TS 9579-9590: any compaction consumes a pending model request and honors
         // its instructions.
         let custom_instructions = self
@@ -14398,8 +14504,15 @@ impl AgentSession {
         // continuation immediately. Publish its fence before scheduling it or
         // calling start-event subscribers that may yield to another worker.
         let controller = CancellationToken::new();
-        let compaction_operation = self.begin_compaction_operation();
-        *self.auto_compaction_abort_controller.lock().unwrap() = Some(controller.clone());
+        let compaction_operation = {
+            // Register cancellation atomically with the explicit-stop fence. A
+            // late agent_end must not create an uncancellable cleanup request.
+            let _admission = self.explicit_stop_admission.lock().unwrap();
+            if self.explicitly_stopped() { return false; }
+            let operation = self.begin_compaction_operation();
+            *self.auto_compaction_abort_controller.lock().unwrap() = Some(controller.clone());
+            operation
+        };
 
         // TS 9594-9602.
         self.queue_pending_rlm_continuation();
@@ -15159,7 +15272,8 @@ impl AgentSession {
             .unwrap_or(false);
         self.disconnect_from_agent();
         if !skip_abort {
-            self.abort().await?;
+            // Compaction's internal settlement is not an explicit user stop.
+            self.abort_inner(false).await?;
         }
         // REPAIR CURSOR: the TypeScript tracks `didCompact` for the `finally` tail;
         // the port runs that tail from the success arm (`finish_successful_manual_compaction`)
@@ -16562,7 +16676,11 @@ mod post_compaction_continuation_tests {
     ///
     /// Mirrors the soak fixture's wiring
     /// (`crates/pi-coding-agent/tests/long_session_soak.rs:1474-1533`).
-    async fn test_session_with_credentials() -> Arc<AgentSession> {
+    pub(super) async fn test_session_with_credentials() -> Arc<AgentSession> {
+        test_session_with_credentials_at_depth(0).await
+    }
+
+    pub(super) async fn test_session_with_credentials_at_depth(rlm_depth: i64) -> Arc<AgentSession> {
         let provider = pi_ai::providers::faux::register_faux_provider(Some(
             pi_ai::providers::faux::RegisterFauxProviderOptions {
                 provider: Some(format!("unit-{}", uuid::Uuid::new_v4())),
@@ -16653,6 +16771,7 @@ mod post_compaction_continuation_tests {
                 session_start_event: None,
                 creation: crate::core::agent_session_services::AgentSessionCreationOptions {
                     model: Some(model),
+                    rlm_depth: Some(rlm_depth),
                     no_tools: Some("all".to_string()),
                     prewarm_ipython_kernel: Some(false),
                     telemetry_disabled: Some(true),
@@ -18243,9 +18362,11 @@ mod post_compaction_continuation_tests {
                 .map(|index| {
                     pi_ai::providers::faux::FauxResponseStep::Message(
                         pi_ai::providers::faux::faux_assistant_message(
-                            pi_ai::providers::faux::FauxAssistantContent::Text(format!(
-                                "resume reply {index}"
-                            )),
+                            pi_ai::providers::faux::FauxAssistantContent::Text(if index == 0 {
+                                "resume reply 0".into()
+                            } else {
+                                "## Goal\nResume fixture.\n## Constraints & Preferences\nNone.\n## Progress\nSaved.\n## Key Decisions\nPreserve state.\n## Next Steps\nContinue.\n## Critical Context\nKernel fixture.".into()
+                            }),
                             None,
                         ),
                     )

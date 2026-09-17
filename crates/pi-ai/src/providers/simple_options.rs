@@ -19,10 +19,9 @@ pub fn build_base_options(model: &Model, options: Option<&SimpleStreamOptions>, 
 	base.cache_retention = options.and_then(|o| o.stream.cache_retention.clone());
 	base.session_id = options.and_then(|o| o.stream.session_id.clone());
 	base.headers = options.and_then(|o| o.stream.headers.clone());
-	// simple-options.ts:3-19 `buildBaseOptions` never copies `onUsageObservation`
-	// (`packages/ai/src/providers/simple-options.ts:16-18`), so a simple stream must not
-	// inherit the caller's usage observer. Providers that do forward it read it off the
-	// typed provider options in `stream*` (e.g. openai-responses.ts:146), not off this base.
+	// Local-only callbacks must survive simple -> provider option conversion.
+	base.on_usage_observation = options.and_then(|o| o.stream.on_usage_observation.clone());
+	base.on_stream_observation = options.and_then(|o| o.stream.on_stream_observation.clone());
 	base.on_payload = options.and_then(|o| o.stream.on_payload.clone());
 	base.on_response = options.and_then(|o| o.stream.on_response.clone());
 	base.timeout_ms = options.and_then(|o| o.stream.timeout_ms);
@@ -126,10 +125,7 @@ mod tests {
 	}
 
 	#[test]
-	fn base_options_does_not_forward_usage_observation() {
-		// `buildBaseOptions` (simple-options.ts:3-19) copies `onPayload` and `onResponse`
-		// but never `onUsageObservation`, so the base options must not carry the observer.
-		// `amazon-bedrock-responses.ts:108` re-adds it explicitly in its own `streamSimple`.
+	fn base_options_forwards_usage_observation_without_serializing_it() {
 		let model = model_with_max_tokens(1000.0);
 		let mut simple = SimpleStreamOptions::default();
 		simple.stream.on_usage_observation = Some(Arc::new(
@@ -139,11 +135,14 @@ mod tests {
 		));
 		let options = build_base_options(&model, Some(&simple), None);
 		assert!(
-			options.on_usage_observation.is_none(),
-			"buildBaseOptions must not forward onUsageObservation"
+			options.on_usage_observation.is_some(),
+			"buildBaseOptions must forward onUsageObservation"
 		);
-		// The callback is still present on the caller's options; only the base drops it.
 		assert!(simple.stream.on_usage_observation.is_some());
+		let wire_with_callback = serde_json::to_value(&options).unwrap();
+		let mut without_callback = options.clone();
+		without_callback.on_usage_observation = None;
+		assert_eq!(wire_with_callback, serde_json::to_value(without_callback).unwrap());
 	}
 
 	#[test]

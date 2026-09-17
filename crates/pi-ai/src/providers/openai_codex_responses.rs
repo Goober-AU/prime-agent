@@ -28,6 +28,7 @@ use crate::providers::openai_responses_shared::{
     convert_responses_messages, convert_responses_tools, process_responses_stream, ConvertResponsesMessagesOptions,
     ConvertResponsesToolsOptions, OpenAIResponsesStreamOptions, ResponsesEventStream,
 };
+use crate::providers::responses_transport::observe_event;
 use crate::providers::simple_options::build_base_options;
 use crate::session_resources::register_session_resource_cleanup;
 use crate::types::{
@@ -40,6 +41,7 @@ use crate::utils::diagnostics::{
 use crate::utils::event_stream::{create_assistant_message_event_stream, AssistantMessageEventStream};
 use crate::utils::headers::header_map_to_record;
 use crate::utils::now_ms;
+use crate::utils::sse_frames::SseFrames;
 use crate::utils::stream_failure::{parse_retry_after_ms, record_stream_failure, ThrownStreamError};
 
 /// `const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api"`.
@@ -608,9 +610,11 @@ pub async fn try_compact_openai_codex_responses(
     body.insert("input".to_string(), Value::Array(with_trigger));
 
     // `decode(response)`: the Codex compaction SSE decoder.
+    let observation_options = options.map(|options| options.simple.stream.clone()).unwrap_or_default();
     let decode = Arc::new(
         move |response: reqwest::Response| -> BoxFuture<Result<Value, CompactionRequestError>> {
             let input = input.clone();
+            let observation_options = observation_options.clone();
             Box::pin(async move {
                 let mut checkpoints: Vec<Value> = Vec::new();
                 let mut completed: Option<Value> = None;
@@ -623,6 +627,7 @@ pub async fn try_compact_openai_codex_responses(
                         }
                     };
                     let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default().to_string();
+                    observe_event(&observation_options, &event);
                     if event_type == "response.output_item.done" {
                         if let Some(item) = event.get("item") {
                             if item.is_object() {
@@ -992,7 +997,16 @@ async fn run_openai_codex_responses(
     }
 
     if !response.status().is_success() {
-        return Err(parse_error_response(response).await);
+        let parse = parse_error_response(response);
+        let error = match options.stream.signal.as_ref() {
+            Some(signal) => tokio::select! {
+                biased;
+                _ = signal.cancelled() => return Err(CodexThrown::error("Request was aborted")),
+                result = parse => result,
+            },
+            None => parse.await,
+        };
+        return Err(error);
     }
 
     stream.push(AssistantMessageEvent::Start {
@@ -1079,7 +1093,12 @@ async fn process_stream(
 ) -> Result<(), CodexThrown> {
     let codex_error: Arc<Mutex<Option<CodexThrown>>> = Arc::new(Mutex::new(None));
     let events: ResponsesEventStream = Box::pin(map_codex_events(
-        parse_sse_response(response),
+        parse_sse_response(response).inspect({
+            let observation_options = options.stream.clone();
+            move |event| {
+                if let Ok(event) = event { observe_event(&observation_options, event); }
+            }
+        }),
         codex_error.clone(),
     ));
     let stream_options = OpenAIResponsesStreamOptions {
@@ -1100,7 +1119,17 @@ async fn process_stream(
         })),
         on_usage_observation: options.stream.on_usage_observation.clone(),
     };
-    let result = process_responses_stream(events, output, stream, model, Some(&stream_options)).await;
+    // The response headers may arrive long before another body chunk. Dropping
+    // this future on cancellation releases the SSE body and retains partial output.
+    let parse = process_responses_stream(events, output, stream, model, Some(&stream_options));
+    let result = match options.stream.signal.as_ref() {
+        Some(signal) => tokio::select! {
+            biased;
+            _ = signal.cancelled() => return Err(CodexThrown::error("Request was aborted")),
+            result = parse => result,
+        },
+        None => parse.await,
+    };
     if let Some(error) = codex_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
         return Err(error);
     }
@@ -1270,11 +1299,16 @@ where
 pub fn parse_sse_response(
     response: reqwest::Response,
 ) -> Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>> {
-    let byte_stream = response.bytes_stream();
+    parse_sse_chunks(Box::pin(response.bytes_stream()))
+}
+
+fn parse_sse_chunks(
+    byte_stream: Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
+) -> Pin<Box<dyn futures::Stream<Item = Result<Value, CodexThrown>> + Send>> {
     Box::pin(futures::stream::unfold(
         (
-            Box::pin(byte_stream) as Pin<Box<dyn futures::Stream<Item = reqwest::Result<bytes::Bytes>> + Send>>,
-            String::new(),
+            byte_stream,
+            SseFrames::default(),
             VecDeque::new(),
             false,
         ),
@@ -1297,32 +1331,20 @@ pub fn parse_sse_response(
                         continue;
                     }
                     Some(Ok(chunk)) => {
-                        buffer.push_str(&String::from_utf8_lossy(&chunk));
-                        while let Some(index) = buffer.find("\n\n") {
-                            let chunk_text = buffer[..index].to_string();
-                            buffer = buffer[index + 2..].to_string();
-                            let data = chunk_text
-                                .split('\n')
-                                .filter(|line| line.starts_with("data:"))
-                                .map(|line| line[5..].trim().to_string())
-                                .collect::<Vec<_>>()
-                                .join("\n");
-                            let data = data.trim().to_string();
-                            if !data.is_empty() && data != "[DONE]" {
-                                match serde_json::from_str::<Value>(&data) {
-                                    Ok(parsed) => queue.push_back(Ok(parsed)),
-                                    Err(cause) => {
-                                        let thrown = CodexThrown::protocol_error(
-                                            format!(
-                                                "Invalid Codex SSE JSON: {}",
-                                                format_thrown_value(&ThrownValue::Text(&cause.to_string()))
-                                            ),
-                                            Some(Value::String(data.clone())),
-                                        );
-                                        finished = true;
-                                        queue.push_back(Err(thrown));
-                                        break;
-                                    }
+                        for data in buffer.push(&chunk) {
+                            match serde_json::from_str::<Value>(&data) {
+                                Ok(parsed) => queue.push_back(Ok(parsed)),
+                                Err(cause) => {
+                                    let thrown = CodexThrown::protocol_error(
+                                        format!(
+                                            "Invalid Codex SSE JSON: {}",
+                                            format_thrown_value(&ThrownValue::Text(&cause.to_string()))
+                                        ),
+                                        Some(Value::String(data)),
+                                    );
+                                    finished = true;
+                                    queue.push_back(Err(thrown));
+                                    break;
                                 }
                             }
                         }
@@ -2623,7 +2645,9 @@ async fn process_web_socket_stream(
     let codex_error: Arc<Mutex<Option<CodexThrown>>> = Arc::new(Mutex::new(None));
     let raw_events = parse_web_socket(socket.clone(), options.stream.signal.clone()).inspect({
         let on_start = on_start.clone();
+        let observation_options = options.stream.clone();
         move |event| {
+            if let Ok(event) = event { observe_event(&observation_options, event); }
             // Even an extension event is evidence that a request is in flight.
             if event.as_ref().is_ok_and(|event| !is_stale_continuation_rejection(event)) {
                 on_start();
@@ -2749,6 +2773,57 @@ async fn process_web_socket_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn codex_sse_frames_arrive_before_close_for_every_unicode_split() {
+        for delimiter in ["\n", "\r\n", "\r"] {
+            let frame = format!("data: {{\"type\":\"response.output_text.delta\",\"delta\":\"Ready ✓ 日本\"}}{delimiter}{delimiter}");
+            for split in 0..=frame.len() {
+                let chunks = vec![
+                    Ok(bytes::Bytes::copy_from_slice(&frame.as_bytes()[..split])),
+                    Ok(bytes::Bytes::copy_from_slice(&frame.as_bytes()[split..])),
+                ];
+                let pending = futures::stream::iter(chunks).chain(futures::stream::pending());
+                let mut events = parse_sse_chunks(Box::pin(pending));
+                let event = tokio::time::timeout(std::time::Duration::from_millis(100), events.next())
+                    .await.expect("complete frame must not wait for body close")
+                    .expect("one frame").expect("valid UTF-8 JSON");
+                assert_eq!(event["delta"], "Ready ✓ 日本", "delimiter {delimiter:?}, split {split}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn codex_sse_keeps_multiline_comments_done_and_protocol_errors() {
+        let wire = b": heartbeat\r\nevent: ignored\rdata: {\ndata: \"type\":\"response.created\"}\r\rdata: [DONE]\n\ndata: not-json\r\rdata: {\"type\":\"must-not-deliver\"}\r\r";
+        let chunks = futures::stream::iter(vec![Ok(bytes::Bytes::from_static(wire))]);
+        let mut events = parse_sse_chunks(Box::pin(chunks));
+        assert_eq!(events.next().await.unwrap().unwrap()["type"], "response.created");
+        let error = events.next().await.unwrap().unwrap_err();
+        assert_eq!(error.name, "CodexProtocolError");
+        assert!(error.message.starts_with("Invalid Codex SSE JSON:"));
+        assert!(events.next().await.is_none(), "do not deliver any event after the first protocol error");
+    }
+
+    #[tokio::test]
+    async fn codex_sse_http_body_failure_is_not_silent_success() {
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).await.unwrap();
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1000\r\nConnection: close\r\n\r\ndata: {\"type\":\"response.created\"}\r\n\r\n").await.unwrap();
+        });
+        let response = reqwest::Client::new().get(format!("http://{address}/fixture"))
+            .send().await.unwrap();
+        let mut events = parse_sse_response(response);
+        assert_eq!(events.next().await.unwrap().unwrap()["type"], "response.created");
+        assert!(events.next().await.unwrap().is_err());
+        assert!(events.next().await.is_none());
+        server.await.unwrap();
+    }
 
     static WEB_SOCKET_TEST_LOCK: Mutex<()> = Mutex::new(());
     use crate::types::{ContentBlock, Message, TextContent, UserContent, UserMessage};

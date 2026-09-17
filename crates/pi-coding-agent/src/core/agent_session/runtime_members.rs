@@ -2661,7 +2661,7 @@ impl AgentSession {
 
     /// `_isStructuredPermanentProviderRetryExhausted(message)`.
     pub(super) fn is_structured_permanent_provider_retry_exhausted(&self, message: &AssistantMessage) -> bool {
-        is_permanent_provider_failure_kind(
+        crate::core::provider_retry::cannot_replay_provider_failure(message) || is_permanent_provider_failure_kind(
             self.get_provider_stream_failure_kind(message).as_deref(),
             self.retry_attempt.load(Ordering::SeqCst) as f64,
         )
@@ -2764,6 +2764,10 @@ impl AgentSession {
 
     /// `_handleRetryableError(message, options?)` (agent-session.ts:12118-12253).
     pub(super) async fn handle_retryable_error(self: &Arc<Self>, message: &AssistantMessage) -> bool {
+        if self.explicitly_stopped() {
+            self.resolve_retry();
+            return false;
+        }
         let policy = crate::core::provider_retry::provider_retry_policy(
             &self.settings_manager.lock().unwrap(),
         );
@@ -2828,21 +2832,17 @@ impl AgentSession {
                 .unwrap_or_else(|| "Unknown error".to_string()),
         });
         // The failed assistant message is dropped again so the retry re-issues it.
-        {
-            let mut state = self.agent.state();
-            if state
-                .messages
-                .last()
-                .map(|message| message.role() == "assistant")
-                .unwrap_or(false)
-            {
-                state.messages.pop();
-                self.agent.set_state(state);
-            }
-        }
+        self.remove_failed_assistant_from_state(message);
         *self.retry_metric_message.lock().unwrap() = Some(message.clone());
         let controller = CancellationToken::new();
-        *self.retry_abort_controller.lock().unwrap() = Some(controller.clone());
+        {
+            let _admission = self.explicit_stop_admission.lock().unwrap();
+            if self.explicitly_stopped() {
+                controller.cancel();
+            } else {
+                *self.retry_abort_controller.lock().unwrap() = Some(controller.clone());
+            }
+        }
         let slept = crate::utils::sleep::sleep(delay_ms.max(0.0) as u64, Some(&controller)).await;
         if slept.is_err() {
             let attempt = self.retry_attempt.load(Ordering::SeqCst);
@@ -2956,26 +2956,14 @@ impl AgentSession {
 
     /// `waitForRetry()` (agent-session.ts:12278-12285).
     ///
-    /// REPAIR CURSOR: the promise slot holds a `BoxFuture` that is not `Clone`, so
-    /// this member moves it out of the mutex instead of awaiting a copy. While the
-    /// await is in flight `is_retrying()` reports false for a second waiter; a
-    /// shared-handle promise (like `SharedReplyFuture`) in `agent_session.rs` would
-    /// remove that deviation.
+    /// All observers await the same deferred; only the retry owner clears its slot.
+    /// A waiter never consumes pending state or resurrects a settled generation.
     pub(super) async fn wait_for_retry(&self) {
-        let promise = { self.retry_promise.lock().unwrap().take() };
+        let promise = { self.retry_promise.lock().unwrap().clone() };
         let Some(promise) = promise else {
             return;
         };
-        let _ = promise.await;
-        // The slot is refilled inside its own block so the guard is dropped at the block's end.
-        // `drop(slot)` is not enough here: the binding still lives to the end of the scope, which
-        // would make this future non-`Send` across the await below.
-        {
-            let mut slot = self.retry_promise.lock().unwrap();
-            if slot.is_none() {
-                *slot = Some(Box::pin(async { Ok(()) }));
-            }
-        }
+        let _ = promise.wait().await;
         self.agent.wait_for_idle().await;
     }
 

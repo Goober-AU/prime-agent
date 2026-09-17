@@ -1829,10 +1829,14 @@ async fn run_terminal(
                     }
                     if mode.borrow().has_interruptible_work() {
                         let activity = InterruptActivity::from_mode(&mode.borrow());
+                        mode.borrow_mut().show_status("Stopping current work; keeping queued input paused.", "dim");
                         let connection = connection.clone();
                         let send = send.clone();
                         tokio::spawn(async move {
                             let result = interrupt_active_work(&connection, activity).await;
+                            if result.is_ok() && activity.abort_session {
+                                let _ = send.send(HostEvent::Status("Stop requested. Queued work is paused; late child reports are saved without starting replies. In-flight work is cancelling. Send a new prompt to resume.".into()));
+                            }
                             let _ = send.send(HostEvent::Completed(result));
                         });
                     } else {
@@ -2912,7 +2916,7 @@ impl InterruptActivity {
             retrying: mode.get_retry_attempt() > 0.0,
             abort_session: mode.is_agent_streaming()
                 || mode.connection_state.as_ref().is_some_and(|state| {
-                    state.session_actions.active.is_some()
+                    state.session_actions.active.is_some() || state.session_actions.queued_count > 0
                 }),
         }
     }
@@ -6416,6 +6420,22 @@ mod tests {
         assert!(!escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
         assert!(escape_repeat_step(&mode, &editor, &ui, &connection, &send).await);
         assert_eq!(editor.borrow().editor().get_text(), "");
+    }
+
+    #[tokio::test]
+    async fn emergency_escape_suspends_queued_only_work() {
+        let mut mode = stash_mode("emergency-queued-only");
+        mode.apply_connection_state_snapshot(local::AgentConnectionState {
+            session_actions: local::SessionActionSnapshot {
+                steering: vec!["accepted steer".into()], queued_count: 1,
+                ..Default::default()
+            }, ..Default::default()
+        });
+        assert!(mode.has_interruptible_work());
+        let recorder = Arc::new(RecordingConnection::new());
+        let connection: Arc<dyn wire::AgentConnection> = recorder.clone();
+        interrupt_active_work(&connection, InterruptActivity::from_mode(&mode)).await.unwrap();
+        assert_eq!(recorder.calls(), vec![("abort".into(), Vec::new())]);
     }
 
     #[tokio::test]

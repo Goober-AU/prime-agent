@@ -4399,6 +4399,19 @@ impl SessionManager {
         path
     }
 
+    /// Visit indexed branch entries in transcript order without cloning message
+    /// bodies. The temporary path contains references only, including for very
+    /// large restored Python state or tool output entries.
+    pub fn visit_branch(&self, from_id: Option<&str>, mut visit: impl FnMut(&SessionEntry)) {
+        let mut path = Vec::new();
+        let mut current = from_id.or(self.leaf_id.as_deref()).and_then(|id| self.by_id.get(id));
+        while let Some(entry) = current {
+            path.push(entry);
+            current = entry.get("parentId").and_then(Value::as_str).and_then(|id| self.by_id.get(id));
+        }
+        for entry in path.into_iter().rev() { visit(entry); }
+    }
+
     pub fn build_session_context(
         &self,
         target_model: Option<&pi_ai::types::Model>,
@@ -5105,6 +5118,26 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_branch_visitor_preserves_order_tip_and_entry_identity() {
+        let mut manager = SessionManager::in_memory(Some("/work"), Some("")).unwrap();
+        let first = manager.append_message(user_message(&"large".repeat(100_000), 1)).unwrap();
+        let abandoned = manager.append_custom_entry("other-branch", None).unwrap();
+        manager.branch(&first).unwrap();
+        let last = manager.append_custom_entry("current-branch", None).unwrap();
+        let mut visited = Vec::new();
+        manager.visit_branch(None, |entry| {
+            let id = entry_id(entry);
+            assert!(std::ptr::eq(entry, manager.by_id.get(&id).unwrap()), "borrow indexed entry, not a cloned body");
+            visited.push(id);
+        });
+        assert_eq!(visited, [first.clone(), last]);
+        visited.clear();
+        manager.visit_branch(Some(&abandoned), |entry| visited.push(entry_id(entry)));
+        assert_eq!(visited, [first, abandoned]);
+        manager.visit_branch(Some("missing"), |_| panic!("invalid tip must not fall back to current branch"));
+    }
 
     fn temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pi-session-test-{}", uuid::Uuid::new_v4()));

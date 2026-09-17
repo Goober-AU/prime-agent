@@ -761,7 +761,7 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         // AFTER resuming (packages/coding-agent/src/core/agent-session.ts:7516-7521),
         // and `daemon-mode.ts:4633` turns a false result into "No queued work to
         // resume". Reading the pre-resume value here answered with the stale state.
-        self.session().resume_queued_work()
+        self.session().resume_stopped_queue()
     }
 
     fn clear_queued_agent_messages(&self) -> Value {

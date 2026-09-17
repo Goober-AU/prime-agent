@@ -23,7 +23,7 @@ const DEFAULT_FLUSH_INTERVAL_MS: usize = 1_000;
 const DEFAULT_CLOSE_TIMEOUT_MS: usize = 1_000;
 
 /// `OPERATIONS`.
-const OPERATIONS: [PerformanceMetricOperation; 8] = [
+const OPERATIONS: [PerformanceMetricOperation; 9] = [
     PerformanceMetricOperation::LogicalRequest,
     PerformanceMetricOperation::ProviderAttempt,
     PerformanceMetricOperation::Tool,
@@ -31,6 +31,7 @@ const OPERATIONS: [PerformanceMetricOperation; 8] = [
     PerformanceMetricOperation::Compaction,
     PerformanceMetricOperation::FileRetry,
     PerformanceMetricOperation::SessionReopen,
+    PerformanceMetricOperation::SessionInput,
     PerformanceMetricOperation::Recorder,
 ];
 
@@ -55,12 +56,19 @@ const COMPONENTS: [PerformanceMetricComponent; 8] = [
 ];
 
 /// `MEASUREMENTS`.
-const MEASUREMENTS: [PerformanceMetricMeasurement; 20] = [
+const MEASUREMENTS: [PerformanceMetricMeasurement; 27] = [
     PerformanceMetricMeasurement::TotalMs,
     PerformanceMetricMeasurement::WaitMs,
     PerformanceMetricMeasurement::DispatchToResponseHeadersMs,
     PerformanceMetricMeasurement::DispatchToFirstEventMs,
     PerformanceMetricMeasurement::DispatchToFirstVisibleMs,
+    PerformanceMetricMeasurement::DispatchToFirstRawMs,
+    PerformanceMetricMeasurement::DispatchToFirstThinkingMs,
+    PerformanceMetricMeasurement::DispatchToFirstToolMs,
+    PerformanceMetricMeasurement::DispatchToFirstTextMs,
+    PerformanceMetricMeasurement::DispatchToNetworkTerminalMs,
+    PerformanceMetricMeasurement::LocalDrainMs,
+    PerformanceMetricMeasurement::TransportWebsocket,
     PerformanceMetricMeasurement::LocalGatewayWaitMs,
     PerformanceMetricMeasurement::UpstreamWaitMs,
     PerformanceMetricMeasurement::SerializationMs,
@@ -339,6 +347,7 @@ fn sanitize_correlation(value: Option<&Value>) -> PerformanceMetricCorrelation {
         return PerformanceMetricCorrelation::default();
     };
     PerformanceMetricCorrelation {
+        action_id: sanitize_string(map.get("actionId"), 128),
         logical_request_id: sanitize_string(map.get("logicalRequestId"), 128),
         provider_attempt_id: sanitize_string(map.get("providerAttemptId"), 128),
         tool_call_id: sanitize_string(map.get("toolCallId"), 128),
@@ -715,6 +724,7 @@ impl LocalPerformanceMetricRecorderInner {
             sequence,
             recorded_at: to_iso_string(recorded_at_ms),
             correlation: PerformanceMetricRecordCorrelation {
+                action_id: correlation.action_id,
                 session_id: self.session_id.clone(),
                 logical_request_id: correlation.logical_request_id,
                 provider_attempt_id: correlation.provider_attempt_id,
@@ -1147,6 +1157,7 @@ mod tests {
             operation: PerformanceMetricOperation::LogicalRequest,
             correlation: Some(PerformanceMetricCorrelation {
                 logical_request_id: Some(id.to_string()),
+                action_id: None,
                 provider_attempt_id: None,
                 tool_call_id: None,
             }),
@@ -1220,6 +1231,36 @@ mod tests {
             // no sleep or subsequent async IO may finish a detached file write.
             assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         }
+    }
+
+    #[tokio::test]
+    async fn transport_metrics_preserve_queue_correlation_and_raw_phase_availability() {
+        let io = Arc::new(MemoryFileIo::new());
+        let recorder = LocalPerformanceMetricRecorder::new(LocalPerformanceMetricRecorderOptions {
+            directory: "C:/isolated/transport-metrics".into(), session_id: "transport-metrics".into(),
+            file_io: Some(io.clone()), ..Default::default()
+        });
+        let mut event = sample_event("logical-one");
+        event.operation = PerformanceMetricOperation::SessionInput;
+        event.correlation.as_mut().unwrap().action_id = Some("action-one".into());
+        let measurements = event.measurements.as_mut().unwrap();
+        measurements.insert(PerformanceMetricMeasurement::QueueMs, Some(17.0));
+        measurements.insert(PerformanceMetricMeasurement::DispatchToFirstRawMs, Some(3.0));
+        measurements.insert(PerformanceMetricMeasurement::DispatchToFirstThinkingMs, None);
+        measurements.insert(PerformanceMetricMeasurement::DispatchToFirstToolMs, Some(4.0));
+        measurements.insert(PerformanceMetricMeasurement::DispatchToFirstTextMs, Some(5.0));
+        measurements.insert(PerformanceMetricMeasurement::DispatchToNetworkTerminalMs, Some(7.0));
+        measurements.insert(PerformanceMetricMeasurement::LocalDrainMs, Some(2.0));
+        let line = recorder.inner.serialize_event(&event).unwrap();
+        let record: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(record["operation"], "session_input");
+        assert_eq!(record["correlation"]["actionId"], "action-one");
+        assert_eq!(record["measurements"]["queue_ms"], 17.0);
+        assert_eq!(record["measurements"]["dispatch_to_first_raw_ms"], 3.0);
+        assert!(record["measurements"]["dispatch_to_first_thinking_ms"].is_null());
+        assert_eq!(record["measurements"]["local_drain_ms"], 2.0);
+        assert!(!line.contains("prompt"));
+        recorder.close().await;
     }
 
     #[tokio::test]

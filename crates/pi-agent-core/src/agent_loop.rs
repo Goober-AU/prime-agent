@@ -56,6 +56,12 @@ struct RequestMetricState {
     response_headers_at: Option<f64>,
     first_event_at: Option<f64>,
     first_visible_at: Option<f64>,
+    first_raw_at: Option<f64>,
+    first_thinking_at: Option<f64>,
+    first_tool_at: Option<f64>,
+    first_text_at: Option<f64>,
+    network_terminal_at: Option<f64>,
+    transport_websocket: Option<f64>,
     provider_usage: Option<PerformanceMetricUsageV1>,
     finished: bool,
 }
@@ -343,6 +349,7 @@ fn settle_logical_request_metric(state: &LogicalRequestMetricFinalizer, outcome:
             operation: PerformanceMetricOperation::LogicalRequest,
             correlation: Some(PerformanceMetricCorrelation {
                 logical_request_id: state.logical_request_id.clone(),
+                action_id: None,
                 provider_attempt_id: None,
                 tool_call_id: None,
             }),
@@ -974,6 +981,7 @@ struct ObservedCallbacks {
     on_payload: pi_ai::types::OnPayload,
     on_response: pi_ai::types::OnResponse,
     on_usage_observation: Option<pi_ai::types::OnUsageObservation>,
+    on_stream_observation: Option<pi_ai::types::OnStreamObservation>,
     /// TypeScript closes over `requestMetrics` and mutates it; the Rust callbacks
     /// share one `Mutex` with the loop so the timestamps are still written through.
     timestamps: Arc<Mutex<RequestMetricState>>,
@@ -1015,6 +1023,9 @@ fn create_observed_callbacks(
                     if slot.response_headers_at.is_none() {
                         slot.response_headers_at = metric_now(&config);
                     }
+                    slot.transport_websocket = match provider_response.headers.get("x-optimus-transport").map(String::as_str) {
+                        Some("websocket") => Some(1.0), Some("sse") => Some(0.0), _ => None,
+                    };
                 }
                 match config.stream_options.stream.on_response.as_ref() {
                     Some(hook) => hook(provider_response, model),
@@ -1056,10 +1067,28 @@ fn create_observed_callbacks(
         }
     };
 
+    let on_stream_observation = if metrics_enabled {
+        let state = timestamps.clone();
+        let config = config.clone();
+        Some(Arc::new(move |stage: &str| {
+            if let Ok(mut state) = state.lock() {
+                let slot = match stage {
+                    "raw_event" => &mut state.first_raw_at,
+                    "thinking" => &mut state.first_thinking_at,
+                    "tool" => &mut state.first_tool_at,
+                    "text" => &mut state.first_text_at,
+                    "terminal" => &mut state.network_terminal_at,
+                    _ => return,
+                };
+                if slot.is_none() { *slot = metric_now(&config); }
+            }
+        }) as pi_ai::types::OnStreamObservation)
+    } else { None };
     ObservedCallbacks {
         on_payload,
         on_response,
         on_usage_observation,
+        on_stream_observation,
         timestamps,
     }
 }
@@ -1532,6 +1561,7 @@ fn record_tool_performance_metric(
             correlation: Some(PerformanceMetricCorrelation {
                 logical_request_id: get_performance_metric_request_correlation(assistant_message)
                     .and_then(|correlation| correlation.logical_request_id),
+                action_id: None,
                 provider_attempt_id: None,
                 tool_call_id: Some(finalized.tool_call.id.clone()),
             }),
@@ -2078,6 +2108,7 @@ async fn stream_assistant_response(
     provider_config.stream.on_payload = Some(observed.on_payload.clone());
     provider_config.stream.on_response = Some(observed.on_response.clone());
     provider_config.stream.on_usage_observation = observed.on_usage_observation.clone();
+    provider_config.stream.on_stream_observation = observed.on_stream_observation.clone();
 
     let result = stream_assistant_response_inner(
         context,
@@ -2172,6 +2203,12 @@ fn finish_request_metrics(
         request_metrics.dispatch_edge_at = request_metrics.dispatch_edge_at.or(observed_state.dispatch_edge_at);
         request_metrics.response_headers_at =
             request_metrics.response_headers_at.or(observed_state.response_headers_at);
+        request_metrics.first_raw_at = observed_state.first_raw_at;
+        request_metrics.first_thinking_at = observed_state.first_thinking_at;
+        request_metrics.first_tool_at = observed_state.first_tool_at;
+        request_metrics.first_text_at = observed_state.first_text_at;
+        request_metrics.network_terminal_at = observed_state.network_terminal_at;
+        request_metrics.transport_websocket = observed_state.transport_websocket;
         if request_metrics.provider_usage.is_none() {
             request_metrics.provider_usage = observed_state.provider_usage.clone();
         }
@@ -2179,6 +2216,7 @@ fn finish_request_metrics(
     let finished_at = metric_now(config);
     let correlation = PerformanceMetricCorrelation {
         logical_request_id: request_metrics.logical_request_id.clone(),
+        action_id: None,
         provider_attempt_id: request_metrics.provider_attempt_id.clone(),
         tool_call_id: None,
     };
@@ -2259,6 +2297,16 @@ fn finish_request_metrics(
         elapsed_metric_ms(request_metrics.dispatch_edge_at, request_metrics.first_visible_at),
     );
     attempt_measurements.insert(PerformanceMetricMeasurement::LocalGatewayWaitMs, None);
+    for (measurement, end) in [
+        (PerformanceMetricMeasurement::DispatchToFirstRawMs, request_metrics.first_raw_at),
+        (PerformanceMetricMeasurement::DispatchToFirstThinkingMs, request_metrics.first_thinking_at),
+        (PerformanceMetricMeasurement::DispatchToFirstToolMs, request_metrics.first_tool_at),
+        (PerformanceMetricMeasurement::DispatchToFirstTextMs, request_metrics.first_text_at),
+        (PerformanceMetricMeasurement::DispatchToNetworkTerminalMs, request_metrics.network_terminal_at),
+    ] { attempt_measurements.insert(measurement, elapsed_metric_ms(request_metrics.dispatch_edge_at, end)); }
+    attempt_measurements.insert(PerformanceMetricMeasurement::LocalDrainMs,
+        elapsed_metric_ms(request_metrics.network_terminal_at, finished_at));
+    attempt_measurements.insert(PerformanceMetricMeasurement::TransportWebsocket, request_metrics.transport_websocket);
     attempt_measurements.insert(PerformanceMetricMeasurement::UpstreamWaitMs, None);
     attempt_measurements.insert(PerformanceMetricMeasurement::AttemptCount, None);
     attempt_measurements.insert(
@@ -2583,6 +2631,40 @@ mod tests {
     use super::*;
     use crate::types::ToolExecutionMode;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn transport_monitoring_keeps_raw_usage_and_first_phase_timestamps() {
+        struct Recorder;
+        impl PerformanceMetricRecorder for Recorder {
+            fn session_id(&self) -> &str { "monitor-test" }
+            fn monotonic_now(&self) -> f64 { 42.0 }
+            fn next_id(&self, _scope: crate::performance_metrics::PerformanceMetricIdScope) -> String { "test-id".into() }
+            fn record(&self, _event: PerformanceMetricEvent) {}
+            fn flush(&self) {}
+            fn close(&self) {}
+        }
+        let mut config = AgentLoopConfig::new(Model::new("test", "test", "openai-responses", "github-copilot", "http://localhost"));
+        let off = create_observed_callbacks(&config, None, &RequestMetricState::default());
+        assert!(off.on_stream_observation.is_none());
+        assert!(off.on_usage_observation.is_none());
+        config.performance_metrics = Some(crate::performance_metrics::AgentLoopPerformanceMetrics::new(Arc::new(Recorder)));
+        let observed = create_observed_callbacks(&config, config.performance_metrics.clone(), &RequestMetricState::default());
+        for stage in ["raw_event", "thinking", "tool", "text", "terminal", "PRIVATE-UNRECOGNIZED"] {
+            observed.on_stream_observation.as_ref().unwrap()(stage);
+        }
+        observed.on_usage_observation.as_ref().unwrap()(ProviderUsageObservation {
+            input_tokens: Some(Some(100.0)), cached_input_tokens:Some(Some(80.0)),
+            reasoning_tokens:Some(Some(0.0)),cached_input_included_in_input:Some(Some(true)), ..Default::default()
+        },&config.model).await;
+        let state = observed.timestamps.lock().unwrap();
+        assert_eq!(state.first_raw_at,Some(42.0)); assert_eq!(state.first_thinking_at,Some(42.0));
+        assert_eq!(state.first_tool_at,Some(42.0)); assert_eq!(state.first_text_at,Some(42.0));
+        assert_eq!(state.network_terminal_at,Some(42.0));
+        let usage=state.provider_usage.as_ref().unwrap();
+        assert_eq!(usage.input_tokens,Some(100.0)); assert_eq!(usage.cached_input_tokens,Some(80.0));
+        assert_eq!(usage.reasoning_tokens,Some(0.0)); assert_eq!(usage.output_tokens,None);
+        assert_eq!(usage.cached_input_included_in_input,Some(true));
+    }
 
     fn assistant_with_tool_call(id: &str, name: &str) -> AssistantMessage {
         let mut message = AssistantMessage::new("openai-responses", "openai", "gpt-test", 1);

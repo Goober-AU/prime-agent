@@ -1,0 +1,238 @@
+{
+  "providers": {
+    "ollama-cloud": {
+      "models": [
+        {
+          "id": "deepseek-v4-flash",
+          "name": "Ollama Cloud - DeepSeek V4 Flash (Max)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 384000,
+          "compat": {
+            "requiresReasoningContentOnAssistantMessages": true
+          }
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "Ollama Cloud - DeepSeek V4 Pro (Max)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 65536,
+          "compat": {
+            "requiresReasoningContentOnAssistantMessages": true
+          }
+        },
+        {
+          "id": "glm-5.2",
+          "name": "Ollama Cloud - GLM 5.2 (Max)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 131072
+        },
+        {
+          "id": "glm-5.3",
+          "name": "Ollama Cloud - GLM 5.3 (Max)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 131072
+        },
+        {
+          "id": "glm-5.3-flash",
+          "name": "Ollama Cloud - GLM 5.3 Flash (Max)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 131072
+        },
+        {
+          "id": "deepseek-v4.1-flash",
+          "name": "Ollama Cloud - DeepSeek V4.1 Flash (Max)",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": null,
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1000000,
+          "maxTokens": 384000,
+          "compat": {
+            "requiresReasoningContentOnAssistantMessages": true
+          }
+        }
+      ],
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsUsageInStreaming": true,
+        "maxTokensField": "max_tokens",
+        "supportsStrictMode": false
+      }
+    },
+    "azure-foundry-managed": {
+      "models": [
+        {
+          "id": "FW-Kimi-K3",
+          "name": "Azure Foundry - Kimi K3",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 131072,
+          "compat": {
+            "supportsReasoningEffort": true,
+            "requiresReasoningContentOnAssistantMessages": true
+          }
+        },
+        {
+          "id": "FW-GLM-5.3",
+          "name": "Azure Foundry - GLM 5.3",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          },
+          "input": [
+            "text"
+          ],
+          "contextWindow": 1048576,
+          "maxTokens": 131072
+        }
+      ],
+      "compat": {
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": true,
+        "supportsUsageInStreaming": true,
+        "maxTokensField": "max_tokens",
+        "supportsStrictMode": false
+      }
+    },
+    "azure-openai-managed": {
+      "models": [
+        {
+          "id": "gpt-5.6-sol",
+          "name": "Azure OpenAI - GPT-5.6 Sol",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1050000,
+          "maxTokens": 128000
+        },
+        {
+          "id": "gpt-6-astra",
+          "name": "Azure OpenAI - GPT-6 Astra",
+          "reasoning": true,
+          "thinkingLevelMap": {
+            "off": null,
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": "max"
+          },
+          "input": [
+            "text",
+            "image"
+          ],
+          "contextWindow": 1050000,
+          "maxTokens": 128000
+        }
+      ]
+    }
+  }
+}

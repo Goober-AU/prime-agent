@@ -27,6 +27,7 @@ pub const KIND_AUTH: StreamFailureKind = "auth";
 pub const KIND_PERMISSION: StreamFailureKind = "permission";
 pub const KIND_INVALID_REQUEST: StreamFailureKind = "invalid_request";
 pub const KIND_MALFORMED_RESPONSE: StreamFailureKind = "malformed_response";
+pub const KIND_REQUEST_INTERRUPTED: StreamFailureKind = "request_interrupted";
 pub const KIND_UNKNOWN: StreamFailureKind = "unknown";
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -74,7 +75,7 @@ impl std::fmt::Display for StreamFailureError {
 
 impl std::error::Error for StreamFailureError {}
 
-pub const KIND_MESSAGES: [(&str, &str); 10] = [
+pub const KIND_MESSAGES: [(&str, &str); 11] = [
     ("refusal", "Model refused to respond"),
     ("safety", "Response blocked by provider safety filters"),
     ("overloaded", "Provider overloaded"),
@@ -91,6 +92,7 @@ pub const KIND_MESSAGES: [(&str, &str); 10] = [
         "Provider returned a malformed response",
     ),
     ("unknown", "Provider stream failed"),
+    ("request_interrupted", "Request interrupted; not automatically replayed"),
 ];
 
 fn kind_message(kind: &str) -> &'static str {
@@ -161,6 +163,11 @@ pub fn classify_stream_failure(
     status: Option<i64>,
 ) -> StreamFailureKind {
     let type_ = provider_error_type.unwrap_or_default().to_lowercase();
+    // Local transport reports this only once sending begins: delivery is uncertain,
+    // even if no text has arrived. A new request could duplicate remote work.
+    if type_ == "responses_request_interrupted" {
+        return KIND_REQUEST_INTERRUPTED;
+    }
     if type_ == "refusal" {
         return KIND_REFUSAL;
     }
@@ -586,6 +593,7 @@ mod tests {
 
     #[test]
     fn classification_order_matches_typescript() {
+        assert_eq!(classify_stream_failure(Some("responses_request_interrupted"), None), KIND_REQUEST_INTERRUPTED);
         assert_eq!(classify_stream_failure(Some("refusal"), None), KIND_REFUSAL);
         assert_eq!(classify_stream_failure(Some("SAFETY"), None), KIND_SAFETY);
         assert_eq!(

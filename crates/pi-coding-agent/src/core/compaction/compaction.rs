@@ -326,6 +326,7 @@ async fn complete_with_provider_retry(
         if retries_performed >= max_retries
             || is_agent_lifecycle_failure(&message)
             || is_faux_provider_queue_exhausted(&message)
+            || crate::core::provider_retry::cannot_replay_provider_failure(&message)
         {
             return Ok(message);
         }
@@ -1204,6 +1205,7 @@ pub async fn generate_summary(
         summary_call,
         &instructions,
         previous_summary,
+        SummaryFormat::Conversation,
     )
     .await
 }
@@ -1222,6 +1224,7 @@ async fn generate_bounded_summary(
     // `Send + Sync` for the same reason: the caller awaits inside a `Send` future.
     instructions: &(dyn Fn(Option<&str>) -> String + Send + Sync),
     previous_summary: Option<&str>,
+    format: SummaryFormat,
 ) -> Result<SummarySlice, String> {
     let input_limit = get_model_input_limit(model);
     let max_tokens = f64::max(
@@ -1368,10 +1371,8 @@ async fn generate_bounded_summary(
             })
             .collect::<Vec<_>>()
             .join("\n");
+        validate_summary(&response, &text, format)?;
         summary = Some(text);
-        if summary.as_deref().map(str::trim).unwrap_or("").is_empty() {
-            return Err("Summarization returned an empty summary".to_string());
-        }
         add_assistant_usage(&mut usage, &response.usage);
         if offset >= conversation.chars().count() {
             break;
@@ -1388,6 +1389,79 @@ fn now_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[derive(Clone, Copy)]
+enum SummaryFormat {
+    Conversation,
+    TurnPrefix,
+}
+
+// Enforce the handoff structure already requested by the summarization prompts.
+// There is deliberately no minimum length: "none" is a legitimate section body.
+fn validate_summary(response: &AssistantMessage, text: &str, format: SummaryFormat) -> Result<(), String> {
+    let fail = |reason: &str| format!("Summarization returned an unusable handoff ({reason}); existing conversation preserved. Retry compaction or select another summarization model.");
+    if response.stop_reason != pi_ai::types::STOP_REASON_STOP {
+        return Err(fail("response did not complete"));
+    }
+    if response.error_message.as_deref().is_some_and(|message| !message.trim().is_empty()) {
+        return Err(fail("provider reported an error"));
+    }
+    if response.stop_reason_raw.as_deref().is_some_and(|reason| {
+        let reason = reason.to_ascii_lowercase();
+        ["refusal", "content_filter", "safety", "blocked"].iter().any(|marker| reason.contains(marker))
+    }) {
+        return Err(fail("provider refused or filtered the summary"));
+    }
+    if text.trim().is_empty() {
+        return Err("Summarization returned an empty summary".to_string());
+    }
+    let text = text.trim();
+    let text = text.split_once('\n').and_then(|(opening, body)| {
+        if matches!(opening.trim(), "```" | "```md" | "```markdown") {
+            body.strip_suffix("```").map(str::trim)
+        } else {
+            None
+        }
+    }).unwrap_or(text);
+    let required: &[&str] = match format {
+        SummaryFormat::Conversation => &["Goal", "Constraints & Preferences", "Progress", "Key Decisions", "Next Steps", "Critical Context"],
+        SummaryFormat::TurnPrefix => &["Original Request", "Early Progress", "Context for Suffix"],
+    };
+    let mut seen = vec![false; required.len()];
+    let mut bodies = vec![false; required.len()];
+    let mut current = None;
+    let mut fence: Option<&str> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            let marker = &line[..3];
+            if fence == Some(marker) { fence = None; }
+            else if fence.is_none() { fence = Some(marker); }
+            continue;
+        }
+        if fence.is_none() {
+            let heading = line.trim_start_matches('#');
+            if heading.len() != line.len() && heading.starts_with(char::is_whitespace) {
+                let heading = heading.trim().trim_end_matches('#').trim().trim_matches('*').trim().trim_end_matches(':');
+                if let Some(index) = required.iter().position(|required| heading.eq_ignore_ascii_case(required)) {
+                    if seen[index] { return Err(fail("duplicate handoff section")); }
+                    seen[index] = true;
+                    current = Some(index);
+                }
+                continue;
+            }
+        }
+        if let Some(index) = current {
+            if line.chars().any(char::is_alphanumeric) {
+                bodies[index] = true;
+            }
+        }
+    }
+    if seen.iter().any(|seen| !seen) || bodies.iter().any(|body| !body) || fence.is_some() {
+        return Err(fail("missing, empty or incomplete handoff sections"));
+    }
+    Ok(())
 }
 
 /// JavaScript `String.prototype.slice(start, end)` by UTF-16 code units; the
@@ -1649,6 +1723,32 @@ async fn generate_turn_prefix_summary(
         summary_call,
         &instructions,
         None,
+        SummaryFormat::TurnPrefix,
     )
     .await
+}
+
+#[cfg(test)]
+mod summary_retry_safety_tests {
+    use super::*;
+    use pi_ai::types::ContentBlock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn summary_partial_failure_is_not_replayed_by_the_local_retry_owner() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        let call = move || -> pi_ai::types::BoxFuture<Result<AssistantMessage, String>> {
+            count.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(AssistantMessage {
+                content: vec![ContentBlock::Text(pi_ai::types::TextContent::new("already streamed"))],
+                stop_reason: "error".into(), error_message: Some("stream broke".into()),
+                ..Default::default()
+            }) })
+        };
+        let policy = ProviderRetryPolicy { base_delay_ms: 0.0, ..DEFAULT_PROVIDER_RETRY_POLICY };
+        let result = complete_with_provider_retry(&call, Some(&policy), None).await.unwrap();
+        assert_eq!(result.stop_reason, "error");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
 }

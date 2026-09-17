@@ -286,6 +286,8 @@ async fn run_azure_openai_responses(
 			})
 			.flat_map(futures::stream::iter),
 	);
+	let observation_options = options.stream.clone();
+	let events = Box::pin(events.inspect(move |event| super::responses_transport::observe_event(&observation_options, event)));
 	process_responses_stream(
 		events,
 		output,
