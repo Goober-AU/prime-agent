@@ -83,7 +83,7 @@ impl SupervisorFixture {
             ownership,
             workers: Mutex::new(HashMap::new()),
             clients: Mutex::new(HashMap::new()),
-            opening: AsyncMutex::new(()),
+            opening: tokio::sync::RwLock::new(()),
             pauses: Mutex::new(HashMap::new()),
             catalog: Arc::new(DaemonCatalogClient::new(Arc::new(|_| {}))),
             stopped: CancellationToken::new(),

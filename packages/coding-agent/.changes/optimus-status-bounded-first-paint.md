@@ -1,0 +1,2 @@
+- Fixed completed and reused subagent status updates without requiring the child chat to be opened.
+- Limited initial chat rendering by message size as well as count while preserving full history through PageUp.

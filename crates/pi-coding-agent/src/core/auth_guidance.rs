@@ -42,10 +42,20 @@ pub fn format_no_models_available_message() -> String {
 ///
 /// That warning is a claim about current state (no model could be resolved), so
 /// consumers must re-check it against the live session before showing it; the
-/// other fallback variants ("Could not restore model X. Using Y") are one-time
-/// startup notices that stay valid.
+/// restore-model notices also need their selected model checked before replay.
 pub fn is_no_models_available_message(message: Option<&str>) -> bool {
     message == Some(format_no_models_available_message().as_str())
+}
+
+/// Only suppress recognized current-state claims; preserve unknown diagnostics.
+pub fn is_obsolete_model_fallback_message(message: Option<&str>, model: Option<(&str, &str)>) -> bool {
+    let (Some(message), Some((provider, id))) = (message, model) else { return false; };
+    if is_no_models_available_message(Some(message)) { return true; }
+    if !message.starts_with("Could not restore model ") { return false; }
+    let Some((_, fallback)) = message.rsplit_once(". Using ") else { return false; };
+    if !fallback.contains('/') || fallback.chars().any(char::is_whitespace) { return false; }
+    let current = format!("{provider}/{id}");
+    fallback != current && fallback != format!("{current}.")
 }
 
 pub fn format_no_model_selected_message() -> String {
@@ -103,6 +113,19 @@ mod tests {
         assert!(is_no_models_available_message(Some(&message)));
         assert!(!is_no_models_available_message(Some("other")));
         assert!(!is_no_models_available_message(None));
+    }
+
+    #[test]
+    fn restore_warning_tracks_both_live_provider_and_model() {
+        let message = "Could not restore model github-copilot/gpt-5.6-sol. Using ollama-cloud/glm-5.3-flash";
+        assert!(!is_obsolete_model_fallback_message(Some(message), None));
+        assert!(!is_obsolete_model_fallback_message(Some(message), Some(("ollama-cloud", "glm-5.3-flash"))));
+        assert!(!is_obsolete_model_fallback_message(Some(&format!("{message}.")), Some(("ollama-cloud", "glm-5.3-flash"))));
+        assert!(is_obsolete_model_fallback_message(Some(message), Some(("github-copilot", "gpt-5.6-sol"))));
+        assert!(is_obsolete_model_fallback_message(Some(message), Some(("ollama-cloud", "deepseek-v4.1-flash"))));
+        assert!(is_obsolete_model_fallback_message(Some(message), Some(("other", "glm-5.3-flash"))));
+        assert!(!is_obsolete_model_fallback_message(Some("Other warning. Using p/m"), Some(("p", "other"))));
+        assert!(!is_obsolete_model_fallback_message(Some("Could not restore model p/m"), Some(("p", "m"))));
     }
 
     #[test]

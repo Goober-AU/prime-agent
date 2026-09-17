@@ -437,10 +437,8 @@ async fn unicode_chunks_and_outbox_progress() {
 
 /// H-10 reproduction: cancelling must end the in-flight long poll promptly.
 ///
-/// `TelegramBridge::run` is not `Send` (a `TelegramState` guard lives across an await
-/// inside `run_inner`), so the future is awaited in place while a small watcher task
-/// performs the cancellation — mirroring the production worker, which also awaits it
-/// in a current-thread style block instead of spawning it.
+/// Await the bridge in place while a watcher cancels its in-flight request,
+/// mirroring the worker's top-level run loop.
 #[tokio::test]
 async fn cancel_poll_stops_the_in_flight_request() {
     let root = case_root("h10_cancel_poll");

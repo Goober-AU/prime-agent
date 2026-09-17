@@ -617,11 +617,13 @@ pub fn build_params(
 
     if let Some(max_tokens) = options.and_then(|options| options.stream.max_tokens) {
         if max_tokens != 0.0 {
+            if !max_tokens.is_finite() || max_tokens < 0.0 || max_tokens.fract() != 0.0 || max_tokens >= u64::MAX as f64 {
+                return Err("max_output_tokens must be a positive integer".to_string());
+            }
+            // Rust preserves f64's `.0`; strict Responses endpoints require an integer.
             params.insert(
                 "max_output_tokens".to_string(),
-                serde_json::Number::from_f64(max_tokens)
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null),
+                Value::Number((max_tokens as u64).into()),
             );
         }
     }
@@ -1142,7 +1144,7 @@ mod tests {
             ..Default::default()
         };
         let params = build_params(&model, &context, Some(&options)).unwrap();
-        assert_eq!(params["max_output_tokens"], json!(4096.0));
+        assert_eq!(params["max_output_tokens"], json!(4096));
         assert_eq!(params["temperature"], json!(0.5));
         assert_eq!(params["prompt_cache_key"], json!("session-1"));
         assert_eq!(params["tools"][0]["strict"], json!(false));

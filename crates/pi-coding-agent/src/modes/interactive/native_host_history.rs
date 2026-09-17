@@ -2,15 +2,23 @@
 use super::*;
 
 const INITIAL_DISPLAY_MESSAGES: usize = 40;
+const INITIAL_DISPLAY_BYTES: usize = 8 * 1024;
 
 pub(super) struct HistoryRuntime {
     connection: Arc<dyn wire::AgentConnection>,
     loaded: Option<LoadedAgentConnectionHistory>,
+    full_history: Option<FullHistory>,
+    full_history_requested: bool,
     session_id: Option<String>,
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
     send: mpsc::Sender<(u64, Result<wire::AgentConnectionHistoryRange, String>)>,
     receive: mpsc::Receiver<(u64, Result<wire::AgentConnectionHistoryRange, String>)>,
+}
+
+struct FullHistory {
+    messages: Vec<AgentMessage>,
+    start: usize,
 }
 
 fn window(window: wire::AgentConnectionHistoryWindow) -> local::AgentConnectionHistoryWindow {
@@ -33,6 +41,8 @@ impl HistoryRuntime {
         Self {
             connection,
             loaded: None,
+            full_history: None,
+            full_history_requested: false,
             session_id: None,
             generation: 0,
             task: None,
@@ -49,7 +59,7 @@ impl HistoryRuntime {
     /// attachment (:5302-5304); the daemon likewise degrades to the full legacy
     /// snapshot instead of dropping or misidentifying it
     /// (modes/daemon/daemon-mode.ts:5507-5509). The unusable window therefore
-    /// degrades to the same full-transcript render here and its message is returned
+    /// degrades to local paging of the full transcript here and its message is returned
     /// for the caller to report, instead of propagating out of the host and killing
     /// startup/resync (handoff defect 5).
     pub(super) fn reset(
@@ -64,6 +74,8 @@ impl HistoryRuntime {
             task.abort();
         }
         let previous = self.loaded.take();
+        let previous_full = self.full_history.take();
+        self.full_history_requested = false;
         let session_id = transcript.borrow().mode.borrow().connection_state.as_ref()
             .map(|state| state.session_id.clone());
         let same_session = self.session_id == session_id;
@@ -94,12 +106,12 @@ impl HistoryRuntime {
         if let Some(mut history) = history {
             let mut messages = messages;
             let display_count = previous.as_ref().filter(|_| same_session)
-                .map(|loaded| loaded.messages.len().max(INITIAL_DISPLAY_MESSAGES))
-                .unwrap_or(INITIAL_DISPLAY_MESSAGES);
+                .map(|loaded| loaded.messages.len());
             if let Some(previous) = previous.as_ref().filter(|_| same_session) {
                 retain_loaded_prefix(&mut history, &mut messages, previous);
             }
-            let start = display_start(&messages, display_count);
+            let start = display_count.map(|count| display_start(&messages, count))
+                .unwrap_or_else(|| initial_display_start(&messages));
             history.start_index += start as f64;
             history.entry_ids.drain(..start);
             history.has_older = history.start_index > 0.0;
@@ -114,21 +126,34 @@ impl HistoryRuntime {
                 self.loaded.as_ref().unwrap().window.total_message_count,
             );
         } else {
-            transcript.borrow_mut().replace(messages);
+            // Legacy/supervisor attachments do not supply wire history ranges.
+            // Keep their complete snapshot locally, but apply the same small
+            // first paint. Older rows remain available without a daemon request.
+            let start = previous_full.as_ref()
+                .filter(|previous| same_session && messages.starts_with(&previous.messages))
+                .map(|previous| previous.start)
+                .unwrap_or_else(|| initial_display_start(&messages));
+            transcript.borrow_mut().replace(Vec::new());
+            transcript.borrow_mut().replace_history(messages[start..].to_vec(), messages.len() as f64);
+            self.full_history = Some(FullHistory { messages, start });
         }
         warning
     }
 
     pub(super) fn request(&mut self, mode: &InteractiveMode) {
+        if mode.connection_state.as_ref()
+            .is_some_and(|s| s.is_streaming || s.is_compacting || s.is_bash_running) {
+            return;
+        }
+        if let Some(full) = &self.full_history {
+            self.full_history_requested = full.start > 0;
+            return;
+        }
         let Some(loaded) = &self.loaded else {
             return;
         };
         if self.task.is_some()
             || !loaded.window.has_older
-            || mode
-                .connection_state
-                .as_ref()
-                .is_some_and(|s| s.is_streaming || s.is_compacting || s.is_bash_running)
         {
             return;
         }
@@ -156,6 +181,13 @@ impl HistoryRuntime {
         transcript: &Rc<RefCell<Transcript>>,
         ui: &Rc<RefCell<TUI>>,
     ) {
+        if std::mem::take(&mut self.full_history_requested) {
+            if let Some(full) = &mut self.full_history {
+                full.start = display_start(&full.messages, full.messages.len() - full.start + INITIAL_DISPLAY_MESSAGES);
+                transcript.borrow_mut().replace_history(full.messages[full.start..].to_vec(), full.messages.len() as f64);
+                ui.borrow_mut().request_render_preserving_viewport();
+            }
+        }
         while let Ok((generation, result)) = self.receive.try_recv() {
             if generation != self.generation {
                 continue;
@@ -228,6 +260,23 @@ fn retain_loaded_prefix(
     history.entry_ids = ids;
     history.start_index = old.start_index;
     history.has_older = old.has_older;
+}
+
+fn initial_display_start(messages: &[AgentMessage]) -> usize {
+    // A count alone still renders megabytes from a few long messages before the
+    // input loop starts. PageUp retains the full snapshot and uses normal pages.
+    // Always show the last message; tool-call linkage may exceed this soft budget.
+    let mut bytes = 0usize;
+    let mut count = 0usize;
+    for message in messages.iter().rev().take(INITIAL_DISPLAY_MESSAGES) {
+        let size = serde_json::to_vec(message).map(|value| value.len()).unwrap_or(0);
+        if count > 0 && bytes.saturating_add(size) > INITIAL_DISPLAY_BYTES {
+            break;
+        }
+        bytes = bytes.saturating_add(size);
+        count += 1;
+    }
+    display_start(messages, count)
 }
 
 fn display_start(messages: &[AgentMessage], count: usize) -> usize {
@@ -359,6 +408,113 @@ mod tests {
     }
 
     #[test]
+    fn oversized_first_paint_is_bounded_and_pageup_retains_every_message() {
+        let (transcript, editor, mut runtime) = fixture("large-payload-first");
+        let (_, mut messages) = large_snapshot(6);
+        messages[4] = user_message(&format!("LARGE_{}", "x".repeat(INITIAL_DISPLAY_BYTES)));
+        runtime.reset(None, messages.clone(), &transcript, &editor);
+        assert_eq!(runtime.full_history.as_ref().unwrap().messages, messages);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 5);
+        assert!(!transcript_text(&transcript).contains("LARGE_"));
+        assert!(transcript_text(&transcript).contains("MESSAGE_005"));
+        // Same-session refresh must retain the budgeted slice, not expand to 40.
+        runtime.reset(None, messages.clone(), &transcript, &editor);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 5);
+        let mode = transcript.borrow().mode.clone();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(pi_tui::terminal::ProcessTerminal::new()), None)));
+        runtime.request(&mode.borrow());
+        runtime.poll(&mode, &transcript, &ui);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 0);
+        let rendered = transcript_text(&transcript);
+        assert_eq!(rendered.matches("LARGE_").count(), 1);
+        assert_eq!(rendered.matches("MESSAGE_005").count(), 1);
+        assert!(runtime.task.is_none());
+        runtime.reset(None, messages, &transcript, &editor);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 0);
+    }
+
+    #[test]
+    fn remote_oversized_first_paint_keeps_boundary_and_resync_slice() {
+        let (transcript, editor, mut runtime) = fixture("large-payload-remote");
+        let (history, mut messages) = large_snapshot(6);
+        messages[4] = user_message(&"x".repeat(INITIAL_DISPLAY_BYTES));
+        runtime.reset(Some(history.clone()), messages.clone(), &transcript, &editor);
+        let loaded = runtime.loaded.as_ref().unwrap();
+        assert_eq!(loaded.messages, messages[5..]);
+        assert_eq!(loaded.window.entry_ids, history.entry_ids[5..]);
+        assert_eq!(loaded.window.start_index, 5.0);
+        assert!(loaded.window.has_older);
+        runtime.reset(Some(history), messages.clone(), &transcript, &editor);
+        assert_eq!(runtime.loaded.as_ref().unwrap().messages, messages[5..]);
+        assert_eq!(initial_display_start(&[user_message(&"x".repeat(INITIAL_DISPLAY_BYTES * 2))]), 0,
+            "the latest message is never hidden even when it exceeds the soft budget");
+    }
+
+    #[test]
+    fn full_snapshot_first_paint_pages_locally_without_losing_history_or_stream() {
+        let (transcript, editor, mut runtime) = fixture("full-first");
+        let (_, messages) = large_snapshot(100);
+        assert_eq!(apply_history_snapshot(None, messages.clone(),
+            Some(streaming_assistant_message("LIVE_REPLY")), &transcript, &editor, &mut runtime), None);
+        assert_eq!(runtime.full_history.as_ref().unwrap().messages, messages);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 60);
+        assert!(runtime.loaded.is_none());
+        let recent = transcript_text(&transcript);
+        assert!(!recent.contains("MESSAGE_000"));
+        assert!(recent.contains("MESSAGE_099"));
+        assert_eq!(recent.matches("LIVE_REPLY").count(), 1);
+        transcript.borrow_mut().message(user_message("AFTER_ATTACH_TURN"), false);
+        let mode = transcript.borrow().mode.clone();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(pi_tui::terminal::ProcessTerminal::new()), None)));
+        for expected in [20, 0, 0] {
+            runtime.request(&mode.borrow());
+            runtime.poll(&mode, &transcript, &ui);
+            assert_eq!(runtime.full_history.as_ref().unwrap().start, expected);
+            assert!(runtime.task.is_none(), "full snapshots must not request a remote range");
+        }
+        let complete = transcript_text(&transcript);
+        for i in 0..100 { assert_eq!(complete.matches(&format!("MESSAGE_{i:03}")).count(), 1); }
+        assert_eq!(complete.matches("LIVE_REPLY").count(), 1);
+        assert_eq!(complete.matches("AFTER_ATTACH_TURN").count(), 1);
+    }
+
+    #[test]
+    fn full_snapshot_resync_keeps_loaded_prefix_but_never_mixes_replaced_history() {
+        let (transcript, editor, mut runtime) = fixture("full-resync");
+        let mode = transcript.borrow().mode.clone();
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "same".into(), ..Default::default()
+        });
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(pi_tui::terminal::ProcessTerminal::new()), None)));
+        let (_, mut messages) = large_snapshot(100);
+        runtime.reset(None, messages.clone(), &transcript, &editor);
+        runtime.request(&mode.borrow());
+        runtime.poll(&mode, &transcript, &ui);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 20);
+        messages.push(user_message("NEW_TURN"));
+        runtime.reset(None, messages, &transcript, &editor);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 20);
+        assert!(transcript_text(&transcript).contains("MESSAGE_020"));
+        runtime.request(&mode.borrow());
+        runtime.reset(None, vec![user_message("COMPACTED_HISTORY")], &transcript, &editor);
+        runtime.poll(&mode, &transcript, &ui);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 0);
+        let compacted = transcript_text(&transcript);
+        assert!(compacted.contains("COMPACTED_HISTORY"));
+        assert!(!compacted.contains("MESSAGE_020"));
+        assert!(!compacted.contains("NEW_TURN"));
+        let (_, messages) = large_snapshot(100);
+        runtime.reset(None, messages.clone(), &transcript, &editor);
+        runtime.request(&mode.borrow());
+        runtime.poll(&mode, &transcript, &ui);
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "different".into(), ..Default::default()
+        });
+        runtime.reset(None, messages, &transcript, &editor);
+        assert_eq!(runtime.full_history.as_ref().unwrap().start, 60);
+    }
+
+    #[test]
     fn first_paint_uses_recent_40_and_backfill_restores_every_message_once() {
         let (transcript, editor, mut runtime) = fixture("recent-first");
         let (history, messages) = large_snapshot(100);
@@ -394,16 +550,24 @@ mod tests {
     }
 
     #[test]
-    fn first_paint_never_trims_legacy_or_malformed_tail_metadata() {
+    fn legacy_or_malformed_metadata_keeps_every_message_available_through_local_paging() {
         let (transcript, editor, mut runtime) = fixture("recent-first-legacy");
         let (mut history, messages) = large_snapshot(100);
-        assert_eq!(runtime.reset(None, messages.clone(), &transcript, &editor), None);
-        assert!(runtime.loaded.is_none());
-        assert!(transcript_text(&transcript).contains("MESSAGE_000"));
         history.total_message_count += 1.0;
-        assert!(runtime.reset(Some(history), messages, &transcript, &editor).is_some());
-        assert!(runtime.loaded.is_none());
-        assert!(transcript_text(&transcript).contains("MESSAGE_000"));
+        let mode = transcript.borrow().mode.clone();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(pi_tui::terminal::ProcessTerminal::new()), None)));
+        for metadata in [None, Some(history)] {
+            let malformed = metadata.is_some();
+            assert_eq!(runtime.reset(metadata, messages.clone(), &transcript, &editor).is_some(), malformed);
+            assert!(runtime.loaded.is_none());
+            assert_eq!(runtime.full_history.as_ref().unwrap().messages, messages);
+            for _ in 0..3 {
+                runtime.request(&mode.borrow());
+                runtime.poll(&mode, &transcript, &ui);
+            }
+            let complete = transcript_text(&transcript);
+            for i in 0..100 { assert_eq!(complete.matches(&format!("MESSAGE_{i:03}")).count(), 1); }
+        }
     }
 
     #[test]
@@ -422,6 +586,14 @@ mod tests {
         messages[59] = result("earlier-call");
         messages[60] = result("boundary-call");
         assert_eq!(display_start(&messages, 40), 55);
+        let oversized_linked = vec![
+            user_message("earlier"),
+            call("large-call"),
+            user_message(&"x".repeat(INITIAL_DISPLAY_BYTES)),
+            result("large-call"),
+        ];
+        assert_eq!(initial_display_start(&oversized_linked), 1,
+            "a visible result keeps its call even across an oversized intervening message");
         let (transcript, editor, mut runtime) = fixture("recent-first-tools");
         let (history, _) = large_snapshot(100);
         assert_eq!(runtime.reset(Some(history), messages.clone(), &transcript, &editor), None);

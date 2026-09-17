@@ -8625,11 +8625,13 @@ impl AgentDaemon {
         // still say busy when a turn or detached child has since settled.
         for entry in self.session_states() {
             let active = entry.session.is_session_active();
+            let foreground = entry.session.is_foreground_active();
             let streaming = entry.session.is_streaming();
             let compacting = entry.session.is_compacting();
             let children = entry.session.has_running_rlm_children();
             let mut state = entry.state.lock().expect("active session poisoned");
             state.runtime.session.is_session_active = active;
+            state.runtime.session.is_foreground_active = Some(foreground);
             state.runtime.session.is_streaming = streaming;
             state.runtime.session.is_compacting = compacting;
             state.runtime.session.has_running_rlm_children = children;
@@ -17135,6 +17137,7 @@ mod agent_observe_parity_tests {
         agent_session: Option<Arc<crate::core::agent_session::AgentSession>>,
         streaming: bool,
         session_active: bool,
+        foreground_active: Option<bool>,
     }
 
     impl DaemonSession for ObserveSession {
@@ -17155,6 +17158,9 @@ mod agent_observe_parity_tests {
         }
         fn is_session_active(&self) -> bool {
             self.session_active
+        }
+        fn is_foreground_active(&self) -> bool {
+            self.foreground_active.unwrap_or(self.session_active)
         }
         fn unfinished_action_count(&self) -> f64 {
             0.0
@@ -17571,6 +17577,7 @@ mod agent_observe_parity_tests {
                         agent_session: None,
                         streaming: false,
                         session_active: false,
+                        foreground_active: None,
                     });
                     let parent_handle: Arc<dyn DaemonSession> =
                         Arc::clone(&parent_session) as Arc<dyn DaemonSession>;
@@ -17707,6 +17714,7 @@ mod agent_observe_parity_tests {
             )),
             streaming,
             session_active,
+            foreground_active: None,
         });
         let fixture = match parent_file {
             Some(parent_file) => ObserveFixture::new_with_parent(&session, &parent_file),
@@ -17720,6 +17728,45 @@ mod agent_observe_parity_tests {
         fixture: ObserveFixture,
         #[allow(dead_code)]
         session: Arc<ObserveSession>,
+    }
+
+    #[test]
+    fn backlog_roster_flush_reconciles_completion_and_reused_child_activity() {
+        // Opening a child calls sync_view; a roster flush must not require it.
+        for (name, active, foreground) in [
+            ("completed-child", false, false),
+            ("follow-up-child", true, true),
+            ("background-only-child", true, false),
+        ] {
+            let session = Arc::new(ObserveSession {
+                inner: MissingSession::new(name),
+                active_session_id: name.into(),
+                session_file: String::new(),
+                agent_session: None,
+                streaming: foreground,
+                session_active: active,
+                foreground_active: Some(foreground),
+            });
+            let fixture = ObserveFixture::new(&session);
+            let entry = fixture.daemon.sessions.lock().unwrap().get(name).unwrap().clone();
+            {
+                let mut state = entry.state.lock().unwrap();
+                state.runtime.session.is_foreground_active = Some(!foreground);
+                state.runtime.session.is_session_active = !active;
+                state.runtime.session.is_streaming = !active;
+                state.runtime.metadata.as_mut().unwrap().kind = Some("subagent".into());
+                state.runtime.metadata.as_mut().unwrap().rlm_child_id = Some(name.into());
+            }
+            fixture.daemon.flush_roster_now();
+            let rows = fixture.daemon.roster_reporter.lock().unwrap().last_composed.clone();
+            let row = rows.values().find(|row| row.summary.session_id == name).unwrap();
+            assert_eq!(row.summary.activity, if foreground { "working" } else { "idle" });
+            assert_eq!(row.summary.is_session_active, active);
+            assert_eq!(row.summary.is_streaming, foreground);
+            assert_eq!(row.summary.status_label.as_deref(),
+                (active && !foreground).then_some("background helper"));
+            assert_eq!(entry.state.lock().unwrap().runtime.session.is_foreground_active, Some(foreground));
+        }
     }
 
     #[test]

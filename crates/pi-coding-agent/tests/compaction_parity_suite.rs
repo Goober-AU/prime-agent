@@ -281,6 +281,7 @@ struct CapturedRequest {
     has_signal: bool,
     /// `options.stream.maxTokens` seen by the provider (F-04 oracle).
     max_tokens: Option<f64>,
+    headers: Option<indexmap::IndexMap<String, String>>,
 }
 
 #[derive(Clone)]
@@ -307,6 +308,7 @@ struct ProviderSpec {
     compact_gate: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
     compact_started: Arc<AtomicU64>,
     compact_calls: Arc<AtomicU64>,
+    compact_headers: Arc<Mutex<Vec<Option<indexmap::IndexMap<String, String>>>>>,
     summary_calls: Arc<AtomicU64>,
     summary_models: Arc<Mutex<Vec<(String, String, String)>>>,
     /// When set, the summarization wire call fails with this message.
@@ -344,6 +346,7 @@ impl ProviderSpec {
             compact_gate: Arc::new(Mutex::new(None)),
             compact_started: Arc::new(AtomicU64::new(0)),
             compact_calls: Arc::new(AtomicU64::new(0)),
+            compact_headers: Arc::new(Mutex::new(Vec::new())),
             summary_calls: Arc::new(AtomicU64::new(0)),
             summary_models: Arc::new(Mutex::new(Vec::new())),
             summary_failure: Arc::new(Mutex::new(None)),
@@ -508,6 +511,7 @@ fn serialize_context(
         is_summary_call,
         has_signal,
         max_tokens,
+        headers: None,
     }
 }
 
@@ -574,7 +578,7 @@ fn record_request(
     options: Option<&SimpleStreamOptions>,
 ) -> bool {
     let is_summary_call = context.system_prompt.as_deref() == Some(SUMMARIZATION_SYSTEM_PROMPT);
-    let captured = serialize_context(
+    let mut captured = serialize_context(
         context,
         is_summary_call,
         options
@@ -583,6 +587,7 @@ fn record_request(
         options.and_then(|options| options.stream.max_tokens),
         model,
     );
+    captured.headers = options.and_then(|options| options.stream.headers.clone());
     spec.requests.lock().unwrap().push(captured);
     is_summary_call
 }
@@ -704,6 +709,9 @@ fn register_fixture_provider(spec: &ProviderSpec) {
         Box::pin(async move {
             step("provider compact: called");
             spec.compact_calls.fetch_add(1, Ordering::SeqCst);
+            spec.compact_headers.lock().unwrap().push(
+                options.as_ref().and_then(|options| options.simple.stream.headers.clone()),
+            );
             spec.compact_started.store(1, Ordering::SeqCst);
             let gate = spec.compact_gate.lock().unwrap().clone();
             if let Some(gate) = gate {
@@ -930,6 +938,7 @@ struct FixtureOptions {
     persist: bool,
     /// Leave the model registry without an API key (auth-failure tests).
     with_api_key: bool,
+    request_headers: Option<indexmap::IndexMap<String, String>>,
     observed: Arc<Observed>,
 }
 
@@ -945,6 +954,7 @@ impl Default for FixtureOptions {
             text_only_provider: false,
             persist: false,
             with_api_key: true,
+            request_headers: None,
             observed: Arc::new(Observed::default()),
         }
     }
@@ -1036,6 +1046,15 @@ impl Fixture {
                 .set_runtime_api_key(&model.provider, T05_API_KEY);
         }
         let model_registry = fixture_registry(&model, options.with_api_key);
+        if let Some(headers) = &options.request_headers {
+            model_registry.lock().unwrap().register_provider(
+                &model.provider,
+                pi_coding_agent::core::model_registry::ProviderConfigInput {
+                    headers: Some(headers.clone()),
+                    ..Default::default()
+                },
+            ).expect("synthetic request headers");
+        }
 
         let session_manager = Arc::new(Mutex::new(if options.persist {
             SessionManager::create(&case.cwd, Some(&case.session_dir)).expect("session manager")
@@ -1275,6 +1294,100 @@ async fn seed_large_transcript(fixture: &Fixture) {
     fixture.turn(&long_user_text("old-user-1", 8000)).await;
     fixture.turn(&long_user_text("old-user-2", 8000)).await;
     fixture.turn(&long_user_text("old-user-3", 8000)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core001_custom_messages_reach_summary_but_metadata_and_digests_do_not() {
+    let _guard = lock_suite();
+    let fixture = Fixture::build(FixtureOptions {
+        case_name: "core001-custom-messages".to_string(),
+        text_only_provider: true,
+        compaction_enabled: false,
+        keep_recent_tokens: 100.0,
+        ..Default::default()
+    }).await;
+    seed_messages(&fixture, &[("before-custom", 500)]);
+    {
+        use pi_coding_agent::core::session_manager::CustomMessageEntryContent;
+        let mut manager = fixture.session.session_manager.lock().unwrap();
+        manager.append_custom_message_entry("ipython_state",
+            &CustomMessageEntryContent::Text("CORE001_KERNEL_STATE_FACT".to_string()),
+            false, Some(json!({"restored": true}))).unwrap();
+        manager.append_custom_message_entry(pi_coding_agent::core::messages::REFINEMENT_NOTICE_CUSTOM_TYPE,
+            &CustomMessageEntryContent::Blocks(vec![json!({"type": "text", "text": "CORE001_REFINEMENT_FACT"})]),
+            false, None).unwrap();
+        manager.append_custom_message_entry(pi_coding_agent::core::messages::REFINEMENT_OUTCOME_CUSTOM_TYPE,
+            &CustomMessageEntryContent::Text("CORE001_AUDIT_OUTCOME_NOT_SUMMARY".to_string()),
+            true, None).unwrap();
+        manager.append_custom_message_entry(
+            pi_coding_agent::core::messages::HARNESS_DIGEST_CUSTOM_TYPE,
+            &CustomMessageEntryContent::Text("CORE001_DIGEST_NOT_SUMMARY".to_string()),
+            false, None).unwrap();
+        manager.append_custom_entry("internal-metadata",
+            Some(json!({"content": "CORE001_METADATA_NOT_MESSAGE"}))).unwrap();
+    }
+    seed_messages(&fixture, &[("after-custom", 500), ("retained-tail", 500)]);
+    fixture.compact_ok(None).await;
+    let summary_input = fixture.spec.summary_texts().join("\n");
+    assert!(summary_input.contains("CORE001_KERNEL_STATE_FACT"));
+    assert!(summary_input.contains("CORE001_REFINEMENT_FACT"));
+    assert!(!summary_input.contains("CORE001_AUDIT_OUTCOME_NOT_SUMMARY"));
+    assert!(!summary_input.contains("CORE001_DIGEST_NOT_SUMMARY"));
+    assert!(!summary_input.contains("CORE001_METADATA_NOT_MESSAGE"));
+    fixture.session.dispose_async(Some(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core004_resolved_session_headers_reach_native_and_fallback_compaction() {
+    let _guard = lock_suite();
+    for native_supported in [true, false] {
+        let expected = indexmap::IndexMap::from([
+            ("X-Session-Compaction-Test".to_string(), "fixture-header".to_string()),
+        ]);
+        let fixture = Fixture::build(FixtureOptions {
+            case_name: format!("core004-headers-{native_supported}"),
+            compaction_enabled: false,
+            keep_recent_tokens: 100.0,
+            request_headers: Some(expected.clone()),
+            ..Default::default()
+        }).await;
+        assert!(fixture.model.headers.is_none(), "headers must come from resolved session auth, not the model");
+        if !native_supported {
+            *fixture.spec.compact_mode.lock().unwrap() = CompactMode::Unsupported;
+        }
+        seed_messages(&fixture, &[("old", 500), ("retained", 500)]);
+        fixture.compact_ok(None).await;
+        assert_eq!(fixture.spec.compact_headers.lock().unwrap().as_slice(), &[Some(expected.clone())]);
+        assert_eq!(fixture.spec.summary_calls.load(Ordering::SeqCst), if native_supported { 0 } else { 1 });
+        for request in fixture.spec.requests.lock().unwrap().iter().filter(|request| request.is_summary_call) {
+            assert_eq!(request.headers.as_ref(), Some(&expected));
+        }
+        fixture.session.dispose_async(Some(false)).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn core007_tokens_before_measures_live_context_not_transcript_size() {
+    let _guard = lock_suite();
+    let fixture = Fixture::build(FixtureOptions {
+        case_name: "core007-live-token-metric".to_string(),
+        compaction_enabled: false,
+        keep_recent_tokens: 100.0,
+        ..Default::default()
+    }).await;
+    seed_messages(&fixture, &[("old", 500), ("retained", 500)]);
+    let durable = fixture.session.build_session_context().messages;
+    let durable_tokens = pi_coding_agent::core::compaction::compaction::estimate_context_tokens(&durable).tokens;
+    let mut state = fixture.session.agent.state();
+    state.messages.push(AgentMessage::Message(Message::User(UserMessage::new(
+        UserContent::Text("unpersisted outcome ".repeat(200)), now_ms(),
+    ))));
+    let expected = pi_coding_agent::core::compaction::compaction::estimate_context_tokens(&state.messages).tokens;
+    assert!(expected > durable_tokens, "fixture must distinguish live and durable token estimates");
+    fixture.session.agent.set_state(state);
+    fixture.compact_ok(None).await;
+    assert_eq!(fixture.compaction_entries()[0].get("tokensBefore").and_then(Value::as_f64), Some(expected));
+    fixture.session.dispose_async(Some(false)).await;
 }
 
 /// Messages that carry a provider checkpoint window: the compaction summary that

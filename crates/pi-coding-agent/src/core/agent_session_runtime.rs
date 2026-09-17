@@ -13,7 +13,7 @@ use crate::core::agent_session_config::AgentSessionRuntimeConfig;
 use crate::core::agent_session_services::{
     AgentSessionCreationOptions, AgentSessionRuntimeDiagnostic, AgentSessionServices,
 };
-use crate::core::auth_guidance::is_no_models_available_message;
+use crate::core::auth_guidance::is_obsolete_model_fallback_message;
 use crate::core::extensions::types::{
     ExtensionEvent, SessionBeforeForkPayload, SessionBeforeSwitchPayload, SessionShutdownPayload,
 };
@@ -356,16 +356,15 @@ impl AgentSessionRuntime {
 
     /// `get modelFallbackMessage()`.
     ///
-    /// The "no models available" warning describes session state, not a startup
-    /// event: once the session gains a model (`set_model`, `/login`,
-    /// onboarding), the stored snapshot is stale and must not reach clients.
+    /// A restore warning must not keep claiming an old fallback after model selection.
     pub fn model_fallback_message(&self) -> Option<String> {
         let message = self
             .model_fallback_message
             .lock()
             .expect("model fallback message poisoned")
             .clone();
-        if is_no_models_available_message(message.as_deref()) && self.session().model().is_some() {
+        let model = self.session().model();
+        if is_obsolete_model_fallback_message(message.as_deref(), model.as_ref().map(|model| (model.provider.as_str(), model.id.as_str()))) {
             return None;
         }
         message

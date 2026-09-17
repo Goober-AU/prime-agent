@@ -1763,29 +1763,33 @@ async fn execute_prepared_tool_call(
     )
     .await;
     accepting_updates.store(false, Ordering::SeqCst);
-    // `await Promise.all(updateEvents)` in TypeScript: close the drain and join it, so every
-    // accepted update has reached the sink before the tool outcome is returned.
+    // Close outside an abortable future: an already-cancelled signal must not skip cleanup.
+    // Normal completion drains accepted updates; cancellation stops and joins the drain before
+    // a later run can begin. The detached tool still finishes its own kernel cleanup.
+    updates_closed.store(true, Ordering::SeqCst);
+    update_wake.notify_one();
     {
-        let finish_drain = async {
-            updates_closed.store(true, Ordering::SeqCst);
-            update_wake.notify_one();
-            update_drain
-                .await
-                .map_err(anyhow::Error::from)
-                .and_then(|inner| inner)
+        let mut update_drain = update_drain;
+        let joined = if let Some(signal) = signal {
+            tokio::select! {
+                biased;
+                _ = signal.cancelled() => {
+                    update_drain.abort();
+                    match update_drain.await {
+                        Err(error) if error.is_cancelled() => Ok(Ok(())),
+                        result => result,
+                    }
+                }
+                result = &mut update_drain => result,
+            }
+        } else {
+            update_drain.await
         };
-        match race_with_abort(finish_drain, signal.cloned(), None).await {
-            Ok(()) => {}
-            Err(error) if is_abort_error(&error) => {
-                // The caller aborted while the join was in flight; the updates already queued
-                // were emitted by the drain task, which finishes on its own.
-            }
-            Err(error) => {
-                return ExecutedToolCallOutcome {
-                    result: create_error_tool_result(&format!("{error}")),
-                    is_error: true,
-                };
-            }
+        if let Err(error) = joined.map_err(anyhow::Error::from).and_then(|inner| inner) {
+            return ExecutedToolCallOutcome {
+                result: create_error_tool_result(&format!("{error}")),
+                is_error: true,
+            };
         }
     }
 
@@ -2569,6 +2573,10 @@ mod rlm_t16_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tool_abort_cleanup_tests.rs"]
+mod tool_abort_cleanup_tests;
 
 #[cfg(test)]
 mod tests {
