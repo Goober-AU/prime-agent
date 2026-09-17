@@ -344,6 +344,11 @@ pub fn wait_for_daemon_worker_startup_gate(environment: &mut HashMap<String, Str
     let Some(raw_fd) = environment.remove(DAEMON_WORKER_STARTUP_GATE_FD_ENV) else {
         return Ok(());
     };
+    // daemon-worker-protocol.ts:229 deletes the gate fd from `process.env` before
+    // reading it. `environment` is only a copy, so clear the real process
+    // environment too; otherwise every child inherits the fd number and reads an
+    // unrelated descriptor (EINVAL, or a hang on an inherited pipe).
+    std::env::remove_var(DAEMON_WORKER_STARTUP_GATE_FD_ENV);
     let fd: i32 = raw_fd
         .parse()
         .map_err(|_| "Daemon session worker has an invalid startup gate".to_string())?;
@@ -367,6 +372,7 @@ pub fn wait_for_daemon_worker_startup_gate(environment: &mut HashMap<String, Str
     let Some(gate) = environment.remove(DAEMON_WORKER_STARTUP_GATE_FD_ENV) else {
         return Ok(());
     };
+    std::env::remove_var(DAEMON_WORKER_STARTUP_GATE_FD_ENV);
     if gate != "stdin" {
         return Err("Daemon session worker has an invalid startup gate".to_string());
     }
@@ -487,8 +493,11 @@ mod tests {
         assert_eq!(require_daemon_worker_authentication_token(&environment).unwrap(), "token");
     }
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn startup_gate_rejects_an_invalid_fd() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let mut environment = HashMap::new();
         environment.insert(DAEMON_WORKER_STARTUP_GATE_FD_ENV.to_string(), "nope".to_string());
         assert_eq!(
@@ -496,6 +505,19 @@ mod tests {
             Err("Daemon session worker has an invalid startup gate".to_string())
         );
         assert!(!environment.contains_key(DAEMON_WORKER_STARTUP_GATE_FD_ENV));
+    }
+
+    #[test]
+    fn startup_gate_clears_the_gate_fd_from_the_process_environment() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var(DAEMON_WORKER_STARTUP_GATE_FD_ENV, "nope");
+        let mut environment = HashMap::new();
+        environment.insert(DAEMON_WORKER_STARTUP_GATE_FD_ENV.to_string(), "nope".to_string());
+        assert_eq!(
+            wait_for_daemon_worker_startup_gate(&mut environment),
+            Err("Daemon session worker has an invalid startup gate".to_string())
+        );
+        assert!(std::env::var_os(DAEMON_WORKER_STARTUP_GATE_FD_ENV).is_none());
     }
 
     #[test]
