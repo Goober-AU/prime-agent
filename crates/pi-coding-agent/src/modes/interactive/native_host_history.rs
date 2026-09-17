@@ -1,9 +1,12 @@
 //! Recent-first history paging on the native terminal owner thread.
 use super::*;
 
+const INITIAL_DISPLAY_MESSAGES: usize = 40;
+
 pub(super) struct HistoryRuntime {
     connection: Arc<dyn wire::AgentConnection>,
     loaded: Option<LoadedAgentConnectionHistory>,
+    session_id: Option<String>,
     generation: u64,
     task: Option<tokio::task::JoinHandle<()>>,
     send: mpsc::Sender<(u64, Result<wire::AgentConnectionHistoryRange, String>)>,
@@ -30,6 +33,7 @@ impl HistoryRuntime {
         Self {
             connection,
             loaded: None,
+            session_id: None,
             generation: 0,
             task: None,
             send,
@@ -59,7 +63,11 @@ impl HistoryRuntime {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-        self.loaded = None;
+        let previous = self.loaded.take();
+        let session_id = transcript.borrow().mode.borrow().connection_state.as_ref()
+            .map(|state| state.session_id.clone());
+        let same_session = self.session_id == session_id;
+        self.session_id = session_id;
         for message in &messages {
             if let AgentMessage::Message(pi_ai::types::Message::User(user)) = message {
                 let text = transcript
@@ -83,7 +91,19 @@ impl HistoryRuntime {
             },
             None => None,
         };
-        if let Some(history) = history {
+        if let Some(mut history) = history {
+            let mut messages = messages;
+            let display_count = previous.as_ref().filter(|_| same_session)
+                .map(|loaded| loaded.messages.len().max(INITIAL_DISPLAY_MESSAGES))
+                .unwrap_or(INITIAL_DISPLAY_MESSAGES);
+            if let Some(previous) = previous.as_ref().filter(|_| same_session) {
+                retain_loaded_prefix(&mut history, &mut messages, previous);
+            }
+            let start = display_start(&messages, display_count);
+            history.start_index += start as f64;
+            history.entry_ids.drain(..start);
+            history.has_older = history.start_index > 0.0;
+            messages.drain(..start);
             self.loaded = Some(LoadedAgentConnectionHistory {
                 window: window(history),
                 messages: messages.clone(),
@@ -179,6 +199,61 @@ impl Drop for HistoryRuntime {
     }
 }
 
+// A resync of the same pinned snapshot must not discard already-paged rows.
+fn retain_loaded_prefix(
+    history: &mut wire::AgentConnectionHistoryWindow,
+    messages: &mut Vec<AgentMessage>,
+    previous: &LoadedAgentConnectionHistory,
+) {
+    let old = &previous.window;
+    if old.generation != history.generation
+        || old.representation != history.representation
+        || old.tip_entry_id != history.tip_entry_id
+        || old.total_message_count != history.total_message_count
+        || old.start_index >= history.start_index
+    {
+        return;
+    }
+    let prefix = (history.start_index - old.start_index) as usize;
+    if previous.messages.len() != old.entry_ids.len()
+        || old.entry_ids.get(prefix..) != Some(history.entry_ids.as_slice())
+    {
+        return;
+    }
+    let mut combined = previous.messages[..prefix].to_vec();
+    combined.append(messages);
+    *messages = combined;
+    let mut ids = old.entry_ids[..prefix].to_vec();
+    ids.append(&mut history.entry_ids);
+    history.entry_ids = ids;
+    history.start_index = old.start_index;
+    history.has_older = old.has_older;
+}
+
+fn display_start(messages: &[AgentMessage], count: usize) -> usize {
+    let mut start = messages.len().saturating_sub(count);
+    let mut calls = HashMap::new();
+    for (index, message) in messages.iter().enumerate() {
+        if let AgentMessage::Message(pi_ai::types::Message::Assistant(assistant)) = message {
+            for block in &assistant.content {
+                if let pi_ai::types::ContentBlock::ToolCall(call) = block {
+                    calls.entry(call.id.as_str()).or_insert(index);
+                }
+            }
+        }
+    }
+    // Walk backwards so newly included results also retain their call rows.
+    for (index, message) in messages.iter().enumerate().rev() {
+        if index < start { break; }
+        if let AgentMessage::Message(pi_ai::types::Message::ToolResult(result)) = message {
+            if let Some(call) = calls.get(result.tool_call_id.as_str()) {
+                start = start.min(*call);
+            }
+        }
+    }
+    start
+}
+
 fn validate(history: &wire::AgentConnectionHistoryWindow, messages: usize) -> Result<(), String> {
     if history.version != 1.0
         || history.order != "chronological"
@@ -186,8 +261,11 @@ fn validate(history: &wire::AgentConnectionHistoryWindow, messages: usize) -> Re
         || history.entry_ids.len() != messages
         || !history.start_index.is_finite()
         || history.start_index < 0.0
+        || history.start_index.fract() != 0.0
         || !history.total_message_count.is_finite()
-        || history.start_index + messages as f64 > history.total_message_count
+        || history.start_index + messages as f64 != history.total_message_count
+        || history.has_older != (history.start_index > 0.0)
+        || history.entry_ids.iter().collect::<std::collections::HashSet<_>>().len() != messages
     {
         return Err("Received an invalid recent-first session history window".into());
     }
@@ -271,6 +349,114 @@ mod tests {
             has_older: false,
             order: "chronological".into(),
         }
+    }
+
+    fn large_snapshot(count: usize) -> (wire::AgentConnectionHistoryWindow, Vec<AgentMessage>) {
+        let ids: Vec<String> = (0..count).map(|i| format!("entry-{i}")).collect();
+        let history = valid_window(&ids.iter().map(String::as_str).collect::<Vec<_>>());
+        let messages = (0..count).map(|i| user_message(&format!("MESSAGE_{i:03}"))).collect();
+        (history, messages)
+    }
+
+    #[test]
+    fn first_paint_uses_recent_40_and_backfill_restores_every_message_once() {
+        let (transcript, editor, mut runtime) = fixture("recent-first");
+        let (history, messages) = large_snapshot(100);
+        assert_eq!(apply_history_snapshot(Some(history.clone()), messages.clone(),
+            Some(streaming_assistant_message("LIVE_REPLY")), &transcript, &editor, &mut runtime), None);
+        let loaded = runtime.loaded.as_ref().unwrap();
+        assert_eq!(loaded.messages, messages[60..]);
+        assert_eq!(loaded.window.start_index, 60.0);
+        assert_eq!(loaded.window.entry_ids, history.entry_ids[60..]);
+        assert!(loaded.window.has_older);
+        let recent = transcript_text(&transcript);
+        assert!(!recent.contains("MESSAGE_000"));
+        assert!(recent.contains("MESSAGE_099"));
+        assert_eq!(recent.matches("LIVE_REPLY").count(), 1);
+
+        let mode = transcript.borrow().mode.clone();
+        let ui = Rc::new(RefCell::new(TUI::new(Box::new(pi_tui::terminal::ProcessTerminal::new()), None)));
+        let range = wire::AgentConnectionHistoryRange {
+            window: wire::AgentConnectionHistoryWindow {
+                entry_ids: history.entry_ids[..60].to_vec(), ..history.clone()
+            },
+            messages: messages[..60].to_vec(),
+        };
+        runtime.send.send((runtime.generation, Ok(range))).unwrap();
+        runtime.poll(&mode, &transcript, &ui);
+        let loaded = runtime.loaded.as_ref().unwrap();
+        assert_eq!(loaded.messages, messages);
+        assert_eq!(loaded.window.entry_ids, history.entry_ids);
+        assert!(!loaded.window.has_older);
+        let complete = transcript_text(&transcript);
+        assert_eq!(complete.matches("MESSAGE_").count(), 100);
+        assert_eq!(complete.matches("LIVE_REPLY").count(), 1);
+    }
+
+    #[test]
+    fn first_paint_never_trims_legacy_or_malformed_tail_metadata() {
+        let (transcript, editor, mut runtime) = fixture("recent-first-legacy");
+        let (mut history, messages) = large_snapshot(100);
+        assert_eq!(runtime.reset(None, messages.clone(), &transcript, &editor), None);
+        assert!(runtime.loaded.is_none());
+        assert!(transcript_text(&transcript).contains("MESSAGE_000"));
+        history.total_message_count += 1.0;
+        assert!(runtime.reset(Some(history), messages, &transcript, &editor).is_some());
+        assert!(runtime.loaded.is_none());
+        assert!(transcript_text(&transcript).contains("MESSAGE_000"));
+    }
+
+    #[test]
+    fn first_paint_retains_tool_calls_for_results_crossing_the_display_boundary() {
+        use pi_ai::types::{ToolCall, ToolResultMessage};
+        let (_, mut messages) = large_snapshot(100);
+        let call = |id: &str| AgentMessage::Message(AiMessage::Assistant(AssistantMessage {
+            content: vec![ContentBlock::ToolCall(ToolCall::new(id, "bash", Default::default()))],
+            ..Default::default()
+        }));
+        let result = |id: &str| AgentMessage::Message(AiMessage::ToolResult(
+            ToolResultMessage::new(id, "bash", Vec::new(), false, 0),
+        ));
+        messages[55] = call("earlier-call");
+        messages[58] = call("boundary-call");
+        messages[59] = result("earlier-call");
+        messages[60] = result("boundary-call");
+        assert_eq!(display_start(&messages, 40), 55);
+        let (transcript, editor, mut runtime) = fixture("recent-first-tools");
+        let (history, _) = large_snapshot(100);
+        assert_eq!(runtime.reset(Some(history), messages.clone(), &transcript, &editor), None);
+        let loaded = runtime.loaded.as_ref().unwrap();
+        assert_eq!(loaded.window.start_index, 55.0);
+        assert_eq!(loaded.messages, messages[55..]);
+        let history = transcript.borrow();
+        assert_eq!(history.history.as_ref().unwrap().tools.len(), 2);
+    }
+
+    #[test]
+    fn first_paint_refresh_retains_loaded_scrollback_and_never_reuses_another_pin() {
+        let (transcript, editor, mut runtime) = fixture("recent-first-refresh");
+        let (history, messages) = large_snapshot(100);
+        assert_eq!(runtime.reset(Some(history.clone()), messages.clone(), &transcript, &editor), None);
+        // Represent a user who has paged back to entry 20.
+        runtime.loaded = Some(LoadedAgentConnectionHistory {
+            window: window(wire::AgentConnectionHistoryWindow {
+                start_index: 20.0, has_older: true, entry_ids: history.entry_ids[20..].to_vec(),
+                ..history.clone()
+            }), messages: messages[20..].to_vec(),
+        });
+        let shorter = wire::AgentConnectionHistoryWindow {
+            start_index: 60.0, has_older: true, entry_ids: history.entry_ids[60..].to_vec(),
+            ..history.clone()
+        };
+        assert_eq!(runtime.reset(Some(shorter.clone()), messages[60..].to_vec(), &transcript, &editor), None);
+        assert_eq!(runtime.loaded.as_ref().unwrap().messages, messages[20..]);
+        assert_eq!(runtime.reset(Some(history), messages.clone(), &transcript, &editor), None);
+        assert_eq!(runtime.loaded.as_ref().unwrap().messages, messages[20..]);
+        let another_pin = wire::AgentConnectionHistoryWindow {
+            generation: "different-generation".into(), ..shorter
+        };
+        assert_eq!(runtime.reset(Some(another_pin), messages[60..].to_vec(), &transcript, &editor), None);
+        assert_eq!(runtime.loaded.as_ref().unwrap().messages, messages[60..]);
     }
 
     /// DEFECT 5: an unusable optional history window degrades to the full-transcript

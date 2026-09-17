@@ -129,6 +129,37 @@ struct Transcript {
     assistant: Option<Rc<RefCell<AssistantMessageComponent>>>,
     assistants: Vec<Rc<RefCell<AssistantMessageComponent>>>,
     tools: HashMap<String, Rc<RefCell<ToolExecutionComponent>>>,
+    wrapped_lines: TranscriptWrapCache,
+}
+
+#[derive(Default)]
+struct TranscriptWrapCache {
+    width: usize,
+    lines: Vec<(String, Vec<String>)>,
+}
+impl TranscriptWrapCache {
+    fn render(&mut self, lines: Vec<String>, width: usize) -> Vec<String> {
+        if self.width != width {
+            self.lines.clear();
+            self.width = width;
+        }
+        self.lines.truncate(lines.len());
+        let mut output = Vec::new();
+        for (index, line) in lines.into_iter().enumerate() {
+            if let Some((previous, wrapped)) = self.lines.get_mut(index) {
+                if *previous != line {
+                    *wrapped = pi_tui::utils::wrap_text_with_ansi(&line, width);
+                    *previous = line;
+                }
+                output.extend(wrapped.iter().cloned());
+            } else {
+                let wrapped = pi_tui::utils::wrap_text_with_ansi(&line, width);
+                output.extend(wrapped.iter().cloned());
+                self.lines.push((line, wrapped));
+            }
+        }
+        output
+    }
 }
 struct ToolRow(Rc<RefCell<ToolExecutionComponent>>);
 impl TuiComponent for ToolRow {
@@ -176,6 +207,7 @@ impl Transcript {
             assistant: None,
             assistants: Vec::new(),
             tools: HashMap::new(),
+            wrapped_lines: TranscriptWrapCache::default(),
         }
     }
     fn replace(&mut self, messages: Vec<AgentMessage>) {
@@ -434,11 +466,10 @@ impl TuiComponent for Transcript {
         if let Some(side_pane) = &self.side_pane {
             lines.extend(side_pane.borrow_mut().render(width));
         }
-        // Existing controller text may be unwrapped; enforce the terminal width.
-        lines
-            .into_iter()
-            .flat_map(|line| pi_tui::utils::wrap_text_with_ansi(&line, width.max(1.0) as usize))
-            .collect()
+        // Editor and overlay repaints must not reparse unchanged history's ANSI
+        // and Unicode on every key. Compare rendered bytes so external component
+        // updates, theme changes and expansion still invalidate precisely.
+        self.wrapped_lines.render(lines, width.max(1.0) as usize)
     }
     fn invalidate(&mut self) {
         if let Some(side_pane) = &self.side_pane {
@@ -5281,6 +5312,41 @@ mod tests {
             prompt_stash_session_id: Some(session_id.to_string()),
         })
         .expect("mode")
+    }
+
+    #[test]
+    fn transcript_wrap_cache_preserves_live_updates_resize_and_unicode() {
+        let mut cache = TranscriptWrapCache::default();
+        let mut lines = vec!["\x1b[32mhello 世界 👩‍💻\x1b[0m".into(), "long output ".repeat(20)];
+        let expected = |lines: &Vec<String>, width| lines.iter()
+            .flat_map(|line| pi_tui::utils::wrap_text_with_ansi(line, width)).collect::<Vec<_>>();
+        assert_eq!(cache.render(lines.clone(), 20), expected(&lines, 20));
+        let stable_buffer = cache.lines[0].1.as_ptr();
+        assert_eq!(cache.render(lines.clone(), 20), expected(&lines, 20));
+        assert_eq!(cache.lines[0].1.as_ptr(), stable_buffer, "unchanged history was rewrapped");
+        lines[1].push_str("stream delta");
+        assert_eq!(cache.render(lines.clone(), 20), expected(&lines, 20));
+        assert_eq!(cache.lines[0].1.as_ptr(), stable_buffer);
+        assert_eq!(cache.render(lines.clone(), 8), expected(&lines, 8));
+        lines[0] = "\x1b[33mchanged theme\x1b[0m".into();
+        assert_eq!(cache.render(lines.clone(), 8), expected(&lines, 8));
+        lines.truncate(1);
+        assert_eq!(cache.render(lines.clone(), 8), expected(&lines, 8));
+        assert_eq!(cache.lines.len(), 1);
+        assert!(cache.render(Vec::new(), 8).is_empty());
+        assert!(cache.lines.is_empty());
+    }
+
+    #[test]
+    fn transcript_wrap_cache_large_repaint_measurement() {
+        let lines: Vec<String> = (0..2000).map(|i| format!("\x1b[32m{i}: café 世界 output text {}\x1b[0m", "abcd ".repeat(12))).collect();
+        let mut cache = TranscriptWrapCache::default();
+        let started = Instant::now();
+        let expected = cache.render(lines.clone(), 150);
+        let cold = started.elapsed();
+        let started = Instant::now();
+        for _ in 0..10 { assert_eq!(cache.render(lines.clone(), 150), expected); }
+        eprintln!("transcript wrap 2000 lines: cold={cold:?}, cached mean={:?}", started.elapsed() / 10);
     }
 
     /// DEFECT 6: `/compact`, `/refine`, `/goal` and `/autonomous` must reach the
