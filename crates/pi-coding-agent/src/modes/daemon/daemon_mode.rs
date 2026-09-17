@@ -9100,7 +9100,7 @@ impl AgentDaemon {
         // context from messages + state.
         snapshot.insert(
             "lastEventSequence".to_string(),
-            Value::from(last_event_sequence as f64),
+            Value::from(last_event_sequence),
         );
         snapshot.insert(
             "lastEventCursor".to_string(),
@@ -9338,7 +9338,7 @@ impl AgentDaemon {
                     "activeSessionId": active_session_id,
                     "snapshotId": stream_id,
                     "chunkCount": chunk_count as f64,
-                    "lastEventSequence": last_event_sequence as f64,
+                    "lastEventSequence": last_event_sequence,
                     "lastEventCursor": { "generation": event_generation, "sequence": last_event_sequence },
                 });
                 self.write_worker_snapshot_record(client, &end, purpose, Some(0))
