@@ -244,6 +244,10 @@ impl DaemonSession for AgentSessionDaemonAdapter {
         self.runtime.session().is_session_active()
     }
 
+    fn is_foreground_active(&self) -> bool {
+        self.runtime.session().is_foreground_active()
+    }
+
     fn has_running_rlm_children(&self) -> bool {
         self.runtime.session().has_running_rlm_children()
     }
@@ -255,6 +259,10 @@ impl DaemonSession for AgentSessionDaemonAdapter {
 
     fn messages(&self) -> Vec<AgentMessage> {
         self.runtime.session().messages()
+    }
+
+    fn message_count(&self) -> usize {
+        self.runtime.session().message_count()
     }
 
     /// `session.rlmDepth ?? null` - `None` is `null` on the wire.

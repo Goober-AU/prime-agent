@@ -965,6 +965,11 @@ impl AgentSession {
             let weak = weak.clone();
             Box::pin(async move { weak.upgrade().ok_or("Parent session disposed")?.delete_rlm_subagent(&target).await })
         })));
+        let weak = Arc::downgrade(self);
+        handlers.insert("rlm.collect".into(), crate::core::rlm_runtime::create_rlm_collect_host_handler(Arc::new(move |targets, timeout_ms| {
+            let weak = weak.clone();
+            Box::pin(async move { weak.upgrade().ok_or("Parent session disposed")?.collect_rlm_children(&targets, timeout_ms).await })
+        })));
         // TS agent-session.ts:10267-10272: the agent_message handlers install only
         // when the controller exists AND the agent-message skill is visible to the
         // model (disableModelInvocation skills are not kernel-reachable).
@@ -2196,6 +2201,67 @@ impl AgentSession {
                 }
             }
         }))
+    }
+
+    /// A read-only, bounded fan-in. Collection never delivers another parent message.
+    pub async fn collect_rlm_children(&self, targets: &[String], timeout_ms: u64) -> Result<crate::core::rlm_runtime::RlmCollectResult, String> {
+        use crate::core::rlm_runtime::{RlmCollectResult, RlmCollectResultEntry};
+        let mut candidates: std::collections::BTreeMap<_, _> = self.active_rlm_child_runs.lock().unwrap().iter()
+            .map(|(id, run)| (id.clone(), run.clone())).collect();
+        let retained = self.rlm_child_sessions.lock().unwrap().clone();
+        for (id, child) in &retained {
+            if let Some(run) = &child.run { candidates.entry(id.clone()).or_insert_with(|| run.clone()); }
+        }
+        let deleting: HashSet<_> = self.deleting_rlm_children.lock().unwrap().keys().cloned().collect();
+        candidates.retain(|id, run| !deleting.contains(id) && run.lock().unwrap().detached_deletion.is_none());
+        let mut runs = std::collections::BTreeMap::new();
+        if targets.is_empty() {
+            runs = candidates;
+        } else {
+            for target in targets {
+                let mut matches = Vec::new();
+                for (id, run) in &candidates {
+                    let snapshot = run.lock().unwrap().clone();
+                    let child = snapshot.session.or_else(|| retained.get(id).map(|entry| entry.session.clone()));
+                    if id == target || snapshot.session_name == *target || child.as_ref().is_some_and(|child| child.session_id() == *target || child.session_name().as_deref() == Some(target)) {
+                        matches.push((id.clone(), run.clone()));
+                    }
+                }
+                if matches.len() != 1 {
+                    return Err(format!("RLM child selector {target:?} {} in the current parent session", if matches.is_empty() { "matches no direct child" } else { "is ambiguous" }));
+                }
+                let (id, run) = matches.pop().unwrap();
+                runs.insert(id, run);
+            }
+        }
+        if timeout_ms > 0 {
+            let settlements: Vec<_> = runs.values().filter_map(|run| {
+                let run = run.lock().unwrap();
+                (!run.settled).then(|| run.settlement.clone())
+            }).collect();
+            let wait = futures::future::join_all(settlements.iter().map(AgentMessageDeferred::wait));
+            tokio::select! {
+                _ = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms.min(2_147_483_647)), wait) => {}
+                _ = self.session_action_commit_dispose_abort.cancelled() => {}
+            }
+        }
+        let results = runs.into_values().map(|run| {
+            let run = run.lock().unwrap().clone();
+            let child = run.session.as_ref().or_else(|| retained.get(&run.id).map(|entry| &entry.session));
+            RlmCollectResultEntry {
+                rlm_child_id: run.id,
+                session_name: child.and_then(|child| child.session_name()).or(Some(run.session_name)),
+                session_dir: run.session_dir,
+                status: run.status,
+                settled: run.settled,
+                answer_preview: run.answer_preview.map(|text| compact_rlm_text(&text, 160)),
+                error: run.error.map(|text| compact_rlm_text(&text, 2000)),
+                duration_ms: run.duration_ms,
+                tool_use_count: Some(run.tool_use_count),
+                replied_since_task: child.and_then(|child| child.replied_to_parent_since_task()),
+            }
+        }).collect();
+        Ok(RlmCollectResult { results })
     }
 
     /// `_rlmChildSnapshotForRun(run, child = run.session ?? retained session)`.

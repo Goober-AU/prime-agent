@@ -34,6 +34,26 @@ use std::rc::Rc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+const MAX_HOST_EVENTS_PER_FRAME: usize = 64;
+const MAX_HOST_EVENT_TIME_PER_FRAME: Duration = Duration::from_millis(8);
+
+struct HostEventBudget {
+    started: Instant,
+    remaining: usize,
+}
+impl HostEventBudget {
+    fn new() -> Self { Self { started: Instant::now(), remaining: MAX_HOST_EVENTS_PER_FRAME } }
+    fn next<T>(&mut self, receive: &mpsc::Receiver<T>) -> Option<T> {
+        self.next_at(receive, Instant::now())
+    }
+    fn next_at<T>(&mut self, receive: &mpsc::Receiver<T>, now: Instant) -> Option<T> {
+        if self.remaining == 0 || now.saturating_duration_since(self.started) >= MAX_HOST_EVENT_TIME_PER_FRAME { return None; }
+        let event = receive.try_recv().ok()?;
+        self.remaining -= 1;
+        Some(event)
+    }
+}
+
 #[path = "native_host_autocomplete.rs"]
 mod native_autocomplete;
 #[path = "native_host_configuration.rs"]
@@ -264,6 +284,9 @@ impl Transcript {
                 self.tool_result(&result.tool_call_id, &value, result.is_error, false);
             }
             AgentMessage::Custom(message) => {
+                if matches!(&message, pi_agent_core::types::CustomAgentMessage::Custom { display: false, .. }) {
+                    return;
+                }
                 if let pi_agent_core::types::CustomAgentMessage::Custom { custom_type, details: Some(details), .. } = &message {
                     if custom_type == crate::core::agent_messages::AGENT_MESSAGE_CUSTOM_TYPE {
                         if let Ok(details) = serde_json::from_value(details.clone()) {
@@ -1873,7 +1896,9 @@ async fn run_terminal(
             }
             ui.borrow_mut().request_render();
         }
-        while let Ok(event) = receive.try_recv() {
+        // Preserve event order, but yield back to input/rendering under a continuous stream.
+        let mut event_budget = HostEventBudget::new();
+        while let Some(event) = event_budget.next(&receive) {
             if matches!(&event,
                 HostEvent::Connection(
                     wire::AgentConnectionEvent::SessionEvent { .. }
@@ -2751,29 +2776,32 @@ async fn run_terminal(
     if let Some(cancel) = command_cancel { cancel.cancel(); }
     if let Some((_, handle)) = command_dialog { handle.hide(); }
     side_pane.borrow_mut().close(connection.clone());
+    let mut cancelled_dialogs = Vec::new();
     if let Some(dialog) = extension {
         dialog.overlay.hide();
-        let _ = connection
-            .respond_to_extension_ui_request(
-                &dialog.request.id,
-                wire::AgentConnectionExtensionUiResponse::Cancelled { cancelled: true },
-            )
-            .await;
+        cancelled_dialogs.push(dialog.request.id);
     }
     for request in extension_queue {
-        let _ = connection
-            .respond_to_extension_ui_request(
-                &request.id,
-                wire::AgentConnectionExtensionUiResponse::Cancelled { cancelled: true },
-            )
-            .await;
+        cancelled_dialogs.push(request.id);
     }
     // The login in flight owns its own token (login-dialog.ts:77); cancelling it
     // here aborts a pending sign-in before the terminal is torn down.
     logins.cancel_current();
     mode.borrow_mut().shutdown().await;
     drop(guard);
-    connection.dispose().await?;
+    let returning_to_browser = mode.borrow().agents_view_request.is_some();
+    let cleanup = close_session_view(connection.clone(), cancelled_dialogs);
+    if returning_to_browser {
+        // Detach acknowledges are not a prerequisite for drawing the browser.
+        // This only disposes the UI's connection, never aborts the agent.
+        tokio::spawn(async move {
+            if let Err(error) = cleanup.await {
+                crate::modes::agents_view::agents_view_mode::log_client_error("Failed to detach session view", &error);
+            }
+        });
+    } else {
+        cleanup.await?;
+    }
     if let Some(args) = pending_relaunch {
         let status = std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
             .args(args).current_dir(mode.borrow().get_current_cwd()).status().map_err(|e| format!("Failed to relaunch optimus-rust: {e}"))?;
@@ -2789,6 +2817,18 @@ async fn run_terminal(
         Some(error) => Err(error),
         None => Ok(result),
     }
+}
+
+async fn close_session_view(connection: Arc<dyn wire::AgentConnection>, cancelled_dialogs: Vec<String>) -> Result<(), String> {
+    let cancel_dialogs = async {
+        for id in cancelled_dialogs {
+            let _ = connection.respond_to_extension_ui_request(
+                &id, wire::AgentConnectionExtensionUiResponse::Cancelled { cancelled: true },
+            ).await;
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_secs(2), cancel_dialogs).await;
+    connection.dispose().await
 }
 
 #[derive(Clone, Copy)]
@@ -4888,6 +4928,59 @@ mod tests {
         ) -> Box<dyn Fn() + Send + Sync> {
             Box::new(|| {})
         }
+    }
+
+    #[test]
+    fn hidden_custom_context_is_not_rendered_live_or_after_reopen() {
+        use pi_agent_core::types::{CustomAgentMessage, CustomMessageContent};
+        let mode = Rc::new(RefCell::new(stash_mode("visibility-test")));
+        let hidden = AgentMessage::Custom(CustomAgentMessage::Custom {
+            custom_type: "harness_state".into(),
+            content: CustomMessageContent::Text("private model context".into()),
+            display: false, details: None, timestamp: 1,
+        });
+        let visible = AgentMessage::Custom(CustomAgentMessage::Custom {
+            custom_type: "notice".into(),
+            content: CustomMessageContent::Text("visible notice".into()),
+            display: true, details: None, timestamp: 2,
+        });
+        let mut transcript = Transcript::new(mode);
+        transcript.message(hidden.clone(), true);
+        assert!(transcript.rows.is_empty());
+        transcript.message(visible.clone(), false);
+        assert_eq!(transcript.rows.len(), 1);
+        let messages = vec![hidden.clone(), visible.clone()];
+        transcript.replace(messages.clone());
+        assert_eq!(transcript.rows.len(), 1);
+        transcript.replace_history(messages.clone(), 2.0);
+        assert_eq!(transcript.history.as_ref().unwrap().rows.len(), 1);
+        assert_eq!(messages, vec![hidden, visible], "rendering must not modify model context");
+        let rendered = transcript.render(100.0).join("\n");
+        assert!(rendered.contains("visible notice"));
+        assert!(!rendered.contains("private model context"));
+    }
+
+    #[test]
+    fn event_budget_yields_without_dropping_or_reordering_events() {
+        let (send, receive) = mpsc::channel();
+        for index in 0..MAX_HOST_EVENTS_PER_FRAME + 3 { send.send(index).unwrap(); }
+        let mut budget = HostEventBudget::new();
+        let frame_start = budget.started;
+        let mut drained = Vec::new();
+        while let Some(event) = budget.next_at(&receive, frame_start) { drained.push(event); }
+        assert_eq!(drained.len(), MAX_HOST_EVENTS_PER_FRAME);
+        let mut expired = HostEventBudget { started: frame_start, remaining: 1 };
+        assert_eq!(expired.next_at(&receive, frame_start + MAX_HOST_EVENT_TIME_PER_FRAME), None);
+        let rest: Vec<_> = receive.try_iter().collect();
+        drained.extend(rest);
+        assert_eq!(drained, (0..MAX_HOST_EVENTS_PER_FRAME + 3).collect::<Vec<_>>());
+    }
+
+    #[tokio::test]
+    async fn session_view_cleanup_only_detaches_and_never_aborts_work() {
+        let recorder = Arc::new(RecordingConnection::new());
+        close_session_view(recorder.clone(), Vec::new()).await.unwrap();
+        assert_eq!(recorder.calls().iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), vec!["dispose"]);
     }
 
     #[test]

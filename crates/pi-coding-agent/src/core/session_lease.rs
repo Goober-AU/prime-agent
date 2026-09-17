@@ -294,8 +294,12 @@ fn run_process_query(
 }
 
 pub fn get_windows_process_start_id(pid: i64, query: Option<&ProcessQuery>) -> Option<String> {
-    if pid <= 0 {
+    if pid <= 0 || pid > u32::MAX as i64 {
         return None;
+    }
+    #[cfg(windows)]
+    if query.is_none() {
+        return windows_process_start_id_native(pid as u32);
     }
     let script = format!(
         "([System.Diagnostics.Process]::GetProcessById({pid})).StartTime.ToUniversalTime().Ticks"
@@ -317,6 +321,28 @@ pub fn get_windows_process_start_id(pid: i64, query: Option<&ProcessQuery>) -> O
         Some(format!("win:{start_ticks}"))
     } else {
         None
+    }
+}
+
+#[cfg(windows)]
+fn windows_process_start_id_native(pid: u32) -> Option<String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // FILETIME counts 100ns since 1601; existing persisted identities use .NET
+    // ticks since 0001. Keep that exact format so leases survive this upgrade.
+    const DOTNET_FILETIME_OFFSET: u64 = 504_911_232_000_000_000;
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() { return None; }
+        let mut created = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut exited = created;
+        let mut kernel = created;
+        let mut user = created;
+        let ok = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user);
+        CloseHandle(handle);
+        if ok == 0 { return None; }
+        let ticks = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+        ticks.checked_add(DOTNET_FILETIME_OFFSET).map(|ticks| format!("win:{ticks}"))
     }
 }
 
@@ -951,6 +977,24 @@ mod tests {
         assert!(read_lease_owner(&dir).is_err());
         std::fs::write(Path::new(&dir).join(LEASE_OWNER_FILE), "{\"version\":2}").unwrap();
         assert!(read_lease_owner(&dir).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn backlog_native_process_identity_matches_persisted_powershell_ticks() {
+        let pid = std::process::id() as i64;
+        let legacy_started = std::time::Instant::now();
+        let legacy = get_windows_process_start_id(pid, Some(&run_process_query)).expect("PowerShell identity");
+        let legacy_elapsed = legacy_started.elapsed();
+        let native_started = std::time::Instant::now();
+        for _ in 0..100 {
+            assert_eq!(get_windows_process_start_id(pid, None).as_deref(), Some(legacy.as_str()));
+        }
+        eprintln!("identity lookup: legacy one={legacy_elapsed:?}; native hundred={:?}", native_started.elapsed());
+        assert_eq!(get_windows_process_start_id(0, None), None);
+        assert_eq!(get_windows_process_start_id(-1, None), None);
+        assert_eq!(get_windows_process_start_id(u32::MAX as i64 + 1, None), None);
+        assert_eq!(get_windows_process_start_id(u32::MAX as i64, None), None);
     }
 
     #[test]

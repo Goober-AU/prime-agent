@@ -484,8 +484,8 @@ fn session_summary_stub(summary: &serde_json::Value) -> SessionSummaryStub {
     }
 }
 
-// Idle-but-loaded sessions reload from disk on the fresh daemon, so only a busy
-// session blocks replacing a stale daemon.
+// A reachable stale peer requires an explicit shutdown: a client-side idle
+// probe cannot fence new admissions or identify the peer on a later connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StaleDaemonDisposition {
     Current,
@@ -502,18 +502,6 @@ async fn shutdown_stale_daemon_if_not_busy(socket_path: &str) -> StaleDaemonDisp
         };
     }
 
-    let mut loaded_session_count = 0usize;
-    let mut has_busy_sessions = true;
-    // An unresponsive daemon is not safe to replace.
-    if let Ok(result) = query_active_daemon_sessions(socket_path, true).await {
-        loaded_session_count = result.sessions.len();
-        has_busy_sessions = result.busy_client_owned_session_count != 0
-            || result
-                .sessions
-                .iter()
-                .any(|summary| is_session_busy(&session_summary_stub(summary)));
-    }
-
     let hello = daemon_wait_for_hello(socket_path, 2000.0).await.ok();
     if let Some(hello) = &hello {
         if is_current_daemon_hello(hello) {
@@ -524,22 +512,11 @@ async fn shutdown_stale_daemon_if_not_busy(socket_path: &str) -> StaleDaemonDisp
             return StaleDaemonDisposition::Current;
         }
     }
-    if has_busy_sessions {
-        log_daemon_launch(&format!(
-            "refusing to replace stale daemon on {}: busy session(s) present",
-            socket_path
-        ));
-        return StaleDaemonDisposition::Busy;
-    }
     log_daemon_launch(&format!(
-        "replacing stale daemon on {} (idle): {} loaded session(s) will reload",
-        socket_path, loaded_session_count
+        "refusing automatic replacement of reachable stale daemon on {}: explicit shutdown is required to preserve work admitted after a probe",
+        socket_path
     ));
-    if shutdown_connected_daemon_and_wait(socket_path, 5000.0, hello.as_ref()).await {
-        StaleDaemonDisposition::Stopped
-    } else {
-        StaleDaemonDisposition::Busy
-    }
+    StaleDaemonDisposition::Busy
 }
 
 async fn ensure_daemon_running(socket_path: &str, spawn_cwd: Option<&str>) -> Result<(), String> {
@@ -1441,6 +1418,41 @@ fn signal_name(signal: i32) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn backlog_stale_or_replaced_peer_never_receives_automatic_shutdown() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        use tokio::net::windows::named_pipe::ServerOptions;
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let socket = format!(r"\\.\pipe\optimus-backlog-stale-{}", uuid::Uuid::new_v4());
+        let mut server = ServerOptions::new().first_pipe_instance(true).create(&socket).unwrap();
+        let commands = Arc::new(AtomicUsize::new(0));
+        let observed = commands.clone();
+        let listen_path = socket.clone();
+        let task = tokio::spawn(async move {
+            let mut identity = 100;
+            loop {
+                server.connect().await.unwrap();
+                let connected = server;
+                server = ServerOptions::new().create(&listen_path).unwrap();
+                identity += 1;
+                let observed = observed.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(connected);
+                    let hello = serde_json::json!({"type":"daemon_hello","protocol":{"version":DAEMON_PROTOCOL_VERSION},"schemaId":"stale","appVersion":"0.0.0","supervisorPid":identity});
+                    if writer.write_all(format!("{hello}\n").as_bytes()).await.is_err() { return; }
+                    let mut line = String::new();
+                    if BufReader::new(reader).read_line(&mut line).await.unwrap_or(0) > 0 { observed.fetch_add(1, Ordering::SeqCst); }
+                });
+            }
+        });
+        assert_eq!(shutdown_stale_daemon_if_not_busy(&socket).await, StaleDaemonDisposition::Busy);
+        assert_eq!(commands.load(Ordering::SeqCst), 0, "automatic stale replacement must dispatch no mutation to either identity");
+        assert!(can_connect_to_daemon(&socket, 500.0).await);
+        task.abort();
+        let _ = task.await;
+    }
 
     #[cfg(windows)]
     #[tokio::test]

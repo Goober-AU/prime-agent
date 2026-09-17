@@ -72,6 +72,48 @@ pub struct RlmListSubagentsResult {
     pub subagents: Vec<RlmSubagentRegistryEntry>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RlmCollectResultEntry {
+    pub rlm_child_id: String,
+    pub session_name: Option<String>,
+    pub session_dir: String,
+    pub status: String,
+    pub settled: bool,
+    pub answer_preview: Option<String>,
+    pub error: Option<String>,
+    pub duration_ms: Option<f64>,
+    pub tool_use_count: Option<f64>,
+    pub replied_since_task: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RlmCollectResult { pub results: Vec<RlmCollectResultEntry> }
+
+pub type RlmCollectHandler = Arc<dyn Fn(Vec<String>, u64) -> BoxFuture<Result<RlmCollectResult, String>> + Send + Sync>;
+
+pub fn create_rlm_collect_host_handler(handler: RlmCollectHandler) -> HostRequestHandler {
+    Arc::new(move |payload| {
+        let handler = handler.clone();
+        Box::pin(async move {
+            let targets = match payload.get("targets") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(Value::Array(values)) => values.iter().map(|value| {
+                    value.as_str().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
+                        .ok_or_else(|| KernelError::new("rlm.collect targets must be non-empty strings"))
+                }).collect::<Result<Vec<_>, _>>()?,
+                _ => return Err(KernelError::new("rlm.collect targets must be an array of child ids or names")),
+            };
+            let timeout_ms = match payload.get("timeout_ms") {
+                None | Some(Value::Null) => 0,
+                Some(value) => value.as_u64().filter(|value| *value <= 2_147_483_647)
+                    .ok_or_else(|| KernelError::new("rlm.collect timeout_ms must be a non-negative integer up to 2147483647"))?,
+            };
+            let result = handler(targets, timeout_ms).await.map_err(KernelError::new)?;
+            serde_json::to_value(result).map_err(|error| KernelError::new(error.to_string()))
+        })
+    })
+}
+
 /// `interface RlmDeleteSubagentResult`.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RlmDeleteSubagentResult {
@@ -817,6 +859,25 @@ mod tests {
             handler(json!({ "limit": 1 })).await.unwrap_err().to_string(),
             "rlm.find_models query must be a string"
         );
+    }
+
+    #[tokio::test]
+    async fn backlog_collect_validates_targets_and_deadline_without_side_effects() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler = create_rlm_collect_host_handler(Arc::new({
+            let calls = calls.clone();
+            move |targets, timeout| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(targets, vec!["child"]);
+                assert_eq!(timeout, 0);
+                Box::pin(async { Ok(RlmCollectResult::default()) })
+            }
+        }));
+        assert_eq!(handler(json!({"targets": [" child "]})).await.unwrap(), json!({"results": []}));
+        for payload in [json!({"targets": true}), json!({"targets": [""]}), json!({"timeout_ms": -1}), json!({"timeout_ms": 0.5}), json!({"timeout_ms": true}), json!({"timeout_ms": 2147483648_u64})] {
+            assert!(handler(payload).await.is_err());
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

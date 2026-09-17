@@ -2200,11 +2200,21 @@ fn rethrow_daemon_connection_error(error: &DaemonClientConnectionError, host: &d
 }
 
 /// `createDaemonClientConnection(options)`.
+struct PendingDaemonViewer(Option<Arc<DaemonClient>>);
+impl Drop for PendingDaemonViewer {
+    fn drop(&mut self) {
+        if let Some(client) = self.0.take() {
+            tokio::spawn(async move { client.close().await; });
+        }
+    }
+}
+
 pub async fn create_daemon_client_connection(
     options: CreateDaemonClientConnectionOptions,
 ) -> Result<(Arc<DaemonAgentConnection>, SessionSummary), DaemonClientConnectionError> {
     // Caller must have awaited ensureInteractiveDaemonRunning for this socket.
     let client = DaemonClient::create(&options.socket_path);
+    let mut pending_viewer = PendingDaemonViewer(Some(client.clone()));
     client
         .connect(DEFAULT_DAEMON_CONNECT_TIMEOUT_MS)
         .await
@@ -2231,6 +2241,7 @@ pub async fn create_daemon_client_connection(
                 client,
                 get_daemon_summary_active_session_id(&summary),
                 DaemonAgentConnectionOptions {
+                    defer_session_events: options.defer_session_events,
                     close_client_on_dispose: true,
                     direct_transport: false,
                     recover_daemon: true,
@@ -2387,7 +2398,7 @@ pub async fn create_daemon_client_connection(
     .await;
 
     match result {
-        Ok(connection) => Ok(connection),
+        Ok(connection) => { pending_viewer.0 = None; Ok(connection) },
         Err(error) => {
             client.close().await;
             Err(error)
@@ -2456,6 +2467,7 @@ impl crate::modes::interactive::onboarding::OnboardingModelRegistryReader
 /// `createDaemonClientConnection(options)`.
 #[derive(Clone)]
 pub struct CreateDaemonClientConnectionOptions {
+    pub defer_session_events: bool,
     pub socket_path: String,
     pub config: AgentSessionRuntimeConfig,
     pub session_path: Option<String>,
@@ -3204,6 +3216,7 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
                 )
                 .is_none();
         let connection = match create_daemon_client_connection(CreateDaemonClientConnectionOptions {
+            defer_session_events: true,
             socket_path: daemon_socket_path.clone(),
             config: default_session_config.clone(),
             session_path: get_interactive_daemon_session_path(
@@ -3331,6 +3344,7 @@ pub async fn main(args: Vec<String>, options: MainOptions, host: &dyn MainHost) 
 
         daemon_ready = await_daemon_ready(daemon_ready).await;
         let connection = match create_daemon_client_connection(CreateDaemonClientConnectionOptions {
+            defer_session_events: false,
             socket_path: daemon_socket_path.clone(),
             config: default_session_config.clone(),
             session_path: if parsed.no_session == Some(true) {

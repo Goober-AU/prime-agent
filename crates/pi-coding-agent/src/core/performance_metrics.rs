@@ -214,6 +214,11 @@ impl PerformanceMetricFileIo for DefaultPerformanceMetricFileIo {
                 .map_err(PerformanceMetricIoError::from_io)?;
             file.write_all(data.as_bytes())
                 .await
+                .map_err(PerformanceMetricIoError::from_io)?;
+            // Tokio may still have a blocking write pending after write_all.
+            // Complete it before the recorder reports a successful drain.
+            file.flush()
+                .await
                 .map_err(PerformanceMetricIoError::from_io)
         })
     }
@@ -637,7 +642,7 @@ impl LocalPerformanceMetricRecorder {
     /// `flush()`.
     pub fn flush(&self) -> pi_ai::types::BoxFuture<()> {
         let inner = Arc::clone(&self.inner);
-        Box::pin(async move { inner.flush_once().await })
+        Box::pin(async move { inner.flush().await })
     }
 
     /// `close()`.
@@ -1199,6 +1204,80 @@ mod tests {
             }
         }
         records
+    }
+
+    #[tokio::test]
+    async fn backlog_real_metric_append_is_visible_when_await_completes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("visible.jsonl");
+        let io = DefaultPerformanceMetricFileIo;
+        let mut expected = String::new();
+        for sequence in 0..16 {
+            let line = format!("{{\"sequence\":{sequence},\"value\":\"{}\"}}\n", "metrics-λ".repeat(32));
+            expected.push_str(&line);
+            io.append(path.to_str().unwrap(), &line).await.unwrap();
+            // A synchronous reader immediately after await must see every byte;
+            // no sleep or subsequent async IO may finish a detached file write.
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn backlog_public_metric_flush_joins_the_in_flight_drain() {
+        struct GatedFileIo {
+            memory: MemoryFileIo,
+            release: Arc<tokio::sync::Semaphore>,
+            append_calls: Arc<std::sync::atomic::AtomicUsize>,
+        }
+        impl PerformanceMetricFileIo for GatedFileIo {
+            fn mkdir(&self, path: &str) -> pi_ai::types::BoxFuture<Result<(), PerformanceMetricIoError>> { self.memory.mkdir(path) }
+            fn size(&self, path: &str) -> pi_ai::types::BoxFuture<Result<Option<u64>, PerformanceMetricIoError>> { self.memory.size(path) }
+            fn rename(&self, source: &str, destination: &str) -> pi_ai::types::BoxFuture<Result<(), PerformanceMetricIoError>> { self.memory.rename(source, destination) }
+            fn remove(&self, path: &str) -> pi_ai::types::BoxFuture<Result<(), PerformanceMetricIoError>> { self.memory.remove(path) }
+            fn append(&self, path: &str, data: &str) -> pi_ai::types::BoxFuture<Result<(), PerformanceMetricIoError>> {
+                let write = self.memory.append(path, data);
+                let release = self.release.clone();
+                let calls = self.append_calls.clone();
+                Box::pin(async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    release.acquire().await.unwrap().forget();
+                    write.await
+                })
+            }
+        }
+        let io = Arc::new(GatedFileIo {
+            memory: MemoryFileIo::new(),
+            release: Arc::new(tokio::sync::Semaphore::new(0)),
+            append_calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let recorder = LocalPerformanceMetricRecorder::new(LocalPerformanceMetricRecorderOptions {
+            directory: "C:/isolated/performance-metrics".into(), session_id: "flush-join".into(),
+            flush_interval_ms: Some(60_000), file_io: Some(io.clone()), ..Default::default()
+        });
+        recorder.record(sample_event("first"));
+        let mut first = recorder.flush();
+        assert!(futures::poll!(first.as_mut()).is_pending());
+        assert_eq!(io.append_calls.load(Ordering::SeqCst), 1);
+
+        // The first flush removed its records from the buffer but has not written
+        // them. A public flush must join that flight, not return on an empty queue.
+        let mut joined = recorder.flush();
+        assert!(futures::poll!(joined.as_mut()).is_pending());
+        recorder.record(sample_event("second"));
+        let mut later = recorder.flush();
+        assert!(futures::poll!(later.as_mut()).is_pending());
+        assert_eq!(io.append_calls.load(Ordering::SeqCst), 1, "no overlapping drain");
+        assert!(parse_records(&io.memory).is_empty());
+        io.release.add_permits(2);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            futures::join!(first, joined, later);
+        }).await.expect("all public flush waiters must settle");
+        let records = parse_records(&io.memory);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["correlation"]["logicalRequestId"], "first");
+        assert_eq!(records[1]["correlation"]["logicalRequestId"], "second");
+        assert_eq!(io.append_calls.load(Ordering::SeqCst), 2);
+        recorder.close().await;
     }
 
     #[tokio::test]

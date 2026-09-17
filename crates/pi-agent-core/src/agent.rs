@@ -350,6 +350,13 @@ impl Agent {
             .clone()
     }
 
+    /// Read a small state projection without cloning the conversation. The
+    /// callback must not call back into the agent or hold this lock across IO.
+    pub fn read_state<T>(&self, read: impl FnOnce(&AgentState) -> T) -> T {
+        let state = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        read(&state)
+    }
+
     /// `set state` for the accessor fields: assigning `tools` or `messages`
     /// copies the provided top-level array.
     pub fn set_state(&self, mut state: AgentState) {

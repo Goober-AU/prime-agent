@@ -548,6 +548,7 @@ impl ScriptedDaemonFixture {
                     kind: Some("top-level".to_string()),
                     ..AgentSessionRuntimeMetadata::default()
                 },
+                snapshot_boundary: StdMutex::new(None),
             }),
         );
         let (sender, outbound) = mpsc::unbounded_channel();

@@ -250,6 +250,16 @@ pub trait AgentHandle: Send + Sync {
     /// Snapshot the live callbacks copied by TypeScript's standalone side agent.
     fn side_question_options(&self) -> Option<pi_agent_core::agent::AgentOptions> { None }
     fn state(&self) -> AgentState;
+    fn model(&self) -> Model { self.state().model }
+    fn thinking_level(&self) -> ThinkingLevel { self.state().thinking_level }
+    fn service_tier(&self) -> ServiceTier { self.state().service_tier }
+    fn system_prompt(&self) -> String { self.state().system_prompt }
+    fn message_count(&self) -> usize { self.state().messages.len() }
+    fn messages(&self) -> Vec<AgentMessage> { self.state().messages }
+    fn streaming_message(&self) -> Option<AgentMessage> { self.state().streaming_message }
+    fn active_tool_names(&self) -> Vec<String> {
+        self.state().tools.unwrap_or_default().into_iter().map(|tool| tool.name).collect()
+    }
     fn set_state(&self, state: AgentState);
     fn subscribe(&self, listener: Arc<dyn Fn(AgentEvent, Option<CancellationToken>) -> BoxFuture<()> + Send + Sync>) -> Box<dyn Fn() + Send + Sync>;
     fn set_before_tool_call(&self, hook: BeforeToolCallHook);
@@ -1061,6 +1071,16 @@ pub struct RestoredPromptInput {
 /// `SESSION_ACTION_RECOVERY_FORMAT_VERSION`.
 pub const SESSION_ACTION_RECOVERY_FORMAT_VERSION: i64 = 1;
 
+fn action_source(source: Option<&str>) -> crate::core::session_action_store::ActionSource {
+    use crate::core::session_action_store::{ActionSource, InputSource};
+    match source {
+        Some("interactive") => ActionSource::Input(InputSource::Interactive),
+        Some("rpc") => ActionSource::Input(InputSource::Rpc),
+        Some("extension") => ActionSource::Input(InputSource::Extension),
+        _ => ActionSource::Internal,
+    }
+}
+
 /// `SessionActionRecoveryRecord`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1111,6 +1131,8 @@ pub enum SessionActionRecoveryPayload {
 pub struct SessionActionRecoveryAction {
     pub id: String,
     pub source: crate::core::session_action_store::ActionSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<crate::core::session_action_store::SessionActionPriority>,
     pub delivery: DeliveryPolicy,
     pub wake: WakePolicy,
     pub payload: SessionActionRecoveryPayload,
@@ -7113,27 +7135,27 @@ impl AgentSession {
 
     /// `get model()`.
     pub fn model(&self) -> Option<Model> {
-        Some(self.agent.state().model)
+        Some(self.agent.model())
     }
 
     /// `get thinkingLevel()`.
     pub fn thinking_level(&self) -> ThinkingLevel {
-        self.agent.state().thinking_level
+        self.agent.thinking_level()
     }
 
     /// `get serviceTier()`.
     pub fn service_tier(&self) -> ServiceTier {
-        self.agent.state().service_tier
+        self.agent.service_tier()
     }
 
     /// `get isStreaming()`.
     pub fn is_streaming(&self) -> bool {
-        self.agent.state().is_streaming
+        self.agent.is_streaming()
     }
 
     /// `get systemPrompt()`.
     pub fn system_prompt(&self) -> String {
-        self.agent.state().system_prompt
+        self.agent.system_prompt()
     }
 
     /// `get retryAttempt()`.
@@ -7143,11 +7165,7 @@ impl AgentSession {
 
     /// `getActiveToolNames()`.
     pub fn get_active_tool_names(&self) -> Vec<String> {
-        self.agent
-            .state()
-            .tools
-            .map(|tools| tools.into_iter().map(|tool| tool.name).collect())
-            .unwrap_or_default()
+        self.agent.active_tool_names()
     }
 
     /// `getAllTools()`.
@@ -7214,7 +7232,15 @@ impl AgentSession {
 
     /// `get messages()`.
     pub fn messages(&self) -> Vec<AgentMessage> {
-        self.agent.state().messages
+        self.agent.messages()
+    }
+
+    pub fn message_count(&self) -> usize {
+        self.agent.message_count()
+    }
+
+    pub fn streaming_message(&self) -> Option<AgentMessage> {
+        self.agent.streaming_message()
     }
 
     /// `buildSessionContext`.
@@ -8851,6 +8877,7 @@ impl AgentSession {
                 queue_key,
                 agent_message_id,
                 resume_if_idle,
+                source: Some("interactive".to_string()),
                 ..Default::default()
             }),
         )
@@ -8895,6 +8922,7 @@ impl AgentSession {
                     queue_key,
                     agent_message_id,
                     resume_if_idle,
+                    source: Some("interactive".to_string()),
                     ..Default::default()
                 }),
             )
@@ -8993,6 +9021,7 @@ impl AgentSession {
             let mut restored_action = restored_action;
             restored_action.wake = action.wake;
             restored_action.source = action.source;
+            restored_action.priority = action.priority;
             // TS 5898: restored actions are admitted with `{ restore: true }`.
             match self.admit_session_input_with_options(restored_action, false, true, false, true) {
                 Ok(_) => restored += 1,
@@ -9241,7 +9270,8 @@ impl AgentSession {
         };
         QueuedSessionAction {
             id: id.clone(),
-            source: crate::core::session_action_store::ActionSource::Internal,
+            source: action_source(options.source.as_deref()),
+            priority: None,
             delivery: self.delivery_policy(schedule),
             wake: WakePolicy::Immediate,
             payload: QueuedActionPayload::Turn(payload),
@@ -9262,10 +9292,10 @@ impl AgentSession {
         agent_message_id: Option<String>,
         source: Option<String>,
     ) -> QueuedSessionAction {
-        let _ = source;
         QueuedSessionAction {
             id: uuid::Uuid::new_v4().to_string(),
-            source: crate::core::session_action_store::ActionSource::Internal,
+            source: action_source(source.as_deref()),
+            priority: None,
             delivery: self.delivery_policy(schedule),
             wake: WakePolicy::Immediate,
             payload: QueuedActionPayload::SessionCommand(PreparedCommandPayload {
@@ -9326,7 +9356,7 @@ impl AgentSession {
     /// `_admitSessionInput(action, { restore, front, wake, immediatelyEligible })`.
     fn admit_session_input_with_options(
         self: &Arc<Self>,
-        action: QueuedSessionAction,
+        mut action: QueuedSessionAction,
         immediately_eligible: bool,
         restore: bool,
         front: bool,
@@ -9382,7 +9412,10 @@ impl AgentSession {
         let had_no_unfinished = self.action_store.lock().unwrap().unfinished_actions(None).is_empty();
         let mut store = self.action_store.lock().unwrap();
         if front {
+            action.priority = Some(crate::core::session_action_store::SessionActionPriority::Pinned);
             store.enqueue_front(action.clone())?;
+        } else if restore {
+            store.enqueue_tail(action.clone())?;
         } else {
             store.enqueue(action.clone())?;
         }
@@ -10986,8 +11019,13 @@ impl AgentSession {
                 client.owner_session_id().as_deref() == Some(self.session_id().as_str())
                     && client.has_background_work()
             });
-        kernel_background_work
-            || self.is_streaming()
+        kernel_background_work || self.is_foreground_active()
+    }
+
+    /// Display activity only. Background helpers still keep the session alive
+    /// through is_session_active, but are not model/tool foreground work.
+    pub fn is_foreground_active(&self) -> bool {
+        self.is_streaming()
             || self.is_compacting()
             || self.is_retrying()
             || self.is_bash_running()
@@ -12559,18 +12597,23 @@ impl AgentSession {
                     return;
                 }
             }
-            if self.has_unfinished_actions() && self.is_queued_work_suspended() {
-                // TS 7543-7555: a suspended queue cannot drain, so park on a
-                // checkpoint waiter; racing the settlement releases a cancelled run.
+            if self.has_unfinished_actions() && self.is_busy_for_session_input("pump") {
+                // A blocked pump cannot drain. Park until its busy condition
+                // changes instead of repeatedly scheduling already-resolved work.
                 let wake = Arc::new(tokio::sync::Notify::new());
                 let entry: Arc<dyn Fn() + Send + Sync> = {
                     let wake = wake.clone();
-                    Arc::new(move || wake.notify_waiters())
+                    Arc::new(move || wake.notify_one())
                 };
                 self.session_input_checkpoint_waiters
                     .lock()
                     .unwrap()
                     .push(entry.clone());
+                // A clear can race waiter registration; a stored permit also
+                // prevents losing a notification before select begins polling.
+                if !self.is_busy_for_session_input("pump") {
+                    wake.notify_one();
+                }
                 let settled = {
                     settlement.map(|settlement| settlement.lock().unwrap().deferred.clone())
                 };
@@ -14921,6 +14964,7 @@ fn session_action_recovery_of(action: &QueuedSessionAction) -> Option<SessionAct
     Some(SessionActionRecoveryAction {
         id: action.id.clone(),
         source: action.source,
+        priority: Some(action.effective_priority()),
         delivery: action.delivery,
         wake: action.wake,
         queue_key: action.queue_key.clone(),
@@ -16416,7 +16460,7 @@ mod post_compaction_continuation_tests {
         }
 
         fn is_streaming(&self) -> bool {
-            false
+            self.state.lock().unwrap().is_streaming
         }
 
         fn has_queued_messages(&self) -> bool {
@@ -20838,6 +20882,110 @@ mod rlm_session_t10_tests {
         t10_session_with(agent, depth, None)
     }
 
+    #[tokio::test]
+    async fn backlog_idle_wait_parks_while_external_work_blocks_input() {
+        let session = t10_session(ScriptedAgent::new(), 0);
+        session.user_bash_running.store(true, Ordering::SeqCst);
+        let action = session.create_prepared_turn_action(SESSION_INPUT_SCHEDULE_STEER, "queued", None, None);
+        session.action_store.lock().unwrap().enqueue(action).unwrap();
+        let waiting = tokio::spawn({ let session = session.clone(); async move { session.wait_for_idle_or_settlement(None).await } });
+        tokio::task::yield_now().await;
+        assert_eq!(session.session_input_checkpoint_waiters.lock().unwrap().len(), 1);
+        assert!(!waiting.is_finished());
+        assert_eq!(session.action_store.lock().unwrap().queued_actions(None).len(), 1);
+        session.action_store.lock().unwrap().remove(&|_| true, None).unwrap();
+        session.user_bash_running.store(false, Ordering::SeqCst);
+        session.notify_session_input_checkpoint_change();
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiting).await.unwrap().unwrap();
+        assert!(session.session_input_checkpoint_waiters.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn backlog_collect_reads_retained_completed_and_pending_children_without_queue_delivery() {
+        let session = t10_session(ScriptedAgent::new(), 0);
+        let child = t10_session(ScriptedAgent::new(), 1);
+        let mut completed = empty_rlm_child_run("finished");
+        completed.status = "done".into();
+        completed.session_name = "builder".into();
+        completed.answer_preview = Some("a".repeat(1000));
+        completed.settled = true;
+        completed.settlement.resolve();
+        session.rlm_child_sessions.lock().unwrap().insert("finished".into(), RetainedRlmChild { session: child, run: Some(Arc::new(Mutex::new(completed))) });
+        let mut pending = empty_rlm_child_run("pending");
+        pending.status = "running".into();
+        pending.session_name = "digger".into();
+        pending.settled = false;
+        let pending = Arc::new(Mutex::new(pending));
+        session.active_rlm_child_runs.lock().unwrap().insert("pending".into(), pending.clone());
+        let queue_before = session.unfinished_action_count();
+        let all = session.collect_rlm_children(&[], 0).await.unwrap();
+        assert_eq!(all.results.len(), 2);
+        assert!(all.results[0].settled);
+        assert!(all.results[0].answer_preview.as_ref().unwrap().chars().count() <= 160);
+        let timed = session.collect_rlm_children(&["digger".into()], 10).await.unwrap();
+        assert!(!timed.results[0].settled);
+        {
+            let mut pending = pending.lock().unwrap();
+            pending.status = "error".into();
+            pending.error = Some("failed".into());
+            pending.settled = true;
+            pending.settlement.reject("failed".into());
+        }
+        let failed = session.collect_rlm_children(&["pending".into(), "pending".into()], 100).await.unwrap();
+        assert_eq!(failed.results.len(), 1);
+        assert_eq!(failed.results[0].status, "error");
+        assert!(session.collect_rlm_children(&["not-a-child".into()], 0).await.is_err());
+        assert_eq!(session.unfinished_action_count(), queue_before);
+        assert!(session.messages().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires a managed Python; run through the isolated acceptance harness"]
+    async fn backlog_collect_round_trip_uses_packaged_python_and_real_host_bridge() {
+        use crate::core::kernel::shared::{ExecuteOptions, ExecuteStatus, KernelClient, KernelManagerOptions, KernelShutdownOptions, KernelStartOptions};
+
+        let python = std::env::var("PRIME_AGENT_KERNEL_PYTHON").expect("isolated harness must provide kernel Python");
+        let runtime_src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..").join("prime-agent-runtime/src").canonicalize().unwrap();
+        let scratch = tempfile::Builder::new().prefix("backlog-collect-kernel-").tempdir().unwrap();
+        let session = t10_session(ScriptedAgent::new(), 0);
+        let mut child = empty_rlm_child_run("ready-child");
+        child.session_name = "builder".into();
+        child.status = "done".into();
+        child.answer_preview = Some("bounded result".into());
+        child.settled = true;
+        child.settlement.resolve();
+        session.active_rlm_child_runs.lock().unwrap().insert(child.id.clone(), Arc::new(Mutex::new(child)));
+        let env = [
+            ("PYTHONPATH".into(), runtime_src.to_string_lossy().into_owned()),
+            ("PYTHONDONTWRITEBYTECODE".into(), "1".into()),
+            ("PYTHONNOUSERSITE".into(), "1".into()),
+        ].into_iter().collect();
+        let kernel = crate::core::kernel::repl_manager::new_repl_kernel_manager(KernelManagerOptions {
+            python: Some(python), cwd: Some(scratch.path().to_string_lossy().into_owned()),
+            env: Some(env), session_id: Some(format!("backlog-collect-{}", uuid::Uuid::new_v4())),
+            host_handlers: Some(session.create_kernel_host_handlers()), snapshot: None,
+            ..Default::default()
+        });
+        let expected_module = serde_json::to_string(&runtime_src.join("rlm/__init__.py").to_string_lossy()).unwrap();
+        let code = format!(
+            "import rlm\nfrom pathlib import Path\nassert Path(rlm.__file__).resolve() == Path({expected_module}).resolve(), rlm.__file__\nassert callable(rlm.collect) and callable(rlm.rlm.collect)\ncollected = await rlm.collect('builder', timeout_ms=0)\nassert len(collected) == 1\nassert collected[0].rlm_child_id == 'ready-child'\nassert collected[0].status == 'done' and collected[0].settled\nassert collected[0].answer_preview == 'bounded result'\nprint('PACKAGED_COLLECT_HOST_BRIDGE_OK')"
+        );
+        let result = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+            kernel.start(KernelStartOptions::default()).await?;
+            kernel.execute(code, ExecuteOptions::default()).await
+        }).await;
+        let shutdown = tokio::time::timeout(std::time::Duration::from_secs(10), kernel.shutdown(KernelShutdownOptions::default())).await;
+        if !matches!(shutdown, Ok(Ok(true))) { kernel.kill().await; }
+        assert!(!kernel.is_running(), "private kernel must be stopped before checking results");
+        let result = result.expect("private kernel round trip deadline").expect("private kernel round trip");
+        assert_eq!(result.status, ExecuteStatus::Ok, "{result:?}");
+        assert!(result.stdout.contains("PACKAGED_COLLECT_HOST_BRIDGE_OK"), "{result:?}");
+        assert_eq!(session.unfinished_action_count(), 0);
+        assert!(session.messages().is_empty(), "collect must not inject parent messages");
+        session.dispose_async(None).await;
+    }
+
     fn t10_session_with(
         agent: Arc<ScriptedAgent>,
         depth: i64,
@@ -21113,6 +21261,7 @@ mod rlm_session_t10_tests {
     async fn real_host_handlers_are_registered() {
         let session = t10_session(ScriptedAgent::new(), 0);
         let handlers = session.create_kernel_host_handlers();
+        assert!(handlers.contains_key("rlm.collect"));
         assert!(
             handlers.contains_key("bash.completed"),
             "DEFECT D-01: create_kernel_host_handlers must register \"bash.completed\" (TS agent-session.ts:10208); registered kinds: {:?}",
@@ -21957,6 +22106,7 @@ mod rlm_session_t10_tests {
             !session.is_streaming() && !session.is_compacting(),
             "the background-helper case must not become a model activity axis (TS 7167-7168)"
         );
+        assert!(!session.is_foreground_active(), "background helpers keep residency without being shown as model work");
         crate::core::kernel::shared::live_kernels_delete(&owned);
 
         // A background helper owned by ANOTHER session must not make this one
@@ -21975,6 +22125,7 @@ mod rlm_session_t10_tests {
         // (b) bash only.
         let session = t10_session(ScriptedAgent::new(), 0);
         session.user_bash_running.store(true, Ordering::SeqCst);
+        assert!(session.is_foreground_active());
         assert!(
             session.is_session_active(),
             "DEFECT D-09: isBashRunning must make the session active (TS 7170, agent-session.ts:12531)"
@@ -21988,6 +22139,7 @@ mod rlm_session_t10_tests {
             .fetch_add(1, Ordering::SeqCst);
         let settled: BoxFuture<Result<(), String>> = Box::pin(async { Ok(()) });
         *session.refine_in_flight.lock().unwrap() = Some((test_gen, settled.shared()));
+        assert!(session.is_foreground_active());
         assert!(
             session.is_session_active(),
             "DEFECT D-09: _refineInFlight must make the session active (TS 7171)"
@@ -21997,6 +22149,7 @@ mod rlm_session_t10_tests {
         // (d) branch summary only.
         let session = t10_session(ScriptedAgent::new(), 0);
         *session.branch_summary_operation.lock().unwrap() = Some(Box::pin(async { Ok(()) }));
+        assert!(session.is_foreground_active());
         assert!(
             session.is_session_active(),
             "DEFECT D-09: _branchSummaryOperation must make the session active (TS 7172)"
@@ -22007,6 +22160,7 @@ mod rlm_session_t10_tests {
         let session = t10_session(ScriptedAgent::new(), 0);
         *session.post_compaction_continuation_settlement.lock().unwrap() =
             Some(Arc::new(Mutex::new(create_post_compaction_continuation_settlement())));
+        assert!(session.is_foreground_active());
         assert!(
             session.is_session_active(),
             "DEFECT D-09: _postCompactionContinuationSettlement must make the session active (TS 7173)"
@@ -22091,6 +22245,10 @@ mod rlm_session_t10_tests {
             crate::modes::agents_view::native_wire::is_background_only(&summary),
             "the background-helper wire shape must be recognized (native_wire.rs:46-65)"
         );
+        let mut foreground = summary.clone();
+        foreground["activity"] = serde_json::Value::String("working".into());
+        assert!(!crate::modes::agents_view::native_wire::is_background_only(&foreground),
+            "foreground refinement or branch work must not be mislabeled as a background helper");
         let normalized = crate::modes::agents_view::native_wire::normalize_browser_numbers(summary);
         assert_eq!(
             normalized.get("statusLabel").and_then(|value| value.as_str()),
