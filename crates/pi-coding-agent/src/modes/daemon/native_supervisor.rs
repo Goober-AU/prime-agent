@@ -3480,7 +3480,13 @@ fn spawn_connection<S>(supervisor: Arc<Supervisor>, stream: S) where S: AsyncRea
 }
 
 #[cfg(unix)]
-fn spawn_worker_process(program: &str, socket: &str, cwd: Option<&str>, mut environment: HashMap<String, String>) -> Result<(tokio::process::Child, std::fs::File), String> {
+fn spawn_worker_process(
+    program: &str,
+    args: Vec<String>,
+    _socket: &str,
+    cwd: Option<&str>,
+    mut environment: HashMap<String, String>,
+) -> Result<(tokio::process::Child, std::fs::File), String> {
     use std::os::fd::{AsRawFd, OwnedFd};
     // std creates close-on-exec handles, so concurrent process launches cannot
     // inherit the parent gate and keep the worker waiting for EOF.
@@ -3489,8 +3495,8 @@ fn spawn_worker_process(program: &str, socket: &str, cwd: Option<&str>, mut envi
     let write = std::fs::File::from(OwnedFd::from(write));
     environment.insert(DAEMON_WORKER_STARTUP_GATE_FD_ENV.to_string(), "3".to_string());
     let mut process = tokio::process::Command::new(program);
-    process.args(["--mode", "daemon", "--daemon-socket", socket]).env_clear().envs(environment)
-        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::inherit());
+    process.args(&args).env_clear().envs(environment)
+        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
     if let Some(cwd) = cwd { process.current_dir(cwd); }
     let fd = read.as_raw_fd();
     unsafe { process.pre_exec(move || {
