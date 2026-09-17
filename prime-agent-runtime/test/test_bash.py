@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import resource
+import shutil
 import signal
 import socket
 import subprocess
@@ -21,6 +22,16 @@ from rlm import bash
 # The package re-exports the bash() function under the same name, so reach the
 # module through sys.modules for internals.
 bash_module = sys.modules["rlm.bash"]
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    return True
 
 
 def _win_spawn(procs=None, resume=True):
@@ -482,6 +493,45 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
             if bash_module._IS_POSIX:
                 with self.assertRaises(ProcessLookupError):
                     os.killpg(pids[0], 0)
+            await asyncio.sleep(1.2)
+            self.assertFalse(os.path.exists(marker))
+
+    @unittest.skipUnless(
+        bash_module._IS_POSIX and shutil.which("timeout"),
+        "GNU timeout is needed to move the command into its own process group",
+    )
+    async def test_cancelled_direct_await_kills_escaped_process_group(self):
+        # GNU timeout calls setpgid(0,0), so its group escapes a killpg of the
+        # shell's group; the cancel path must still reap it and its children
+        # before resolving, and must never mark the journal inactive early.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = os.path.join(tmp, "marker")
+            handles: list[bash_module.BashHandle] = []
+            original_init = bash_module.BashHandle.__init__
+
+            def capturing_init(handle_self, command):
+                original_init(handle_self, command)
+                handles.append(handle_self)
+
+            async def run_oneshot():
+                await bash(f"timeout 30 sh -c 'sleep 1.2 && touch {marker}; sleep 30'")
+
+            with mock.patch.object(bash_module, "_CANCEL_TERM_GRACE", 0.2):
+                with mock.patch.object(bash_module.BashHandle, "__init__", capturing_init):
+                    task = asyncio.ensure_future(run_oneshot())
+                    await asyncio.sleep(0.4)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+            escaped = handles[0]._escaped
+            self.assertTrue(escaped)
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                if not any(_pid_alive(pid) for pid in escaped):
+                    break
+                await asyncio.sleep(0.05)
+            for pid in escaped:
+                self.assertFalse(_pid_alive(pid), f"escaped pid {pid} survived the cancel")
             await asyncio.sleep(1.2)
             self.assertFalse(os.path.exists(marker))
 
@@ -1157,7 +1207,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     records = await _poll_journal(journal, count=1)
                     self.assertTrue(records[-1]["active"])
                     with mock.patch.object(bash_module, "_signal_group", return_value=False):
-                        bash_module._kill_live_handles()
+                        # Tree delivery includes the descendant path; an
+                        # undelivered kill must fail closed on both.
+                        with mock.patch.object(bash_module, "_signal_pid", return_value=False):
+                            bash_module._kill_live_handles()
                     await asyncio.sleep(0.2)  # give any (wrong) inactive write time to land
                     records = await _poll_journal(journal, count=1)
                     self.assertEqual(len(records), 1)
