@@ -130,7 +130,7 @@ fn execute_with_default_shell(command: &str) -> Option<String> {
         },
         CONFIG_VALUE_TIMEOUT_MS,
     ) {
-        Ok(output) => {
+        Ok(output) if output.status.success() => {
             let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if value.is_empty() {
                 None
@@ -138,7 +138,7 @@ fn execute_with_default_shell(command: &str) -> Option<String> {
                 Some(value)
             }
         }
-        Err(_) => None,
+        _ => None,
     }
 }
 
@@ -398,6 +398,16 @@ mod tests {
         let error = resolve_config_value_or_throw("!definitely-not-a-real-binary-xyz", "test credential")
             .unwrap_err();
         assert!(error.starts_with("Failed to resolve test credential"));
+    }
+
+    #[test]
+    fn default_shell_nonzero_exit_does_not_accept_stdout_as_a_key() {
+        let command = if cfg!(windows) {
+            "echo not-a-valid-key & exit /b 9"
+        } else {
+            "printf not-a-valid-key; exit 9"
+        };
+        assert_eq!(execute_with_default_shell(command), None);
     }
 
     #[test]

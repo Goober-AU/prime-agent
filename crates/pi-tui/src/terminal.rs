@@ -82,7 +82,7 @@ fn drain_pending_handoff_input() -> bool {
         return false;
     }
     match read_available_input() {
-        Ok(NativeInput::Bytes(_)) => true,
+        Ok(NativeInput::Bytes(_)) | Ok(NativeInput::Ignored) => true,
         _ => false,
     }
 }
@@ -102,7 +102,7 @@ fn set_raw_mode(raw: bool) -> std::io::Result<()> {
     }
 }
 
-enum NativeInput { Pending, Closed, Bytes(Vec<u8>) }
+enum NativeInput { Pending, Ignored, Closed, Bytes(Vec<u8>) }
 
 #[cfg(unix)]
 fn read_available_input() -> std::io::Result<NativeInput> {
@@ -125,14 +125,115 @@ fn read_available_input() -> std::io::Result<NativeInput> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+static WINDOWS_PENDING_SURROGATE: Mutex<Option<u16>> = Mutex::new(None);
+
+#[cfg(windows)]
+fn read_available_input() -> std::io::Result<NativeInput> {
+    use windows_sys::Win32::System::Console::{
+        GetNumberOfConsoleInputEvents, GetStdHandle, ReadConsoleInputW, INPUT_RECORD,
+        KEY_EVENT, STD_INPUT_HANDLE,
+    };
+    unsafe {
+        let handle = GetStdHandle(STD_INPUT_HANDLE);
+        let mut count = 0;
+        if GetNumberOfConsoleInputEvents(handle, &mut count) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if count == 0 { return Ok(NativeInput::Pending); }
+        let mut record: INPUT_RECORD = std::mem::zeroed();
+        if ReadConsoleInputW(handle, &mut record, 1, &mut count) == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if count == 0 || record.EventType != KEY_EVENT as u16 {
+            return Ok(NativeInput::Ignored);
+        }
+        let key = record.Event.KeyEvent;
+        let mut surrogate = WINDOWS_PENDING_SURROGATE.lock().unwrap();
+        Ok(match windows_record_sequence(
+            key.bKeyDown != 0, key.wVirtualKeyCode, key.uChar.UnicodeChar,
+            key.dwControlKeyState, &mut surrogate,
+        ) {
+            Some(sequence) => NativeInput::Bytes(sequence.into_bytes()),
+            None => NativeInput::Ignored,
+        })
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn read_available_input() -> std::io::Result<NativeInput> {
     use crossterm::event;
     if !event::poll(std::time::Duration::ZERO)? { return Ok(NativeInput::Pending); }
     Ok(match native_event_sequence(event::read()?) {
         Some(sequence) => NativeInput::Bytes(sequence.into_bytes()),
-        None => NativeInput::Pending,
+        None => NativeInput::Ignored,
     })
+}
+
+#[cfg(any(windows, test))]
+fn windows_record_sequence(
+    down: bool,
+    virtual_key: u16,
+    code_unit: u16,
+    control: u32,
+    pending_surrogate: &mut Option<u16>,
+) -> Option<String> {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    if !down { return None; }
+    let mut decoded = String::new();
+    if let Some(high) = pending_surrogate.take() {
+        if (0xdc00..=0xdfff).contains(&code_unit) {
+            decoded.push(char::from_u32(0x10000 + ((u32::from(high) - 0xd800) << 10)
+                + u32::from(code_unit) - 0xdc00).unwrap());
+        } else {
+            decoded.push(char::REPLACEMENT_CHARACTER);
+        }
+    }
+    if decoded.chars().next().is_none_or(|ch| ch == char::REPLACEMENT_CHARACTER) {
+        if (0xd800..=0xdbff).contains(&code_unit) {
+            *pending_surrogate = Some(code_unit);
+            return if decoded.is_empty() { None } else { Some(decoded) };
+        }
+        decoded.push(char::from_u32(u32::from(code_unit)).unwrap_or(char::REPLACEMENT_CHARACTER));
+    }
+    // In VT input mode ConPTY writes exact characters as VK=0 records. Do not
+    // reinterpret ESC/LF as keyboard shortcuts or strip paste framing. Decode
+    // UTF-16 here: crossterm's record reader drops these controls and can pair
+    // surrogate key releases rather than the two key-down code units.
+    if virtual_key == 0 { return Some(decoded); }
+
+    let mut modifiers = KeyModifiers::NONE;
+    if control & 0x10 != 0 { modifiers |= KeyModifiers::SHIFT; }
+    if control & 0x03 != 0 { modifiers |= KeyModifiers::ALT; }
+    if control & 0x0c != 0 { modifiers |= KeyModifiers::CONTROL; }
+    let key = match virtual_key {
+        0x08 => KeyCode::Backspace,
+        0x09 if modifiers.contains(KeyModifiers::SHIFT) => KeyCode::BackTab,
+        0x09 => KeyCode::Tab,
+        0x0d => KeyCode::Enter,
+        0x1b => KeyCode::Esc,
+        0x21 => KeyCode::PageUp, 0x22 => KeyCode::PageDown,
+        0x23 => KeyCode::End, 0x24 => KeyCode::Home,
+        0x25 => KeyCode::Left, 0x26 => KeyCode::Up,
+        0x27 => KeyCode::Right, 0x28 => KeyCode::Down,
+        0x2d => KeyCode::Insert, 0x2e => KeyCode::Delete,
+        0x70..=0x87 => KeyCode::F((virtual_key - 0x6f) as u8),
+        _ => {
+            let mut ch = decoded.chars().last()?;
+            if ch.is_control() && modifiers.contains(KeyModifiers::CONTROL) {
+                ch = match virtual_key {
+                    0x41..=0x5a => char::from_u32(u32::from(virtual_key) + 32)?,
+                    0x20 => ' ',
+                    _ if (1..=31).contains(&code_unit) => char::from_u32(u32::from(code_unit) + 64)?,
+                    _ => return None,
+                };
+            } else if ch == '\0' {
+                return None;
+            }
+            KeyCode::Char(ch)
+        }
+    };
+    native_event_sequence(Event::Key(KeyEvent::new(key, modifiers)))
 }
 
 #[cfg(any(not(unix), test))]
@@ -266,6 +367,9 @@ pub struct ProcessTerminal {
     started_at: Option<std::time::Instant>,
     last_input_at: Option<std::time::Instant>,
     last_size: Option<(usize, usize)>,
+    pending_native_input: Vec<u8>,
+    #[cfg(windows)]
+    windows_input_mode: Option<u32>,
 }
 
 fn timestamp_for_log() -> String {
@@ -312,6 +416,9 @@ impl ProcessTerminal {
             started_at: None,
             last_input_at: None,
             last_size: None,
+            pending_native_input: Vec::new(),
+            #[cfg(windows)]
+            windows_input_mode: None,
         }
     }
 
@@ -448,8 +555,8 @@ impl ProcessTerminal {
         }
     }
 
-    /// Crossterm reads Windows INPUT_RECORDs, not a VT byte stream. Mixing VT
-    /// input with that reader loses control keys and splits navigation sequences.
+    /// Our Windows record reader preserves VT characters (including controls
+    /// and UTF-16 pairs) instead of feeding them through crossterm's key parser.
     fn configure_windows_event_input(&mut self) {
         #[cfg(windows)]
         {
@@ -460,8 +567,20 @@ impl ProcessTerminal {
                 let handle = GetStdHandle(STD_INPUT_HANDLE);
                 let mut mode: u32 = 0;
                 if GetConsoleMode(handle, &mut mode) != 0 {
-                    let _ = SetConsoleMode(handle, mode & !ENABLE_VIRTUAL_TERMINAL_INPUT);
+                    self.windows_input_mode = Some(mode);
+                    let _ = SetConsoleMode(handle, mode | ENABLE_VIRTUAL_TERMINAL_INPUT);
                 }
+            }
+            *WINDOWS_PENDING_SURROGATE.lock().unwrap() = None;
+        }
+    }
+
+    fn restore_windows_event_input(&mut self) {
+        #[cfg(windows)]
+        if let Some(mode) = self.windows_input_mode.take() {
+            unsafe {
+                use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+                let _ = SetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), mode);
             }
         }
     }
@@ -488,6 +607,48 @@ impl ProcessTerminal {
                 StdinBufferEvent::Paste(content) => dispatcher(format!("\x1b[200~{content}\x1b[201~")),
             }
         }
+    }
+
+    fn flush_native_input(&mut self) {
+        if !self.pending_native_input.is_empty() {
+            let bytes = std::mem::take(&mut self.pending_native_input);
+            self.process_input_bytes(&bytes);
+        }
+    }
+
+    fn poll_input_from(
+        &mut self,
+        mut read: impl FnMut() -> std::io::Result<NativeInput>,
+        coalesce_native: bool,
+    ) -> std::io::Result<bool> {
+        // Win32 pastes arrive as press/release records, not Event::Paste. Keep
+        // their text together until the native queue is empty, including when
+        // a large paste spans several bounded polls. Otherwise pasted Enter
+        // reaches the editor as Submit instead of part of the pasted text.
+        let budget = if coalesce_native { 4096 } else { 64 };
+        for _ in 0..budget {
+            match read()? {
+                NativeInput::Pending => {
+                    self.flush_native_input();
+                    break;
+                }
+                NativeInput::Ignored => continue,
+                NativeInput::Closed => {
+                    self.flush_native_input();
+                    return Ok(false);
+                }
+                NativeInput::Bytes(bytes) => {
+                    if coalesce_native && !bytes.starts_with(b"\x1b") {
+                        self.pending_native_input.extend_from_slice(&bytes);
+                    } else {
+                        self.flush_native_input();
+                        self.process_input_bytes(&bytes);
+                    }
+                    self.last_input_at = Some(std::time::Instant::now());
+                }
+            }
+        }
+        Ok(true)
     }
 
     /// Flush a pending partial sequence (the TypeScript flush timer).
@@ -632,18 +793,12 @@ impl Terminal for ProcessTerminal {
             while drain_pending_handoff_input() {}
             return Ok(true);
         }
-        // Bound each poll so a large paste cannot starve rendering or events.
-        for _ in 0..64 {
-            match read_available_input()? {
-                NativeInput::Pending => break,
-                NativeInput::Closed => return Ok(false),
-                NativeInput::Bytes(bytes) => {
-                    self.process_input_bytes(&bytes);
-                    self.last_input_at = Some(std::time::Instant::now());
-                }
-            }
+        if !self.poll_input_from(read_available_input, cfg!(windows))? {
+            return Ok(false);
         }
-        if self.last_input_at.is_some_and(|last| last.elapsed().as_millis() >= 10) {
+        if self.pending_native_input.is_empty()
+            && self.last_input_at.is_some_and(|last| last.elapsed().as_millis() >= 10)
+        {
             self.flush_pending_input();
             self.last_input_at = None;
         }
@@ -737,6 +892,8 @@ impl Terminal for ProcessTerminal {
         // Clean up StdinBuffer
         self.stdin_buffer = None;
         self.stdin_dispatcher = None;
+        self.pending_native_input.clear();
+        self.restore_windows_event_input();
 
         if options.preserve_alt_screen && was_started {
             begin_input_handoff(self.alt_screen_handoff_token, self.was_raw);
@@ -776,7 +933,7 @@ impl Terminal for ProcessTerminal {
             }
             match read_available_input() {
                 Ok(NativeInput::Closed) => break,
-                Ok(NativeInput::Bytes(_)) => {
+                Ok(NativeInput::Bytes(_)) | Ok(NativeInput::Ignored) => {
                     last_data_time = std::time::Instant::now();
                 }
                 Ok(NativeInput::Pending) | Err(_) => {
@@ -911,6 +1068,132 @@ impl Terminal for ProcessTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native_input_fixture() -> (ProcessTerminal, Rc<RefCell<Vec<String>>>) {
+        let mut terminal = ProcessTerminal::new();
+        let received = Rc::new(RefCell::new(Vec::new()));
+        let output = received.clone();
+        terminal.shared.borrow_mut().input_handler = Some(Box::new(move |data| {
+            output.borrow_mut().push(data);
+        }));
+        terminal.setup_stdin_buffer();
+        (terminal, received)
+    }
+
+    fn native_paste_records(text: &str) -> std::collections::VecDeque<NativeInput> {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+        let mut records = std::collections::VecDeque::new();
+        for ch in text.chars() {
+            let code = if ch == '\r' { KeyCode::Enter } else { KeyCode::Char(ch) };
+            for kind in [KeyEventKind::Press, KeyEventKind::Release] {
+                let sequence = native_event_sequence(Event::Key(KeyEvent::new_with_kind(
+                    code, KeyModifiers::NONE, kind,
+                )));
+                records.push_back(match sequence {
+                    Some(sequence) => NativeInput::Bytes(sequence.into_bytes()),
+                    None => NativeInput::Ignored,
+                });
+            }
+        }
+        records
+    }
+
+    fn vt_records(text: &str, surrogate: &mut Option<u16>) -> std::collections::VecDeque<NativeInput> {
+        text.encode_utf16().map(|unit| match windows_record_sequence(true, 0, unit, 0, surrogate) {
+            Some(sequence) => NativeInput::Bytes(sequence.into_bytes()),
+            None => NativeInput::Ignored,
+        }).collect()
+    }
+
+    #[test]
+    fn windows_vt_records_preserve_split_paste_framing_and_utf16() {
+        let (mut terminal, received) = native_input_fixture();
+        let mut surrogate = None;
+        let mut records = vt_records("\x1b[200~first\n世界", &mut surrogate);
+        terminal.poll_input_from(|| Ok(records.pop_front().unwrap_or(NativeInput::Pending)), true).unwrap();
+        terminal.flush_pending_input();
+        assert!(received.borrow().is_empty(), "a gap inside a bracketed paste must not dispatch text");
+        let mut records = vt_records("😀second\nlast\x1b[201~", &mut surrogate);
+        terminal.poll_input_from(|| Ok(records.pop_front().unwrap_or(NativeInput::Pending)), true).unwrap();
+        assert_eq!(*received.borrow(), vec!["\x1b[200~first\n世界😀second\nlast\x1b[201~"]);
+    }
+
+    #[test]
+    fn windows_utf16_surrogate_releases_do_not_consume_the_pair() {
+        let mut surrogate = None;
+        assert_eq!(windows_record_sequence(true, 0, 0xd83d, 0, &mut surrogate), None);
+        assert_eq!(windows_record_sequence(false, 0, 0xd83d, 0, &mut surrogate), None);
+        assert_eq!(windows_record_sequence(true, 0, 0xde00, 0, &mut surrogate), Some("😀".into()));
+        assert_eq!(windows_record_sequence(false, 0, 0xde00, 0, &mut surrogate), None);
+        assert_eq!(surrogate, None);
+    }
+
+    #[test]
+    fn windows_vt_controls_and_legacy_navigation_remain_distinct() {
+        let mut surrogate = None;
+        for unit in [0, 3, 10, 13, 27, 127] {
+            assert_eq!(windows_record_sequence(true, 0, unit, 0, &mut surrogate), Some(char::from_u32(u32::from(unit)).unwrap().to_string()));
+        }
+        for (virtual_key, name) in [(0x25, "left"), (0x26, "up"), (0x27, "right"), (0x28, "down"), (0x0d, "enter"), (0x1b, "escape")] {
+            let sequence = windows_record_sequence(true, virtual_key, 0, 0, &mut surrogate).unwrap();
+            assert!(crate::keys::matches_key(&sequence, name));
+        }
+        let control_c = windows_record_sequence(true, 0x43, 3, 8, &mut surrogate).unwrap();
+        assert!(crate::keys::matches_key(&control_c, "ctrl+c"));
+        let shift_enter = windows_record_sequence(true, 0x0d, 13, 16, &mut surrogate).unwrap();
+        assert!(crate::keys::matches_key(&shift_enter, "shift+enter"));
+    }
+
+    #[test]
+    fn windows_native_paste_ignores_releases_and_keeps_newlines_in_one_paste() {
+        let (mut terminal, received) = native_input_fixture();
+        let text = "Do not build\rDo not run tests\rReview only: café 世界";
+        let mut records = native_paste_records(text);
+        assert!(terminal.poll_input_from(|| Ok(records.pop_front().unwrap_or(NativeInput::Pending)), true).unwrap());
+        assert!(records.is_empty(), "a release record must not end the poll");
+        assert_eq!(*received.borrow(), vec![format!("\x1b[200~{text}\x1b[201~")]);
+    }
+
+    #[test]
+    fn windows_native_paste_survives_poll_budget_without_submitting_fragments() {
+        let (mut terminal, received) = native_input_fixture();
+        let text = format!("{}\r{}\rFinal line", "a".repeat(5000), "界".repeat(5000));
+        let mut records = native_paste_records(&text);
+        let initial_count = records.len();
+        assert!(terminal.poll_input_from(|| Ok(records.pop_front().unwrap_or(NativeInput::Pending)), true).unwrap());
+        assert_eq!(initial_count - records.len(), 4096, "each poll remains bounded");
+        assert!(received.borrow().is_empty(), "do not dispatch an unfinished native batch");
+        while !records.is_empty() {
+            assert!(terminal.poll_input_from(|| Ok(records.pop_front().unwrap_or(NativeInput::Pending)), true).unwrap());
+        }
+        terminal.poll_input_from(|| Ok(NativeInput::Pending), true).unwrap();
+        assert_eq!(*received.borrow(), vec![format!("\x1b[200~{text}\x1b[201~")]);
+    }
+
+    #[test]
+    fn windows_native_paste_preserves_following_navigation_and_escape() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        let (mut terminal, received) = native_input_fixture();
+        let mut records = native_paste_records("first\rsecond");
+        let left = native_event_sequence(Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))).unwrap();
+        records.push_back(NativeInput::Bytes(left.as_bytes().to_vec()));
+        records.push_back(NativeInput::Bytes(vec![0x1b]));
+        terminal.poll_input_from(|| Ok(records.pop_front().unwrap_or(NativeInput::Pending)), true).unwrap();
+        terminal.flush_pending_input();
+        assert_eq!(*received.borrow(), vec!["\x1b[200~first\rsecond\x1b[201~".to_string(), left, "\x1b".to_string()]);
+    }
+
+    #[test]
+    fn windows_native_bracketed_paste_and_ordinary_enter_are_preserved() {
+        let (mut terminal, received) = native_input_fixture();
+        let mut records = native_paste_records("\x1b[200~first\rsecond\x1b[201~");
+        terminal.poll_input_from(|| Ok(records.pop_front().unwrap_or(NativeInput::Pending)), true).unwrap();
+        assert_eq!(*received.borrow(), vec!["\x1b[200~first\rsecond\x1b[201~"]);
+        received.borrow_mut().clear();
+        let mut records = native_paste_records("ok\r");
+        terminal.poll_input_from(|| Ok(records.pop_front().unwrap_or(NativeInput::Pending)), true).unwrap();
+        assert_eq!(*received.borrow(), vec!["o", "k", "\r"]);
+    }
 
     #[test]
     fn windows_control_and_navigation_events_match_editor_bindings() {
