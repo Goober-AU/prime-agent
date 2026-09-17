@@ -1,25 +1,32 @@
 # Security Policy
 
-## Reporting a Vulnerability
+## Reporting Security Vulnerabilities
 
-Do not report security vulnerabilities through public Issues, Discussions, or pull requests.
+If you discover a security vulnerability in Optimus Agent, please do not report it through a public GitHub Issue, Discussion, or pull request.
 
-Send the report to [security@primeintellect.ai](mailto:security@primeintellect.ai). For encrypted communication and the current company-wide disclosure policy, see [primeintellect.ai/security](https://www.primeintellect.ai/security).
+Please report security vulnerabilities directly to **support@telemus.ai**.
 
-Include the following when possible:
+Where possible, include:
 
 - The affected version or commit
-- The affected component and environment
-- Reproduction steps or a minimal proof of concept
-- The expected and observed impact
-- Any known mitigations
+- The affected component or environment
+- Steps to reproduce the issue
+- The expected and observed behaviour
+- The potential security impact
+- Any known workaround or mitigation
 
-Do not include real API keys, tokens, personal data, or credentials in the report. Use redacted or disposable test values.
+Please do not include real API keys, access tokens, credentials, personal information, or other sensitive data. Use redacted or temporary test values where required.
 
-## What to Expect
+## Vulnerability Review and Resolution
 
-Maintainers will assess the report, determine its scope, and coordinate remediation and disclosure when appropriate. Please allow time for investigation before publishing details that could put users at risk.
+Reported vulnerabilities will be reviewed to determine their scope, severity, and appropriate remediation.
 
-Security fixes are generally prepared against the default branch and released on a schedule chosen by the maintainers. We do not guarantee fixes for older versions.
+Please allow reasonable time for investigation and remediation before publicly disclosing details that could affect users.
 
-For ordinary bugs, feature requests, and support questions, use [GitHub Discussions](https://github.com/PrimeIntellect-ai/prime-agent/discussions).
+Security fixes will generally target the current version of Optimus Agent. Older versions may not receive security updates.
+
+## General Issues and Support
+
+For ordinary bugs, feature requests, or other project questions, please use the Optimus Agent GitHub repository:
+
+https://github.com/telemusai/optimus-agent
