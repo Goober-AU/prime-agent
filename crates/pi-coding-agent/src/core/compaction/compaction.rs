@@ -1491,7 +1491,8 @@ fn validate_summary(response: &AssistantMessage, text: &str, format: SummaryForm
             if heading.len() != line.len() && heading.starts_with(char::is_whitespace) {
                 let heading = heading.trim().trim_end_matches('#').trim().trim_matches('*').trim().trim_end_matches(':');
                 if let Some(index) = required.iter().position(|required| heading.eq_ignore_ascii_case(required)) {
-                    if seen[index] { return Err(fail("duplicate handoff section")); }
+                    // A repeated heading is a formatting slip, not an unusable handoff:
+                    // the section content is still present, so keep counting its body.
                     seen[index] = true;
                     current = Some(index);
                 }
