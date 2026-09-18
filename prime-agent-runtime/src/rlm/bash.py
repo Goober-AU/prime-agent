@@ -948,10 +948,18 @@ def _status_script(command: str, completion_a: str, completion_b: str) -> str:
     return (
         f"exec {_STATUS_FD}>&0 {_OUTPUT_FD}>&1 0</dev/null\n"
         f"read -r _prime_agent_gate <&{_STATUS_FD} || exit 127\n"
+        # Without pipefail a pipeline reports only its last command, so
+        # `python ... | tee log` hides a crashed producer. Enable pipefail on
+        # shells that support it (the dash fallback must parse this script).
+        "__prime_pipefail=0\n"
+        "if [ -n \"${BASH_VERSION:-}\" ]; then set -o pipefail; __prime_pipefail=1; fi\n"
         "{\n"
         f"{command}\n"
         f"}} {_OUTPUT_FD}>&- {_STATUS_FD}>&-\n"
         "__prime_status=$?\n"
+        # `| head` and similar consumers make producers die of SIGPIPE; that is
+        # a completed pipeline, not a failed command.
+        "if [ \"$__prime_pipefail\" -eq 1 ] && [ \"$__prime_status\" -eq 141 ]; then __prime_status=0; fi\n"
         "\\set +x\n"
         f"{emit} '\\036prime-agent-complete:%s%s\\037' "
         f"'{completion_a}' '{completion_b}' >&{_OUTPUT_FD} || exit \"$__prime_status\"\n"
