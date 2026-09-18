@@ -69,13 +69,15 @@ async fn summary_guard_rejects_refusal_empty_error_and_malformed_handoffs() {
     let mut hidden_error = response(VALID, "stop");
     hidden_error.error_message = Some("provider rejected this request".to_string());
     assert!(summarize(hidden_error, false).await.is_err());
-    assert!(summarize(response(&format!("{VALID}\n## Goal\nDuplicated."), "stop"), false).await.is_err());
     assert!(summarize(response(&format!("{VALID}\n```\nunfinished fence"), "stop"), false).await.is_err());
 }
 
 #[tokio::test]
 async fn summary_guard_preserves_short_valid_summary_and_split_turn_contract() {
     assert_eq!(summarize(response(VALID, "stop"), false).await.unwrap(), VALID);
+    // A repeated section heading is a formatting slip; the handoff stays usable.
+    let duplicated = format!("{VALID}\n## Goal\nDuplicated.");
+    assert_eq!(summarize(response(&duplicated, "stop"), false).await.unwrap(), duplicated);
     assert!(summarize(response(PREFIX, "stop"), true).await.unwrap().contains(PREFIX));
     assert!(summarize(response(VALID, "stop"), true).await.is_err());
     assert!(summarize(response(PREFIX, "stop"), false).await.is_err());
