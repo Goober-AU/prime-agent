@@ -3765,7 +3765,13 @@ impl SessionManager {
         self.file_entries.push(entry.clone());
         self.by_id.insert(id.clone(), entry.clone());
         self.leaf_id = Some(id);
-        self.persist(&entry)
+        let result = self.persist(&entry);
+        if result.is_err() {
+            // Retain the unsaved entry and force recovery to rewrite the complete
+            // transcript, including any line an unsuccessful append partly wrote.
+            self.flushed = false;
+        }
+        result
     }
 
     fn append_entry_with_rollback(

@@ -23,12 +23,18 @@ const DEFAULT_FLUSH_INTERVAL_MS: usize = 1_000;
 const DEFAULT_CLOSE_TIMEOUT_MS: usize = 1_000;
 
 /// `OPERATIONS`.
-const OPERATIONS: [PerformanceMetricOperation; 9] = [
+const OPERATIONS: [PerformanceMetricOperation; 15] = [
     PerformanceMetricOperation::LogicalRequest,
     PerformanceMetricOperation::ProviderAttempt,
     PerformanceMetricOperation::Tool,
     PerformanceMetricOperation::Snapshot,
     PerformanceMetricOperation::Compaction,
+    PerformanceMetricOperation::CompactionPrepare,
+    PerformanceMetricOperation::CompactionHistory,
+    PerformanceMetricOperation::CompactionPrefix,
+    PerformanceMetricOperation::CompactionNative,
+    PerformanceMetricOperation::CompactionPersist,
+    PerformanceMetricOperation::CompactionRestore,
     PerformanceMetricOperation::FileRetry,
     PerformanceMetricOperation::SessionReopen,
     PerformanceMetricOperation::SessionInput,
@@ -56,7 +62,7 @@ const COMPONENTS: [PerformanceMetricComponent; 8] = [
 ];
 
 /// `MEASUREMENTS`.
-const MEASUREMENTS: [PerformanceMetricMeasurement; 27] = [
+const MEASUREMENTS: [PerformanceMetricMeasurement; 28] = [
     PerformanceMetricMeasurement::TotalMs,
     PerformanceMetricMeasurement::WaitMs,
     PerformanceMetricMeasurement::DispatchToResponseHeadersMs,
@@ -75,6 +81,7 @@ const MEASUREMENTS: [PerformanceMetricMeasurement; 27] = [
     PerformanceMetricMeasurement::SerializationCpuMs,
     PerformanceMetricMeasurement::WriteMs,
     PerformanceMetricMeasurement::QueueMs,
+    PerformanceMetricMeasurement::InputAgentMessage,
     PerformanceMetricMeasurement::NextCellDelayMs,
     PerformanceMetricMeasurement::ReopenMs,
     PerformanceMetricMeasurement::SerializedBytes,

@@ -1423,6 +1423,54 @@ async fn core007_tokens_before_measures_live_context_not_transcript_size() {
     fixture.session.dispose_async(Some(false)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compaction_metrics_follow_real_persistence_and_failure_boundaries() {
+    let _guard = lock_suite();
+    let fixture = Fixture::build(FixtureOptions {
+        case_name: "compaction-observed-persistence".to_string(),
+        compaction_enabled: false,
+        text_only_provider: true,
+        persist: true,
+        keep_recent_tokens: 100.0,
+        ..Default::default()
+    }).await;
+    let recorder = Arc::new(pi_coding_agent::core::performance_metrics::LocalPerformanceMetricRecorder::new(
+        pi_coding_agent::core::performance_metrics::LocalPerformanceMetricRecorderOptions {
+            directory: fixture.case.root.join("metrics").to_string_lossy().into_owned(),
+            session_id: fixture.session.session_id(),
+            ..Default::default()
+        },
+    ));
+    fixture.session.agent.set_performance_metrics(Some(pi_agent_core::performance_metrics::AgentLoopPerformanceMetrics::new(recorder.clone())));
+    seed_messages(&fixture, &[("old", 500), ("retained", 500)]);
+    fixture.compact_ok(None).await;
+    assert_eq!(fixture.compaction_entries().len(), 1);
+    let persisted = std::fs::read_to_string(fixture.session_file.as_ref().unwrap()).unwrap();
+    assert_eq!(persisted.lines().filter(|line| serde_json::from_str::<Value>(line).unwrap()["type"] == "compaction").count(), 1);
+    seed_messages(&fixture, &[("new-old", 500), ("new-retained", 500)]);
+    *fixture.spec.summary_failure.lock().unwrap() = Some("SYNTHETIC-PRIVATE-PROVIDER-ERROR".into());
+    assert!(fixture.compact(None).await.is_err());
+    assert_eq!(fixture.compaction_entries().len(), 1);
+    recorder.flush().await;
+    let sidecar = std::fs::read_to_string(recorder.log_path()).unwrap();
+    let events: Vec<Value> = sidecar.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+    let terminals = |operation: &str| events.iter().filter(|event| event["operation"] == operation && event.get("outcome").is_some()).collect::<Vec<_>>();
+    for operation in ["compaction_persist", "compaction_restore"] {
+        let records = terminals(operation);
+        assert_eq!(records.len(), 1, "{operation} must only run after a usable summary");
+        assert_eq!(records[0]["outcome"], "success");
+        assert!(records[0]["measurements"]["total_ms"].as_f64().unwrap() >= 0.0);
+    }
+    let totals = terminals("compaction");
+    assert_eq!(totals.len(), 2);
+    assert_eq!(totals[0]["outcome"], "success");
+    assert_eq!(totals[1]["outcome"], "failure");
+    assert_ne!(totals[0]["correlation"]["actionId"], totals[1]["correlation"]["actionId"]);
+    assert!(!sidecar.contains("SYNTHETIC-PRIVATE-PROVIDER-ERROR"));
+    fixture.session.dispose_async(Some(false)).await;
+    recorder.close().await;
+}
+
 /// Messages that carry a provider checkpoint window: the compaction summary that
 /// stores it, or a user message that was created with one.
 fn checkpoint_carrier_count(messages: &[AgentMessage]) -> usize {

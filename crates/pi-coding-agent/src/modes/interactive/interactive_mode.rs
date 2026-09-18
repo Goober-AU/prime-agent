@@ -3049,6 +3049,12 @@ impl InteractiveMode {
         self.update_working_pulse();
     }
 
+    /// Apply an authoritative queue change and refresh its bounded previews.
+    pub fn patch_connection_queue(&mut self, patch: impl FnOnce(&mut AgentConnectionState)) {
+        self.patch_connection_state(patch);
+        self.update_pending_messages_display();
+    }
+
     /// Render authoritative accepted queue state without resetting the editor.
     fn update_pending_messages_display(&mut self) {
         let queue = self.get_connection_queue();
@@ -4033,10 +4039,9 @@ impl InteractiveMode {
                 });
             }
             AgentConnectionSessionEvent::SessionActionUpdate { actions } => {
-                self.patch_connection_state(|state| {
+                self.patch_connection_queue(|state| {
                     state.session_actions = actions.clone();
                 });
-                self.update_pending_messages_display();
             }
             AgentConnectionSessionEvent::CompactionStart { .. } => {
                 self.patch_connection_state(|state| state.is_compacting = true);
@@ -5048,6 +5053,7 @@ mod tests {
     #[test]
     fn accepted_queue_previews_survive_stream_refresh_and_clear_authoritatively() {
         use super::super::interactive_mode_services::Component;
+        crate::modes::interactive::theme::theme::init_theme(Some("prime"), false);
         let mut mode = test_mode();
         mode.apply_connection_state_snapshot(AgentConnectionState {
             session_id: "queue-preview".into(), is_streaming: true,
