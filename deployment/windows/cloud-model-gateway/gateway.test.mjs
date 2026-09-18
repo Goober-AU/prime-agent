@@ -467,7 +467,7 @@ test("opaque-input scanning remains bounded for very wide arrays and objects", (
 });
 
 test("gateway lifecycle helper pins the candidate build exactly", () => {
-  const expected = "optimus-gateway-20260917.responses-ws.1";
+  const expected = "optimus-gateway-monitoring-repair-20260918.1";
   const ensure = readFileSync(new URL("./ensure-gateway.ps1", import.meta.url), "utf8");
   const source = readFileSync(new URL("./gateway.mjs", import.meta.url), "utf8");
   assert.ok(ensure.includes("expectedBuildId = '" + expected + "'"));

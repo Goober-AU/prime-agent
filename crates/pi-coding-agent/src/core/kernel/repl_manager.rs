@@ -214,6 +214,10 @@ fn as_snapshot_performance_metadata(value: Option<&Value>) -> Option<SnapshotPer
     Some(SnapshotPerformanceMetadata {
         serialization_wall_ms: as_metric_number_field(value.get("serialization_wall_ms")),
         serialization_cpu_ms: as_metric_number_field(value.get("serialization_cpu_ms")),
+        serialization_max_variable_ms: as_metric_number_field(value.get("serialization_max_variable_ms")),
+        serialization_slow_variables: as_metric_number_field(value.get("serialization_slow_variables")),
+        serialization_saved_ms: as_metric_number_field(value.get("serialization_saved_ms")),
+        serialization_skipped_ms: as_metric_number_field(value.get("serialization_skipped_ms")),
         serialized_bytes: as_metric_number_field(value.get("serialized_bytes")),
         write_ms: as_metric_number_field(value.get("write_ms")),
         written_bytes: as_metric_number_field(value.get("written_bytes")),
@@ -3112,6 +3116,22 @@ impl KernelState {
                     "serialization_cpu_ms",
                     metadata.and_then(|metadata| metadata.serialization_cpu_ms),
                 ),
+                (
+                    "serialization_max_variable_ms",
+                    metadata.and_then(|metadata| metadata.serialization_max_variable_ms),
+                ),
+                (
+                    "serialization_slow_variables",
+                    metadata.and_then(|metadata| metadata.serialization_slow_variables),
+                ),
+                (
+                    "serialization_saved_ms",
+                    metadata.and_then(|metadata| metadata.serialization_saved_ms),
+                ),
+                (
+                    "serialization_skipped_ms",
+                    metadata.and_then(|metadata| metadata.serialization_skipped_ms),
+                ),
                 ("write_ms", metadata.and_then(|metadata| metadata.write_ms)),
                 (
                     "serialized_bytes",
@@ -3977,11 +3997,21 @@ mod tests {
             "serialization_wall_ms": 12.5,
             "serialized_bytes": "x",
             "write_ms": -1,
+            "serialization_max_variable_ms": 11.0,
+            "serialization_slow_variables": 2,
+            "serialization_saved_ms": true,
+            "serialization_skipped_ms": -1,
         })))
         .expect("record");
         assert_eq!(metadata.serialization_wall_ms, Some(12.5));
         assert_eq!(metadata.serialized_bytes, None);
         assert_eq!(metadata.write_ms, None);
+        assert_eq!(metadata.serialization_max_variable_ms, Some(11.0));
+        assert_eq!(metadata.serialization_slow_variables, Some(2.0));
+        assert_eq!(metadata.serialization_saved_ms, None);
+        assert_eq!(metadata.serialization_skipped_ms, None);
+        let old_metadata = as_snapshot_performance_metadata(Some(&json!({}))).expect("old metadata");
+        assert_eq!(old_metadata.serialization_max_variable_ms, None);
         assert!(as_snapshot_performance_metadata(Some(&json!([1]))).is_none());
     }
 

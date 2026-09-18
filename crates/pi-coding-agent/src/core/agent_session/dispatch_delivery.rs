@@ -1,12 +1,32 @@
 use super::*;
 
-pub(super) fn is_child_report_action(action: &QueuedSessionAction) -> bool {
+pub(super) fn is_family_message_action(action: &QueuedSessionAction) -> bool {
     primary_delivery_record(action).ok().is_some_and(|record| {
         matches!(record.message, DeliveryMessage::Custom(custom)
             if custom.custom_type == "agent_message"
-                && custom.details.as_ref().and_then(|details| details.get("fromRelationship"))
-                    .and_then(Value::as_str) == Some("child"))
+                && matches!(custom.details.as_ref().and_then(|details| details.get("fromRelationship"))
+                    .and_then(Value::as_str), Some("parent" | "sibling" | "child")))
     })
+}
+
+pub(super) fn compatible_family_message_actions(
+    first: &QueuedSessionAction,
+    next: &QueuedSessionAction,
+) -> bool {
+    let (QueuedActionPayload::Turn(first_turn), QueuedActionPayload::Turn(next_turn)) =
+        (&first.payload, &next.payload)
+    else {
+        return false;
+    };
+    // Batch delivery, not message contents: each ordered record keeps its own
+    // durable receipt and (for parent instructions) continuation-ledger task.
+    is_family_message_action(first)
+        && is_family_message_action(next)
+        && next.delivery == first.delivery
+        && next.wake == first.wake
+        && next.effective_priority() == first.effective_priority()
+        && next.suppress_autonomous_continuation == first.suppress_autonomous_continuation
+        && turn_execution_policies_equal(&first_turn.execution_policy, &next_turn.execution_policy)
 }
 
 impl AgentSession {
@@ -39,7 +59,12 @@ impl AgentSession {
             AgentMessage::Message(Message::User(_) | Message::Assistant(_) | Message::ToolResult(_)) => manager.append_message(message.clone()),
             _ => return Ok(String::new()),
         };
-        appended.and_then(|entry_id| manager.flush_now().map(|()| entry_id))
+        let entry_id = appended.and_then(|entry_id| manager.flush_now().map(|()| entry_id))?;
+        drop(manager);
+        // Parent work must be registered durably before the delivery receipt or
+        // provider/tool work, not later in the extension event-processing queue.
+        self.begin_rlm_parent_task(message)?;
+        Ok(entry_id)
     }
 
     pub(super) fn record_dispatch_persistence(&self, message: &AgentMessage, persisted: &Result<String, String>) {

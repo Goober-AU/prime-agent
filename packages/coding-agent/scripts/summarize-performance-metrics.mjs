@@ -25,6 +25,11 @@ const OPERATIONS = new Set([
 	"file_retry",
 	"session_reopen",
 	"session_input",
+	"ui_input",
+	"ui_input_ack",
+	"ui_render",
+	"ui_menu_open",
+	"ui_session_open",
 	"recorder",
 ]);
 const MEASUREMENTS = new Set([
@@ -44,6 +49,10 @@ const MEASUREMENTS = new Set([
 	"upstream_wait_ms",
 	"serialization_ms",
 	"serialization_cpu_ms",
+	"serialization_max_variable_ms",
+	"serialization_slow_variables",
+	"serialization_saved_ms",
+	"serialization_skipped_ms",
 	"write_ms",
 	"queue_ms",
 	"next_cell_delay_ms",
@@ -56,6 +65,8 @@ const MEASUREMENTS = new Set([
 	"attempt_ordinal",
 	"dropped_count",
 	"input_agent_message",
+	"frame_count",
+	"max_ms",
 ]);
 const TOKEN_FIELDS = ["inputTokens", "cachedInputTokens", "outputTokens", "reasoningTokens", "totalTokens"];
 
@@ -127,6 +138,7 @@ function newSummary() {
 		usage: { provider: newUsageSummary(), localEstimate: newUsageSummary() },
 		droppedRecordsReported: 0,
 		notes: [
+			"UI input spans begin when decoded terminal input reaches the host, not at physical keypress. UI acknowledgments end at the actual prompt RPC reply, not durable delivery or model completion; their local action IDs do not join daemon action IDs. UI menu spans include retrieval, mounting and the next completed render pass; session-open begins at terminal-host entry, not browser selection. UI render totals/counts aggregate requested render passes in approximately one-second windows; max_ms is the worst call, not a per-window latency. A render pass may produce no terminal bytes; these are not physical screen-paint timings.",
 			"Duration distributions are separated by operation. Nested request/attempt spans and concurrent spans are never added as elapsed workflow time.",
 			"Duration aggregates report count, unavailable, mean, and range; they intentionally omit a duration sum.",
 			"Token fields are summed independently; overlap categories are never added into input/output or provider total.",

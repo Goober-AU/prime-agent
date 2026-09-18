@@ -69,6 +69,10 @@ impl KernelRestoreSource {
 pub struct SnapshotPerformanceMetadata {
     pub serialization_wall_ms: Option<f64>,
     pub serialization_cpu_ms: Option<f64>,
+    pub serialization_max_variable_ms: Option<f64>,
+    pub serialization_slow_variables: Option<f64>,
+    pub serialization_saved_ms: Option<f64>,
+    pub serialization_skipped_ms: Option<f64>,
     pub serialized_bytes: Option<f64>,
     pub write_ms: Option<f64>,
     pub written_bytes: Option<f64>,

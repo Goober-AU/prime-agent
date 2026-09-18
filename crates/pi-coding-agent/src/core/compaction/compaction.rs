@@ -1229,6 +1229,45 @@ async fn generate_summary_with_options(
 }
 
 /// Reconstructing history after a model switch can exceed the destination's input limit.
+fn summary_output_budgets(
+    model: &Model,
+    requested: f64,
+    thinking_level: Option<&ThinkingLevel>,
+    request_options: Option<&CompactionOptions>,
+) -> Result<(f64, f64), String> {
+    let mut ceiling = model.max_tokens.min((get_model_input_limit(model) / 4.0).floor());
+    if !ceiling.is_finite() || ceiling < 1.0 {
+        return Err("Compaction model has no usable output budget".to_string());
+    }
+    // Responses counts hidden reasoning inside max_output_tokens. Other APIs
+    // keep their adapter-owned reasoning budget behavior (no double addition).
+    let reasoning_budgeted = model.reasoning
+        && matches!(model.api.as_str(), "openai-responses" | "azure-openai-responses")
+        && thinking_level != Some(&ThinkingLevel::Off);
+    if reasoning_budgeted {
+        // Local ceiling for the added reasoning headroom. Preserve other APIs'
+        // preexisting initial output allocation, including Ollama.
+        ceiling = ceiling.min(65_536.0);
+    }
+    let requested = if reasoning_budgeted {
+        pi_ai::providers::simple_options::adjust_max_tokens_for_thinking(
+            requested,
+            ceiling,
+            &thinking_level.map(|level| level.as_str()).unwrap_or("medium").to_string(),
+            request_options.and_then(|options| options.simple.thinking_budgets.as_ref()),
+        ).max_tokens
+    } else {
+        requested
+    };
+    let initial = requested.min(ceiling).floor().max(1.0);
+    // The subscription Codex serializer does not send max_output_tokens. A
+    // larger local option would replay the same wire budget, not recover it.
+    if model.api == "openai-codex-responses" {
+        return Ok((initial, initial));
+    }
+    Ok((initial, (initial * 2.0).min(ceiling).min(65_536.0).floor().max(initial)))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn generate_bounded_summary(
     messages: &[AgentMessage],
@@ -1253,13 +1292,8 @@ async fn generate_bounded_summary(
     let requests = phase.requests();
     let result = async {
     let input_limit = get_model_input_limit(model);
-    let max_tokens = f64::max(
-        1.0,
-        f64::min(
-            requested_max_tokens,
-            f64::min(model.max_tokens, (input_limit / 4.0).floor()),
-        ),
-    );
+    let (max_tokens, retry_max_tokens) = summary_output_budgets(model, requested_max_tokens, thinking_level, request_options)?;
+    let mut length_retry_used = false;
     let conversation = serialize_conversation(&convert_to_llm(messages, &Default::default()));
     phase.measurement(PerformanceMetricMeasurement::SerializedBytes, Some(conversation.len() as f64));
     let conversation_chars = conversation.chars().count();
@@ -1279,7 +1313,9 @@ async fn generate_bounded_summary(
             instructions(summary.as_deref())
         );
         // Leave output headroom and use a conservative chars/3 estimate for fallback calls.
-        let budget = (((f64::min(input_limit, model.context_window - max_tokens) - 1024.0) * 3.0)
+        // Reserve the possible retry's output headroom before selecting a chunk,
+        // so retrying never drops or changes the transcript being summarized.
+        let budget = (((f64::min(input_limit, model.context_window - retry_max_tokens) - 1024.0) * 3.0)
             .floor())
             - suffix.chars().count() as f64
             - SUMMARIZATION_SYSTEM_PROMPT.chars().count() as f64
@@ -1292,6 +1328,10 @@ async fn generate_bounded_summary(
         }
         let chunk: String = slice_chars(&conversation, offset, offset + budget as usize);
         offset += chunk.chars().count();
+        let mut attempt_max_tokens = max_tokens;
+        let response = loop {
+        let max_tokens = attempt_max_tokens;
+        let chunk = chunk.clone();
         let model_for_call = model.clone();
         let api_key = api_key.to_string();
         let suffix_for_call = suffix.clone();
@@ -1397,6 +1437,21 @@ async fn generate_bounded_summary(
         if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
             return Err(abort_error());
         }
+        add_assistant_usage(&mut usage, &response.usage);
+        if !length_retry_used && retry_max_tokens > max_tokens
+            && response.stop_reason == pi_ai::types::STOP_REASON_LENGTH
+            && response.stop_reason_raw.as_deref() == Some("max_output_tokens")
+            && response.error_message.as_deref().is_none_or(str::is_empty)
+            && provider_stream_failure_kind(&response).is_none()
+            && !is_agent_lifecycle_failure(&response)
+            && !response.content.iter().any(|part| matches!(part, pi_ai::types::ContentBlock::ToolCall(_)))
+        {
+            length_retry_used = true;
+            attempt_max_tokens = retry_max_tokens;
+            continue;
+        }
+        break response;
+        };
         if response.stop_reason == STOP_REASON_ERROR || response.stop_reason == STOP_REASON_ABORTED
         {
             let reason = response
@@ -1416,7 +1471,6 @@ async fn generate_bounded_summary(
             .join("\n");
         validate_summary(&response, &text, format)?;
         summary = Some(text);
-        add_assistant_usage(&mut usage, &response.usage);
         if offset >= conversation_chars {
             break;
         }
@@ -1814,6 +1868,33 @@ mod summary_retry_safety_tests {
     use super::*;
     use pi_ai::types::ContentBlock;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn reasoning_summary_budget_preserves_effort_and_all_caps() {
+        let mut model = Model::new("fixture", "fixture", "openai-responses", "fixture", "https://fixture.invalid");
+        model.reasoning = true;
+        model.context_window = 1_000_000.0;
+        model.max_tokens = 131_072.0;
+        for api in ["openai-responses", "azure-openai-responses"] {
+            model.api = api.to_string();
+            assert_eq!(summary_output_budgets(&model, 13_107.0, Some(&ThinkingLevel::Xhigh), None).unwrap(), (29_491.0, 58_982.0));
+            assert_eq!(summary_output_budgets(&model, 13_107.0, Some(&ThinkingLevel::Off), None).unwrap(), (13_107.0, 26_214.0));
+        }
+        model.api = "openai-codex-responses".into();
+        assert_eq!(summary_output_budgets(&model, 13_107.0, Some(&ThinkingLevel::Xhigh), None).unwrap(), (13_107.0, 13_107.0));
+        model.api = "anthropic-messages".into();
+        assert_eq!(summary_output_budgets(&model, 13_107.0, Some(&ThinkingLevel::Xhigh), None).unwrap().0, 13_107.0);
+        model.api = "openai-responses".into();
+        model.max_tokens = 16_000.0;
+        assert_eq!(summary_output_budgets(&model, 13_107.0, Some(&ThinkingLevel::High), None).unwrap(), (16_000.0, 16_000.0));
+        model.max_tokens = 131_072.0;
+        model.max_input_tokens = Some(40_000.0);
+        assert_eq!(summary_output_budgets(&model, 13_107.0, Some(&ThinkingLevel::High), None).unwrap(), (10_000.0, 10_000.0));
+        model.max_input_tokens = None;
+        let mut options = CompactionOptions::default();
+        options.simple.thinking_budgets = Some(pi_ai::types::ThinkingBudgets { high: Some(100_000.0), ..Default::default() });
+        assert_eq!(summary_output_budgets(&model, 13_107.0, Some(&ThinkingLevel::High), Some(&options)).unwrap(), (65_536.0, 65_536.0));
+    }
 
     #[tokio::test]
     async fn summary_partial_failure_is_not_replayed_by_the_local_retry_owner() {

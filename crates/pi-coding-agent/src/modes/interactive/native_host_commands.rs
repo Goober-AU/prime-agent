@@ -281,6 +281,7 @@ pub(super) async fn run(
         "tree" => {
             let mut selected = None;
             loop {
+                let started = Instant::now();
                 let tree = connection.get_session_tree().await?;
                 if tree.tree.is_empty() {
                     return Ok(CommandOutput::Status("No entries in session".into()));
@@ -291,6 +292,7 @@ pub(super) async fn run(
                     tree, selected, reply,
                 )))
                 .map_err(|e| e.to_string())?;
+                let _ = send.send(HostEvent::MenuTiming(started));
                 let Some(id) = wait.await.ok().flatten() else {
                     break;
                 };

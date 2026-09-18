@@ -78,6 +78,9 @@ impl TransportError {
     }
 }
 const MAX_CONNECTIONS: usize = 64;
+// A split compaction and the parent request may coexist. A socket still carries
+// exactly one request; the bounded pool provides separate leases, not multiplexing.
+const MAX_SESSION_CONNECTIONS: usize = 4;
 const MAX_AGE: Duration = Duration::from_secs(55 * 60);
 const IDLE_AGE: Duration = Duration::from_secs(5 * 60);
 
@@ -258,7 +261,7 @@ async fn capable(model: &Model, client: &ResponsesClient, headers: &HeaderMap, k
     enabled
 }
 
-fn connection(key: &str) -> Option<Arc<Mutex<Connection>>> {
+fn connection(key: &str) -> Option<OwnedMutexGuard<Connection>> {
     let mut pool = POOL
         .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
         .lock()
@@ -267,24 +270,32 @@ fn connection(key: &str) -> Option<Arc<Mutex<Connection>>> {
     pool.retain(|_, e| {
         now.duration_since(e.used) < IDLE_AGE || Arc::strong_count(&e.connection) > 1
     });
-    if !pool.contains_key(key) && pool.len() >= MAX_CONNECTIONS {
-        let oldest = pool
-            .iter()
-            .filter(|(_, e)| Arc::strong_count(&e.connection) == 1)
-            .min_by_key(|(_, e)| e.used)
-            .map(|(k, _)| k.clone());
-        if let Some(oldest) = oldest {
-            pool.remove(&oldest);
-        } else {
-            return None;
+    for slot in 0..MAX_SESSION_CONNECTIONS {
+        let slot_key = format!("{key}:slot:{slot}");
+        if !pool.contains_key(&slot_key) && pool.len() >= MAX_CONNECTIONS {
+            let oldest = pool
+                .iter()
+                .filter(|(_, e)| Arc::strong_count(&e.connection) == 1)
+                .min_by_key(|(_, e)| e.used)
+                .map(|(k, _)| k.clone());
+            if let Some(oldest) = oldest {
+                pool.remove(&oldest);
+            } else {
+                return None;
+            }
+        }
+        let entry = pool.entry(slot_key).or_insert_with(|| PoolEntry {
+            connection: Arc::new(Mutex::new(Connection::default())),
+            used: now,
+        });
+        if let Ok(lease) = entry.connection.clone().try_lock_owned() {
+            entry.used = now;
+            return Some(lease);
         }
     }
-    let entry = pool.entry(key.to_owned()).or_insert_with(|| PoolEntry {
-        connection: Arc::new(Mutex::new(Connection::default())),
-        used: now,
-    });
-    entry.used = now;
-    Some(entry.connection.clone())
+    // No request has been sent: an occupied pool can safely use HTTP/SSE rather
+    // than producing a retryable 10-second "active request" failure.
+    None
 }
 
 fn create_payload(params: &Map<String, Value>) -> Map<String, Value> {
@@ -350,13 +361,9 @@ pub(crate) async fn try_websocket(
         return Ok(None);
     }
     let key = format!("{}:{}:{}", account_key, model.id, session);
-    let Some(connection) = connection(&key) else {
+    let Some(mut owner) = connection(&key) else {
         return Ok(None);
     };
-    let lock = tokio::time::timeout(Duration::from_secs(10), connection.lock_owned());
-    let mut owner = if let Some(signal) = &options.stream.signal {
-        tokio::select! { biased; _ = signal.cancelled() => return Err("Request was aborted".into()), result = lock => result }
-    } else { lock.await }.map_err(|_| "Responses session already has an active request")?;
     if owner.born.map(|t| t.elapsed() >= MAX_AGE).unwrap_or(false) {
         owner.socket = None;
     }
@@ -706,6 +713,47 @@ mod tests {
             );
         }
         assert_eq!(connections.load(Ordering::SeqCst), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_parallel_summaries_use_distinct_sockets_without_waiting_for_each_other() {
+        let (base, connections, server) = fake_endpoint(false).await;
+        let (model, client, options, params) = fake_request(&base);
+        let (history, _) = try_websocket(&model, &client, &params, &options)
+            .await.unwrap().unwrap();
+        // Keep the first stream leased: split compaction starts its prefix summary
+        // before the history summary finishes, with the same account/session ID.
+        let (prefix, _) = tokio::time::timeout(
+            Duration::from_secs(2), try_websocket(&model, &client, &params, &options),
+        ).await.expect("parallel summary must not wait on the other stream")
+            .unwrap().expect("parallel summary should retain WebSockets");
+        let (history, prefix) = tokio::join!(history.collect::<Vec<_>>(), prefix.collect::<Vec<_>>());
+        assert_eq!(history.last().unwrap()["type"], "response.completed");
+        assert_eq!(prefix.last().unwrap()["type"], "response.completed");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        // Sequential work still reuses a warm socket after both summaries finish.
+        let (events, _) = try_websocket(&model, &client, &params, &options).await.unwrap().unwrap();
+        assert_eq!(events.collect::<Vec<_>>().await.len(), 3);
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn websocket_session_capacity_falls_back_only_before_send() {
+        let (base, connections, server) = fake_endpoint(false).await;
+        let (model, client, options, params) = fake_request(&base);
+        let mut active = Vec::new();
+        for _ in 0..MAX_SESSION_CONNECTIONS {
+            active.push(try_websocket(&model, &client, &params, &options).await.unwrap().unwrap().0);
+        }
+        assert!(tokio::time::timeout(Duration::from_secs(2),
+            try_websocket(&model, &client, &params, &options))
+            .await.unwrap().unwrap().is_none());
+        assert_eq!(connections.load(Ordering::SeqCst), MAX_SESSION_CONNECTIONS);
+        for stream in active {
+            assert_eq!(stream.collect::<Vec<_>>().await.last().unwrap()["type"], "response.completed");
+        }
         server.abort();
     }
 

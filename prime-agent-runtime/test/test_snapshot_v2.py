@@ -21,6 +21,7 @@ import dill
 from rlm import repl
 from rlm.bash import BashHandle, BashResult
 from rlm import snapshot as snapshot_store
+from rlm import snapshot_serializer
 
 
 class MutableBox:
@@ -144,16 +145,16 @@ class SnapshotV2RoundTripTest(CasSnapshotTestCase):
         closure = make_closure(captured)
         namespace = {"closure": closure, "math_module": math}
         seen = {"closure": 0, "module": 0}
-        real_dump = dill.dump
+        real_dump = snapshot_serializer._dump_with_dill
 
-        def counting_dump(value, stream, *args, **kwargs):
+        def counting_dump(dill_module, value, stream, *args, **kwargs):
             if value is closure:
                 seen["closure"] += 1
             if value is math:
                 seen["module"] += 1
-            return real_dump(value, stream, *args, **kwargs)
+            return real_dump(dill_module, value, stream, *args, **kwargs)
 
-        with mock.patch.object(dill, "dump", counting_dump):
+        with mock.patch.object(snapshot_serializer, "_dump_with_dill", counting_dump):
             first = self.cas_snapshot(namespace)
             captured.append(2)
             second = self.cas_snapshot(namespace)

@@ -21,7 +21,7 @@ Install only this package's locked dependency with
 `npm ci --ignore-scripts --no-audit --no-fund`. Run:
 
 ```text
-node --test gateway.test.mjs http-proxy-acceptance.test.mjs azure-responses-websocket.test.mjs
+node --test gateway.test.mjs rate-admission.test.mjs http-proxy-acceptance.test.mjs azure-responses-websocket.test.mjs
 ```
 
 These tests use injected credentials and fake upstreams, never paid providers.
@@ -40,5 +40,17 @@ adapter never retries a submitted response; only an authentication-rejected
 handshake can refresh once before sending. Timeouts, connection lifetime, memory,
 connection count and outbound buffering are bounded. Neither prompts nor provider
 output are logged. Gateway/helper build IDs must be deployed together.
+This candidate identity is `optimus-gateway-monitoring-repair-20260918.1`.
+
+Azure quota admission preserves FIFO ordering across HTTP and WebSocket callers
+within each model limiter. Slot release and cancellation wake pending requests;
+token/RPM reservations, pacing, provider cooldown and restart embargo still apply.
+Reservations are not refunded from provider usage/remaining-token headers, whose
+cache and rate-window accounting may differ from the local conservative estimate.
+Logs include measured admission `waitedMs`, `rateWaitReasonsMs` and
+`limiterAtResponse`; health snapshots include `queuedRequests`. Wait-reason
+durations describe observed blocking constraints and can overlap, so they must
+not be summed as independent wall-clock time. No prompts or credentials are
+included. Ollama does not use this limiter and is unchanged.
 
 Protocol source: [Azure Responses WebSockets](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/websockets).

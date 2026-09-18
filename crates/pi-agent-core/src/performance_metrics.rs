@@ -32,6 +32,11 @@ pub enum PerformanceMetricOperation {
     FileRetry,
     SessionReopen,
     SessionInput,
+    UiInput,
+    UiInputAck,
+    UiRender,
+    UiMenuOpen,
+    UiSessionOpen,
     Recorder,
 }
 
@@ -52,6 +57,11 @@ impl PerformanceMetricOperation {
             PerformanceMetricOperation::FileRetry => "file_retry",
             PerformanceMetricOperation::SessionReopen => "session_reopen",
             PerformanceMetricOperation::SessionInput => "session_input",
+            PerformanceMetricOperation::UiInput => "ui_input",
+            PerformanceMetricOperation::UiInputAck => "ui_input_ack",
+            PerformanceMetricOperation::UiRender => "ui_render",
+            PerformanceMetricOperation::UiMenuOpen => "ui_menu_open",
+            PerformanceMetricOperation::UiSessionOpen => "ui_session_open",
             PerformanceMetricOperation::Recorder => "recorder",
         }
     }
@@ -96,6 +106,10 @@ pub enum PerformanceMetricMeasurement {
     UpstreamWaitMs,
     SerializationMs,
     SerializationCpuMs,
+    SerializationMaxVariableMs,
+    SerializationSlowVariables,
+    SerializationSavedMs,
+    SerializationSkippedMs,
     WriteMs,
     QueueMs,
     InputAgentMessage,
@@ -108,6 +122,8 @@ pub enum PerformanceMetricMeasurement {
     AttemptCount,
     AttemptOrdinal,
     DroppedCount,
+    FrameCount,
+    MaxMs,
 }
 
 impl PerformanceMetricMeasurement {
@@ -129,6 +145,10 @@ impl PerformanceMetricMeasurement {
             PerformanceMetricMeasurement::UpstreamWaitMs => "upstream_wait_ms",
             PerformanceMetricMeasurement::SerializationMs => "serialization_ms",
             PerformanceMetricMeasurement::SerializationCpuMs => "serialization_cpu_ms",
+            PerformanceMetricMeasurement::SerializationMaxVariableMs => "serialization_max_variable_ms",
+            PerformanceMetricMeasurement::SerializationSlowVariables => "serialization_slow_variables",
+            PerformanceMetricMeasurement::SerializationSavedMs => "serialization_saved_ms",
+            PerformanceMetricMeasurement::SerializationSkippedMs => "serialization_skipped_ms",
             PerformanceMetricMeasurement::WriteMs => "write_ms",
             PerformanceMetricMeasurement::QueueMs => "queue_ms",
             PerformanceMetricMeasurement::InputAgentMessage => "input_agent_message",
@@ -141,6 +161,8 @@ impl PerformanceMetricMeasurement {
             PerformanceMetricMeasurement::AttemptCount => "attempt_count",
             PerformanceMetricMeasurement::AttemptOrdinal => "attempt_ordinal",
             PerformanceMetricMeasurement::DroppedCount => "dropped_count",
+            PerformanceMetricMeasurement::FrameCount => "frame_count",
+            PerformanceMetricMeasurement::MaxMs => "max_ms",
         }
     }
 }

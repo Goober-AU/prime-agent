@@ -10,6 +10,11 @@ export type PerformanceMetricOperation =
 	| "compaction"
 	| "file_retry"
 	| "session_reopen"
+	| "ui_input"
+	| "ui_input_ack"
+	| "ui_render"
+	| "ui_menu_open"
+	| "ui_session_open"
 	| "recorder";
 
 export type PerformanceMetricOutcome = "success" | "failure" | "cancelled" | "unavailable";
@@ -24,6 +29,12 @@ export type PerformanceMetricMeasurement =
 	| "upstream_wait_ms"
 	| "serialization_ms"
 	| "serialization_cpu_ms"
+	| "serialization_max_variable_ms"
+	| "serialization_slow_variables"
+	| "serialization_saved_ms"
+	| "serialization_skipped_ms"
+	| "frame_count"
+	| "max_ms"
 	| "write_ms"
 	| "queue_ms"
 	| "next_cell_delay_ms"

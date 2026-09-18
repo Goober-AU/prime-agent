@@ -90,6 +90,8 @@ export function installAzureResponsesWebSockets(server, options) {
       log("websocket_turn", {
         route: route.name, model, reservation: turn.reservation,
         waitedMs: turn.admission?.waitedMs, durationMs: Date.now() - turn.startedAt,
+        rateWaitReasonsMs: turn.admission?.waitReasons,
+        limiterAtResponse: turn.limiter?.snapshot?.(),
         firstEventMs: turn.firstEventMs, firstTextMs: turn.firstTextMs,
         firstThinkingMs: turn.firstThinkingMs, firstToolMs: turn.firstToolMs,
         terminal: turn.terminal ?? "disconnected",
