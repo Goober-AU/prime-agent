@@ -238,8 +238,10 @@ impl TreeList {
         // - At indent 2+: stay flat for single-child chains, +1 only if parent branches
 
         // Stack items: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
-        struct StackItem {
-            node: AgentConnectionSessionTreeNode,
+        // The TypeScript stack holds node references; the Rust port must not own
+        // clones here or every visited node deep-clones its whole subtree.
+        struct StackItem<'a> {
+            node: &'a AgentConnectionSessionTreeNode,
             indent: usize,
             just_branched: bool,
             show_connector: bool,
@@ -256,7 +258,7 @@ impl TreeList {
         // Add roots in reverse order, prioritizing the one containing the active leaf
         // If multiple roots, treat them as children of a virtual root that branches
         let multiple_roots = roots.len() > 1;
-        let mut ordered_roots: Vec<AgentConnectionSessionTreeNode> = roots.to_vec();
+        let mut ordered_roots: Vec<&AgentConnectionSessionTreeNode> = roots.iter().collect();
         // `[...roots].sort((a, b) => Number(containsActive.get(b)) - Number(containsActive.get(a)))`.
         // Rust's `sort_by_key` is stable, so the input order inside each group is
         // the same order the TypeScript sort preserves.
@@ -274,7 +276,7 @@ impl TreeList {
         for i in (0..ordered_roots.len()).rev() {
             let is_last = i == ordered_roots.len() - 1;
             stack.push(StackItem {
-                node: ordered_roots[i].clone(),
+                node: ordered_roots[i],
                 indent: if multiple_roots { 1 } else { 0 },
                 just_branched: multiple_roots,
                 show_connector: multiple_roots,
@@ -336,7 +338,15 @@ impl TreeList {
             }
 
             result.push(FlatNode {
-                node: node.clone(),
+                // `FlatNode.node` is only read through `entry`/`label`, matching
+                // the TypeScript's shared reference. Keeping the children here
+                // would retain one deep copy per row (quadratic on long chains).
+                node: AgentConnectionSessionTreeNode {
+                    entry,
+                    label: node.label.clone(),
+                    label_timestamp: node.label_timestamp.clone(),
+                    children: Vec::new(),
+                },
                 indent,
                 show_connector,
                 is_last,
@@ -344,11 +354,11 @@ impl TreeList {
                 is_virtual_root_child,
             });
 
-            let children = node.children.clone();
+            let children = &node.children;
             let multiple_children = children.len() > 1;
 
             // Order children so the branch containing the active leaf comes first
-            let mut ordered_children: Vec<AgentConnectionSessionTreeNode> = children.clone();
+            let mut ordered_children: Vec<&AgentConnectionSessionTreeNode> = children.iter().collect();
             ordered_children.sort_by_key(|child| {
                 if contains_active
                     .get(child.entry.id())
@@ -400,7 +410,7 @@ impl TreeList {
             for i in (0..ordered_children.len()).rev() {
                 let child_is_last = i == ordered_children.len() - 1;
                 stack.push(StackItem {
-                    node: ordered_children[i].clone(),
+                    node: ordered_children[i],
                     indent: child_indent,
                     just_branched: multiple_children,
                     show_connector: multiple_children,
@@ -2147,3 +2157,4 @@ fn get_searchable_text(node: &AgentConnectionSessionTreeNode) -> String {
 
     parts.join(" ")
 }
+
