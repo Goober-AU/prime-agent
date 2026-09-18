@@ -2235,7 +2235,7 @@ mod queue_metrics;
 
 #[path = "agent_session/dispatch_delivery.rs"]
 mod dispatch_delivery;
-use dispatch_delivery::is_child_report_action;
+use dispatch_delivery::{compatible_family_message_actions, is_family_message_action};
 
 #[cfg(test)]
 #[path = "agent_session/dispatch_delivery_tests.rs"]
@@ -5196,8 +5196,10 @@ impl AgentSession {
         if self.rlm_depth == 0 {
             return;
         }
-        let state = self.rlm_continuation.lock().unwrap().clone();
-        let value = serde_json::to_value(&state).unwrap_or(Value::Null);
+        // Keep snapshot and append in the same ledger critical section. An
+        // older snapshot must not overwrite a newly delivered parent task.
+        let state = self.rlm_continuation.lock().unwrap();
+        let value = serde_json::to_value(&*state).unwrap_or(Value::Null);
         let _ = self.session_manager.lock().unwrap().append_custom_entry(
             RLM_CONTINUATION_STATE_CUSTOM_TYPE,
             Some(value),
@@ -5205,35 +5207,32 @@ impl AgentSession {
     }
 
     /// `_beginRlmParentTask`.
-    fn begin_rlm_parent_task(&self, message: &AgentMessage) {
+    fn begin_rlm_parent_task(&self, message: &AgentMessage) -> Result<(), String> {
         if self.rlm_depth == 0 || !is_agent_session_message(message) {
-            return;
+            return Ok(());
         }
         let (details, timestamp) = match message {
             AgentMessage::Custom(CustomAgentMessage::Custom {
                 details, timestamp, ..
             }) => (details.clone().unwrap_or(Value::Null), *timestamp),
-            _ => return,
+            _ => return Ok(()),
         };
         if details.get("fromRelationship").and_then(Value::as_str) != Some("parent") {
-            return;
+            return Ok(());
         }
         let message_id = details
             .get("id")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        {
-            // `state.tasks.some((task) => task.id === message.details.id)`.
-            let state = self.rlm_continuation.lock().unwrap();
-            if state.tasks.iter().any(|task| task.id == message_id) {
-                return;
-            }
+        let mut current = self.rlm_continuation.lock().unwrap();
+        if current.tasks.iter().any(|task| task.id == message_id) {
+            return Ok(());
         }
         // Follow-up admission is not a task boundary: only durable delivery can
         // reset completion state. Keep every delivered task awaiting a result.
         {
-            let mut state = self.rlm_continuation.lock().unwrap();
+            let mut state = current.clone();
             state.tasks.retain(|task| !task.replied);
             state.tasks.push(RlmParentTask {
                 id: message_id,
@@ -5248,9 +5247,18 @@ impl AgentSession {
             state.task_had_length = false;
             state.pending_continuation = None;
             state.pending_result = None;
+            let value = serde_json::to_value(&state).map_err(|error| error.to_string())?;
+            // This append includes a checked flush. A failed write rolls back
+            // only the new ledger entry and leaves the prior in-memory ledger.
+            self.session_manager.lock().unwrap().append_custom_entry_with_rollback(
+                RLM_CONTINUATION_STATE_CUSTOM_TYPE,
+                Some(value),
+            ).map_err(|error| format!("Parent-task ledger persistence failed: {error}"))?;
+            *current = state;
         }
+        drop(current);
         *self.replied_to_parent_since_task.lock().unwrap() = Some(false);
-        self.persist_rlm_continuation_state();
+        Ok(())
     }
 
     /// `_rlmContinuationMatches`.
@@ -6349,7 +6357,6 @@ impl AgentSession {
             if persisted.is_err() {
                 return;
             }
-            self.begin_rlm_parent_task(message);
             self.consume_started_rlm_continuation(message);
 
             if let AgentMessage::Message(Message::Assistant(assistant)) = message {
@@ -9663,8 +9670,8 @@ impl AgentSession {
                 self.follow_up_mode()
             };
             let mut actions: Vec<QueuedSessionAction> = vec![first.clone()];
-            let batch_child_reports = is_child_report_action(&first);
-            while (preselected.is_none() && mode == "all") || batch_child_reports {
+            let batch_family_messages = is_family_message_action(&first);
+            while (preselected.is_none() && mode == "all") || batch_family_messages {
                 let mut store = self.action_store.lock().unwrap();
                 let next = store.queued_actions(None).into_iter().next();
                 let next = match next {
@@ -9672,9 +9679,7 @@ impl AgentSession {
                     None => break,
                 };
                 if next.delivery != first.delivery
-                    || (batch_child_reports && (!is_child_report_action(&next)
-                        || next.effective_priority() != first.effective_priority()
-                        || next.suppress_autonomous_continuation != first.suppress_autonomous_continuation))
+                    || (batch_family_messages && !compatible_family_message_actions(&first, &next))
                 {
                     break;
                 }

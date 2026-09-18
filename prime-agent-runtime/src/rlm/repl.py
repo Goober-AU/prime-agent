@@ -42,7 +42,7 @@ from .snapshot import (
     restore_cas_v2,
     snapshot_cas_v2,
 )
-from .snapshot_serializer import dump_snapshot_value
+from .snapshot_serializer import SnapshotSerializationMetrics, dump_snapshot_value
 
 PROTOCOL_VERSION = 3
 
@@ -674,6 +674,7 @@ def _snapshot_state(
 
     serialization_wall_ns = 0
     serialization_cpu_ns = 0
+    variable_metrics = SnapshotSerializationMetrics()
     outer_serialization_wall_ns = 0
     thread_clock = getattr(time, "thread_time_ns", None)
 
@@ -717,7 +718,9 @@ def _snapshot_state(
             skipped.append({"name": name, "reason": f"{type(err).__name__}: {_safe_str(err)[:200]}"})
             continue
         finally:
-            serialization_wall_ns += time.monotonic_ns() - serialization_started
+            elapsed_ns = time.monotonic_ns() - serialization_started
+            serialization_wall_ns += elapsed_ns
+            variable_metrics.record(name, elapsed_ns)
             if serialization_cpu_started is not None and thread_clock is not None:
                 serialization_cpu_ns += thread_clock() - serialization_cpu_started
         if total + len(blob) > max_bytes:
@@ -858,6 +861,7 @@ def _snapshot_state(
                 "write_ms": max(0, persistence_elapsed_ns - outer_serialization_wall_ns) / 1_000_000,
                 "written_bytes": disk_bytes_written,
                 "total_wall_ms": (time.monotonic_ns() - total_started) / 1_000_000,
+                **variable_metrics.summarize(payload),
             },
         }
         # Publish while still parked: a later KeyboardInterrupt into this task finds the committed result (see _handle_state).

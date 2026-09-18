@@ -238,8 +238,6 @@ impl TreeList {
         // - At indent 2+: stay flat for single-child chains, +1 only if parent branches
 
         // Stack items: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
-        // The TypeScript stack holds node references; the Rust port must not own
-        // clones here or every visited node deep-clones its whole subtree.
         struct StackItem<'a> {
             node: &'a AgentConnectionSessionTreeNode,
             indent: usize,
@@ -301,8 +299,7 @@ impl TreeList {
             // (`entry.message.content` is duck-typed in the TypeScript: blocks with
             // `type === "toolCall"`. The port reads the same blocks from the
             // serialized message, which keeps the field names identical.)
-            let entry = node.entry.clone();
-            if let AgentConnectionSessionEntry::Message { message, .. } = &entry {
+            if let AgentConnectionSessionEntry::Message { message, .. } = &node.entry {
                 if message.role() == "assistant" {
                     let message_value =
                         serde_json::to_value(message).unwrap_or(serde_json::Value::Null);
@@ -338,11 +335,10 @@ impl TreeList {
             }
 
             result.push(FlatNode {
-                // `FlatNode.node` is only read through `entry`/`label`, matching
-                // the TypeScript's shared reference. Keeping the children here
-                // would retain one deep copy per row (quadratic on long chains).
+                // Flat rows only need this entry's metadata. Retaining every
+                // descendant here makes a chain's copies quadratic in its depth.
                 node: AgentConnectionSessionTreeNode {
-                    entry,
+                    entry: node.entry.clone(),
                     label: node.label.clone(),
                     label_timestamp: node.label_timestamp.clone(),
                     children: Vec::new(),
@@ -354,11 +350,10 @@ impl TreeList {
                 is_virtual_root_child,
             });
 
-            let children = &node.children;
-            let multiple_children = children.len() > 1;
+            let multiple_children = node.children.len() > 1;
 
             // Order children so the branch containing the active leaf comes first
-            let mut ordered_children: Vec<&AgentConnectionSessionTreeNode> = children.iter().collect();
+            let mut ordered_children: Vec<&AgentConnectionSessionTreeNode> = node.children.iter().collect();
             ordered_children.sort_by_key(|child| {
                 if contains_active
                     .get(child.entry.id())
@@ -445,11 +440,10 @@ impl TreeList {
         let current_leaf_id = self.current_leaf_id.clone();
         let filter_mode = self.filter_mode;
         let search_query = self.search_query.clone();
-        let flat_nodes = self.flat_nodes.clone();
-        let mut filtered: Vec<FlatNode> = flat_nodes
+        let mut filtered: Vec<FlatNode> = self.flat_nodes
             .iter()
             .filter(|flat_node| {
-                let entry = flat_node.node.entry.clone();
+                let entry = &flat_node.node.entry;
                 let is_current_leaf = Some(entry.id()) == current_leaf_id.as_deref();
 
                 // Skip assistant messages with only tool calls (no text) unless error/aborted
@@ -2158,3 +2152,46 @@ fn get_searchable_text(node: &AgentConnectionSessionTreeNode) -> String {
     parts.join(" ")
 }
 
+#[cfg(test)]
+mod linear_storage_tests {
+    use super::*;
+
+    #[test]
+    fn long_chain_flat_rows_remain_shallow_through_label_fold_and_search() {
+        let mut children = Vec::new();
+        for index in (0..200).rev() {
+            children = vec![AgentConnectionSessionTreeNode {
+                entry: AgentConnectionSessionEntry::CustomMessage {
+                    id: format!("node-{index}"),
+                    parent_id: (index > 0).then(|| format!("node-{}", index - 1)),
+                    timestamp: "2026-09-18T00:00:00Z".into(),
+                    custom_type: "test".into(),
+                    content: serde_json::Value::String("payload".repeat(128)),
+                    details: None, display: true,
+                },
+                label: None, label_timestamp: None, children,
+            }];
+        }
+        let mut list = TreeList::new(&children, Some("node-199".into()), 15, Some("node-0".into()), Some("all"));
+        assert_eq!(list.flat_nodes.len(), 200);
+        assert_eq!(list.filtered_nodes.len(), 200);
+        assert!(list.flat_nodes.iter().all(|row| row.node.children.is_empty()));
+        assert!(list.filtered_nodes.iter().all(|row| row.node.children.is_empty()));
+        assert_eq!(list.get_selected_node().unwrap().entry, children[0].entry);
+        assert!(list.get_selected_node().unwrap().children.is_empty());
+        list.update_node_label("node-0", Some("root label".into()), Some("2026-09-18T01:00:00Z".into()));
+        list.apply_filter();
+        assert_eq!(list.get_selected_node().unwrap().label.as_deref(), Some("root label"));
+        assert!(list.get_selected_node().unwrap().children.is_empty());
+        list.folded_nodes.insert("node-0".into());
+        list.apply_filter();
+        assert_eq!(list.filtered_nodes.len(), 1);
+        list.folded_nodes.clear();
+        list.apply_filter();
+        assert_eq!(list.filtered_nodes.len(), 200);
+        list.search_query = "root label".into();
+        list.apply_filter();
+        assert_eq!(list.filtered_nodes.len(), 1);
+        assert_eq!(list.get_selected_node().unwrap().entry.id(), "node-0");
+    }
+}

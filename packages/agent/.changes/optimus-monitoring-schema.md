@@ -1,0 +1,1 @@
+- Added optional content-free UI timing and snapshot serialization measurements to the performance metric schema.
