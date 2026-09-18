@@ -289,7 +289,7 @@ class BashHandle:
             )
         else:
             # Windows lacks a foreground-status channel, so its exit drain stays best-effort.
-            script = _with_prefix(command)
+            script = _pipeline_script(_with_prefix(command))
             self._job = _winjob.create_job()
             if self._job is None:
                 # Nothing spawned yet, so nothing can leak: refuse to start.
@@ -930,6 +930,13 @@ def _with_prefix(command: str) -> str:
     return f"{prefix}\n{command}" if prefix else command
 
 
+def _pipeline_script(command: str) -> str:
+    # Share Bash's producer-failure handling across POSIX and Windows. Dash
+    # must still parse the script. Status 141 is ambiguous (SIGPIPE or an
+    # explicit exit), so callers must handle intentional truncation themselves.
+    return 'if [ -n "${BASH_VERSION:-}" ]; then set -o pipefail; fi\n' + command
+
+
 def _fence_printf() -> str:
     # `\command -p printf` defeats alias expansion but not a user-defined shell
     # function named `command`, which would swallow both fence frames and leave
@@ -948,18 +955,10 @@ def _status_script(command: str, completion_a: str, completion_b: str) -> str:
     return (
         f"exec {_STATUS_FD}>&0 {_OUTPUT_FD}>&1 0</dev/null\n"
         f"read -r _prime_agent_gate <&{_STATUS_FD} || exit 127\n"
-        # Without pipefail a pipeline reports only its last command, so
-        # `python ... | tee log` hides a crashed producer. Enable pipefail on
-        # shells that support it (the dash fallback must parse this script).
-        "__prime_pipefail=0\n"
-        "if [ -n \"${BASH_VERSION:-}\" ]; then set -o pipefail; __prime_pipefail=1; fi\n"
         "{\n"
-        f"{command}\n"
+        f"{_pipeline_script(command)}\n"
         f"}} {_OUTPUT_FD}>&- {_STATUS_FD}>&-\n"
         "__prime_status=$?\n"
-        # `| head` and similar consumers make producers die of SIGPIPE; that is
-        # a completed pipeline, not a failed command.
-        "if [ \"$__prime_pipefail\" -eq 1 ] && [ \"$__prime_status\" -eq 141 ]; then __prime_status=0; fi\n"
         "\\set +x\n"
         f"{emit} '\\036prime-agent-complete:%s%s\\037' "
         f"'{completion_a}' '{completion_b}' >&{_OUTPUT_FD} || exit \"$__prime_status\"\n"
