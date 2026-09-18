@@ -23,7 +23,7 @@ const DEFAULT_FLUSH_INTERVAL_MS: usize = 1_000;
 const DEFAULT_CLOSE_TIMEOUT_MS: usize = 1_000;
 
 /// `OPERATIONS`.
-const OPERATIONS: [PerformanceMetricOperation; 15] = [
+const OPERATIONS: [PerformanceMetricOperation; 20] = [
     PerformanceMetricOperation::LogicalRequest,
     PerformanceMetricOperation::ProviderAttempt,
     PerformanceMetricOperation::Tool,
@@ -38,6 +38,11 @@ const OPERATIONS: [PerformanceMetricOperation; 15] = [
     PerformanceMetricOperation::FileRetry,
     PerformanceMetricOperation::SessionReopen,
     PerformanceMetricOperation::SessionInput,
+    PerformanceMetricOperation::UiInput,
+    PerformanceMetricOperation::UiInputAck,
+    PerformanceMetricOperation::UiRender,
+    PerformanceMetricOperation::UiMenuOpen,
+    PerformanceMetricOperation::UiSessionOpen,
     PerformanceMetricOperation::Recorder,
 ];
 
@@ -62,7 +67,7 @@ const COMPONENTS: [PerformanceMetricComponent; 8] = [
 ];
 
 /// `MEASUREMENTS`.
-const MEASUREMENTS: [PerformanceMetricMeasurement; 28] = [
+const MEASUREMENTS: [PerformanceMetricMeasurement; 34] = [
     PerformanceMetricMeasurement::TotalMs,
     PerformanceMetricMeasurement::WaitMs,
     PerformanceMetricMeasurement::DispatchToResponseHeadersMs,
@@ -79,6 +84,10 @@ const MEASUREMENTS: [PerformanceMetricMeasurement; 28] = [
     PerformanceMetricMeasurement::UpstreamWaitMs,
     PerformanceMetricMeasurement::SerializationMs,
     PerformanceMetricMeasurement::SerializationCpuMs,
+    PerformanceMetricMeasurement::SerializationMaxVariableMs,
+    PerformanceMetricMeasurement::SerializationSlowVariables,
+    PerformanceMetricMeasurement::SerializationSavedMs,
+    PerformanceMetricMeasurement::SerializationSkippedMs,
     PerformanceMetricMeasurement::WriteMs,
     PerformanceMetricMeasurement::QueueMs,
     PerformanceMetricMeasurement::InputAgentMessage,
@@ -91,6 +100,8 @@ const MEASUREMENTS: [PerformanceMetricMeasurement; 28] = [
     PerformanceMetricMeasurement::AttemptCount,
     PerformanceMetricMeasurement::AttemptOrdinal,
     PerformanceMetricMeasurement::DroppedCount,
+    PerformanceMetricMeasurement::FrameCount,
+    PerformanceMetricMeasurement::MaxMs,
 ];
 
 /// A failed file operation.

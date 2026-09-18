@@ -1268,7 +1268,11 @@ where
                 if type_ == "response.done" || type_ == "response.completed" || type_ == "response.incomplete" {
                     let response = event.get("response").cloned();
                     let normalized_response = response.map(|response| {
-                        let status = normalize_codex_status(response.get("status"));
+                        let status = if type_ == "response.incomplete" {
+                            Some("incomplete".to_string())
+                        } else {
+                            normalize_codex_status(response.get("status"))
+                        };
                         let mut normalized = response;
                         if let Some(object) = normalized.as_object_mut() {
                             object.insert(
@@ -3636,13 +3640,24 @@ mod tests {
     }
 
     #[test]
-    fn map_codex_events_drops_unknown_statuses() {
+    fn map_codex_incomplete_events_preserve_terminal_kind_even_with_unknown_status() {
         let (mapped, error) = map_events(vec![Ok(json!({
             "type": "response.incomplete",
             "response": { "status": "weird" }
         }))]);
         assert!(error.is_none());
-        assert_eq!(mapped[0]["response"]["status"], json!(null));
+        assert_eq!(mapped[0]["response"]["status"], json!("incomplete"));
+    }
+
+    #[test]
+    fn map_codex_incomplete_events_keep_explicit_reason() {
+        let (mapped, error) = map_events(vec![Ok(json!({
+            "type": "response.incomplete",
+            "response": { "incomplete_details": { "reason": "max_output_tokens" } }
+        }))]);
+        assert!(error.is_none());
+        assert_eq!(mapped[0]["response"]["status"], "incomplete");
+        assert_eq!(mapped[0]["response"]["incomplete_details"]["reason"], "max_output_tokens");
     }
 
     #[test]

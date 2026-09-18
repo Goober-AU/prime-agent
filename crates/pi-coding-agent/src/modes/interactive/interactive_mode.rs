@@ -1311,6 +1311,21 @@ pub trait RosterBar: Send + Sync {
     fn dispose(&self) -> futures::future::BoxFuture<'static, ()>;
 }
 
+struct CompactionNotice {
+    session_id: Option<String>,
+    text: Text,
+}
+
+impl super::interactive_mode_services::Component for CompactionNotice {
+    fn render(&self, width: usize) -> Vec<String> {
+        let mut lines = vec![String::new()];
+        lines.extend(super::interactive_mode_services::Component::render(&self.text, width));
+        lines
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any { self }
+}
+
 /// Port of `InteractiveMode`.
 pub struct InteractiveMode {
     // Static configuration
@@ -1389,6 +1404,7 @@ pub struct InteractiveMode {
 
     last_status_spacer_index: Option<usize>,
     last_status_text_index: Option<usize>,
+    restored_draft_notice: std::rc::Rc<std::cell::RefCell<Option<String>>>,
     last_goal_announcement: Option<GoalAnnouncementSnapshot>,
 
     feature_hint_deck: FeatureHintDeck,
@@ -1529,6 +1545,7 @@ impl InteractiveMode {
             anthropic_subscription_warning_shown: false,
             last_status_spacer_index: None,
             last_status_text_index: None,
+            restored_draft_notice: std::rc::Rc::new(std::cell::RefCell::new(None)),
             last_goal_announcement: None,
             feature_hint_deck: FeatureHintDeck::default(),
             current_feature_hint: None,
@@ -3017,6 +3034,10 @@ impl InteractiveMode {
 
     /// Port of `applyConnectionStateSnapshot`.
     pub fn apply_connection_state_snapshot(&mut self, state: AgentConnectionState) {
+        if self.connection_state.as_ref().is_some_and(|previous| previous.session_id != state.session_id) {
+            self.restored_draft_notice.borrow_mut().take();
+            self.clear_compaction_notices();
+        }
         self.bind_prompt_stash_session(&state.session_id);
         self.connection_state = Some(state.clone());
         if let Some(warning) = self.options.model_fallback_message.clone() {
@@ -4145,6 +4166,30 @@ impl InteractiveMode {
     pub fn clear_input_bar(&mut self) {
         self.queue_selection.reset();
         self.ui.request_render();
+    }
+
+    fn show_compaction_error(&mut self, message: &str) {
+        self.chat_container.add_child(Box::new(CompactionNotice {
+            session_id: self.connection_state.as_ref().map(|state| state.session_id.clone()),
+            text: Text::new(theme().fg("error", &format!("Error: {message}")), 1, 0),
+        }));
+        self.last_status_spacer_index = None;
+        self.last_status_text_index = None;
+        self.ui.request_render();
+    }
+
+    fn clear_compaction_notices(&mut self) {
+        let session_id = self.connection_state.as_ref().map(|state| state.session_id.as_str());
+        let before = self.chat_container.len();
+        self.chat_container.children.retain(|child| {
+            child.as_any().downcast_ref::<CompactionNotice>()
+                .is_none_or(|notice| notice.session_id.as_deref() != session_id)
+        });
+        if before != self.chat_container.len() {
+            self.last_status_spacer_index = None;
+            self.last_status_text_index = None;
+            self.ui.request_render();
+        }
     }
 
     /// Port of `showError` (interactive-mode.ts:7672-7676).

@@ -1532,10 +1532,61 @@ fn find_double_newline_index(data: &[u8]) -> Option<usize> {
 
 /// Reads the response body and forwards each `data:` payload as it arrives, so
 /// the caller emits events incrementally like the SDK's async iterator.
+fn observe_sse_payload(observer: Option<&crate::types::OnStreamObservation>, payload: &str) {
+	let Some(observer) = observer else { return; };
+	// Observe at the network reader, before parser/UI queues. Never include content,
+	// and do no extra JSON parsing when local monitoring is disabled.
+	let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+		observer("raw_event");
+		if payload.starts_with("[DONE]") {
+			observer("terminal");
+			return;
+		}
+		let Ok(chunk) = serde_json::from_str::<Value>(payload) else { return; };
+		if chunk.get("error").map(js_truthy).unwrap_or(false) {
+			observer("terminal");
+		}
+		let delta = &chunk["choices"][0]["delta"];
+		if delta["content"].as_str().map(|text| !text.is_empty()).unwrap_or(false) {
+			observer("text");
+		}
+		if ["reasoning_content", "reasoning", "reasoning_text"].iter()
+			.any(|key| delta[*key].as_str().map(|text| !text.is_empty()).unwrap_or(false))
+			|| delta["reasoning_details"].as_array().map(|details| !details.is_empty()).unwrap_or(false)
+		{
+			observer("thinking");
+		}
+		if delta["tool_calls"].as_array().map(|calls| !calls.is_empty()).unwrap_or(false) {
+			observer("tool");
+		}
+	}));
+}
+
+fn observe_chunk_usage(raw: &Value, model: &Model, options: Option<&OpenAICompletionsOptions>) {
+	let Some(observer) = options.and_then(|options| options.stream.on_usage_observation.as_ref()) else { return; };
+	let finite = |value: Option<&Value>| value.and_then(Value::as_f64).filter(|value| value.is_finite() && *value >= 0.0);
+	let observation = crate::types::ProviderUsageObservation {
+		input_tokens: Some(finite(raw.get("prompt_tokens"))),
+		cached_input_tokens: Some(finite(raw.get("prompt_tokens_details").and_then(|v| v.get("cached_tokens")))
+			.or_else(|| finite(raw.get("prompt_cache_hit_tokens")))),
+		output_tokens: Some(finite(raw.get("completion_tokens"))),
+		reasoning_tokens: Some(finite(raw.get("completion_tokens_details").and_then(|v| v.get("reasoning_tokens")))),
+		total_tokens: Some(finite(raw.get("total_tokens"))),
+		// Raw OpenAI-compatible wire totals, not pi-ai's normalized uncached input.
+		cached_input_included_in_input: Some(Some(true)),
+		reasoning_included_in_output: Some(Some(true)),
+	};
+	if let Ok(future) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(observation, model))) {
+		// Monitoring is disposable; an observer must not block model output.
+		tokio::spawn(future);
+	}
+}
+
 async fn read_sse_data(
 	response: reqwest::Response,
 	signal: Option<tokio_util::sync::CancellationToken>,
 	sender: tokio::sync::mpsc::UnboundedSender<Result<String, StreamError>>,
+	observer: Option<crate::types::OnStreamObservation>,
 ) {
 	let mut response = response;
 	let mut decoder = SseDecoder::new();
@@ -1581,6 +1632,7 @@ async fn read_sse_data(
 					continue;
 				}
 				if let Some((_, payload)) = decoder.decode(line) {
+					observe_sse_payload(observer.as_ref(), &payload);
 					if payload.starts_with("[DONE]") {
 						done = true;
 						continue;
@@ -1600,6 +1652,7 @@ async fn read_sse_data(
 			continue;
 		}
 		if let Some((_, payload)) = decoder.decode(line) {
+			observe_sse_payload(observer.as_ref(), &payload);
 			if payload.starts_with("[DONE]") {
 				done = true;
 				continue;
@@ -1774,10 +1827,11 @@ async fn run_stream_body(
 	let response = post_chat_completions(&client, &params, signal.as_ref(), timeout_ms).await?;
 	let status = response.status().as_u16();
 	if let Some(on_response) = options_ref.and_then(|options| options.stream.on_response.clone()) {
-		let response_record = crate::types::ProviderResponse {
+		let mut response_record = crate::types::ProviderResponse {
 			status: status as i64,
 			headers: crate::utils::headers::header_map_to_record(response.headers()),
 		};
+		response_record.headers.insert("x-optimus-transport".into(), "sse".into());
 		on_response(response_record, model).await;
 	}
 	stream.push(AssistantMessageEvent::Start {
@@ -1790,7 +1844,8 @@ async fn run_stream_body(
 	let response_headers = crate::utils::headers::header_map_to_record(response.headers());
 
 	let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel::<Result<String, StreamError>>();
-	tokio::spawn(read_sse_data(response, signal.clone(), sender));
+	let observer = options_ref.and_then(|options| options.stream.on_stream_observation.clone());
+	tokio::spawn(read_sse_data(response, signal.clone(), sender, observer));
 	while let Some(payload) = receiver.recv().await {
 		let payload = payload?;
 		let Ok(chunk) = serde_json::from_str::<Value>(&payload) else {
@@ -1824,6 +1879,7 @@ async fn run_stream_body(
 		let chunk_usage = chunk.get("usage").filter(|value| js_truthy(value));
 		if let Some(chunk_usage) = chunk_usage {
 			output.usage = parse_chunk_usage(chunk_usage, model, cache_write_cost);
+			observe_chunk_usage(chunk_usage, model, options_ref);
 		}
 
 		let choice = chunk
@@ -1840,6 +1896,7 @@ async fn run_stream_body(
 		if chunk_usage.is_none() {
 			if let Some(choice_usage) = choice.get("usage").filter(|value| js_truthy(value)) {
 				output.usage = parse_chunk_usage(choice_usage, model, cache_write_cost);
+				observe_chunk_usage(choice_usage, model, options_ref);
 			}
 		}
 
@@ -2510,6 +2567,104 @@ mod tests {
 			socket.flush().await.unwrap();
 		});
 		(address, server)
+	}
+
+	#[tokio::test]
+	async fn completions_monitoring_records_raw_phases_and_inclusive_usage_without_changing_output() {
+		let body = concat!(
+			"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"private reasoning\"}}]}\r\n\r\n",
+			"data: {\"choices\":[{\"delta\":{\"content\":\"answer\"}}]}\r\n\r\n",
+			"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":80},\"completion_tokens\":12,\"completion_tokens_details\":{\"reasoning_tokens\":9},\"total_tokens\":112}}\r\n\r\n",
+			"data: [DONE]\r\n\r\n"
+		);
+		let mut outputs = Vec::new();
+		for enabled in [false, true] {
+			let (address, server) = serve_http("200 OK", body).await;
+			let mut model = base_model();
+			model.base_url = format!("http://{address}");
+			let mut options = keyed_options();
+			let phases = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+			let usages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+			if enabled {
+				let capture = phases.clone();
+				options.stream.on_stream_observation = Some(std::sync::Arc::new(move |phase| {
+					capture.lock().unwrap().push(phase.into());
+				}));
+				let capture = usages.clone();
+				options.stream.on_usage_observation = Some(std::sync::Arc::new(move |usage, _| {
+					capture.lock().unwrap().push(usage);
+					Box::pin(async {})
+				}));
+				options.stream.on_response = Some(std::sync::Arc::new(|response, _| {
+					assert_eq!(response.headers["x-optimus-transport"], "sse");
+					Box::pin(async {})
+				}));
+			}
+			let stream = stream_openai_completions(&model, &context(vec![user_text("hi")]), Some(options));
+			let mut done = None;
+			while let Some(event) = tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await.unwrap() {
+				match event {
+					AssistantMessageEvent::Done { message, .. } => done = Some(message),
+					AssistantMessageEvent::Error { error, .. } => panic!("unexpected stream error: {:?}", error.error_message),
+					_ => {}
+				}
+			}
+			server.await.unwrap();
+			let done = done.unwrap();
+			outputs.push((done.content, done.usage));
+			if enabled {
+				assert_eq!(*phases.lock().unwrap(), vec!["raw_event", "thinking", "raw_event", "text", "raw_event", "raw_event", "terminal"]);
+				let usage = usages.lock().unwrap();
+				assert_eq!(usage.len(), 1);
+				assert_eq!(usage[0].input_tokens, Some(Some(100.0)));
+				assert_eq!(usage[0].cached_input_tokens, Some(Some(80.0)));
+				assert_eq!(usage[0].reasoning_tokens, Some(Some(9.0)));
+				assert_eq!(usage[0].cached_input_included_in_input, Some(Some(true)));
+				assert_eq!(usage[0].reasoning_included_in_output, Some(Some(true)));
+			}
+		}
+		assert_eq!(outputs[0], outputs[1]);
+		assert_eq!(outputs[0].1.input, 20.0);
+	}
+
+	#[tokio::test]
+	async fn completions_observers_preserve_unknown_and_zero_counts_and_contain_panics() {
+		let usages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let capture = usages.clone();
+		let mut options = keyed_options();
+		options.stream.on_usage_observation = Some(std::sync::Arc::new(move |usage, _| {
+			capture.lock().unwrap().push(usage);
+			Box::pin(async {})
+		}));
+		observe_chunk_usage(&json!({"prompt_tokens": 0, "prompt_cache_hit_tokens": 0, "completion_tokens": -1}), &base_model(), Some(&options));
+		let observations = usages.lock().unwrap();
+		assert_eq!(observations[0].input_tokens, Some(Some(0.0)));
+		assert_eq!(observations[0].cached_input_tokens, Some(Some(0.0)));
+		assert_eq!(observations[0].output_tokens, Some(None));
+		assert_eq!(observations[0].reasoning_tokens, Some(None));
+		drop(observations);
+		options.stream.on_usage_observation = Some(std::sync::Arc::new(|_, _| panic!("disposable observer")));
+		observe_chunk_usage(&json!({}), &base_model(), Some(&options));
+		let observer: crate::types::OnStreamObservation = std::sync::Arc::new(|_| panic!("disposable observer"));
+		observe_sse_payload(Some(&observer), "[DONE]");
+	}
+
+	#[test]
+	fn completions_monitoring_is_content_free_and_not_part_of_the_request_payload() {
+		let phases = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+		let capture = phases.clone();
+		let observer: crate::types::OnStreamObservation = std::sync::Arc::new(move |phase| capture.lock().unwrap().push(phase.into()));
+		observe_sse_payload(Some(&observer), r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"PRIVATE"}}]}}]}"#);
+		observe_sse_payload(Some(&observer), r#"{"error":{"message":"PRIVATE"}}"#);
+		assert_eq!(*phases.lock().unwrap(), vec!["raw_event", "tool", "raw_event", "terminal"]);
+		let model = base_model();
+		let ctx = context(vec![user_text("hi")]);
+		let compat = get_compat(&model);
+		let mut options = keyed_options();
+		let before = build_params(&model, &ctx, Some(&options), &compat, &"short".into(), None).unwrap();
+		options.stream.on_stream_observation = Some(observer);
+		options.stream.on_usage_observation = Some(std::sync::Arc::new(|_, _| Box::pin(async {})));
+		assert_eq!(build_params(&model, &ctx, Some(&options), &compat, &"short".into(), None).unwrap(), before);
 	}
 
 	#[tokio::test]

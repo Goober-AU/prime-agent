@@ -80,6 +80,8 @@ mod native_extension_bridge;
 mod native_subagents;
 #[path = "native_host_recovery_notice.rs"]
 mod native_recovery_notice;
+#[path = "native_host_metrics.rs"]
+mod native_metrics;
 #[cfg(test)]
 #[path = "native_host_ui_tests.rs"]
 mod ui_tests;
@@ -531,6 +533,9 @@ impl TuiComponent for Transcript {
         for container in mode.get_prompt_context_containers() {
             lines.extend(local::Component::render(container, width.max(1.0) as usize));
         }
+        if mode.restored_draft_notice.borrow().is_some() {
+            lines.push(theme().fg("dim", "Draft restored"));
+        }
         if mode.should_show_working_loader() {
             // `createWorkingLoader` mounts the animated pi-tui `Loader`
             // (interactive-mode.ts:3305-3313); the native host renders the same
@@ -652,6 +657,7 @@ enum InputAction {
     SessionResume,
 }
 enum HostEvent {
+    MenuTiming(Instant),
     Extension(native_extension_bridge::Event),
     Shutdown,
     CommandDialog(native_commands::Dialog),
@@ -700,7 +706,7 @@ enum HostEvent {
     /// resolves, interactive-mode.ts:7852-7856). The owner loop must not await
     /// the RPC itself: the continuation travels back as this event.
     SettingAccepted(native_settings::Change),
-    Models(wire::AgentConnectionModelCatalog, Option<String>),
+    Models(wire::AgentConnectionModelCatalog, Option<String>, Instant),
     ModelSelected {
         session_id: String,
         model: wire::AgentConnectionModel,
@@ -1161,16 +1167,17 @@ fn handle_prompt_stash_action(
     apply_prompt_stash_outcome(mode, editor, &outcome);
 }
 
-/// Drops the previous status anchor so the next notice starts a fresh block.
-///
-/// `restorePromptStashOnOpen` clears `lastStatusText`/`lastStatusSpacer` before
-/// restoring (interactive-mode.ts:4360-4364) because `showStatus` replaces the
-/// anchored line, and the restore notice must not overwrite a notice that
-/// `init()` just posted. `native_host` is a child module of `interactive_mode`,
-/// so the anchor fields are reachable without widening their visibility.
-fn reset_status_anchor(mode: &mut InteractiveMode) {
-    mode.last_status_spacer_index = None;
-    mode.last_status_text_index = None;
+fn bind_draft_restore_notice(mode: &InteractiveMode, editor: &mut CustomEditor) {
+    let notice = mode.restored_draft_notice.clone();
+    let mut previous = editor.editor_mut().on_change.take();
+    editor.editor_mut().on_change = Some(Box::new(move |text| {
+        if notice.borrow().as_deref().is_some_and(|draft| draft != text) {
+            notice.borrow_mut().take();
+        }
+        if let Some(callback) = previous.as_mut() {
+            callback(text);
+        }
+    }));
 }
 
 /// Port of `stashDraftForAgentsView` (interactive-mode.ts:4367-4377).
@@ -1202,10 +1209,13 @@ fn apply_prompt_stash_outcome(
             if let Some(snapshot) = paste_snapshot {
                 editor.editor_mut().restore_paste_snapshot(snapshot.clone());
             }
+            *mode.borrow().restored_draft_notice.borrow_mut() = Some(text.clone());
         }
     }
     if let Some(status) = outcome.status {
-        mode.borrow_mut().show_status(status, "dim");
+        if !matches!(outcome.editor, PromptStashEditorEffect::SetText { .. }) {
+            mode.borrow_mut().show_status(status, "dim");
+        }
     }
 }
 
@@ -1272,6 +1282,7 @@ async fn run_terminal(
     options: InteractiveModeSeamOptions,
     benchmark: bool,
 ) -> Result<Option<InteractiveModeRunResult>, String> {
+    let opened_at = Instant::now();
     let mut in_process_connection = None;
     let connection: Arc<dyn wire::AgentConnection> = match options.connection.clone() {
         Some(connection) => connection,
@@ -1289,6 +1300,7 @@ async fn run_terminal(
     };
     let snapshot = connection.get_initial_snapshot().await?;
     let mut current_session_id = snapshot.state.session_id.clone();
+    let mut ui_metrics = native_metrics::UiMetrics::new(&current_session_id);
     let mut state_refresh = native_state::StateRefresh::new();
     let services = if let Some(runtime) = &options.runtime {
         local::create_interactive_mode_ui_services(&runtime.session())
@@ -1387,6 +1399,7 @@ async fn run_terminal(
         }));
     }
     bind_editor_actions(&editor, &actions);
+    bind_draft_restore_notice(&mode.borrow(), &mut editor.borrow_mut());
     let mut history_runtime = native_history::HistoryRuntime::new(connection.clone());
     // `renderInitialMessages` renders the transcript first and restores the
     // in-flight assistant message afterwards (interactive-mode.ts:6865-6871), the
@@ -1429,13 +1442,10 @@ async fn run_terminal(
             true
         }));
     }
-    // `run()` restores a `restoreOnOpen` stash once init is done
-    // (interactive-mode.ts:1628-1630, :4358-4365). The restore notice must land in a
-    // fresh status block, so the previous status anchor is dropped first.
+    // Automatic draft restore is session-scoped feedback, not transcript history.
     {
         let session = stash_session(&mode.borrow(), &current_session_id);
         if session.restore_on_open_pending() {
-            reset_status_anchor(&mut mode.borrow_mut());
             let editor_text = editor.borrow().editor().get_text();
             if let Some(outcome) =
                 session.restore_prompt_stash_if_editor_empty(None, &editor_text, true)
@@ -1445,6 +1455,7 @@ async fn run_terminal(
         }
     }
     let input = Rc::new(RefCell::new(Vec::<String>::new()));
+    let input_received = Rc::new(Cell::new(None::<Instant>));
     let viewport_input = Rc::new(Cell::new(false));
     let history_requested = Rc::new(Cell::new(false));
     {
@@ -1452,9 +1463,13 @@ async fn run_terminal(
         let mode = mode.clone();
         let viewport_input = viewport_input.clone();
         let history_requested = history_requested.clone();
+        let input_received = input_received.clone();
         // Dispatch component input after releasing the TUI borrow: Editor owns
         // the same TUI handle and requests rendering from its input handlers.
         ui.borrow_mut().add_input_listener(Box::new(move |data| {
+            if !pi_tui::keys::is_key_release(data) && input_received.get().is_none() {
+                input_received.set(Some(Instant::now()));
+            }
             let keys = pi_tui::keybindings::get_keybindings();
             if keys.matches(data, "tui.viewport.pageUp")
                 || keys.matches(data, "tui.viewport.top")
@@ -1522,6 +1537,7 @@ async fn run_terminal(
     let fullscreen = mode.borrow().fullscreen_enabled;
     native_settings::fullscreen(fullscreen, &mode, &editor, &ui, &transcript);
     ui.borrow_mut().run_pending_render(now_ms());
+    ui_metrics.first_frame(opened_at);
     if benchmark {
         mode.borrow_mut().shutdown().await;
         drop(guard);
@@ -1664,6 +1680,7 @@ async fn run_terminal(
         viewport_input
             .set(ui.borrow().is_fullscreen() && !ui.borrow().is_fullscreen_overlay_focused());
         ui.borrow_mut().drain_input();
+        if let Some(received) = input_received.take() { ui_metrics.input(received); }
         if history_requested.replace(false) {
             history_runtime.request(&mode.borrow());
         }
@@ -1869,7 +1886,7 @@ async fn run_terminal(
                     } else if text.trim() == "/help" {
                         mode.borrow_mut().show_status("/model  select a model\n/login  provider setup\n/new  new session\n/context  context usage\n/compact [instructions]  compact session\n/refine  refine reusable knowledge\n/goal <objective>  pursue a goal\n!<command>  run shell command\n/quit  exit\nEsc interrupts; Ctrl+C twice exits; Ctrl+D exits an empty prompt; Alt+Enter queues follow-up; Ctrl+O expands tools.", "dim");
                     } else {
-                        submit(&connection, &send, text, follow_up, None);
+                        submit_with_metrics(&connection, &send, text, follow_up, None, Some(ui_metrics.recorder.clone()));
                     }
                 }
                 InputAction::Interrupt | InputAction::Escape => {
@@ -2050,6 +2067,7 @@ async fn run_terminal(
                 state_refresh.invalidate();
             }
             match event {
+                HostEvent::MenuTiming(started) => ui_metrics.menu(started),
                 HostEvent::Shutdown => mode.borrow_mut().shutdown_requested = true,
                 HostEvent::Extension(event) => {
                     use native_extension_bridge::Event;
@@ -2784,7 +2802,7 @@ async fn run_terminal(
                     apply_fullscreen_request(requested, &mode, &editor, &ui, &transcript)
                 }
                 // `showModelsSelector` (interactive-mode.ts:8457-8533).
-                HostEvent::Models(catalog, search) => {
+                HostEvent::Models(catalog, search, started) => {
                     models = catalog.models;
                     configured_providers = catalog.configured_providers.into_iter().collect();
                     if let Some(model) = search.as_deref().and_then(|query| {
@@ -2807,6 +2825,7 @@ async fn run_terminal(
                             "models",
                             search,
                         ));
+                        let _ = send.send(HostEvent::MenuTiming(started));
                     }
                 }
             }
@@ -2909,10 +2928,15 @@ async fn run_terminal(
         model_rows.set(rows as f64);
         editor.borrow_mut().editor_mut().set_terminal_rows(rows);
         editor.borrow_mut().editor_mut().poll_autocomplete();
+        ui_metrics.session(&current_session_id);
+        let render_requested = ui.borrow().render_requested();
+        let render_started = Instant::now();
         ui.borrow_mut().run_pending_render(now_ms());
+        if render_requested { ui_metrics.rendered(render_started.elapsed()); }
         tokio::time::sleep(Duration::from_millis(16)).await;
     }
     unsubscribe();
+    ui_metrics.flush_render();
     if let Some(bridge) = &local_extension_bridge { bridge.close(); }
     if let Some((_, _, handle, reply)) = custom_extension { handle.hide(); let _ = reply.send(None); }
     extension_surfaces.borrow_mut().reset();
@@ -3033,9 +3057,29 @@ fn submit(
     follow_up: bool,
     images: Option<Vec<ImageContent>>,
 ) {
+    submit_with_metrics(connection, send, text, follow_up, images, None);
+}
+
+fn submit_with_metrics(
+    connection: &Arc<dyn wire::AgentConnection>,
+    send: &mpsc::Sender<HostEvent>,
+    text: String,
+    follow_up: bool,
+    images: Option<Vec<ImageContent>>,
+    recorder: Option<Arc<dyn pi_agent_core::performance_metrics::PerformanceMetricRecorder>>,
+) {
     let (connection, send) = (connection.clone(), send.clone());
     tokio::spawn(async move {
-        let result = dispatch_submission(&connection, &send, &text, follow_up, images).await;
+        let is_prompt = match classify_submission(&text) {
+            SlashDispatch::Model(line) => !line.starts_with('!'),
+            SlashDispatch::SessionCommand(_) => true,
+            SlashDispatch::Builtin { .. } => false,
+        };
+        let submission = dispatch_submission(&connection, &send, &text, follow_up, images);
+        let result = match recorder.filter(|_| is_prompt) {
+            Some(recorder) => native_metrics::acknowledged(recorder, submission).await,
+            None => submission.await,
+        };
         let _ = send.send(HostEvent::Completed(result));
     });
 }
@@ -3062,9 +3106,11 @@ async fn dispatch_submission(
         // `/login` keeps its dedicated provider picker (interactive-mode.ts:4952-4956).
         let result = match dispatch {
             SlashDispatch::Builtin { name, args, raw } if name == "login" && args.is_empty() => {
+                let started = Instant::now();
                 match connection.get_model_catalog().await {
                     Ok(catalog) => {
                         let _ = send.send(HostEvent::Configuration(catalog, "providers", None));
+                        let _ = send.send(HostEvent::MenuTiming(started));
                     }
                     Err(error) => {
                         let _ = send.send(HostEvent::Warning(error));
@@ -3626,16 +3672,20 @@ async fn run_builtin_command(
 ) -> Result<CommandOutput, String> {
     match name {
         "mcp" if args.trim().is_empty() => {
+            let started = Instant::now();
             let _ = send.send(HostEvent::Configuration(
                 connection.get_model_catalog().await?,
                 "mcp-connections",
                 None,
             ));
+            let _ = send.send(HostEvent::MenuTiming(started));
             Ok(CommandOutput::Nothing)
         }
         "btw" | "side" | "fork" | "logout" | "scoped-models" | "share" | "traces" | "monitor" | "tree" | "update" | "debug" | "mcp" => native_commands::run(connection, send, if name == "side" { "btw" } else { name }, args).await,
         "settings" => {
+            let started = Instant::now();
             let _ = send.send(HostEvent::Settings(connection.get_state().await?));
+            let _ = send.send(HostEvent::MenuTiming(started));
             Ok(CommandOutput::Nothing)
         }
         // `commandName === "fullscreen"` (interactive-mode.ts:5014-5023).
@@ -3653,9 +3703,10 @@ async fn run_builtin_command(
         },
         // `/model` keeps its existing search behaviour exactly.
         "model" => {
+            let started = Instant::now();
             let search = (!args.is_empty()).then(|| args.to_string());
             connection.get_model_catalog().await.map(|catalog| {
-                let _ = send.send(HostEvent::Models(catalog, search));
+                let _ = send.send(HostEvent::Models(catalog, search, started));
             })?;
             Ok(CommandOutput::Nothing)
         }
@@ -4296,8 +4347,13 @@ fn apply_event(
             let mut mode = mode.borrow_mut();
             mode.patch_connection_state(|s| s.is_compacting = false);
             mode.stop_compaction_loader();
-            if let Some(error) = optional_string(&value, "errorMessage") {
-                mode.show_error(&error);
+            if let wire::AgentConnectionSessionEvent::CompactionEnd { result, aborted, error_message, .. } = event {
+                if let Some(error) = error_message {
+                    mode.show_compaction_error(&error);
+                } else if !aborted && result.is_some() {
+                    // An idle snapshot or cancelled/skipped attempt is not recovery.
+                    mode.clear_compaction_notices();
+                }
             }
         }
         "recap_update" => {
@@ -5850,7 +5906,7 @@ mod tests {
                 HostEvent::Settings(_) => "Settings",
                 HostEvent::Setting(_) => "Setting",
                 HostEvent::SettingAccepted(_) => "SettingAccepted",
-                HostEvent::Models(_, _) => "Models",
+                HostEvent::Models(_, _, _) => "Models",
                 HostEvent::ModelSelected { .. } => "ModelSelected",
                 HostEvent::Configuration(_, _, _) => "Configuration",
                 HostEvent::BeginLogin(_, _) => "BeginLogin",
@@ -6143,33 +6199,149 @@ mod tests {
         );
     }
 
-    /// The on-open restore notice must land in its own status block: `showStatus`
-    /// replaces the anchored previous line, so `restorePromptStashOnOpen` drops the
-    /// anchor first (`interactive-mode.ts:4360-4364`; test
-    /// `interactive-mode-prompt-stash.test.ts:358-375`).
+    fn compaction_notice_end(error: Option<&str>, committed: bool, aborted: bool) -> wire::AgentConnectionSessionEvent {
+        wire::AgentConnectionSessionEvent::CompactionEnd {
+            reason: "threshold".into(),
+            result: committed.then(|| wire::CompactionResultSummary::default()),
+            aborted,
+            will_retry: false,
+            error_message: error.map(str::to_string),
+            error_severity: None,
+            custom_instructions: None,
+        }
+    }
+
     #[test]
-    fn the_on_open_restore_notice_starts_a_fresh_status_block() {
-        let session_id = "host-on-open-anchor";
-        let mut mode = stash_mode(session_id);
-        mode.show_status("Compaction finished", "dim");
-        let anchored = mode.chat_container.len();
-        let before_second = anchored;
+    fn compaction_notice_success_removes_only_owned_failure_and_preserves_draft_feedback() {
+        let mode = Rc::new(RefCell::new(stash_mode("compaction-notice-recovered")));
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "one".into(), ..Default::default()
+        });
+        let transcript = Rc::new(RefCell::new(Transcript::new(mode.clone())));
+        let failure = "Auto-compaction failed: temporary provider error";
+        apply_event(&mode, &transcript, compaction_notice_end(Some(failure), false, false));
+        mode.borrow_mut().show_error(failure); // Same text, but not a compaction-owned notice.
+        mode.borrow_mut().show_error("New unrelated error");
+        mode.borrow_mut().show_warning("Keep this warning");
+        mode.borrow_mut().show_status("Keep this status", "dim");
+        *mode.borrow().restored_draft_notice.borrow_mut() = Some("draft".into());
+        assert_eq!(transcript.borrow_mut().render(100.0).join("\n").matches(failure).count(), 2);
 
-        // Without the anchor reset the second notice coalesces into one block.
-        mode.show_status("Restored stashed prompt", "dim");
-        assert_eq!(
-            mode.chat_container.len(),
-            before_second,
-            "the coalescing path reuses the previous status block"
-        );
+        apply_event(&mode, &transcript, compaction_notice_end(None, true, false));
+        let rendered = transcript.borrow_mut().render(100.0).join("\n");
+        assert_eq!(rendered.matches(failure).count(), 1);
+        for preserved in ["New unrelated error", "Keep this warning", "Keep this status", "Draft restored"] {
+            assert!(rendered.contains(preserved), "missing {preserved}: {rendered}");
+        }
+        mode.borrow_mut().show_status("Status after recovery", "dim");
+        assert!(transcript.borrow_mut().render(100.0).join("\n").contains("Status after recovery"));
+    }
 
-        reset_status_anchor(&mut mode);
-        mode.show_status("Restored stashed prompt", "dim");
-        assert_eq!(
-            mode.chat_container.len(),
-            before_second + 2,
-            "the restore notice appends a fresh spacer + line"
-        );
+    #[test]
+    fn compaction_notice_requires_committed_success_not_start_idle_or_abort() {
+        let mode = Rc::new(RefCell::new(stash_mode("compaction-notice-attempts")));
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "one".into(), ..Default::default()
+        });
+        let transcript = Rc::new(RefCell::new(Transcript::new(mode.clone())));
+        let failure = "Auto-compaction failed: preserve until recovered";
+        apply_event(&mode, &transcript, compaction_notice_end(Some(failure), false, false));
+        apply_event(&mode, &transcript, wire::AgentConnectionSessionEvent::CompactionStart {
+            reason: "manual".into(), custom_instructions: None,
+        });
+        assert!(transcript.borrow_mut().render(100.0).join("\n").contains(failure));
+        for (committed, aborted) in [(false, true), (false, false), (true, true)] {
+            apply_event(&mode, &transcript, compaction_notice_end(None, committed, aborted));
+            assert!(transcript.borrow_mut().render(100.0).join("\n").contains(failure));
+        }
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "one".into(), is_compacting: false, ..Default::default()
+        });
+        assert!(transcript.borrow_mut().render(100.0).join("\n").contains(failure));
+        let mut recovered = compaction_notice_end(None, true, false);
+        if let wire::AgentConnectionSessionEvent::CompactionEnd { reason, .. } = &mut recovered {
+            *reason = "manual".into();
+        }
+        apply_event(&mode, &transcript, recovered);
+        assert!(!transcript.borrow_mut().render(100.0).join("\n").contains(failure));
+        apply_event(&mode, &transcript, compaction_notice_end(Some("New compaction failure"), false, false));
+        assert!(transcript.borrow_mut().render(100.0).join("\n").contains("New compaction failure"));
+    }
+
+    #[test]
+    fn compaction_notice_is_session_scoped_and_does_not_remove_other_errors_on_switch() {
+        let mode = Rc::new(RefCell::new(stash_mode("compaction-notice-scope")));
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "one".into(), ..Default::default()
+        });
+        let transcript = Rc::new(RefCell::new(Transcript::new(mode.clone())));
+        apply_event(&mode, &transcript, compaction_notice_end(Some("Old session compaction failed"), false, false));
+        mode.borrow_mut().show_error("Unrelated retained error");
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "two".into(), ..Default::default()
+        });
+        let rendered = transcript.borrow_mut().render(100.0).join("\n");
+        assert!(!rendered.contains("Old session compaction failed"));
+        assert!(rendered.contains("Unrelated retained error"));
+        apply_event(&mode, &transcript, compaction_notice_end(Some("New session compaction failed"), false, false));
+        mode.borrow_mut().chat_container.add_child(Box::new(CompactionNotice {
+            session_id: Some("foreign".into()), text: Text::new("Foreign session notice", 1, 0),
+        }));
+        apply_event(&mode, &transcript, compaction_notice_end(None, true, false));
+        let rendered = transcript.borrow_mut().render(100.0).join("\n");
+        assert!(!rendered.contains("New session compaction failed"));
+        assert!(rendered.contains("Foreign session notice"));
+        assert!(rendered.contains("Unrelated retained error"));
+    }
+
+    #[test]
+    fn draft_restore_notice_is_transient_and_does_not_clear_other_statuses() {
+        let mode = Rc::new(RefCell::new(stash_mode("host-on-open-notice")));
+        mode.borrow_mut().show_warning("Keep this warning");
+        mode.borrow_mut().show_status("Compaction finished", "dim");
+        let editor = Rc::new(RefCell::new(CustomEditor::new(
+            Rc::new(RefCell::new(TUI::new(Box::new(pi_tui::terminal::ProcessTerminal::new()), None))),
+            editor_theme(), CustomEditorOptions::default(),
+        )));
+        bind_draft_restore_notice(&mode.borrow(), &mut editor.borrow_mut());
+        let outcome = PromptStashOutcome {
+            editor: PromptStashEditorEffect::SetText { text: "restored draft".into(), paste_snapshot: None },
+            status: Some("Restored stashed prompt"),
+        };
+        let mut transcript = Transcript::new(mode.clone());
+        for replacement in ["", "replacement draft"] {
+            apply_prompt_stash_outcome(&mode, &editor, &outcome);
+            let rendered = transcript.render(80.0).join("\n");
+            assert_eq!(rendered.matches("Draft restored").count(), 1);
+            assert!(rendered.contains("Keep this warning"));
+            assert!(rendered.contains("Compaction finished"));
+            editor.borrow_mut().editor_mut().set_text(replacement);
+            let rendered = transcript.render(80.0).join("\n");
+            assert!(!rendered.contains("Draft restored"));
+            assert!(rendered.contains("Keep this warning"));
+            assert!(rendered.contains("Compaction finished"));
+        }
+        apply_prompt_stash_outcome(&mode, &editor, &outcome);
+        editor.borrow_mut().handle_input("x");
+        assert!(!transcript.render(80.0).join("\n").contains("Draft restored"));
+        assert_eq!(editor.borrow().editor().get_text(), "restored draftx");
+    }
+
+    #[test]
+    fn draft_restore_notice_clears_on_session_change_without_discarding_the_draft() {
+        let mode = Rc::new(RefCell::new(stash_mode("host-notice-session")));
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "one".into(), ..Default::default()
+        });
+        *mode.borrow().restored_draft_notice.borrow_mut() = Some("keep draft".into());
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "one".into(), ..Default::default()
+        });
+        assert!(mode.borrow().restored_draft_notice.borrow().is_some());
+        mode.borrow_mut().apply_connection_state_snapshot(local::AgentConnectionState {
+            session_id: "two".into(), ..Default::default()
+        });
+        assert!(mode.borrow().restored_draft_notice.borrow().is_none());
     }
 
     /// An auto-stash for the agents view survives a reopen: the handoff stashes the
@@ -6718,14 +6890,14 @@ mod tests {
             ),
         }
         assert!(
-            !events.iter().any(|event| matches!(event, HostEvent::Models(_, _))),
+            !events.iter().any(|event| matches!(event, HostEvent::Models(_, _, _))),
             "the prompt text must never re-enter the dispatcher, got {:?}",
             event_names(&events)
         );
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let drained: Vec<HostEvent> = receive.try_iter().collect();
         assert!(
-            !drained.iter().any(|event| matches!(event, HostEvent::Models(_, _))),
+            !drained.iter().any(|event| matches!(event, HostEvent::Models(_, _, _))),
             "no model picker may open for the prompt text: {:?}",
             event_names(&drained)
         );

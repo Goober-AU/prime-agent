@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import dill
 from rlm import repl
+from rlm import snapshot_serializer
 from rlm.snapshot_serializer import dump_snapshot_value
 
 
@@ -37,7 +38,7 @@ class SnapshotSpeedTests(unittest.TestCase):
         cycle = []
         cycle.append(cycle)
         value = {"a": shared, "b": shared, "cycle": cycle, "set": {1, 2}, "frozen": frozenset({3}), "tuple": (4, 5)}
-        with mock.patch.object(dill, "dump", side_effect=AssertionError("slow serializer used")):
+        with mock.patch.object(snapshot_serializer, "_dump_with_dill", side_effect=AssertionError("slow serializer used")):
             blob = self.serialize(value)
         restored = dill.loads(blob)
         self.assertIs(restored["a"], restored["b"])
@@ -84,7 +85,7 @@ class SnapshotSpeedTests(unittest.TestCase):
                   decimal.Decimal("12345678901234567890.000000001")]
         value = {"a": shared, "b": shared, "self": None}
         value["self"] = value
-        with mock.patch.object(dill, "dump", side_effect=AssertionError("slow serializer used")):
+        with mock.patch.object(snapshot_serializer, "_dump_with_dill", side_effect=AssertionError("slow serializer used")):
             restored = dill.loads(self.serialize(value))
         self.assertEqual(restored["a"], shared)
         self.assertIs(restored["a"], restored["b"])
@@ -103,7 +104,7 @@ class SnapshotSpeedTests(unittest.TestCase):
             def dst(self, dt):
                 return datetime.timedelta(0)
         for value in [CustomDate(2026, 9, 17), datetime.datetime(2026, 9, 17, tzinfo=CustomZone())]:
-            with mock.patch.object(dill, "dump", wraps=dill.dump) as fallback:
+            with mock.patch.object(snapshot_serializer, "_dump_with_dill", wraps=snapshot_serializer._dump_with_dill) as fallback:
                 restored = dill.loads(self.serialize(value))
             self.assertEqual(restored, value)
             fallback.assert_called_once()
@@ -112,14 +113,14 @@ class SnapshotSpeedTests(unittest.TestCase):
         def reduction(value):
             return datetime.date, (2000, 1, 1)
         with mock.patch.dict(copyreg.dispatch_table, {datetime.date: reduction}):
-            with mock.patch.object(dill, "dump", wraps=dill.dump) as fallback:
+            with mock.patch.object(snapshot_serializer, "_dump_with_dill", wraps=snapshot_serializer._dump_with_dill) as fallback:
                 restored = dill.loads(self.serialize(datetime.date(2026, 9, 17)))
             self.assertEqual(restored, datetime.date(2000, 1, 1))
             fallback.assert_called_once()
         def dill_reduction(pickler, value):
             pickler.save_reduce(datetime.date, (2001, 1, 1), obj=value)
         with mock.patch.dict(dill.Pickler.dispatch, {datetime.date: dill_reduction}):
-            with mock.patch.object(dill, "dump", wraps=dill.dump) as fallback:
+            with mock.patch.object(snapshot_serializer, "_dump_with_dill", wraps=snapshot_serializer._dump_with_dill) as fallback:
                 restored = dill.loads(self.serialize(datetime.date(2026, 9, 17)))
             self.assertEqual(restored, datetime.date(2001, 1, 1))
             fallback.assert_called_once()

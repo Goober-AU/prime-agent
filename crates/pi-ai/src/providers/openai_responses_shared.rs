@@ -1055,7 +1055,7 @@ pub async fn process_responses_stream(
                     partial: output.clone(),
                 });
             }
-        } else if event_type == "response.completed" {
+        } else if event_type == "response.completed" || event_type == "response.incomplete" {
             let response = get(&event, "response").cloned().unwrap_or(Value::Null);
             if let Some(id) = get_str(&response, "id") {
                 output.response_id = Some(id.to_string());
@@ -1112,7 +1112,25 @@ pub async fn process_responses_stream(
                 };
                 apply(&mut output.usage, service_tier.as_deref());
             }
-            output.stop_reason = map_stop_reason(get_str(&response, "status"))?;
+            let status = if event_type == "response.incomplete" {
+                Some("incomplete")
+            } else {
+                get_str(&response, "status")
+            };
+            output.stop_reason = map_stop_reason(status)?;
+            if status == Some("incomplete") && output.stop_reason_raw.is_none() {
+                // Keep the provider's explicit reason: generic incomplete is
+                // not proof of an output-token limit (it may be filtering).
+                output.stop_reason_raw = response.get("incomplete_details")
+                    .and_then(|details| get_str(details, "reason")).map(str::to_string);
+            }
+            if response.get("error").is_some_and(|error| !error.is_null()) {
+                output.stop_reason = "error".to_string();
+                if output.stop_reason_raw.as_deref() != Some("refusal") {
+                    output.stop_reason_raw = Some(response.get("error").and_then(|error| get_str(error, "code"))
+                        .unwrap_or("failed").to_string());
+                }
+            }
             if output
                 .content
                 .iter()
@@ -1121,8 +1139,8 @@ pub async fn process_responses_stream(
             {
                 output.stop_reason = "toolUse".to_string();
             }
-            if output.stop_reason == "error" {
-                if let Some(status) = get_str(&response, "status") {
+            if output.stop_reason == "error" && output.stop_reason_raw.is_none() {
+                if let Some(status) = status {
                     output.stop_reason_raw = Some(status.to_string());
                 }
             }
@@ -1945,6 +1963,57 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.message(), "Unhandled stop reason: unknown-status");
+    }
+
+    #[tokio::test]
+    async fn incomplete_terminals_preserve_exact_reason_and_usage() {
+        let model = text_model();
+        for kind in ["response.completed", "response.incomplete"] {
+            for reason in [Some("max_output_tokens"), Some("content_filter"), Some("unknown"), None] {
+                let mut output = empty_output(&model);
+                let stream = AssistantMessageEventStream::new();
+                let events = vec![json!({
+                    "type":kind, "response": { "status":"incomplete", "id":"bounded-summary",
+                        "incomplete_details": { "reason":reason },
+                        "usage": { "input_tokens":10, "output_tokens":13107, "total_tokens":13117,
+                            "output_tokens_details": { "reasoning_tokens":4834 } } }
+                })];
+                process_responses_stream(event_stream(events), &mut output, &stream, &model, None).await.unwrap();
+                assert_eq!(output.stop_reason, "length");
+                assert_eq!(output.stop_reason_raw.as_deref(), reason);
+                assert_eq!(output.usage.output, 13107.0);
+                assert_eq!(output.response_id.as_deref(), Some("bounded-summary"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_terminal_without_status_is_not_success_and_cannot_erase_refusal() {
+        let model = text_model();
+        for raw in [None, Some("refusal")] {
+            let mut output = empty_output(&model);
+            output.stop_reason_raw = raw.map(str::to_string);
+            let stream = AssistantMessageEventStream::new();
+            let events = vec![json!({ "type":"response.incomplete",
+                "response": { "incomplete_details": { "reason":"max_output_tokens" } } })];
+            process_responses_stream(event_stream(events), &mut output, &stream, &model, None).await.unwrap();
+            assert_eq!(output.stop_reason, "length");
+            assert_eq!(output.stop_reason_raw.as_deref(), Some(raw.unwrap_or("max_output_tokens")));
+        }
+    }
+
+    #[tokio::test]
+    async fn incomplete_terminal_with_provider_error_cannot_be_retried_as_length() {
+        let model = text_model();
+        let mut output = empty_output(&model);
+        let stream = AssistantMessageEventStream::new();
+        let events = vec![json!({ "type":"response.incomplete", "response": {
+            "incomplete_details": { "reason":"max_output_tokens" },
+            "error": { "code":"content_filter", "message":"filtered" }
+        } })];
+        process_responses_stream(event_stream(events), &mut output, &stream, &model, None).await.unwrap();
+        assert_eq!(output.stop_reason, "error");
+        assert_ne!(output.stop_reason_raw.as_deref(), Some("max_output_tokens"));
     }
 
     #[tokio::test]

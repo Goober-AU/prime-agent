@@ -12,7 +12,7 @@ const ROOT = dirname(fileURLToPath(import.meta.url));
 const HOST = "127.0.0.1";
 const PORT = 43120;
 const VERSION = 2;
-export const BUILD_ID = "optimus-gateway-20260917.responses-ws.1";
+export const BUILD_ID = "optimus-gateway-monitoring-repair-20260918.1";
 const APP_V01_MAX_BODY_BYTES = 32_768;
 const GATEWAY_STARTED_AT = Date.now();
 function localCredential(runtime) {
@@ -100,6 +100,8 @@ export class RollingLimiter {
     this.inFlight = 0;
     this.nextPacedAt = 0;
     this.blockedUntil = 0;
+    this.pendingAdmissions = [];
+    this.changeWaiters = new Set();
   }
 
   purge(now) {
@@ -118,6 +120,7 @@ export class RollingLimiter {
       usedRequests: this.records.length,
       inFlight: this.inFlight,
       maxInFlight: this.maxInFlight,
+      queuedRequests: this.pendingAdmissions.length,
       blockedUntil: this.blockedUntil || undefined,
     };
   }
@@ -136,6 +139,28 @@ export class RollingLimiter {
           ? retryAfterDate - Date.now()
           : 1000;
     this.blockedUntil = Math.max(this.blockedUntil, Date.now() + delayMs);
+    this.notifyChange();
+  }
+
+  notifyChange() {
+    for (const notify of this.changeWaiters) notify();
+  }
+
+  waitForChange(waitMs, signal) {
+    if (signal?.aborted) return Promise.reject(abortError(signal));
+    return new Promise((resolve, reject) => {
+      let timer;
+      const cleanup = () => {
+        clearTimeout(timer);
+        this.changeWaiters.delete(onChange);
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onChange = () => { cleanup(); resolve(); };
+      const onAbort = () => { cleanup(); reject(abortError(signal)); };
+      this.changeWaiters.add(onChange);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      if (Number.isFinite(waitMs)) timer = setTimeout(onChange, Math.max(1, waitMs));
+    });
   }
 
   async admit(tokens, signal) {
@@ -147,7 +172,11 @@ export class RollingLimiter {
       throw error;
     }
 
-    let totalWaitMs = 0;
+    const queuedAt = Date.now();
+    const waiter = {};
+    const waitReasons = {};
+    this.pendingAdmissions.push(waiter);
+    try {
     for (;;) {
       if (signal?.aborted) throw abortError(signal);
       const now = Date.now();
@@ -158,34 +187,51 @@ export class RollingLimiter {
       const inflightReady = this.inFlight < this.maxInFlight;
       const paceReady = now >= this.nextPacedAt;
       const blockReady = now >= this.blockedUntil;
+      const fifoReady = this.pendingAdmissions[0] === waiter;
 
-      if (tokenReady && requestReady && inflightReady && paceReady && blockReady) {
+      if (fifoReady && tokenReady && requestReady && inflightReady && paceReady && blockReady) {
         this.records.push({ at: now, tokens });
         this.inFlight += 1;
         this.nextPacedAt = now + this.spacingMs;
         let released = false;
         return {
-          waitedMs: totalWaitMs,
+          waitedMs: Math.max(0, Date.now() - queuedAt),
+          waitReasons,
           release: () => {
             if (released) return;
             released = true;
             this.inFlight = Math.max(0, this.inFlight - 1);
+            this.notifyChange();
           },
         };
       }
 
-      const waits = [1];
+      const reasons = fifoReady ? [
+        ...(!tokenReady ? ["tokens"] : []),
+        ...(!requestReady ? ["requests"] : []),
+        ...(!inflightReady ? ["in_flight"] : []),
+        ...(!paceReady ? ["pacing"] : []),
+        ...(!blockReady ? ["cooldown"] : []),
+      ] : ["fifo"];
+      const waits = [];
       if (!paceReady) waits.push(this.nextPacedAt - now);
       if (!blockReady) waits.push(this.blockedUntil - now);
       if ((!tokenReady || !requestReady) && this.records.length > 0) {
         waits.push(this.records[0].at + 60_000 - now + 1);
       }
-      if (!inflightReady) waits.push(25);
-      // Every blocked condition must clear, so wait until the latest known
-      // readiness point. In-flight completion is unknown and is polled at 25 ms.
-      const waitMs = Math.max(1, ...waits.filter((value) => value > 0));
-      totalWaitMs += waitMs;
-      await sleep(waitMs, signal);
+      // Only the head reserves capacity; new small requests cannot repeatedly
+      // overtake a large waiting request. Releases/cancellations wake waiters.
+      const waitMs = fifoReady && waits.length > 0 ? Math.max(1, ...waits) : Infinity;
+      const waitStarted = Date.now();
+      await this.waitForChange(waitMs, signal);
+      const elapsed = Math.max(0, Date.now() - waitStarted);
+      // Simultaneous constraints overlap; these durations are not additive.
+      for (const reason of reasons) waitReasons[reason] = (waitReasons[reason] ?? 0) + elapsed;
+    }
+    } finally {
+      const index = this.pendingAdmissions.indexOf(waiter);
+      if (index >= 0) this.pendingAdmissions.splice(index, 1);
+      this.notifyChange();
     }
   }
 }
@@ -881,13 +927,16 @@ export function upstreamAuthenticationUnavailablePayload() {
   };
 }
 
-function copyResponseHeaders(upstream, response, limiter, reservation, waitedMs) {
+function copyResponseHeaders(upstream, response, limiter, reservation, waitedMs, waitReasons) {
   for (const [name, value] of upstream.headers.entries()) {
     if (!HOP_BY_HOP_HEADERS.has(name.toLowerCase())) response.setHeader(name, value);
   }
   response.setHeader("x-prime-gateway", `cloud-model-gateway/${VERSION}`);
   response.setHeader("x-prime-reserved-tokens", String(reservation));
   response.setHeader("x-prime-rate-wait-ms", String(waitedMs));
+  if (waitReasons && Object.keys(waitReasons).length > 0) {
+    response.setHeader("x-prime-rate-wait-reasons", Object.keys(waitReasons).join(","));
+  }
   if (limiter) {
     const snapshot = limiter.snapshot();
     response.setHeader("x-prime-local-tpm", String(snapshot.tokensPerMinute));
@@ -913,6 +962,13 @@ async function proxyRequest(request, response, route, runtime = {}) {
   });
   let admission;
   let totalWaitedMs = 0;
+  const rateWaitReasonsMs = {};
+  const recordAdmission = (value) => {
+    totalWaitedMs += value.waitedMs;
+    for (const [reason, ms] of Object.entries(value.waitReasons ?? {})) {
+      rateWaitReasonsMs[reason] = (rateWaitReasonsMs[reason] ?? 0) + ms;
+    }
+  };
   let startedAt = now();
   let deadlineTimer;
   if (control) deadlineTimer = setTimer(() => controller.abort(appV01DeadlineError()),
@@ -973,7 +1029,7 @@ async function proxyRequest(request, response, route, runtime = {}) {
 
     checkAppV01Operation(control, now());
     admission = limiter ? await limiter.admit(reservation, controller.signal) : { waitedMs: 0, release() {} };
-    totalWaitedMs += admission.waitedMs;
+    recordAdmission(admission);
     if (azureCredential && azureCredential.expiresAt - Date.now() <= 60_000) {
       // The queue outlived the token. Preserve the first admission as a
       // conservative reservation, refresh, then obtain a fresh dispatch slot.
@@ -981,7 +1037,7 @@ async function proxyRequest(request, response, route, runtime = {}) {
       admission = undefined;
       azureCredential = await azureCredentialProvider(route.azureResource, true, control);
       admission = await limiter.admit(reservation, controller.signal);
-      totalWaitedMs += admission.waitedMs;
+      recordAdmission(admission);
     }
     const upstreamHeaders = {
       "content-type": "application/json",
@@ -1011,7 +1067,7 @@ async function proxyRequest(request, response, route, runtime = {}) {
       admission = undefined;
       azureCredential = await azureCredentialProvider(route.azureResource, true, control);
       admission = await limiter.admit(reservation, controller.signal);
-      totalWaitedMs += admission.waitedMs;
+      recordAdmission(admission);
       upstreamHeaders.authorization = `Bearer ${azureCredential.token}`;
       azureAuthenticationRetries = 1;
       checkAppV01Operation(control, now());
@@ -1029,7 +1085,7 @@ async function proxyRequest(request, response, route, runtime = {}) {
       }
     }
     const publicStatus = mapUpstreamStatus(upstream.status);
-    copyResponseHeaders(upstream, response, limiter, reservation, totalWaitedMs);
+    copyResponseHeaders(upstream, response, limiter, reservation, totalWaitedMs, rateWaitReasonsMs);
     response.statusCode = publicStatus;
     const requestId = upstream.headers.get("x-request-id") || upstream.headers.get("apim-request-id") || undefined;
     eventLog("request", {
@@ -1042,6 +1098,7 @@ async function proxyRequest(request, response, route, runtime = {}) {
       azureAuthenticationRetries,
       reservation,
       waitedMs: totalWaitedMs,
+      ...(limiter ? { rateWaitReasonsMs, limiterAtResponse: limiter.snapshot() } : {}),
       durationMs: Date.now() - startedAt,
       requestId,
       remainingTokens: upstream.headers.get("x-ratelimit-remaining-tokens") || undefined,

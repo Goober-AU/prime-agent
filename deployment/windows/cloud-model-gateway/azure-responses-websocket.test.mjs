@@ -41,7 +41,8 @@ async function fixture(t, options = {}) {
       if (signal.aborted) throw signal.reason;
       inFlight++;
       let released = false;
-      return { waitedMs: 0, release() { if (!released) { released = true; inFlight--; releases++; } } };
+      return { waitedMs: options.waitedMs ?? 0, waitReasons: options.waitReasons,
+        release() { if (!released) { released = true; inFlight--; releases++; } } };
     },
     snapshot() { return { id: "fixture", inFlight }; },
     observeResponse(status, headers) { logs.push({ observedStatus: status, retryAfter: headers.get("retry-after") }); },
@@ -126,7 +127,8 @@ test("authenticated capability, isolated upgrade auth and route allowlist", { ti
 
 test("sequential and incremental responses preserve normalization and full-context quota", { timeout: 5000 }, async (t) => {
   const output = [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "x".repeat(1200) }] }];
-  const f = await fixture(t, { respond(ws, body, n) { ws.send(JSON.stringify(complete(`response-${n}`, output))); } });
+  const f = await fixture(t, { waitedMs: 17, waitReasons: { fifo: 17 },
+    respond(ws, body, n) { ws.send(JSON.stringify(complete(`response-${n}`, output))); } });
   const c = await f.connect();
   const first = request({ input: [{ role: "user", content: "A".repeat(2000) }] });
   c.send(first); assert.equal((await c.next()).type, "response.completed");
@@ -147,6 +149,11 @@ test("sequential and incremental responses preserve normalization and full-conte
   c.send(request({ input: [{ role: "user", content: "compacted" }] })); await c.next();
   assert.ok(f.reservations[2] < f.reservations[1]);
   assert.equal(f.logs.filter((r) => r.event === "websocket_turn").length, 3);
+  for (const record of f.logs.filter((r) => r.event === "websocket_turn")) {
+    assert.deepEqual(record.rateWaitReasonsMs, { fifo: 17 });
+    assert.equal(record.limiterAtResponse.id, "fixture");
+  }
+  assert.doesNotMatch(JSON.stringify(f.logs), /isolated-azure-false|A{100}/);
 });
 
 test("parallel chats cannot borrow previous IDs and failed references are not replayed", { timeout: 5000 }, async (t) => {

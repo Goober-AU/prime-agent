@@ -23,7 +23,7 @@ import uuid
 from collections.abc import Iterator
 from typing import Any
 
-from .snapshot_serializer import dump_snapshot_value
+from .snapshot_serializer import SnapshotSerializationMetrics, dump_snapshot_value
 
 CAS_FORMAT = "prime-agent-kernel-snapshot-cas"
 CAS_VERSION = 2
@@ -556,6 +556,7 @@ def _serialize_namespace(
     skipped: list[dict[str, str]] = []
     oversized: list[str] = []
     total = 0
+    variable_metrics = SnapshotSerializationMetrics()
     missing = object()
     for name in list(ns.keys()):
         if not isinstance(name, str) or name.startswith("_") or name in always_skip:
@@ -577,6 +578,7 @@ def _serialize_namespace(
         import io
 
         buffer = io.BytesIO()
+        serialization_started = time.monotonic_ns()
         try:
             dump_snapshot_value(dill, value, buffer, CappedWriter(buffer, limit))
             blob = buffer.getvalue()
@@ -590,6 +592,8 @@ def _serialize_namespace(
         except Exception as error:
             skipped.append({"name": name, "reason": f"{type(error).__name__}: {_safe_str(error)[:200]}"})
             continue
+        finally:
+            variable_metrics.record(name, time.monotonic_ns() - serialization_started)
         if total + len(blob) > max_bytes:
             skipped.append({"name": name, "reason": "exceeds aggregate snapshot size cap"})
             continue
@@ -623,6 +627,7 @@ def _serialize_namespace(
         "serialization_wall_ms": _elapsed_ms(wall_start, wall_end),
         "serialization_cpu_ms": _elapsed_ms(cpu_start, cpu_end),
         "serialized_bytes": logical_bytes,
+        **variable_metrics.summarize(payload),
     }
     return payload, skipped, oversized, envelope_bytes, logical_bytes, metrics
 

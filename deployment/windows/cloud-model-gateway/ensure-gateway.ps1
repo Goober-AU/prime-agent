@@ -5,7 +5,7 @@ $tokenPath = Join-Path $root 'local-token.txt'
 $healthUri = 'http://127.0.0.1:43120/health'
 $taskName = 'OptimusAgentCloudModelGateway'
 $expectedVersion = 2
-$expectedBuildId = 'optimus-gateway-20260917.responses-ws.1'
+$expectedBuildId = 'optimus-gateway-monitoring-repair-20260918.1'
 
 $localToken = (Get-Content -LiteralPath $tokenPath -Raw).Trim()
 if ([string]::IsNullOrWhiteSpace($localToken)) {
