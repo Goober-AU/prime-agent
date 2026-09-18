@@ -30,6 +30,7 @@ use crate::modes::interactive::prompt_stash_state::{
 use pi_tui::components::text::Text as TuiText;
 use pi_tui::tui::{Component as TuiComponent, InputListenerResult, TuiStopOptions, TUI};
 use std::cell::{Cell, RefCell};
+use std::hash::{Hash, Hasher};
 use std::io::IsTerminal;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -79,6 +80,9 @@ mod native_extension_bridge;
 mod native_subagents;
 #[path = "native_host_recovery_notice.rs"]
 mod native_recovery_notice;
+#[cfg(test)]
+#[path = "native_host_ui_tests.rs"]
+mod ui_tests;
 
 pub(crate) async fn run_interactive_mode(
     options: InteractiveModeSeamOptions,
@@ -131,6 +135,8 @@ struct Transcript {
     history: Option<Box<Transcript>>,
     mode: Rc<RefCell<InteractiveMode>>,
     rows: Vec<Box<dyn TuiComponent>>,
+    row_keys: HashMap<usize, Rc<str>>,
+    viewport_anchors: Vec<Option<pi_tui::fullscreen::ViewportAnchor>>,
     assistant: Option<Rc<RefCell<AssistantMessageComponent>>>,
     assistants: Vec<Rc<RefCell<AssistantMessageComponent>>>,
     tools: HashMap<String, Rc<RefCell<ToolExecutionComponent>>>,
@@ -140,7 +146,7 @@ struct Transcript {
 #[derive(Default)]
 struct TranscriptWrapCache {
     width: usize,
-    lines: Vec<(String, Vec<String>)>,
+    lines: Vec<(String, Vec<String>, Vec<usize>)>,
 }
 impl TranscriptWrapCache {
     fn render(&mut self, lines: Vec<String>, width: usize) -> Vec<String> {
@@ -151,19 +157,42 @@ impl TranscriptWrapCache {
         self.lines.truncate(lines.len());
         let mut output = Vec::new();
         for (index, line) in lines.into_iter().enumerate() {
-            if let Some((previous, wrapped)) = self.lines.get_mut(index) {
+            if let Some((previous, wrapped, counts)) = self.lines.get_mut(index) {
                 if *previous != line {
                     *wrapped = pi_tui::utils::wrap_text_with_ansi(&line, width);
+                    *counts = Self::content_counts(wrapped);
                     *previous = line;
                 }
                 output.extend(wrapped.iter().cloned());
             } else {
                 let wrapped = pi_tui::utils::wrap_text_with_ansi(&line, width);
                 output.extend(wrapped.iter().cloned());
-                self.lines.push((line, wrapped));
+                let counts = Self::content_counts(&wrapped);
+                self.lines.push((line, wrapped, counts));
             }
         }
         output
+    }
+
+    fn content_counts(lines: &[String]) -> Vec<usize> {
+        lines.iter().map(|line| pi_tui::utils::strip_ansi(line).chars().filter(|ch| !ch.is_whitespace()).count()).collect()
+    }
+
+    fn anchors(&self, keys: &[Option<Rc<str>>]) -> Vec<Option<pi_tui::fullscreen::ViewportAnchor>> {
+        let mut anchors = Vec::new();
+        let mut previous = None;
+        let mut offset = 0;
+        for ((_, _, counts), key) in self.lines.iter().zip(keys) {
+            if previous != *key {
+                offset = 0;
+                previous = key.clone();
+            }
+            for count in counts {
+                anchors.push(key.as_ref().filter(|_| *count > 0).map(|key| pi_tui::fullscreen::ViewportAnchor { key: key.clone(), offset }));
+                offset += count;
+            }
+        }
+        anchors
     }
 }
 struct ToolRow(Rc<RefCell<ToolExecutionComponent>>);
@@ -211,6 +240,8 @@ impl Transcript {
             history: None,
             mode,
             rows: Vec::new(),
+            row_keys: HashMap::new(),
+            viewport_anchors: Vec::new(),
             assistant: None,
             assistants: Vec::new(),
             tools: HashMap::new(),
@@ -220,6 +251,8 @@ impl Transcript {
     fn replace(&mut self, messages: Vec<AgentMessage>) {
         self.history = None;
         self.rows.clear();
+        self.row_keys.clear();
+        self.viewport_anchors.clear();
         self.tools.clear();
         self.assistant = None;
         self.assistants.clear();
@@ -231,15 +264,25 @@ impl Transcript {
         }
     }
     fn replace_history(&mut self, messages: Vec<AgentMessage>, total: f64) {
+        self.replace_history_with_ids(messages, total, &[]);
+    }
+    fn replace_history_with_ids(&mut self, messages: Vec<AgentMessage>, total: f64, entry_ids: &[String]) {
         let mut history = Self::new(self.mode.clone());
+        let start = (total as usize).saturating_sub(messages.len());
         if (messages.len() as f64) < total {
             history.rows.push(Box::new(TuiText::new(theme().fg("dim", &format!("Showing {} of {total} messages. Scroll up or use PageUp to load earlier history.", messages.len())), 1, 0, None)));
             history
                 .rows
                 .push(Box::new(pi_tui::components::spacer::Spacer::new(1)));
         }
-        for message in messages {
-            history.message(message, false);
+        for (index, message) in messages.into_iter().enumerate() {
+            let key = entry_ids.get(index).map(|id| format!("entry:{id}"))
+                .unwrap_or_else(|| {
+                    let mut hash = std::collections::hash_map::DefaultHasher::new();
+                    serde_json::to_vec(&message).unwrap_or_default().hash(&mut hash);
+                    format!("history:{}:{:x}", start + index, hash.finish())
+                });
+            history.message_anchored(message, false, &key);
         }
         self.history = Some(Box::new(history));
     }
@@ -273,6 +316,17 @@ impl Transcript {
             .collect()
     }
     fn message(&mut self, message: AgentMessage, streaming: bool) {
+        let key = format!("live:{}", self.rows.len());
+        self.message_anchored(message, streaming, &key);
+    }
+    fn message_anchored(&mut self, message: AgentMessage, streaming: bool, key: &str) {
+        let start = self.rows.len();
+        self.append_message(message, streaming);
+        for index in start..self.rows.len() {
+            self.row_keys.entry(index).or_insert_with(|| Rc::from(format!("{key}:{}", index - start)));
+        }
+    }
+    fn append_message(&mut self, message: AgentMessage, streaming: bool) {
         match message {
             AgentMessage::Message(pi_ai::types::Message::User(user)) => {
                 let mode = self.mode.borrow();
@@ -397,6 +451,7 @@ impl Transcript {
         component.mark_execution_started();
         component.set_expanded(mode.tool_output_expanded);
         let component = Rc::new(RefCell::new(component));
+        self.row_keys.insert(self.rows.len(), Rc::from(format!("tool:{id}")));
         self.rows.push(Box::new(ToolRow(component.clone())));
         self.tools.insert(id.to_string(), component);
     }
@@ -432,6 +487,7 @@ impl TuiComponent for Transcript {
     fn render(&mut self, width: f64) -> Vec<String> {
         let mode = self.mode.borrow();
         let mut lines = Vec::new();
+        let mut keys = Vec::new();
         let mut custom_header = false;
         if let Some(surfaces) = &self.extension_surfaces {
             if let Some(header) = &mut surfaces.borrow_mut().header { lines.extend(header.render(width)); custom_header = true; }
@@ -453,13 +509,18 @@ impl TuiComponent for Transcript {
             lines.extend(header.render(width, None));
         }
         drop(mode);
+        keys.resize(lines.len(), None);
         if let Some(history) = &mut self.history {
-            for row in &mut history.rows {
-                lines.extend(row.render(width));
+            for (index, row) in history.rows.iter_mut().enumerate() {
+                let rendered = row.render(width);
+                keys.extend(std::iter::repeat_n(history.row_keys.get(&index).cloned(), rendered.len()));
+                lines.extend(rendered);
             }
         }
-        for row in &mut self.rows {
-            lines.extend(row.render(width));
+        for (index, row) in self.rows.iter_mut().enumerate() {
+            let rendered = row.render(width);
+            keys.extend(std::iter::repeat_n(self.row_keys.get(&index).cloned(), rendered.len()));
+            lines.extend(rendered);
         }
         let mode = self.mode.borrow();
         // The `mainViewContainer` child order (interactive-mode.ts:1268-1272), then
@@ -500,7 +561,16 @@ impl TuiComponent for Transcript {
         // Editor and overlay repaints must not reparse unchanged history's ANSI
         // and Unicode on every key. Compare rendered bytes so external component
         // updates, theme changes and expansion still invalidate precisely.
-        self.wrapped_lines.render(lines, width.max(1.0) as usize)
+        keys.resize(lines.len(), None);
+        let rendered = self.wrapped_lines.render(lines, width.max(1.0) as usize);
+        self.viewport_anchors = self.wrapped_lines.anchors(&keys);
+        rendered
+    }
+    fn get_viewport_anchors(&self) -> Vec<Option<pi_tui::fullscreen::ViewportAnchor>> {
+        self.viewport_anchors.clone()
+    }
+    fn bottom_align_in_fullscreen(&self) -> bool {
+        !self.rows.is_empty() || self.history.as_ref().is_some_and(|history| !history.rows.is_empty())
     }
     fn invalidate(&mut self) {
         if let Some(side_pane) = &self.side_pane {
@@ -2160,6 +2230,9 @@ async fn run_terminal(
                     state,
                     messages,
                 }) => {
+                    if current_session_id != state.session_id {
+                        ui.borrow_mut().scroll_to_bottom();
+                    }
                     extension_surfaces.borrow_mut().reset();
                     side_pane.borrow_mut().close(connection.clone());
                     if let Some(dialog) = extension.take() {
@@ -2208,6 +2281,7 @@ async fn run_terminal(
                 HostEvent::RefreshSnapshot(snapshot) | HostEvent::Connection(wire::AgentConnectionEvent::SessionResynced { snapshot }) => {
                     native_subagents::seed(&mode, &snapshot);
                     if current_session_id != snapshot.state.session_id {
+                        ui.borrow_mut().scroll_to_bottom();
                         extension_surfaces.borrow_mut().reset();
                         side_pane.borrow_mut().close(connection.clone());
                     }
@@ -4123,7 +4197,7 @@ fn apply_event(
                         })
                         .collect::<Vec<_>>()
                 };
-                mode.borrow_mut().patch_connection_state(|state| {
+                mode.borrow_mut().patch_connection_queue(|state| {
                     state.session_actions.steering = strings("steering");
                     state.session_actions.follow_ups = strings("followUps");
                     state.session_actions.queued_count =

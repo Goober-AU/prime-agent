@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use pi_agent_core::types::{AgentMessage, CustomAgentMessage, CustomMessageContent, ThinkingLevel};
+use pi_agent_core::performance_metrics::{PerformanceMetricOperation, PerformanceMetricOutcome, PerformanceMetricMeasurement};
 use pi_ai::compaction::{
     compaction_matches_model, is_compaction_checkpoint, CompactionOptions,
     ProviderCompactionCheckpoint,
@@ -26,13 +27,14 @@ use pi_ai::compaction::{
 use pi_ai::models::get_model_input_limit;
 use pi_ai::stream::{compact_simple, complete_simple, supports_compaction};
 use pi_ai::types::{
-    Api, AssistantMessage, Context, Message, Model, SimpleStreamOptions, StopReason, Usage,
+    Api, AssistantMessage, Context, Message, Model, StopReason, Usage,
     STOP_REASON_ABORTED, STOP_REASON_ERROR,
 };
 use pi_ai::utils::event_stream::AssistantMessageEventStream;
 use serde_json::Value;
 
 use crate::core::compaction::checkpoint::has_provider_checkpoint;
+use crate::core::compaction::metrics::CompactionMetrics;
 use crate::core::compaction::utils::{
     compute_file_lists, create_file_ops, extract_file_ops_from_message, format_file_operations,
     serialize_conversation, FileOperations, SUMMARIZATION_SYSTEM_PROMPT,
@@ -1183,6 +1185,20 @@ pub async fn generate_summary(
     summary_call: SummaryCallRunner,
     summary_update_policy: &SummaryUpdatePolicy,
 ) -> Result<SummarySlice, String> {
+    generate_summary_with_options(current_messages, model, reserve_tokens, api_key, signal,
+        custom_instructions, previous_summary, thinking_level, retry, summary_call,
+        summary_update_policy, None, &CompactionMetrics::new(None, model)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_summary_with_options(
+    current_messages: &[AgentMessage], model: &Model, reserve_tokens: f64, api_key: &str,
+    signal: Option<&tokio_util::sync::CancellationToken>, custom_instructions: Option<&str>,
+    previous_summary: Option<&str>, thinking_level: Option<&ThinkingLevel>,
+    retry: Option<&ProviderRetryPolicy>, summary_call: SummaryCallRunner,
+    summary_update_policy: &SummaryUpdatePolicy, request_options: Option<&CompactionOptions>,
+    metrics: &CompactionMetrics,
+) -> Result<SummarySlice, String> {
     let instructions = {
         let custom_instructions = custom_instructions.map(str::to_string);
         let summary_update_policy = summary_update_policy.clone();
@@ -1206,6 +1222,8 @@ pub async fn generate_summary(
         &instructions,
         previous_summary,
         SummaryFormat::Conversation,
+        request_options,
+        metrics,
     )
     .await
 }
@@ -1225,7 +1243,15 @@ async fn generate_bounded_summary(
     instructions: &(dyn Fn(Option<&str>) -> String + Send + Sync),
     previous_summary: Option<&str>,
     format: SummaryFormat,
+    request_options: Option<&CompactionOptions>,
+    metrics: &CompactionMetrics,
 ) -> Result<SummarySlice, String> {
+    let mut phase = metrics.phase(match format {
+        SummaryFormat::Conversation => PerformanceMetricOperation::CompactionHistory,
+        SummaryFormat::TurnPrefix => PerformanceMetricOperation::CompactionPrefix,
+    });
+    let requests = phase.requests();
+    let result = async {
     let input_limit = get_model_input_limit(model);
     let max_tokens = f64::max(
         1.0,
@@ -1235,6 +1261,8 @@ async fn generate_bounded_summary(
         ),
     );
     let conversation = serialize_conversation(&convert_to_llm(messages, &Default::default()));
+    phase.measurement(PerformanceMetricMeasurement::SerializedBytes, Some(conversation.len() as f64));
+    let conversation_chars = conversation.chars().count();
     let mut offset = 0usize;
     let mut summary: Option<String> = previous_summary.map(str::to_string);
     let mut usage = empty_usage();
@@ -1272,6 +1300,8 @@ async fn generate_bounded_summary(
         // `SummaryCallFn` is `'static`, so the borrowed retry policy and the
         // borrowed signal are cloned into owned values before the closure.
         let retry_for_call = retry.cloned();
+        let base_options = request_options.map(|options| options.simple.clone()).unwrap_or_default();
+        let requests_for_call = requests.clone();
         let attempt: SummaryCallFn = Arc::new(
             move |call_headers: Option<serde_json::Map<String, Value>>| {
                 let model = model_for_call.clone();
@@ -1285,6 +1315,8 @@ async fn generate_bounded_summary(
                 let retry_for_call = retry_for_call.clone();
                 let chunk = chunk.clone();
                 let headers = call_headers.clone();
+                let base_options = base_options.clone();
+                let requests = requests_for_call.clone();
                 Box::pin(async move {
                     let complete = move || {
                         let model = model.clone();
@@ -1294,8 +1326,10 @@ async fn generate_bounded_summary(
                         let signal = signal_for_complete.clone();
                         let headers = headers.clone();
                         let chunk = chunk.clone();
+                        let base_options = base_options.clone();
+                        let requests = requests.clone();
                         Box::pin(async move {
-                            let mut options = SimpleStreamOptions::default();
+                            let mut options = base_options;
                             options.stream.max_tokens = Some(max_tokens);
                             options.stream.api_key = Some(api_key);
                             options.stream.signal = signal.clone();
@@ -1308,6 +1342,7 @@ async fn generate_bounded_summary(
                                 }
                                 Some(map)
                             });
+                            options.reasoning = None;
                             if model.reasoning {
                                 if let Some(level) = thinking_level {
                                     if level != pi_agent_core::types::ThinkingLevel::Off {
@@ -1327,7 +1362,9 @@ async fn generate_bounded_summary(
                             ))],
                             tools: None,
                         };
-                            let message = complete_simple(&model, &context, Some(&options)).await;
+                            let request_metrics = requests.next();
+                            request_metrics.observe(&mut options);
+                            let mut message = complete_simple(&model, &context, Some(&options)).await;
                             // Keep one retry owner. An empty successful response is not a usable
                             // checkpoint, so let the existing bounded provider policy retry it.
                             if message.stop_reason == pi_ai::types::STOP_REASON_STOP
@@ -1336,11 +1373,10 @@ async fn generate_bounded_summary(
                                 .iter()
                                 .any(|part| matches!(part, pi_ai::types::ContentBlock::Text(text) if !text.text.trim().is_empty()))
                         {
-                            let mut failed = message;
-                            failed.stop_reason = STOP_REASON_ERROR.to_string();
-                            failed.error_message = Some("Summarization returned an empty summary".to_string());
-                            return Ok(failed);
+                            message.stop_reason = STOP_REASON_ERROR.to_string();
+                            message.error_message = Some("Summarization returned an empty summary".to_string());
                         }
+                            request_metrics.finish(&message, signal.as_ref().is_some_and(|signal| signal.is_cancelled()));
                             Ok(message)
                         })
                             as pi_ai::types::BoxFuture<Result<AssistantMessage, String>>
@@ -1350,7 +1386,14 @@ async fn generate_bounded_summary(
                 })
             },
         );
-        let response = (summary_call)(attempt).await?;
+        let response = match signal {
+            Some(signal) => tokio::select! {
+                biased;
+                _ = signal.cancelled() => return Err(abort_error()),
+                response = (summary_call)(attempt) => response?,
+            },
+            None => (summary_call)(attempt).await?,
+        };
         if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
             return Err(abort_error());
         }
@@ -1374,7 +1417,7 @@ async fn generate_bounded_summary(
         validate_summary(&response, &text, format)?;
         summary = Some(text);
         add_assistant_usage(&mut usage, &response.usage);
-        if offset >= conversation.chars().count() {
+        if offset >= conversation_chars {
             break;
         }
     }
@@ -1382,6 +1425,9 @@ async fn generate_bounded_summary(
         summary: summary.unwrap_or_default(),
         usage: Some(usage),
     })
+    }.await;
+    phase.finish_result(&result, signal.is_some_and(|signal| signal.is_cancelled()));
+    result
 }
 
 fn now_millis() -> i64 {
@@ -1491,6 +1537,24 @@ pub async fn compact(
     retry: Option<&ProviderRetryPolicy>,
     provider_context: Option<(&Context, Option<&CompactionOptions>)>,
 ) -> Result<CompactionResult, String> {
+    compact_with_metrics(preparation, model, api_key, custom_instructions, signal, thinking_level,
+        summary_call, retry, provider_context, &CompactionMetrics::new(None, model)).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn compact_with_metrics(
+    preparation: &CompactionPreparation, model: &Model, api_key: &str,
+    custom_instructions: Option<&str>, signal: Option<&tokio_util::sync::CancellationToken>,
+    thinking_level: Option<&ThinkingLevel>, summary_call: SummaryCallRunner,
+    retry: Option<&ProviderRetryPolicy>, provider_context: Option<(&Context, Option<&CompactionOptions>)>,
+    metrics: &CompactionMetrics,
+) -> Result<CompactionResult, String> {
+    // Cancel detached provider workers when the compaction future is dropped or a sibling fails.
+    // A child token never cancels the parent session's signal.
+    let local_signal = signal.map(|signal| signal.child_token()).unwrap_or_default();
+    let _cancel_on_drop = local_signal.clone().drop_guard();
+    let signal = Some(&local_signal);
+    let request_options = provider_context.and_then(|(_, options)| options);
     let CompactionPreparation {
         first_kept_entry_id,
         messages_to_summarize,
@@ -1504,6 +1568,7 @@ pub async fn compact(
     let mut native_compaction_unsupported = false;
     if let Some((context, options)) = provider_context {
         if supports_compaction(model) {
+            let native_phase = metrics.phase(PerformanceMetricOperation::CompactionNative);
             let model_for_call = model.clone();
             let context = context.clone();
             let options = options.cloned();
@@ -1559,9 +1624,16 @@ pub async fn compact(
                 let attempt = attempt.clone();
                 Box::pin(async move { attempt().await })
             };
-            let remote = request_with_provider_retry(&request, retry, signal)
-                .await
-                .map_err(|error| error.message)?;
+            let remote_result = request_with_provider_retry(&request, retry, signal).await;
+            native_phase.finish(match &remote_result {
+                _ if local_signal.is_cancelled() => PerformanceMetricOutcome::Cancelled,
+                Ok(Some(remote)) if !is_compaction_checkpoint(&serde_json::to_value(&remote.checkpoint).unwrap_or(Value::Null))
+                    || !compaction_matches_model(&remote.checkpoint, model) => PerformanceMetricOutcome::Failure,
+                Ok(Some(_)) => PerformanceMetricOutcome::Success,
+                Ok(None) => PerformanceMetricOutcome::Unavailable,
+                Err(_) => PerformanceMetricOutcome::Failure,
+            });
+            let remote = remote_result.map_err(|error| error.message)?;
             if let Some(remote) = remote {
                 if signal.map(|signal| signal.is_cancelled()).unwrap_or(false) {
                     return Err(abort_error());
@@ -1603,7 +1675,7 @@ pub async fn compact(
         // Split turns make two wire calls with different bodies; each needs its own identity.
         let history_future = async {
             if !messages_to_summarize.is_empty() {
-                generate_summary(
+                generate_summary_with_options(
                     messages_to_summarize,
                     model,
                     settings.reserve_tokens,
@@ -1615,6 +1687,8 @@ pub async fn compact(
                     retry,
                     summary_call.clone(),
                     &summary_update_policy,
+                    request_options,
+                    metrics,
                 )
                 .await
             } else {
@@ -1633,10 +1707,10 @@ pub async fn compact(
             thinking_level,
             retry,
             summary_call.clone(),
+            request_options,
+            metrics,
         );
-        let (history_result, turn_prefix_result) = tokio::join!(history_future, prefix_future);
-        let history_result = history_result?;
-        let turn_prefix_result = turn_prefix_result?;
+        let (history_result, turn_prefix_result) = tokio::try_join!(history_future, prefix_future)?;
         slices.push(history_result.clone());
         slices.push(turn_prefix_result.clone());
         summary = format!(
@@ -1644,7 +1718,7 @@ pub async fn compact(
             history_result.summary, turn_prefix_result.summary
         );
     } else {
-        let result = generate_summary(
+        let result = generate_summary_with_options(
             messages_to_summarize,
             model,
             settings.reserve_tokens,
@@ -1656,6 +1730,8 @@ pub async fn compact(
             retry,
             summary_call,
             &summary_update_policy,
+            request_options,
+            metrics,
         )
         .await?;
         summary = result.summary.clone();
@@ -1710,6 +1786,8 @@ async fn generate_turn_prefix_summary(
     thinking_level: Option<&ThinkingLevel>,
     retry: Option<&ProviderRetryPolicy>,
     summary_call: SummaryCallRunner,
+    request_options: Option<&CompactionOptions>,
+    metrics: &CompactionMetrics,
 ) -> Result<SummarySlice, String> {
     let instructions = |_: Option<&str>| TURN_PREFIX_SUMMARIZATION_PROMPT.to_string();
     generate_bounded_summary(
@@ -1724,6 +1802,8 @@ async fn generate_turn_prefix_summary(
         &instructions,
         None,
         SummaryFormat::TurnPrefix,
+        request_options,
+        metrics,
     )
     .await
 }

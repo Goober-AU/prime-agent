@@ -2233,6 +2233,14 @@ mod explicit_stop;
 #[path = "agent_session/queue_metrics.rs"]
 mod queue_metrics;
 
+#[path = "agent_session/dispatch_delivery.rs"]
+mod dispatch_delivery;
+use dispatch_delivery::is_child_report_action;
+
+#[cfg(test)]
+#[path = "agent_session/dispatch_delivery_tests.rs"]
+mod dispatch_delivery_tests;
+
 #[cfg(test)]
 #[path = "agent_session/queue_stop_tests.rs"]
 mod queue_stop_tests;
@@ -3516,7 +3524,7 @@ impl AgentSession {
             }
         }
         for action in &actions {
-            self.finish_action_queue_metric(&action.id, false);
+            self.finish_action_queue_metric(&action, false);
             let ticket = self.action_store.lock().unwrap().ticket_for(action);
             let previous_state = previous_states
                 .get(&action.id)
@@ -6098,11 +6106,7 @@ impl AgentSession {
                         }
                         let _ = self.action_store.lock().unwrap().update_action(&next);
                         if started_primary {
-                            self.finish_action_queue_metric(&action.id, true);
-                            if let Ok(ticket) = self.action_store.lock().unwrap().ticket_for(&action) {
-                                ticket.settle_delivered(DeliveryOutcome::Delivered);
-                            }
-                            self.settle_agent_message(action.agent_message_id.as_deref(), "delivery", None);
+                            self.finish_action_queue_metric(&action, true);
                         }
                     }
                 }
@@ -6122,7 +6126,6 @@ impl AgentSession {
                         if let QueuedActionPayload::Turn(turn) = &mut next.payload {
                             for record in turn.base.records.iter_mut() {
                                 if delivery_message_key_of(&record.message) == key {
-                                    record.durable = true;
                                     if record.role == DeliveryRecordRole::Primary {
                                         started_primary = true;
                                     }
@@ -6148,9 +6151,20 @@ impl AgentSession {
             }
             _ => {}
         }
+        let persisted = if let AgentEvent::MessageEnd { message } = &event {
+            if self.is_dispatched_input(message) && self.capturing_cancelled_action(message).is_none() {
+                let result = self.persist_dispatch_message(message);
+                self.record_dispatch_persistence(message, &result);
+                Some(result)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let session = self.clone();
         self.push_agent_event_task(async move {
-            session.process_agent_event(event).await;
+            session.process_agent_event(event, persisted).await;
         });
     }
 
@@ -6237,7 +6251,7 @@ impl AgentSession {
     }
 
     /// `_processAgentEvent`.
-    async fn process_agent_event(self: &Arc<Self>, event: AgentEvent) {
+    async fn process_agent_event(self: &Arc<Self>, event: AgentEvent, persisted: Option<Result<String, String>>) {
         let mut cleared_dispatch_ended = false;
         if let AgentEvent::MessageStart { message } | AgentEvent::MessageEnd { message } = &event {
             if let AgentMessage::Message(Message::ToolResult(_)) = message {
@@ -6324,61 +6338,16 @@ impl AgentSession {
         self.emit(AgentSessionEvent::Agent(event.clone()));
 
         if let AgentEvent::MessageEnd { message } = &event {
-            match message {
-                AgentMessage::Custom(CustomAgentMessage::Custom {
-                    custom_type,
-                    content,
-                    display,
-                    details,
-                    ..
-                }) => {
-                    let entry_content = match content {
-                        CustomMessageContent::Text(text) => {
-                            crate::core::session_manager::CustomMessageEntryContent::Text(text.clone())
-                        }
-                        CustomMessageContent::Blocks(blocks) => {
-                            crate::core::session_manager::CustomMessageEntryContent::Blocks(
-                                blocks
-                                    .iter()
-                                    .map(|block| match block {
-                                        pi_agent_core::types::ContentBlock::Text(text) => {
-                                            Value::Object({
-                                                let mut object = Map::new();
-                                                object.insert(
-                                                    "type".to_string(),
-                                                    Value::String("text".to_string()),
-                                                );
-                                                object.insert(
-                                                    "text".to_string(),
-                                                    Value::String(text.text.clone()),
-                                                );
-                                                object
-                                            })
-                                        }
-                                        pi_agent_core::types::ContentBlock::Image(image) => {
-                                            serde_json::to_value(image).unwrap_or(Value::Null)
-                                        }
-                                    })
-                                    .collect(),
-                            )
-                        }
-                    };
-                    let _ = self
-                        .session_manager
-                        .lock()
-                        .unwrap()
-                        .append_custom_message_entry(custom_type, &entry_content, *display, details.clone());
+            let persisted = match persisted {
+                Some(result) => result,
+                None => {
+                    let result = self.persist_dispatch_message(message);
+                    self.record_dispatch_persistence(message, &result);
+                    result
                 }
-                AgentMessage::Message(Message::User(_))
-                | AgentMessage::Message(Message::Assistant(_))
-                | AgentMessage::Message(Message::ToolResult(_)) => {
-                    let _ = self
-                        .session_manager
-                        .lock()
-                        .unwrap()
-                        .append_message(message.clone());
-                }
-                _ => {}
+            };
+            if persisted.is_err() {
+                return;
             }
             self.begin_rlm_parent_task(message);
             self.consume_started_rlm_continuation(message);
@@ -6452,6 +6421,10 @@ impl AgentSession {
         }
 
         if let AgentEvent::AgentEnd { messages } = &event {
+            if self.has_failed_dispatch_persistence() {
+                self.resolve_retry();
+                return;
+            }
             let message = {
                 let last = self.last_assistant_message.lock().unwrap().clone();
                 *self.last_assistant_message.lock().unwrap() = None;
@@ -9690,18 +9663,21 @@ impl AgentSession {
                 self.follow_up_mode()
             };
             let mut actions: Vec<QueuedSessionAction> = vec![first.clone()];
-            while preselected.is_none() && mode == "all" {
-                let next = self
-                    .action_store
-                    .lock()
-                    .unwrap()
-                    .queued_actions(Some(first.delivery))
-                    .into_iter()
-                    .next();
+            let batch_child_reports = is_child_report_action(&first);
+            while (preselected.is_none() && mode == "all") || batch_child_reports {
+                let mut store = self.action_store.lock().unwrap();
+                let next = store.queued_actions(None).into_iter().next();
                 let next = match next {
                     Some(next) => next,
                     None => break,
                 };
+                if next.delivery != first.delivery
+                    || (batch_child_reports && (!is_child_report_action(&next)
+                        || next.effective_priority() != first.effective_priority()
+                        || next.suppress_autonomous_continuation != first.suppress_autonomous_continuation))
+                {
+                    break;
+                }
                 let (QueuedActionPayload::Turn(first_turn), QueuedActionPayload::Turn(next_turn)) =
                     (&first.payload, &next.payload)
                 else {
@@ -9711,8 +9687,10 @@ impl AgentSession {
                 {
                     break;
                 }
-                let _ = self.action_store.lock().unwrap().select_first();
-                actions.push(next);
+                match store.select_first() {
+                    Ok(Some(selected)) => actions.push(selected),
+                    _ => break,
+                }
             }
             if epoch != self.session_input_pump_epoch.load(Ordering::SeqCst) {
                 let mut store = self.action_store.lock().unwrap();
@@ -9760,11 +9738,11 @@ impl AgentSession {
                     for action in actions.iter() {
                         let current = self.action_state_of(&action.id);
                         if current == Some(ActionLifecycleState::Committing) {
-                            let durable = primary_delivery_record(action)
-                                .map(|record| self.messages().contains(&agent_message_from_delivery(&record.message)))
+                            let durable = self.action_by_id(&action.id)
+                                .and_then(|current| primary_delivery_record(&current).ok())
+                                .map(|record| record.durable)
                                 .unwrap_or(false);
                             if durable {
-                                self.mark_delivery_record_durable(action, &current_messages_of(self));
                                 let Some(mut next) = self.action_by_id(&action.id) else { continue; };
                                 let _ = transition_session_action(
                                     &mut next,
@@ -9793,18 +9771,16 @@ impl AgentSession {
                 }
                 Err(error) => {
                     let transcript = self.messages();
-                    let delivered: HashSet<String> =
-                        transcript.iter().map(agent_message_key_of).collect();
                     let mut undelivered: Vec<QueuedSessionAction> = Vec::new();
                     for action in actions.iter() {
+                        let Some(action) = self.action_by_id(&action.id) else { continue; };
                         if !matches!(action.payload, QueuedActionPayload::Turn(_))
                             || action.lifecycle.state() == ActionLifecycleState::Cancelled
                         {
                             continue;
                         }
-                        self.mark_matching_records_durable(action, &delivered);
-                        self.filter_records_after_dispatch_failure(action);
-                        let primary_durable = primary_delivery_record(action)
+                        self.filter_records_after_dispatch_failure(&action);
+                        let primary_durable = primary_delivery_record(&action)
                             .map(|record| record.durable)
                             .unwrap_or(false);
                         if !primary_durable {
@@ -9847,7 +9823,7 @@ impl AgentSession {
                     }
                     let terminal_error = self.as_error(&error);
                     for action in actions.iter() {
-                        if action.lifecycle.state() == ActionLifecycleState::Cancelled {
+                        if self.action_state_of(&action.id) == Some(ActionLifecycleState::Cancelled) {
                             continue;
                         }
                         let state = self.action_state_of(&action.id);
@@ -10209,6 +10185,10 @@ impl AgentSession {
             Err(error) => Err(error),
         };
         if let Err(error) = prompt_result {
+            if !self.has_cancelled_dispatch_capture() {
+                self.await_agent_event_queue().await;
+            }
+            let error = self.failed_dispatch_persistence_error().unwrap_or(error);
             let delivered: HashSet<String> = self.messages().iter().map(agent_message_key_of).collect();
             let remaining: Vec<CustomMessage> = next_turn_messages
                 .iter()
@@ -10227,23 +10207,8 @@ impl AgentSession {
         if !self.has_cancelled_dispatch_capture() {
             self.await_agent_event_queue().await;
         }
-        let transcript = self.messages();
-        let missing_durable = turns.iter().any(|action| {
-            if self.action_state_of(&action.id) == Some(ActionLifecycleState::Cancelled) {
-                return false;
-            }
-            match primary_delivery_record(action) {
-                Ok(record) => {
-                    if record.durable {
-                        return false;
-                    }
-                    !transcript.contains(&agent_message_from_delivery(&record.message))
-                }
-                Err(_) => false,
-            }
-        });
-        if missing_durable {
-            return Err("Session input dispatch settled without durable delivery".to_string());
+        if let Some(error) = self.settled_turn_delivery_error(&turns) {
+            return Err(error);
         }
         let primary_messages: Vec<AgentMessage> = turns
             .iter()
@@ -15250,11 +15215,6 @@ pub struct RlmSubagentRuntimeOptionsInput {
 /// `ActionExecution` alias used by the appended members.
 pub type ActionExecutionAlias = crate::core::session_action_store::ActionExecution;
 
-/// A read of `self.agent.state().messages` for record bookkeeping.
-fn current_messages_of(session: &Arc<AgentSession>) -> Vec<AgentMessage> {
-    session.agent.state().messages
-}
-
 impl AgentSession {
     /// `compact(customInstructions, options)`.
     async fn compact(self: &Arc<Self>, custom_instructions: Option<&str>, skip_abort: bool) -> Result<crate::core::compaction::compaction::CompactionResult, String> {
@@ -15512,6 +15472,13 @@ impl AgentSession {
         let model = self
             .model()
             .ok_or_else(|| format_no_model_selected_message())?;
+        let compaction_metrics = crate::core::compaction::metrics::CompactionMetrics::new(
+            self.agent.performance_metrics().map(|metrics| metrics.recorder), &model,
+        );
+        let total_phase = compaction_metrics.phase(pi_agent_core::performance_metrics::PerformanceMetricOperation::Compaction);
+        let completed = async {
+        let prepare_phase = compaction_metrics.phase(pi_agent_core::performance_metrics::PerformanceMetricOperation::CompactionPrepare);
+        let prepared = async {
         let auth = match auth {
             Some(auth) => auth,
             None => self.get_required_request_auth(&model).await?,
@@ -15595,6 +15562,10 @@ impl AgentSession {
                     .collect(),
             )
         };
+        Ok::<_, String>((auth, preparation, extension_compaction, from_extension, headers, messages))
+        }.await;
+        prepare_phase.finish_result(&prepared, signal.is_cancelled() || prepared.as_ref().is_err_and(|error| error == COMPACTION_CANCELLED_ERROR_MESSAGE));
+        let (auth, preparation, extension_compaction, from_extension, headers, messages) = prepared?;
         // TS 8322/8323-8343: the summary call carries the provider retry policy, the
         // transformed provider context and the request options (20-minute timeout,
         // session id, service tier and reasoning). `onPayload`/`onResponse`
@@ -15629,7 +15600,7 @@ impl AgentSession {
                 };
                 // TS 8322: `providerRetryPolicy(this.settingsManager)`.
                 let retry = self.provider_retry_policy();
-                crate::core::compaction::compaction::compact(
+                crate::core::compaction::compaction::compact_with_metrics(
                     &preparation,
                     &model,
                     &auth.api_key,
@@ -15644,6 +15615,7 @@ impl AgentSession {
                         max_retry_delay_ms: retry.max_retry_delay_ms,
                     }),
                     Some((&provider_context, Some(&request_options))),
+                    &compaction_metrics,
                 )
                 .await?
             }
@@ -15656,7 +15628,8 @@ impl AgentSession {
         // (TS 8369) re-locking the same non-reentrant session manager deadlocked
         // every durable-session compaction. Hoist the digest before the guard.
         let harness_digest = self.harness_digest();
-        self.session_manager.lock().unwrap().append_compaction(
+        let persist_phase = compaction_metrics.phase(pi_agent_core::performance_metrics::PerformanceMetricOperation::CompactionPersist);
+        let persisted = self.session_manager.lock().unwrap().append_compaction(
             &result.summary,
             &result.first_kept_entry_id,
             result.tokens_before,
@@ -15671,7 +15644,11 @@ impl AgentSession {
 
             // TS 8369: `this._harnessDigest()`.
             Some(&harness_digest),
-        )?;
+        );
+        persist_phase.finish_result(&persisted, signal.is_cancelled());
+        persisted?;
+        let restore_phase = compaction_metrics.phase(pi_agent_core::performance_metrics::PerformanceMetricOperation::CompactionRestore);
+        let restored = async {
         // TS 8383-8386: the live conversation is replaced by the compacted context,
         // merged with the outcomes that have not been persisted yet.
         {
@@ -15708,7 +15685,14 @@ impl AgentSession {
         }
         self.sync_kernel_state_after_compaction().await?;
         self.restore_provider_context_for_model();
+        Ok::<_, String>(())
+        }.await;
+        restore_phase.finish_result(&restored, signal.is_cancelled());
+        restored?;
         Ok(result)
+        }.await;
+        total_phase.finish_result(&completed, signal.is_cancelled() || completed.as_ref().is_err_and(|error| error == COMPACTION_CANCELLED_ERROR_MESSAGE));
+        completed
     }
 
 
@@ -16186,43 +16170,6 @@ impl AgentSession {
             .into_iter()
             .find(|action| action.id == action_id)
             .map(|action| action.lifecycle.state())
-    }
-
-    /// `_markDeliveryRecordDurable(action, transcript)`: the action's primary
-    /// delivery record becomes durable once its message is in the transcript.
-    fn mark_delivery_record_durable(&self, action: &QueuedSessionAction, transcript: &[AgentMessage]) {
-        let Ok(primary) = primary_delivery_record(action) else {
-            return;
-        };
-        if !transcript.contains(&agent_message_from_delivery(&primary.message)) {
-            return;
-        }
-        let Some(mut next) = self.action_by_id(&action.id) else { return; };
-        if let QueuedActionPayload::Turn(turn) = &mut next.payload {
-            for record in turn.base.records.iter_mut() {
-                if record.id == primary.id {
-                    record.durable = true;
-                }
-            }
-        }
-        let _ = self.action_store.lock().unwrap().update_action(&next);
-    }
-
-    /// `record.durable ||= delivered.has(record.message)` for every record.
-    fn mark_matching_records_durable(
-        &self,
-        action: &QueuedSessionAction,
-        delivered: &HashSet<String>,
-    ) {
-        let Some(mut next) = self.action_by_id(&action.id) else { return; };
-        if let QueuedActionPayload::Turn(turn) = &mut next.payload {
-            for record in turn.base.records.iter_mut() {
-                if delivered.contains(&delivery_message_key_of(&record.message)) {
-                    record.durable = true;
-                }
-            }
-        }
-        let _ = self.action_store.lock().unwrap().update_action(&next);
     }
 
     /// The dispatch-failure record filter from `_startPreparedTurnActions`:

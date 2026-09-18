@@ -1,0 +1,320 @@
+use super::*;
+use crate::core::session_action_store::ActionTicketController;
+use pi_ai::types::{AssistantMessageEvent, ContentBlock};
+use pi_ai::utils::event_stream::AssistantMessageEventStream;
+use std::sync::atomic::AtomicUsize;
+
+#[derive(Default)]
+struct DispatchRecorder(Mutex<Vec<pi_agent_core::performance_metrics::PerformanceMetricEvent>>);
+
+impl PerformanceMetricRecorder for DispatchRecorder {
+    fn session_id(&self) -> &str { "dispatch-fixture" }
+    fn monotonic_now(&self) -> f64 { now_ms() }
+    fn next_id(&self, _: pi_agent_core::performance_metrics::PerformanceMetricIdScope) -> String { uuid::Uuid::new_v4().to_string() }
+    fn record(&self, event: pi_agent_core::performance_metrics::PerformanceMetricEvent) { self.0.lock().unwrap().push(event); }
+    fn flush(&self) {}
+    fn close(&self) {}
+}
+
+async fn fixture() -> (Arc<AgentSession>, tempfile::TempDir) {
+    let session = post_compaction_continuation_tests::test_session_with_credentials().await;
+    let root = tempfile::tempdir().unwrap();
+    *session.session_manager.lock().unwrap() = SessionManager::create(
+        &session.cwd, Some(&root.path().to_string_lossy()),
+    ).unwrap();
+    (session, root)
+}
+
+fn child_report(id: &str) -> CustomMessage {
+    CustomMessage {
+        role: "custom".into(), custom_type: "agent_message".into(),
+        content: CustomMessageContent::Text(format!("child evidence {id}")),
+        details: Some(serde_json::json!({"id":id,"fromRelationship":"child","fromName":"fixture"})),
+        display: true, timestamp: 1000,
+    }
+}
+
+fn enqueue(session: &Arc<AgentSession>, text: &str, custom: Option<CustomMessage>) -> (QueuedSessionAction, Arc<ActionTicketController>) {
+    let agent_message_id = custom.as_ref().and_then(|m| m.details.as_ref())
+        .and_then(|d| d.get("id")).and_then(Value::as_str).map(str::to_string);
+    let action = session.create_prepared_turn_action("steer", text, None, Some(PreparedTurnActionOptions {
+        source: Some(if custom.is_some() { "internal" } else { "interactive" }.into()),
+        custom_message: custom, agent_message_id, queue_visible: Some(true), ..Default::default()
+    }));
+    let (_, ticket, _) = session.admit_session_input_with_options(action.clone(), false, false, false, false).unwrap();
+    (action, ticket.unwrap())
+}
+
+fn response(model: Model) -> AssistantMessageEventStream {
+    let stream = AssistantMessageEventStream::new();
+    let mut message = AssistantMessage::new(model.api, model.provider, model.id, now_ms_i64());
+    message.content = vec![ContentBlock::Text(TextContent::new("done"))];
+    stream.push(AssistantMessageEvent::Start { partial: message.clone() });
+    stream.push(AssistantMessageEvent::Done { reason: "stop".into(), message });
+    stream.end(None);
+    stream
+}
+
+async fn pump(session: &Arc<AgentSession>) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), session.pump_session_inputs(
+        session.session_input_pump_epoch.load(Ordering::SeqCst),
+    )).await.expect("bounded dispatch");
+}
+
+fn count_input(entries: &[crate::core::session_manager::SessionEntry], text: &str) -> usize {
+    entries.iter().filter(|entry| {
+        matches!(entry.get("type").and_then(Value::as_str), Some("message" | "custom_message"))
+            && serde_json::to_string(entry).unwrap().contains(text)
+    }).count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn durable_receipts_survive_compaction_context_replacement_and_reopen() {
+    let (session, _root) = fixture().await;
+    session.set_steering_mode("all");
+    let (human, human_ticket) = enqueue(&session, "human durable fixture", None);
+    let (child, child_ticket) = enqueue(&session, "child durable fixture", Some(child_report("durable-child")));
+    let originals = vec![human.clone(), child.clone()];
+    let weak = Arc::downgrade(&session);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    session.agent.set_stream_fn(Arc::new(move |model, _, _| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        let session = weak.upgrade().unwrap();
+        let originals = originals.clone();
+        Box::pin(async move {
+            session.await_agent_event_queue().await;
+            assert!(session.settled_turn_delivery_error(&originals).is_none());
+            let last_id = session.session_manager.lock().unwrap().get_leaf_id().unwrap();
+            session.session_manager.lock().unwrap().append_compaction(
+                "earlier work retained in summary", &last_id, 9999.0, None, None, None, None, None,
+            ).unwrap();
+            let context = session.build_session_context();
+            session.agent.update_state(Box::new(move |state| state.messages = context.messages));
+            let live = session.messages();
+            assert!(originals.iter().all(|action| {
+                !live.contains(&agent_message_from_delivery(&primary_delivery_record(action).unwrap().message))
+            }), "human was compacted and custom timestamp was normalized");
+            assert!(session.settled_turn_delivery_error(&originals).is_none());
+            response(model)
+        })
+    }));
+    pump(&session).await;
+    human_ticket.ticket.completed.clone().await.unwrap();
+    child_ticket.ticket.completed.clone().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "no replay to repair a stale snapshot");
+    let path = session.session_manager.lock().unwrap().get_session_file().unwrap();
+    let reopened = SessionManager::open(&path, None, None).unwrap();
+    assert_eq!(count_input(&reopened.get_entries(), "human durable fixture"), 1);
+    assert_eq!(count_input(&reopened.get_entries(), "child evidence durable-child"), 1);
+    session.dispose_async(Some(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delivery_is_durable_before_model_execution_even_when_event_processing_is_delayed() {
+    let (session, _root) = fixture().await;
+    let release = CancellationToken::new();
+    let held = release.clone();
+    session.push_agent_event_task(async move { held.cancelled().await; });
+    // Select directly so the pump's initial event barrier does not mask the
+    // immediate write/receipt while extension event handling remains delayed.
+    let (action, ticket) = enqueue(&session, "delayed durable event", None);
+    let mut selected = session.action_store.lock().unwrap().select_first().unwrap().unwrap();
+    transition_session_action(&mut selected, ActionLifecycle::Preparing { preparation: None }, &TransitionOptions::default()).unwrap();
+    session.action_store.lock().unwrap().update_action(&selected).unwrap();
+    let message = agent_message_from_delivery(&primary_delivery_record(&action).unwrap().message);
+    transition_session_action(&mut selected, ActionLifecycle::Committing, &TransitionOptions::default()).unwrap();
+    session.action_store.lock().unwrap().update_action(&selected).unwrap();
+    session.agent.update_state(Box::new({ let message = message.clone(); move |state| state.messages.push(message) }));
+    session.handle_agent_event(AgentEvent::MessageStart { message: message.clone() });
+    session.handle_agent_event(AgentEvent::MessageEnd { message });
+    ticket.ticket.delivered.clone().await.unwrap();
+    assert!(session.settled_turn_delivery_error(&[action.clone()]).is_none());
+    let path = session.session_manager.lock().unwrap().get_session_file().unwrap();
+    let reopened = SessionManager::open(&path, None, None).unwrap();
+    assert_eq!(count_input(&reopened.get_entries(), "delayed durable event"), 1);
+    release.cancel();
+    session.await_agent_event_queue().await;
+    assert!(session.settled_turn_delivery_error(&[action]).is_none());
+    assert_eq!(count_input(&session.session_manager.lock().unwrap().get_entries(), "delayed durable event"), 1);
+    session.dispose_async(Some(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_transcript_write_rejects_delivery_and_retains_input_for_flush_recovery() {
+    let (session, _root) = fixture().await;
+    let path = session.session_manager.lock().unwrap().get_session_file().unwrap();
+    // Block the exact new fixture transcript path with a directory. No live files.
+    std::fs::create_dir(&path).unwrap();
+    let (action, ticket) = enqueue(&session, "recover-unsaved-input", None);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    session.agent.set_stream_fn(Arc::new(move |model, _, _| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move { response(model) })
+    }));
+    pump(&session).await;
+    let failure = ticket.ticket.delivered.clone().await.unwrap_err();
+    assert!(failure.contains("transcript persistence failed"), "{failure}");
+    assert!(failure.contains(&action.id));
+    assert!(ticket.ticket.completed.clone().await.is_err());
+    assert_eq!(count_input(&session.session_manager.lock().unwrap().get_entries(), "recover-unsaved-input"), 1);
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "failed initial persistence must prevent provider/tool work");
+    std::fs::remove_dir(&path).unwrap();
+    session.session_manager.lock().unwrap().flush_now().unwrap();
+    let reopened = SessionManager::open(&path, None, None).unwrap();
+    assert_eq!(count_input(&reopened.get_entries(), "recover-unsaved-input"), 1);
+    assert!(!session.has_failed_dispatch_persistence(), "settled failure must not suppress a later independent turn");
+    session.prompt("new task after persistence repair", None).await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "a new explicit task runs normally without replaying the failed action");
+    // Repeat after a successful flush: append failure must invalidate the old
+    // flushed marker, or recovery would silently omit this retained new input.
+    let saved = std::path::Path::new(&path).with_extension("saved-fixture");
+    std::fs::rename(&path, &saved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(session.prompt("unsaved-after-flushed", None).await.unwrap_err().contains("persistence failed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    std::fs::remove_dir(&path).unwrap();
+    std::fs::rename(&saved, &path).unwrap();
+    session.session_manager.lock().unwrap().flush_now().unwrap();
+    let reopened = SessionManager::open(&path, None, None).unwrap();
+    assert_eq!(count_input(&reopened.get_entries(), "unsaved-after-flushed"), 1);
+    session.dispose_async(Some(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn child_backlog_batches_once_while_human_order_and_one_at_a_time_are_preserved() {
+    let (session, _root) = fixture().await;
+    session.set_steering_mode("one-at-a-time");
+    let recorder = Arc::new(DispatchRecorder::default());
+    session.agent.set_performance_metrics(Some(AgentLoopPerformanceMetrics::new(recorder.clone())));
+    let mut tickets = Vec::new();
+    for id in ["one", "two", "three"] {
+        tickets.push(enqueue(&session, "child report", Some(child_report(id))).1);
+    }
+    tickets.push(enqueue(&session, "human-first", None).1);
+    tickets.push(enqueue(&session, "human-second", None).1);
+    let contexts = Arc::new(Mutex::new(Vec::new()));
+    let seen = contexts.clone();
+    session.agent.set_stream_fn(Arc::new(move |model, context, _| {
+        seen.lock().unwrap().push(serde_json::to_string(&context.messages).unwrap());
+        Box::pin(async move { response(model) })
+    }));
+    pump(&session).await;
+    for ticket in tickets { ticket.ticket.completed.clone().await.unwrap(); }
+    let seen = contexts.lock().unwrap();
+    assert_eq!(seen.len(), 3, "two ordered human turns plus one complete child batch");
+    assert!(seen[0].contains("human-first"));
+    assert!(!seen[0].contains("human-second"));
+    assert!(!seen[0].contains("child evidence"));
+    assert!(seen[1].contains("human-second"));
+    for id in ["one", "two", "three"] { assert!(seen[2].contains(&format!("child evidence {id}"))); }
+    drop(seen);
+    let entries = session.session_manager.lock().unwrap().get_entries();
+    for id in ["one", "two", "three"] { assert_eq!(count_input(&entries, &format!("child evidence {id}")), 1); }
+    let queue_metrics: Vec<_> = recorder.0.lock().unwrap().iter().filter(|event| {
+        event.operation == pi_agent_core::performance_metrics::PerformanceMetricOperation::SessionInput
+    }).cloned().collect();
+    let classifications: Vec<_> = queue_metrics.iter().map(|event| event.measurements.as_ref().unwrap()[
+        &pi_agent_core::performance_metrics::PerformanceMetricMeasurement::InputAgentMessage
+    ].unwrap()).collect();
+    assert_eq!(classifications, [0.0, 0.0, 1.0, 1.0, 1.0]);
+    let serialized = serde_json::to_string(&queue_metrics).unwrap();
+    assert!(!serialized.contains("human-first") && !serialized.contains("child evidence"));
+    session.dispose_async(Some(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_before_delivery_never_receives_durable_ack_or_transcript_entry() {
+    let (session, _root) = fixture().await;
+    let (action, ticket) = enqueue(&session, "cancel-before-delivery", Some(child_report("cancelled-report")));
+    let mut selected = session.action_store.lock().unwrap().select_first().unwrap().unwrap();
+    transition_session_action(&mut selected, ActionLifecycle::Preparing { preparation: None }, &TransitionOptions::default()).unwrap();
+    session.action_store.lock().unwrap().update_action(&selected).unwrap();
+    transition_session_action(&mut selected, ActionLifecycle::Committing, &TransitionOptions::default()).unwrap();
+    session.action_store.lock().unwrap().update_action(&selected).unwrap();
+    session.cancel_session_actions(&|candidate| candidate.id == action.id, "cancel fixture", Some(vec![selected]));
+    let message = agent_message_from_delivery(&primary_delivery_record(&action).unwrap().message);
+    session.handle_agent_event(AgentEvent::MessageStart { message: message.clone() });
+    session.handle_agent_event(AgentEvent::MessageEnd { message });
+    session.await_agent_event_queue().await;
+    assert!(ticket.ticket.delivered.clone().await.is_err());
+    assert_eq!(count_input(&session.session_manager.lock().unwrap().get_entries(), "cancelled-report"), 0);
+    assert!(session.settled_turn_delivery_error(&[action]).is_none());
+    session.dispose_async(Some(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_retry_reuses_the_same_durable_input_without_duplicate_transcript_entries() {
+    use pi_ai::utils::stream_failure::{record_stream_failure, StreamFailureError, StreamFailureInfo, ThrownStreamError};
+    let (session, _root) = fixture().await;
+    session.settings_manager.lock().unwrap().set_retry_enabled(true);
+    let (_, ticket) = enqueue(&session, "one input across provider retry", None);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    session.agent.set_stream_fn(Arc::new(move |model, _, _| {
+        let index = counter.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move {
+            if index > 0 { return response(model); }
+            let stream = AssistantMessageEventStream::new();
+            let mut message = AssistantMessage::new(model.api.clone(), model.provider.clone(), model.id.clone(), now_ms_i64());
+            message.stop_reason = "error".into();
+            message.error_message = Some("isolated rate limit".into());
+            let failure = StreamFailureError::new("isolated rate limit", StreamFailureInfo {
+                kind: "rate_limit".into(), ..Default::default()
+            });
+            record_stream_failure(&model, &mut message, &ThrownStreamError::Failure(&failure));
+            stream.push(AssistantMessageEvent::Error { reason: "error".into(), error: message });
+            stream.end(None);
+            stream
+        })
+    }));
+    pump(&session).await;
+    ticket.ticket.delivered.clone().await.unwrap();
+    ticket.ticket.completed.clone().await.unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let path = session.session_manager.lock().unwrap().get_session_file().unwrap();
+    let reopened = SessionManager::open(&path, None, None).unwrap();
+    assert_eq!(count_input(&reopened.get_entries(), "one input across provider retry"), 1);
+    session.dispose_async(Some(false)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_dispatch_cannot_overtake_delayed_previous_assistant_or_tool_persistence() {
+    let (session, _root) = fixture().await;
+    let release = CancellationToken::new();
+    let held = release.clone();
+    session.push_agent_event_task(async move { held.cancelled().await; });
+    let old_assistant = AssistantMessage {
+        content: vec![ContentBlock::Text(TextContent::new("older-assistant-entry"))],
+        ..Default::default()
+    };
+    let old_tool = pi_ai::types::ToolResultMessage::new("older-call", "fixture", vec![
+        pi_ai::types::ImageOrTextContent::Text(TextContent::new("older-tool-entry")),
+    ], false, 1000);
+    session.handle_agent_event(AgentEvent::MessageEnd { message: AgentMessage::Message(Message::Assistant(old_assistant)) });
+    session.handle_agent_event(AgentEvent::MessageEnd { message: AgentMessage::Message(Message::ToolResult(old_tool)) });
+    let (_, ticket) = enqueue(&session, "new-ordered-input", None);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = calls.clone();
+    session.agent.set_stream_fn(Arc::new(move |model, _, _| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async move { response(model) })
+    }));
+    let owner = session.clone();
+    let task = tokio::spawn(async move { pump(&owner).await });
+    tokio::task::yield_now().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(count_input(&session.session_manager.lock().unwrap().get_entries(), "new-ordered-input"), 0);
+    release.cancel();
+    task.await.unwrap();
+    ticket.ticket.completed.clone().await.unwrap();
+    let path = session.session_manager.lock().unwrap().get_session_file().unwrap();
+    let reopened = SessionManager::open(&path, None, None).unwrap();
+    let entries: Vec<_> = reopened.get_entries().iter().map(|entry| serde_json::to_string(entry).unwrap()).collect();
+    let position = |text: &str| entries.iter().position(|entry| entry.contains(text)).unwrap();
+    assert!(position("older-assistant-entry") < position("older-tool-entry"));
+    assert!(position("older-tool-entry") < position("new-ordered-input"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    session.dispose_async(Some(false)).await;
+}

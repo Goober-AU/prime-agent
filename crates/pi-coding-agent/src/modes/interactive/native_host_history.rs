@@ -121,9 +121,10 @@ impl HistoryRuntime {
                 messages: messages.clone(),
             });
             transcript.borrow_mut().replace(Vec::new());
-            transcript.borrow_mut().replace_history(
+            transcript.borrow_mut().replace_history_with_ids(
                 messages,
                 self.loaded.as_ref().unwrap().window.total_message_count,
+                &self.loaded.as_ref().unwrap().window.entry_ids,
             );
         } else {
             // Legacy/supervisor attachments do not supply wire history ranges.
@@ -205,9 +206,10 @@ impl HistoryRuntime {
             });
             match result {
                 Ok(merged) => {
-                    transcript.borrow_mut().replace_history(
+                    transcript.borrow_mut().replace_history_with_ids(
                         merged.messages.clone(),
                         merged.window.total_message_count,
+                        &merged.window.entry_ids,
                     );
                     self.loaded = Some(merged);
                     ui.borrow_mut().request_render_preserving_viewport();
@@ -403,6 +405,45 @@ mod tests {
         let history = valid_window(&ids.iter().map(String::as_str).collect::<Vec<_>>());
         let messages = (0..count).map(|i| user_message(&format!("MESSAGE_{i:03}"))).collect();
         (history, messages)
+    }
+
+    #[test]
+    fn native_remote_short_tail_backfill_keeps_follow_or_manual_reading_intent() {
+        for browsing in [false, true] {
+            let h = super::super::ui_tests::FrameHarness::new("remote-short-tail");
+            let mut runtime = HistoryRuntime::new(unused_connection());
+            let (history, messages) = large_snapshot(80);
+            let tail = wire::AgentConnectionHistoryWindow {
+                start_index: 78.0, entry_ids: history.entry_ids[78..].to_vec(), has_older: true,
+                ..history.clone()
+            };
+            h.editor.borrow_mut().editor_mut().set_text("remote draft");
+            apply_history_snapshot(Some(tail), messages[78..].to_vec(), Some(streaming_assistant_message("LIVE_REPLY")), &h.transcript, &h.editor, &mut runtime);
+            let before = h.paint();
+            let anchor_row = before.iter().position(|line| line.contains("MESSAGE_078")).unwrap();
+            if browsing {
+                h.key("\x1b[<64;2;3M");
+                h.paint();
+                assert!(!h.ui.borrow().get_scroll_info().unwrap().following);
+            }
+            let range = wire::AgentConnectionHistoryRange {
+                window: wire::AgentConnectionHistoryWindow {
+                    entry_ids: history.entry_ids[..78].to_vec(), ..history.clone()
+                }, messages: messages[..78].to_vec(),
+            };
+            runtime.send.send((runtime.generation, Ok(range))).unwrap();
+            runtime.poll(&h.mode, &h.transcript, &h.ui);
+            let after = h.paint();
+            if browsing {
+                assert!(after[anchor_row].contains("MESSAGE_078"), "manual history anchor moved: {after:?}");
+            } else {
+                assert!(after.iter().any(|line| line.contains("LIVE_REPLY")));
+                assert!(h.ui.borrow().get_scroll_info().unwrap().following);
+            }
+            assert_eq!(runtime.loaded.as_ref().unwrap().messages.len(), 80);
+            assert_eq!(transcript_text(&h.transcript).matches("LIVE_REPLY").count(), 1);
+            assert_eq!(h.editor.borrow().editor().get_text(), "remote draft");
+        }
     }
 
     #[test]

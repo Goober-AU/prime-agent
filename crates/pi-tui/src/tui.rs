@@ -3,7 +3,7 @@
 //! Minimal TUI implementation with differential rendering.
 
 use crate::components::image::with_fullscreen_image_fallback;
-use crate::fullscreen::{FullscreenViewport, ScrollInfo, SelectionScrollDirection};
+use crate::fullscreen::{FullscreenViewport, ScrollInfo, SelectionScrollDirection, ViewportAnchor};
 use crate::keybindings::get_keybindings;
 use crate::keys::{is_key_release, matches_key};
 use crate::mouse::{
@@ -68,6 +68,15 @@ pub trait Component {
 
     fn get_selection_regions(&self) -> Vec<TableCellSelectionRegion> {
         Vec::new()
+    }
+
+    /// Optional stable anchors corresponding to the most recently rendered lines.
+    fn get_viewport_anchors(&self) -> Vec<Option<ViewportAnchor>> {
+        Vec::new()
+    }
+
+    fn bottom_align_in_fullscreen(&self) -> bool {
+        false
     }
 
     /// Optional handler for keyboard input when component has focus.
@@ -2154,6 +2163,8 @@ impl TUI {
         self.overlay_selection_regions = Vec::new();
 
         let mut transcript: Vec<String> = Vec::new();
+        let mut anchors = Vec::new();
+        let mut bottom_aligned = false;
         let mut selection_regions: Vec<TableCellSelectionRegion> = Vec::new();
         let scroll_components: Vec<Rc<RefCell<dyn Component>>> = match &self.fullscreen {
             Some(fullscreen) => fullscreen.scroll.clone(),
@@ -2167,6 +2178,10 @@ impl TUI {
             for component in scroll_components.iter() {
                 let line_offset = transcript.len();
                 let component_lines = component.borrow_mut().render(width as f64);
+                let mut component_anchors = component.borrow().get_viewport_anchors();
+                component_anchors.resize(component_lines.len(), None);
+                anchors.extend(component_anchors);
+                bottom_aligned |= component.borrow().bottom_align_in_fullscreen();
                 for region in component.borrow().get_selection_regions() {
                     selection_regions.push(TableCellSelectionRegion {
                         line: region.line + line_offset,
@@ -2183,11 +2198,13 @@ impl TUI {
         let (mut frame, window_height, scroll_info, viewport_controls) =
             match self.fullscreen.as_mut() {
                 Some(fullscreen) => {
-                    let frame = fullscreen.viewport.compose_frame(
+                    let frame = fullscreen.viewport.compose_frame_anchored(
                         &transcript,
                         &dock,
                         height,
                         &selection_regions,
+                        &anchors,
+                        bottom_aligned,
                     );
                     let window_height = fullscreen.viewport.window_height();
                     let scroll_info = fullscreen.viewport.scroll_info();

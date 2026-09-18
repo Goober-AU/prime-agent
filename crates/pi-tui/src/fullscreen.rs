@@ -8,6 +8,7 @@
 use crate::selection_metadata::TableCellSelectionRegion;
 use crate::terminal_image::is_image_line;
 use crate::utils::{slice_by_column, strip_ansi, url_at_column, visible_width};
+use std::rc::Rc;
 
 pub const FULLSCREEN_MIN_TRANSCRIPT_ROWS: usize = 3;
 
@@ -24,6 +25,13 @@ pub struct ScrollInfo {
     pub following: bool,
     pub lines_below: usize,
     pub lines_above: usize,
+}
+
+/// Stable component identity and content offset for one rendered transcript line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewportAnchor {
+    pub key: Rc<str>,
+    pub offset: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +124,9 @@ pub struct FullscreenViewport {
     last_max_scroll: usize,
     last_window_height: usize,
     last_transcript: Vec<String>,
+    last_anchors: Vec<Option<ViewportAnchor>>,
+    last_top_padding: usize,
+    last_bottom_aligned: bool,
     last_frame: Vec<String>,
     last_frame_visible_start: usize,
     last_frame_visible_height: usize,
@@ -145,6 +156,9 @@ impl FullscreenViewport {
             last_max_scroll: 0,
             last_window_height: 0,
             last_transcript: Vec::new(),
+            last_anchors: Vec::new(),
+            last_top_padding: 0,
+            last_bottom_aligned: false,
             last_frame: Vec::new(),
             last_frame_visible_start: 0,
             last_frame_visible_height: 0,
@@ -168,6 +182,18 @@ impl FullscreenViewport {
         height: usize,
         table_cell_selection_regions: &[TableCellSelectionRegion],
     ) -> Vec<String> {
+        self.compose_frame_anchored(transcript, dock, height, table_cell_selection_regions, &[], false)
+    }
+
+    pub fn compose_frame_anchored(
+        &mut self,
+        transcript: &[String],
+        dock: &[String],
+        height: usize,
+        table_cell_selection_regions: &[TableCellSelectionRegion],
+        anchors: &[Option<ViewportAnchor>],
+        bottom_aligned: bool,
+    ) -> Vec<String> {
         let dock_height = clipped_fullscreen_dock_height(dock.len(), height);
         let dock_lines: Vec<String> = if dock.len() > dock_height {
             dock[dock.len() - dock_height..].to_vec()
@@ -180,11 +206,28 @@ impl FullscreenViewport {
         if self.following {
             self.scroll_top = max_scroll;
         } else {
+            // The first anchored visible row remains at the same screen row.
+            // Its content offset survives wrapping changes within that message.
+            let old_end = (self.scroll_top + self.last_window_height).min(self.last_anchors.len());
+            if let Some((old_line, anchor)) = (self.scroll_top..old_end)
+                .find_map(|line| self.last_anchors[line].as_ref().map(|anchor| (line, anchor)))
+            {
+                if let Some((new_line, _)) = anchors.iter().enumerate()
+                    .filter_map(|(line, candidate)| candidate.as_ref().map(|candidate| (line, candidate)))
+                    .filter(|(_, candidate)| candidate.key == anchor.key && candidate.offset <= anchor.offset)
+                    .max_by_key(|(_, candidate)| candidate.offset)
+                {
+                    let screen_row = self.last_top_padding + old_line - self.scroll_top;
+                    self.scroll_top = new_line.saturating_sub(screen_row);
+                }
+            }
             self.scroll_top = self.scroll_top.min(max_scroll);
         }
         self.last_max_scroll = max_scroll;
         self.last_window_height = window_height;
         self.last_transcript = transcript.to_vec();
+        self.last_anchors = anchors.to_vec();
+        self.last_bottom_aligned = bottom_aligned;
         self.table_cell_selection_regions = table_cell_selection_regions.to_vec();
 
         let end = (self.scroll_top + window_height).min(transcript.len());
@@ -195,6 +238,10 @@ impl FullscreenViewport {
             }
         }
         self.highlight_selection(&mut window);
+        self.last_top_padding = if bottom_aligned { window_height - window.len() } else { 0 };
+        if self.last_top_padding > 0 {
+            window.splice(0..0, std::iter::repeat_n(String::new(), self.last_top_padding));
+        }
         while window.len() < window_height {
             window.push(String::new());
         }
@@ -546,7 +593,7 @@ impl FullscreenViewport {
             0
         };
         let visible_end = visible_start + visible_height - 1;
-        let transcript_start = visible_start;
+        let transcript_start = visible_start.max(self.last_top_padding);
         let transcript_end = (self.last_window_height - 1).min(visible_end);
         if transcript_start > transcript_end {
             return None;
@@ -575,7 +622,7 @@ impl FullscreenViewport {
         if !clamp && (frame_line < bounds.transcript_start || frame_line > bounds.transcript_end) {
             return None;
         }
-        Some(self.scroll_top + frame_line.clamp(bounds.transcript_start, bounds.transcript_end))
+        Some(self.scroll_top + frame_line.clamp(bounds.transcript_start, bounds.transcript_end) - self.last_top_padding)
     }
 
     fn is_frame_selectable(&self, point: SelectionPoint) -> bool {
@@ -1019,12 +1066,12 @@ impl FullscreenViewport {
         };
         let next = base as i64 + delta;
         self.scroll_top = next.clamp(0, self.last_max_scroll as i64) as usize;
-        self.following = self.scroll_top >= self.last_max_scroll;
+        self.following = (delta >= 0 || !self.last_bottom_aligned) && self.scroll_top >= self.last_max_scroll;
     }
 
     pub fn scroll_to_top(&mut self) {
         self.scroll_top = 0;
-        self.following = self.last_max_scroll == 0;
+        self.following = !self.last_bottom_aligned && self.last_max_scroll == 0;
     }
 
     pub fn scroll_to_bottom(&mut self) {
@@ -1081,6 +1128,45 @@ mod tests {
         assert_eq!(frame, lines(&["3", "4", "5", "dock"]));
         assert_eq!(viewport.scroll_info().lines_below, 0);
         assert!(viewport.is_following());
+    }
+
+    #[test]
+    fn bottom_aligned_short_tail_keeps_selection_coordinates_and_up_scroll_intent() {
+        let mut viewport = FullscreenViewport::new();
+        let transcript = lines(&["recent", "live"]);
+        let frame = viewport.compose_frame_anchored(&transcript, &lines(&["dock"]), 6, &[], &[], true);
+        assert_eq!(frame, lines(&["", "", "", "recent", "live", "dock"]));
+        assert!(!viewport.begin_selection(0, 0));
+        assert!(viewport.begin_selection(3, 0));
+        viewport.extend_selection(4, 4);
+        assert_eq!(viewport.end_selection(), Some("recent\nlive".into()));
+        viewport.scroll_by(-1);
+        assert!(!viewport.is_following(), "scrolling up a short tail must pause follow before backfill");
+        viewport.scroll_to_bottom();
+        assert!(viewport.is_following());
+    }
+
+    #[test]
+    fn message_anchor_survives_prepend_reflow_and_async_backfill_while_following() {
+        let mut viewport = FullscreenViewport::new();
+        let anchor = |key: &str, offset| Some(ViewportAnchor { key: Rc::from(key), offset });
+        let transcript = lines(&["header", "first", "second", "third", "live"]);
+        let anchors = vec![None, anchor("message", 0), anchor("message", 5), anchor("message", 11), anchor("live", 0)];
+        viewport.compose_frame_anchored(&transcript, &[], 3, &[], &anchors, true);
+        viewport.scroll_by(-1);
+        assert_eq!(viewport.compose_frame_anchored(&transcript, &[], 3, &[], &anchors, true)[0], "first");
+        let prepended = lines(&["older 1", "older 2", "header", "first", "second", "third", "live update", "later 1", "later 2"]);
+        let prepended_anchors = vec![anchor("older", 0), anchor("older", 7), None, anchor("message", 0), anchor("message", 5), anchor("message", 11), anchor("live", 0), anchor("later", 0), anchor("later", 7)];
+        assert_eq!(viewport.compose_frame_anchored(&prepended, &[], 3, &[], &prepended_anchors, true)[0], "first");
+        viewport.scroll_by(1);
+        viewport.compose_frame_anchored(&prepended, &[], 3, &[], &prepended_anchors, true);
+        let reflowed = lines(&["old", "er 1", "old", "er 2", "header", "fir", "stse", "cond", "third", "live update", "later 1", "later 2"]);
+        let reflowed_anchors = vec![anchor("older", 0), anchor("older", 3), anchor("older", 7), anchor("older", 10), None, anchor("message", 0), anchor("message", 3), anchor("message", 7), anchor("message", 11), anchor("live", 0), anchor("later", 0), anchor("later", 7)];
+        assert_eq!(viewport.compose_frame_anchored(&reflowed, &[], 3, &[], &reflowed_anchors, true)[0], "stse");
+        viewport.scroll_to_bottom();
+        let mut new_tail = reflowed.clone();
+        new_tail.push("latest".into());
+        assert_eq!(viewport.compose_frame_anchored(&new_tail, &[], 3, &[], &reflowed_anchors, true)[2], "latest");
     }
 
     #[test]

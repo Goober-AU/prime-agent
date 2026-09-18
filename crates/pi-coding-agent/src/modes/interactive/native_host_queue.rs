@@ -230,7 +230,7 @@ impl QueueRuntime {
             let status = match reply.result {
                 Ok((status, queue)) => {
                     if reply.revision == self.revision {
-                        mode.patch_connection_state(|state| {
+                        mode.patch_connection_queue(|state| {
                             state.session_actions.queued_count =
                                 queue.steering.len() + queue.follow_up.len();
                             state.session_actions.steering = queue.steering;
@@ -992,7 +992,7 @@ mod tests {
         let mode = Rc::new(RefCell::new(test_mode("s1")));
         {
             let mut borrowed = mode.borrow_mut();
-            borrowed.patch_connection_state(|state| {
+            borrowed.patch_connection_queue(|state| {
                 state.session_actions.steering = queue.0.iter().map(|s| (*s).to_string()).collect();
                 state.session_actions.follow_ups =
                     queue.1.iter().map(|s| (*s).to_string()).collect();
@@ -1044,14 +1044,14 @@ mod tests {
         /// `apply_event` in `native_host.rs`.
         fn deliver_queue_event(&mut self, steering: &[&str], follow_up: &[&str]) {
             self.runtime.observe_queue_change();
-            let mut mode = self.mode.borrow_mut();
-            mode.patch_connection_state(|state| {
-                state.session_actions.steering =
-                    steering.iter().map(|s| (*s).to_string()).collect();
-                state.session_actions.follow_ups =
-                    follow_up.iter().map(|s| (*s).to_string()).collect();
-                state.session_actions.queued_count = steering.len() + follow_up.len();
+            let transcript = Rc::new(RefCell::new(super::super::Transcript::new(self.mode.clone())));
+            super::super::apply_event(&self.mode, &transcript, wire::AgentConnectionSessionEvent::SessionActionUpdate {
+                actions: json!({"steering": steering, "followUps": follow_up, "queuedCount": steering.len() + follow_up.len()}),
             });
+        }
+
+        fn painted(&self) -> String {
+            super::super::ui_tests::painted_transcript(self.mode.clone(), self.editor.clone())
         }
 
         fn queue(&self) -> (Vec<String>, Vec<String>) {
@@ -1174,6 +1174,8 @@ mod tests {
 
         assert_eq!(harness.connection.queue().steering, vec!["s2", "s1"]);
         assert_eq!(harness.queue(), (vec!["s2".into(), "s1".into()], vec![]));
+        let painted = harness.painted();
+        assert!(painted.find("Steering: s2").unwrap() < painted.find("Steering: s1").unwrap(), "{painted}");
         assert_eq!(
             harness.selected(),
             Some(QueueSelectionItem {
@@ -1231,6 +1233,9 @@ mod tests {
             "the selection must drop once its item is gone"
         );
         assert_eq!(harness.editor_text(), "draft", "the draft is restored");
+        let painted = harness.painted();
+        assert!(painted.contains("Steering: fresh"), "{painted}");
+        assert!(!painted.contains("Steering: s1") && !painted.contains("Steering: s2"));
     }
 
     /// The same guard must not fire when the live queue simply *is* the reply
@@ -1332,6 +1337,9 @@ mod tests {
             "the old selection must be discarded"
         );
         assert_eq!(harness.queue(), (vec!["new".into()], vec![]));
+        let painted = harness.painted();
+        assert!(painted.contains("Steering: new"), "{painted}");
+        assert!(!painted.contains("Steering: s1") && !painted.contains("Steering: s2"));
         assert_eq!(
             harness.editor_text(),
             "",
@@ -1359,6 +1367,9 @@ mod tests {
         assert_eq!(harness.editor_text(), "typed draft");
         assert!(!harness.is_browsing());
         assert!(!harness.mode.borrow().queue_selection.has_draft());
+        let painted = harness.painted();
+        assert!(painted.contains("Follow-up: f1 edited"), "{painted}");
+        assert!(!painted.lines().any(|line| line.trim() == "Follow-up: f1"));
     }
 
     /// Empty text deletes the selected entry
@@ -1378,6 +1389,9 @@ mod tests {
         assert_eq!(harness.connection.queue().follow_up, Vec::<String>::new());
         assert_eq!(harness.queue(), (vec!["s1".into()], vec![]));
         assert_eq!(harness.editor_text(), "draft");
+        let painted = harness.painted();
+        assert!(painted.contains("Steering: s1"), "{painted}");
+        assert!(!painted.contains("Follow-up: f1"));
     }
 
     /// `interactive-mode.ts:7426-7436`: a rejected edit is kept in the editor so
@@ -1442,17 +1456,19 @@ mod tests {
         assert!(!harness.is_browsing());
     }
 
-    /// `interactive-mode.ts:7663-7669` / `clearInputBar`: leaving browse mode
-    /// restores the draft instead of arming an accidental delete.
+    /// Queued-only work is interruptible even before streaming starts. Escape
+    /// must reach the host's interrupt path instead of silently clearing input.
     #[test]
-    fn clearing_the_input_restores_the_draft_instead_of_deleting() {
+    fn clearing_queued_only_work_defers_to_interrupt_without_deleting() {
         let mut harness = harness((&["s1"], &[]));
         browse_to_follow_up(&mut harness, "typed draft");
         assert_eq!(harness.editor_text(), "s1");
         let clear = key_data("app.input.clear");
-        assert!(harness.runtime.handle_input(&clear));
-        assert_eq!(harness.editor_text(), "typed draft");
-        assert!(!harness.is_browsing());
+        assert!(harness.mode.borrow().has_interruptible_work());
+        assert!(!harness.runtime.handle_input(&clear));
+        assert_eq!(harness.editor_text(), "s1");
+        assert!(harness.is_browsing());
+        assert!(harness.mode.borrow().queue_selection.has_draft());
         assert!(
             harness.connection.mutations().is_empty(),
             "no delete was sent"

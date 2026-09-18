@@ -56,7 +56,7 @@ The two factory functions return `undefined` if local metrics are disabled or re
 
 ### Operation and measurement allowlists
 
-Operations are `logical_request`, `provider_attempt`, `tool`, `snapshot`, `compaction`, `file_retry`, `session_reopen`, and `recorder`.
+Operations are `logical_request`, `provider_attempt`, `tool`, `snapshot`, `compaction`, `file_retry`, `session_reopen`, `session_input`, and `recorder`. The Rust host also records `compaction_prepare`, `compaction_history`, `compaction_prefix`, `compaction_native`, `compaction_persist`, and `compaction_restore`.
 
 Measurements are `total_ms`, `wait_ms`, `dispatch_to_response_headers_ms`, `dispatch_to_first_event_ms`, `dispatch_to_first_visible_ms`, `local_gateway_wait_ms`, `upstream_wait_ms`, `serialization_ms`, `serialization_cpu_ms`, `write_ms`, `queue_ms`, `next_cell_delay_ms`, `reopen_ms`, `serialized_bytes`, `written_bytes`, `read_bytes`, `retry_count`, `attempt_count`, `attempt_ordinal`, and `dropped_count`.
 
@@ -144,6 +144,16 @@ The `onPayload` edge is not a socket-write timestamp. It can include provider SD
 Each local stream invocation emits one terminal `provider_attempt`. A standalone one-attempt Agent also emits one `logical_request`. A retry-owning host emits exactly one outer logical terminal for the complete retry group. Authoritative raw usage belongs only to `provider_attempt`; the outer logical terminal omits usage. Reporting must not sum nested operation durations. Tool execution emits one terminal `tool` record. Stream deltas do not write metric records.
 
 ## Usage and overlap
+
+### Rust compaction phases
+
+Compaction uses the session recorder when metrics are enabled. A start event has no outcome; its terminal event reuses the same correlation IDs with `success`, `failure`, `cancelled`, or `unavailable`. Group related phases by `actionId`. Preparation includes authentication, history selection, and extension preparation. Persistence measures the durable compaction append. Restoration measures live-context replacement, extension notification, and kernel/provider restoration. The outer `compaction` duration includes the complete shared operation; phase durations overlap and must not be summed.
+
+History and split-turn prefix summaries have separate logical request IDs. Each actual summary completion invocation, including a local retry, records one terminal `provider_attempt` with `identity.component: "compaction"`; these attempts must be separated from ordinary agent requests. The existing content-free observer records response headers, first raw/thinking/tool/text event, stream terminal, local drain, and provider usage when available. A fast HTTP 200/header event does not measure completion of the response body. Unknown timings remain null. Error and cancellation outcomes contain no provider error text, prompts, summaries, reasoning text, request headers, credentials, or checkpoints.
+
+Native checkpoint requests retain their own `compaction_native` phase. Native providers without stream observations have only their measured phase duration. An explicit unsupported native result is `unavailable`; malformed checkpoints are failures. A cancelled or dropped split-summary operation cancels its child requests without cancelling the parent session token.
+
+Rust queue records also include `input_agent_message`: 1 identifies a structured agent message; 0 identifies other input and is not, by itself, proof of human origin. This field contains no message text. The report accepts the Rust stream measurements (`dispatch_to_first_raw_ms`, `dispatch_to_first_thinking_ms`, `dispatch_to_first_tool_ms`, `dispatch_to_first_text_ms`, `dispatch_to_network_terminal_ms`, `local_drain_ms`, and `transport_websocket`) without treating unknown values as zero.
 
 `PerformanceMetricUsageV1` keeps provider observations and local estimates separate:
 
