@@ -75,9 +75,9 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         result = await bash("false | cat")
         self.assertEqual(result.exit_code, 1)
 
-    async def test_pipeline_ignores_benign_sigpipe_from_head(self):
+    async def test_pipeline_preserves_sigpipe_from_head(self):
         result = await bash("yes | head -1")
-        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.exit_code, 141)
         self.assertIn("y", result.output)
 
     def test_construction_cleanup_uses_windows_signal_without_sigkill(self):
@@ -789,7 +789,10 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(spawned[-1].spawn_job, sentinel)
                     self.assertEqual(
                         spawned[-1].spawn_argv,
-                        ["/bin/sh", "-c", bash_module._with_prefix("sleep 30")],
+                        [
+                            "/bin/sh", "-c",
+                            bash_module._pipeline_script(bash_module._with_prefix("sleep 30")),
+                        ],
                     )
                     spawned[-1].resume.assert_called_once_with()
                     self.assertEqual(order, ["create_job", "spawn", "journal", "resume"])

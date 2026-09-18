@@ -7,3 +7,4 @@
 - Added privacy-safe snapshot timing totals for retained and skipped variables so expensive saves can be diagnosed without logging variable names or contents.
 - Added bounded recovery for summaries that exhaust their output allowance without accepting partial handoffs or replaying chat and tool work.
 - Cleared obsolete compaction failure notices after successful compaction without hiding unrelated errors.
+- Fixed failed Bash pipeline producers appearing successful on Windows and retained genuine exit failures on all platforms; intentional output truncation now requires explicit handling of the expected broken-pipe status.
