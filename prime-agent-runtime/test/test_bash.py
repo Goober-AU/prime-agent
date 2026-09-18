@@ -67,6 +67,19 @@ class BashTest(unittest.IsolatedAsyncioTestCase):
         awaited = await handle
         self.assertEqual(handle.poll(), awaited)
 
+    async def test_pipeline_reports_a_failing_producer(self):
+        # `python ... | tee log` must not report the consumer's success.
+        result = await bash(f"{sys.executable} -c 'import sys; sys.exit(3)' 2>&1 | cat")
+        self.assertEqual(result.exit_code, 3)
+
+        result = await bash("false | cat")
+        self.assertEqual(result.exit_code, 1)
+
+    async def test_pipeline_ignores_benign_sigpipe_from_head(self):
+        result = await bash("yes | head -1")
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("y", result.output)
+
     def test_construction_cleanup_uses_windows_signal_without_sigkill(self):
         failure = RuntimeError("task construction failed")
         loop = mock.Mock()
